@@ -3,38 +3,83 @@ package domain
 import "fmt"
 
 // ErrCode is the unified error code type.
+// All codes are 5-digit integers, fully compatible with the legacy backend.
 type ErrCode int
 
 const (
-	// Success code — old backend compatibility.
+	// Success is the success code compatible with the legacy backend.
 	Success ErrCode = 200
 
-	// General errors (1xxxx).
-	ErrInternalError      ErrCode = 10001
-	ErrInvalidParams      ErrCode = 10002
-	ErrUnauthorized       ErrCode = 10003
-	ErrNotFound           ErrCode = 10004
-	ErrTooManyRequests    ErrCode = 10005
-	ErrServiceUnavailable ErrCode = 10006
+	// ErrInvalidParams indicates request parameter errors.
+	ErrInvalidParams ErrCode = 10001
+	// ErrUsernameInvalid indicates the username is incorrect.
+	ErrUsernameInvalid ErrCode = 10002
+	// ErrPasswordFormat indicates the password format is invalid.
+	ErrPasswordFormat ErrCode = 10003
+	// ErrPasswordEmpty indicates the password is empty.
+	ErrPasswordEmpty ErrCode = 10004
+	// ErrLoginFailed indicates login authentication failure.
+	ErrLoginFailed ErrCode = 10005
+	// ErrAccountExists indicates duplicate registration.
+	ErrAccountExists ErrCode = 10007
+	// ErrOAuthNotBound indicates the OAuth user is not registered or bound.
+	ErrOAuthNotBound ErrCode = 10010
+	// ErrUserNotFound indicates the user does not exist.
+	ErrUserNotFound ErrCode = 10011
 
-	// Auth errors (2xxxx).
-	ErrAccountNotFound      ErrCode = 20001
-	ErrPasswordIncorrect    ErrCode = 20002
-	ErrAccountAlreadyExists ErrCode = 20003
-	ErrTicketInvalid        ErrCode = 20004
-	ErrTicketExpired        ErrCode = 20005
-	ErrTicketUsed           ErrCode = 20006
-	ErrTokenInvalid         ErrCode = 20007
-	ErrTokenExpired         ErrCode = 20008
-	ErrPermissionDenied     ErrCode = 20009
-	ErrOauthBindFailed      ErrCode = 20010
-	ErrOauthAlreadyBound    ErrCode = 20011
-	ErrOauthNotBound        ErrCode = 20012
-	ErrCaptchaInvalid       ErrCode = 20013
-	ErrEmailSendFailed      ErrCode = 20014
-	ErrEmailAlreadyVerified ErrCode = 20015
-	ErrVerificationInvalid  ErrCode = 20016
-	ErrRoleForbidden        ErrCode = 20017
+	// ErrTokenExpired indicates the token has expired.
+	ErrTokenExpired ErrCode = 20002
+	// ErrTokenGenFailed indicates token generation failure.
+	ErrTokenGenFailed ErrCode = 20003
+	// ErrTokenInvalid indicates the token is invalid.
+	ErrTokenInvalid ErrCode = 20004
+	// ErrTokenParseFail indicates token parsing failure.
+	ErrTokenParseFail ErrCode = 20006
+	// ErrTicketInvalid indicates the ticket is incorrect.
+	ErrTicketInvalid ErrCode = 20007
+	// ErrTicketNotFound indicates the ticket does not exist.
+	ErrTicketNotFound ErrCode = 20008
+
+	// ErrEmailSendFailed indicates email sending failure.
+	ErrEmailSendFailed ErrCode = 30001
+	// ErrCaptchaInvalid indicates the verification code is wrong.
+	ErrCaptchaInvalid ErrCode = 30002
+	// ErrEmailFormat indicates the email format is invalid.
+	ErrEmailFormat ErrCode = 30003
+
+	// ErrVerifyAccountFail indicates account verification failure.
+	ErrVerifyAccountFail ErrCode = 40001
+	// ErrVerifyPasswordFail indicates account password verification failure.
+	ErrVerifyPasswordFail ErrCode = 40002
+
+	// ErrInternal is the catch-all unknown server error.
+	ErrInternal ErrCode = 50000
+
+	// ErrOAuthClientErr indicates an OAuth client error.
+	ErrOAuthClientErr ErrCode = 60001
+	// ErrOAuthAccessTokenErr indicates an OAuth access token error.
+	ErrOAuthAccessTokenErr ErrCode = 60002
+	// ErrOAuthRefreshTokenErr indicates an OAuth refresh token error.
+	ErrOAuthRefreshTokenErr ErrCode = 60003
+
+	// ErrRegisterFail indicates registration failure due to stage error.
+	ErrRegisterFail ErrCode = 70003
+	// ErrResetPasswordFail indicates password reset failure.
+	ErrResetPasswordFail ErrCode = 70004
+
+	// ErrProfileNotFound indicates the user profile does not exist.
+	ErrProfileNotFound ErrCode = 80000
+	// ErrOrgIDInvalid indicates the organization ID is invalid.
+	ErrOrgIDInvalid ErrCode = 80001
+	// ErrHideFieldInvalid indicates a hide field value is invalid.
+	ErrHideFieldInvalid ErrCode = 80002
+
+	// ErrNotificationSendFail indicates audit notification sending failure.
+	ErrNotificationSendFail ErrCode = 90000
+	// ErrImageProcessFail indicates image processing failure.
+	ErrImageProcessFail ErrCode = 90001
+	// ErrImageURLInvalid indicates the image URL is invalid.
+	ErrImageURLInvalid ErrCode = 90002
 )
 
 // AppError is the unified application error.

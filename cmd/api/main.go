@@ -1,3 +1,4 @@
+// Package main is the entry point for the SAST Link API server.
 package main
 
 import (
@@ -39,10 +40,6 @@ func main() {
 		slog.Error("connect redis", "error", err)
 		os.Exit(1)
 	}
-	defer redisClient.Close()
-
-	_ = db
-	_ = redisClient
 
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -50,6 +47,21 @@ func main() {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	if cfg.App.Env == "production" {
+		if err := r.SetTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.1"}); err != nil {
+			slog.Error("set trusted proxies", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			slog.Error("close redis", "error", err)
+		}
+	}()
+
+	_ = db
+	_ = redisClient
 
 	r.GET("/ping", func(c *gin.Context) {
 		c.String(http.StatusOK, "pong")
@@ -60,7 +72,7 @@ func main() {
 			"database": "ok",
 			"redis":    "ok",
 		}
-		if err := infra.HealthCheckDB(db); err != nil {
+		if err := infra.HealthCheckDB(c.Request.Context(), db); err != nil {
 			checks["database"] = "fail"
 			slog.Warn("health check db failed", "error", err)
 		}
@@ -86,12 +98,16 @@ func main() {
 	})
 
 	r.NoRoute(func(c *gin.Context) {
-		response.Err(c, domain.ErrNotFound, "not found")
+		response.ErrWithStatus(c, http.StatusNotFound, domain.ErrInternal, "not found")
 	})
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.App.Port),
-		Handler: r,
+		Addr:              fmt.Sprintf(":%d", cfg.App.Port),
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

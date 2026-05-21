@@ -1,3 +1,4 @@
+// Package infra provides infrastructure concerns: database, Redis, logging, and idempotency.
 package infra
 
 import (
@@ -39,11 +40,16 @@ func NewDB(cfg *config.DBConfig) (*gorm.DB, error) {
 	return db, nil
 }
 
-// HealthCheckDB pings the database.
-func HealthCheckDB(db *gorm.DB) error {
+// HealthCheckDB pings the database with a timeout.
+func HealthCheckDB(ctx context.Context, db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("db is nil")
+	}
 	sqlDB, err := db.DB()
 	if err != nil {
 		return err
 	}
-	return sqlDB.Ping()
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return sqlDB.PingContext(ctx)
 }

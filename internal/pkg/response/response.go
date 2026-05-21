@@ -1,3 +1,4 @@
+// Package response provides unified JSON response helpers for Gin handlers.
 package response
 
 import (
@@ -10,6 +11,7 @@ import (
 
 // Response is the unified API response format.
 type Response struct {
+	Success bool   `json:"Success"`
 	ErrCode int    `json:"ErrCode"`
 	ErrMsg  string `json:"ErrMsg"`
 	Data    any    `json:"Data,omitempty"`
@@ -18,6 +20,7 @@ type Response struct {
 // OK sends a successful response.
 func OK(c *gin.Context, data any) {
 	c.JSON(http.StatusOK, Response{
+		Success: true,
 		ErrCode: int(domain.Success),
 		ErrMsg:  "",
 		Data:    data,
@@ -27,6 +30,7 @@ func OK(c *gin.Context, data any) {
 // Err sends an error response.
 func Err(c *gin.Context, code domain.ErrCode, msg string) {
 	c.JSON(http.StatusOK, Response{
+		Success: false,
 		ErrCode: int(code),
 		ErrMsg:  msg,
 		Data:    nil,
@@ -36,6 +40,7 @@ func Err(c *gin.Context, code domain.ErrCode, msg string) {
 // ErrWithStatus sends an error response with a specific HTTP status code.
 func ErrWithStatus(c *gin.Context, httpStatus int, code domain.ErrCode, msg string) {
 	c.JSON(httpStatus, Response{
+		Success: false,
 		ErrCode: int(code),
 		ErrMsg:  msg,
 		Data:    nil,

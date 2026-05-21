@@ -1,7 +1,9 @@
+// Package config loads and validates application configuration from environment variables.
 package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -10,12 +12,16 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	App   AppConfig   `mapstructure:"app"`
-	DB    DBConfig    `mapstructure:"db"`
-	Redis RedisConfig `mapstructure:"redis"`
-	JWT   JWTConfig   `mapstructure:"jwt"`
-	SMTP  SMTPConfig  `mapstructure:"smtp"`
-	CORS  CORSConfig  `mapstructure:"cors"`
+	App        AppConfig        `mapstructure:"app"`
+	DB         DBConfig         `mapstructure:"db"`
+	Redis      RedisConfig      `mapstructure:"redis"`
+	JWT        JWTConfig        `mapstructure:"jwt"`
+	SMTP       SMTPConfig       `mapstructure:"smtp"`
+	CORS       CORSConfig       `mapstructure:"cors"`
+	OAuth      OAuthConfig      `mapstructure:"oauth"`
+	Storage    StorageConfig    `mapstructure:"storage"`
+	RateLimit  RateLimitConfig  `mapstructure:"rate_limit"`
+	SuperAdmin SuperAdminConfig `mapstructure:"super_admin"`
 }
 
 // AppConfig holds application-level settings.
@@ -45,8 +51,9 @@ type RedisConfig struct {
 
 // JWTConfig holds JWT signing settings.
 type JWTConfig struct {
-	SecretKey string `mapstructure:"secret_key"`
-	Expiry    string `mapstructure:"expiry"`
+	SecretKey     string `mapstructure:"secret_key"`
+	SecretKeyPrev string `mapstructure:"secret_key_prev"`
+	Expiry        string `mapstructure:"expiry"`
 }
 
 // SMTPConfig holds email server settings.
@@ -62,6 +69,47 @@ type SMTPConfig struct {
 // CORSConfig holds CORS settings.
 type CORSConfig struct {
 	AllowedOrigins []string `mapstructure:"allowed_origins"`
+}
+
+// OAuthProviderConfig holds a single OAuth provider settings.
+type OAuthProviderConfig struct {
+	Enabled      bool   `mapstructure:"enabled"`
+	ClientID     string `mapstructure:"client_id"`
+	ClientSecret string `mapstructure:"client_secret"`
+	RedirectURI  string `mapstructure:"redirect_uri"`
+}
+
+// OAuthConfig holds all OAuth provider settings.
+type OAuthConfig struct {
+	Feishu    OAuthProviderConfig `mapstructure:"feishu"`
+	GitHub    OAuthProviderConfig `mapstructure:"github"`
+	Microsoft OAuthProviderConfig `mapstructure:"microsoft"`
+	QQ        OAuthProviderConfig `mapstructure:"qq"`
+}
+
+// StorageConfig holds object storage settings.
+type StorageConfig struct {
+	Provider  string `mapstructure:"provider"` // s3, cos, minio
+	Endpoint  string `mapstructure:"endpoint"`
+	Region    string `mapstructure:"region"`
+	Bucket    string `mapstructure:"bucket"`
+	AccessKey string `mapstructure:"access_key"`
+	SecretKey string `mapstructure:"secret_key"`
+	BaseURL   string `mapstructure:"base_url"` // public CDN base URL
+}
+
+// RateLimitConfig holds rate limiting settings.
+type RateLimitConfig struct {
+	GlobalRPS    int `mapstructure:"global_rps"`     // global requests per minute per IP
+	LoginRPM     int `mapstructure:"login_rpm"`      // login requests per minute per account
+	SendEmailRPM int `mapstructure:"send_email_rpm"` // send email requests per minute per account
+	CaptchaRPM   int `mapstructure:"captcha_rpm"`    // captcha verify requests per minute per IP
+	RegisterRPH  int `mapstructure:"register_rph"`   // register requests per hour per IP
+}
+
+// SuperAdminConfig holds initial super admin settings.
+type SuperAdminConfig struct {
+	UID string `mapstructure:"uid"`
 }
 
 // Load reads configuration from environment variables.
@@ -92,6 +140,7 @@ func Load() (*Config, error) {
 
 	// JWT defaults
 	v.SetDefault("jwt.secret_key", getEnv("JWT_SECRET_KEY", ""))
+	v.SetDefault("jwt.secret_key_prev", getEnv("JWT_SECRET_KEY_PREV", ""))
 	v.SetDefault("jwt.expiry", getEnv("JWT_EXPIRY", "168h"))
 
 	// SMTP defaults
@@ -104,6 +153,43 @@ func Load() (*Config, error) {
 
 	// CORS defaults
 	v.SetDefault("cors.allowed_origins", getEnvSlice("CORS_ALLOWED_ORIGINS", []string{"*"}))
+
+	// OAuth defaults
+	v.SetDefault("oauth.feishu.enabled", getEnvBool("OAUTH_FEISHU_ENABLED", false))
+	v.SetDefault("oauth.feishu.client_id", getEnv("OAUTH_FEISHU_CLIENT_ID", ""))
+	v.SetDefault("oauth.feishu.client_secret", getEnv("OAUTH_FEISHU_CLIENT_SECRET", ""))
+	v.SetDefault("oauth.feishu.redirect_uri", getEnv("OAUTH_FEISHU_REDIRECT_URI", ""))
+	v.SetDefault("oauth.github.enabled", getEnvBool("OAUTH_GITHUB_ENABLED", false))
+	v.SetDefault("oauth.github.client_id", getEnv("OAUTH_GITHUB_CLIENT_ID", ""))
+	v.SetDefault("oauth.github.client_secret", getEnv("OAUTH_GITHUB_CLIENT_SECRET", ""))
+	v.SetDefault("oauth.github.redirect_uri", getEnv("OAUTH_GITHUB_REDIRECT_URI", ""))
+	v.SetDefault("oauth.microsoft.enabled", getEnvBool("OAUTH_MICROSOFT_ENABLED", false))
+	v.SetDefault("oauth.microsoft.client_id", getEnv("OAUTH_MICROSOFT_CLIENT_ID", ""))
+	v.SetDefault("oauth.microsoft.client_secret", getEnv("OAUTH_MICROSOFT_CLIENT_SECRET", ""))
+	v.SetDefault("oauth.microsoft.redirect_uri", getEnv("OAUTH_MICROSOFT_REDIRECT_URI", ""))
+	v.SetDefault("oauth.qq.enabled", getEnvBool("OAUTH_QQ_ENABLED", false))
+	v.SetDefault("oauth.qq.client_id", getEnv("OAUTH_QQ_CLIENT_ID", ""))
+	v.SetDefault("oauth.qq.client_secret", getEnv("OAUTH_QQ_CLIENT_SECRET", ""))
+	v.SetDefault("oauth.qq.redirect_uri", getEnv("OAUTH_QQ_REDIRECT_URI", ""))
+
+	// Storage defaults
+	v.SetDefault("storage.provider", getEnv("STORAGE_PROVIDER", "minio"))
+	v.SetDefault("storage.endpoint", getEnv("STORAGE_ENDPOINT", ""))
+	v.SetDefault("storage.region", getEnv("STORAGE_REGION", ""))
+	v.SetDefault("storage.bucket", getEnv("STORAGE_BUCKET", ""))
+	v.SetDefault("storage.access_key", getEnv("STORAGE_ACCESS_KEY", ""))
+	v.SetDefault("storage.secret_key", getEnv("STORAGE_SECRET_KEY", ""))
+	v.SetDefault("storage.base_url", getEnv("STORAGE_BASE_URL", ""))
+
+	// Rate limit defaults
+	v.SetDefault("rate_limit.global_rps", getEnvInt("RATE_LIMIT_GLOBAL_RPS", 100))
+	v.SetDefault("rate_limit.login_rpm", getEnvInt("RATE_LIMIT_LOGIN_RPM", 5))
+	v.SetDefault("rate_limit.send_email_rpm", getEnvInt("RATE_LIMIT_SEND_EMAIL_RPM", 3))
+	v.SetDefault("rate_limit.captcha_rpm", getEnvInt("RATE_LIMIT_CAPTCHA_RPM", 5))
+	v.SetDefault("rate_limit.register_rph", getEnvInt("RATE_LIMIT_REGISTER_RPH", 3))
+
+	// Super admin defaults
+	v.SetDefault("super_admin.uid", getEnv("INITIAL_SUPER_ADMIN_UID", ""))
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
@@ -156,6 +242,7 @@ func getEnvInt(key string, fallback int) int {
 		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
 			return n
 		}
+		slog.Warn("invalid integer env var, using fallback", "key", key, "value", v, "fallback", fallback)
 	}
 	return fallback
 }
