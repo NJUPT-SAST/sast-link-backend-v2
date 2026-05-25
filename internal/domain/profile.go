@@ -1,6 +1,10 @@
 package domain
 
-import "gorm.io/datatypes"
+import (
+	"time"
+
+	"gorm.io/datatypes"
+)
 
 type Profile struct {
 	ID        int64          `gorm:"column:id;primaryKey;autoIncrement"`
@@ -13,6 +17,7 @@ type Profile struct {
 	Link      []string       `gorm:"column:link;type:varchar(256)[];default:null"`
 	Badge     datatypes.JSON `gorm:"column:badge;type:jsonb;default:null"`
 	Hide      []string       `gorm:"column:hide;type:varchar(30)[];default:null"`
+	UpdatedAt time.Time      `gorm:"column:updated_at;autoUpdateTime;not null"`
 	IsDeleted bool           `gorm:"column:is_deleted;default:false;not null"`
 }
 

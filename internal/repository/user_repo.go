@@ -57,7 +57,7 @@ func (r *userRepo) Create(ctx context.Context, user *domain.User) error {
 }
 
 func (r *userRepo) UpdatePassword(ctx context.Context, id int64, hash string) error {
-	return r.db.WithContext(ctx).Model(&domain.User{}).Where("id = ?", id).Update("password_hash", hash).Error
+	return r.db.WithContext(ctx).Model(&domain.User{}).Where("id = ?", id).Update("password", hash).Error
 }
 
 func (r *userRepo) SoftDelete(ctx context.Context, id int64) error {
