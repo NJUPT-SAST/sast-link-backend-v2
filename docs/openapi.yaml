@@ -39,7 +39,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Access Token，15 分钟有效期，放 Authorization: Bearer Header
+      description: "Access Token，15 分钟有效期，放 Authorization: Bearer Header"
     RefreshTokenAuth:
       type: apiKey
       in: header
@@ -335,7 +335,12 @@ paths:
           description: 邮箱地址
       responses:
         "200":
-          description: 验证通过，返回 Ticket
+          description: |-
+            验证通过，返回 Ticket
+
+            常见错误码：
+            - `10003` 邮箱格式错误
+            - `40001` 账号验证失败（模糊错误，不区分账号是否存在）
           content:
             application/json:
               schema:
@@ -348,12 +353,6 @@ paths:
                       ticket:
                         type: string
                         description: 阶段凭证
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10003` 邮箱格式错误
-            - `40001` 账号验证失败（模糊错误，不区分账号是否存在）
-
   /verify/captcha:
     post:
       tags: [验证]
@@ -382,17 +381,16 @@ paths:
                   description: 验证码，格式 `S-XXXXX`（5位）
       responses:
         "200":
-          description: 校验通过
+          description: |-
+            校验通过
+
+            常见错误码：
+            - `30002` 验证码错误
+            - `20008` Ticket 不存在或过期
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `30002` 验证码错误
-            - `20008` Ticket 不存在或过期
-
   /sendEmail:
     post:
       tags: [验证]
@@ -420,20 +418,16 @@ paths:
                   format: email
       responses:
         "200":
-          description: 邮件已发送
+          description: |-
+            邮件已发送
+
+            常见错误码：
+            - `30001` 邮件发送失败
+            - `10008` 操作太频繁（限流）
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `30001` 邮件发送失败
-            - `10008` 操作太频繁（限流）
-
-  # ==========================================================================
-  # 用户
-  # ==========================================================================
   /user/register:
     post:
       tags: [用户]
@@ -462,7 +456,14 @@ paths:
                   description: 密码，必须同时含字母和数字
       responses:
         "200":
-          description: 注册成功
+          description: |-
+            注册成功
+
+            常见错误码：
+            - `10003` 密码格式错误
+            - `30002` 验证码错误
+            - `70001` 注册信息不完整
+            - `70002` 注册阶段错误
           content:
             application/json:
               schema:
@@ -471,14 +472,6 @@ paths:
                 properties:
                   Data:
                     $ref: "#/components/schemas/TokenPair"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10003` 密码格式错误
-            - `30002` 验证码错误
-            - `70001` 注册信息不完整
-            - `70002` 注册阶段错误
-
   /user/login:
     post:
       tags: [用户]
@@ -502,7 +495,15 @@ paths:
                   description: 密码
       responses:
         "200":
-          description: 登录成功
+          description: |-
+            登录成功
+
+            常见错误码：
+            - `10005` 登录失败（账号或密码错误）
+            - `10006` 账号不存在
+            - `20007` Ticket 不正确
+            - `20009` Token 版本不匹配（密码已被修改）
+            - `10008` 操作太频繁（限流锁定 15 分钟）
           content:
             application/json:
               schema:
@@ -511,15 +512,6 @@ paths:
                 properties:
                   Data:
                     $ref: "#/components/schemas/TokenPair"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10005` 登录失败（账号或密码错误）
-            - `10006` 账号不存在
-            - `20007` Ticket 不正确
-            - `20009` Token 版本不匹配（密码已被修改）
-            - `10008` 操作太频繁（限流锁定 15 分钟）
-
   /user/logout:
     post:
       tags: [用户]
@@ -532,17 +524,16 @@ paths:
         - RefreshTokenAuth: []
       responses:
         "200":
-          description: 登出成功
+          description: |-
+            登出成功
+
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
-
   /user/changePassword:
     post:
       tags: [用户]
@@ -570,20 +561,19 @@ paths:
                   description: 新密码，必须同时含字母和数字
       responses:
         "200":
-          description: 修改成功，需重新登录
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
+          description: |-
+            修改成功，需重新登录
+
             常见错误码：
             - `10009` 权限不足（未携带有效 Token）
             - `20004` Token 无效
             - `40003` 旧密码错误
             - `10003` 新密码格式错误
             - `10008` 操作太频繁
-
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
   /user/resetPassword:
     post:
       tags: [用户]
@@ -611,19 +601,18 @@ paths:
                   description: 新密码，必须同时含字母和数字
       responses:
         "200":
-          description: 重置成功，需重新登录
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
+          description: |-
+            重置成功，需重新登录
+
             常见错误码：
             - `10003` 密码格式错误
             - `20008` Ticket 不存在或过期
             - `30002` 验证码错误
             - `70004` 重置密码失败
-
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
   /user/info:
     get:
       tags: [用户]
@@ -633,7 +622,12 @@ paths:
         - BearerAuth: []
       responses:
         "200":
-          description: 成功
+          description: |-
+            成功
+
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
           content:
             application/json:
               schema:
@@ -642,12 +636,6 @@ paths:
                 properties:
                   Data:
                     $ref: "#/components/schemas/UserInfo"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
-
   /user/oauthRegister:
     post:
       tags: [用户]
@@ -680,7 +668,15 @@ paths:
                   description: 密码
       responses:
         "200":
-          description: 注册补全成功
+          description: |-
+            注册补全成功
+
+            常见错误码：
+            - `10003` 密码格式错误
+            - `10007` 邮箱已被注册
+            - `10015` OAuth 注册补全时邮箱已被占用
+            - `30002` 验证码错误
+            - `70005` OAuth 注册补全失败
           content:
             application/json:
               schema:
@@ -689,15 +685,6 @@ paths:
                 properties:
                   Data:
                     $ref: "#/components/schemas/TokenPair"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10003` 密码格式错误
-            - `10007` 邮箱已被注册
-            - `10015` OAuth 注册补全时邮箱已被占用
-            - `30002` 验证码错误
-            - `70005` OAuth 注册补全失败
-
   /user/oauthBindExisting:
     post:
       tags: [用户]
@@ -721,21 +708,17 @@ paths:
                   description: 已有账号的密码
       responses:
         "200":
-          description: 绑定成功
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
+          description: |-
+            绑定成功
+
             常见错误码：
             - `10005` 密码错误
             - `10006` 账号不存在
             - `10012` OAuth 已绑定其他账号
-
-  # ==========================================================================
-  # 资料
-  # ==========================================================================
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
   /profile/getProfile:
     get:
       tags: [资料]
@@ -754,7 +737,13 @@ paths:
           description: 目标用户 uid，不传则返回当前登录用户资料
       responses:
         "200":
-          description: 成功
+          description: |-
+            成功
+
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `80000` 用户资料不存在
           content:
             application/json:
               schema:
@@ -763,13 +752,6 @@ paths:
                 properties:
                   Data:
                     $ref: "#/components/schemas/UserProfile"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
-            - `80000` 用户资料不存在
-
   /profile/changeProfile:
     post:
       tags: [资料]
@@ -785,19 +767,18 @@ paths:
               $ref: "#/components/schemas/ChangeProfileRequest"
       responses:
         "200":
-          description: 修改成功
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
+          description: |-
+            修改成功
+
             常见错误码：
             - `10009` 权限不足（未携带有效 Token）
             - `20004` Token 无效
             - `80001` 组织 ID 无效
             - `80002` 隐藏字段无效
-
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
   /profile/uploadAvatar:
     post:
       tags: [资料]
@@ -822,7 +803,15 @@ paths:
                   description: 头像图片文件
       responses:
         "200":
-          description: 上传成功
+          description: |-
+            上传成功
+
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `90001` 图片处理失败
+            - `90002` 图片 URL 无效
+            - `10008` 操作太频繁
           content:
             application/json:
               schema:
@@ -835,15 +824,6 @@ paths:
                       url:
                         type: string
                         description: 头像 URL
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
-            - `90001` 图片处理失败
-            - `90002` 图片 URL 无效
-            - `10008` 操作太频繁
-
   /profile/bindStatus:
     get:
       tags: [资料]
@@ -853,7 +833,12 @@ paths:
         - BearerAuth: []
       responses:
         "200":
-          description: 成功
+          description: |-
+            成功
+
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
           content:
             application/json:
               schema:
@@ -862,15 +847,6 @@ paths:
                 properties:
                   Data:
                     $ref: "#/components/schemas/BindStatus"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
-
-  # ==========================================================================
-  # OAuth 登录
-  # ==========================================================================
   /login/github:
     get:
       tags: [OAuth 登录]
@@ -902,7 +878,14 @@ paths:
           description: CSRF 防护状态值
       responses:
         "200":
-          description: 已绑定，登录成功
+          description: |-
+            已绑定，登录成功
+
+            未绑定，返回 OAuth-Ticket
+
+            常见错误码：
+            - `10010` OAuth 未绑定
+            - `10013` OAuth 绑定失败
           content:
             application/json:
               schema:
@@ -911,29 +894,6 @@ paths:
                 properties:
                   Data:
                     $ref: "#/components/schemas/TokenPair"
-        "200-Ticket":
-          description: 未绑定，返回 OAuth-Ticket
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/UnifiedResponse"
-                properties:
-                  Data:
-                    type: object
-                    properties:
-                      oauthTicket:
-                        type: string
-                      nickname:
-                        type: string
-                      avatar:
-                        type: string
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10010` OAuth 未绑定
-            - `10013` OAuth 绑定失败
-
   /login/lark:
     get:
       tags: [OAuth 登录]
@@ -965,7 +925,14 @@ paths:
           description: CSRF 防护状态值
       responses:
         "200":
-          description: 已绑定，登录成功
+          description: |-
+            已绑定，登录成功
+
+            未绑定，返回 OAuth-Ticket
+
+            常见错误码：
+            - `10010` OAuth 未绑定
+            - `10013` OAuth 绑定失败
           content:
             application/json:
               schema:
@@ -974,29 +941,6 @@ paths:
                 properties:
                   Data:
                     $ref: "#/components/schemas/TokenPair"
-        "200-Ticket":
-          description: 未绑定，返回 OAuth-Ticket
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/UnifiedResponse"
-                properties:
-                  Data:
-                    type: object
-                    properties:
-                      oauthTicket:
-                        type: string
-                      nickname:
-                        type: string
-                      avatar:
-                        type: string
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10010` OAuth 未绑定
-            - `10013` OAuth 绑定失败
-
   /profile/bind/github:
     get:
       tags: [OAuth 登录]
@@ -1006,9 +950,9 @@ paths:
         - BearerAuth: []
       responses:
         "302":
-          description: 重定向到 GitHub
-        "200-Error":
           description: |
+            重定向到 GitHub。
+
             常见错误码：
             - `10009` 权限不足（未携带有效 Token）
             - `20004` Token 无效
@@ -1022,19 +966,18 @@ paths:
         - BearerAuth: []
       responses:
         "200":
-          description: 绑定成功
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
+          description: |-
+            绑定成功
+
             常见错误码：
             - `10009` 权限不足（未携带有效 Token）
             - `20004` Token 无效
             - `10012` OAuth 已绑定其他账号
             - `10013` OAuth 绑定失败
-
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
   /profile/bind/lark:
     get:
       tags: [OAuth 登录]
@@ -1044,9 +987,9 @@ paths:
         - BearerAuth: []
       responses:
         "302":
-          description: 重定向到飞书
-        "200-Error":
           description: |
+            重定向到飞书。
+
             常见错误码：
             - `10009` 权限不足（未携带有效 Token）
             - `20004` Token 无效
@@ -1060,17 +1003,16 @@ paths:
         - BearerAuth: []
       responses:
         "200":
-          description: 绑定成功
+          description: |-
+            绑定成功
+
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
-
   /profile/unbind:
     post:
       tags: [OAuth 登录]
@@ -1094,21 +1036,17 @@ paths:
                   description: 要解绑的 provider
       responses:
         "200":
-          description: 解绑成功
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
+          description: |-
+            解绑成功
+
             常见错误码：
             - `10009` 权限不足（未携带有效 Token）
             - `20004` Token 无效
             - `10014` 解绑失败（解绑后无可用登录方式，或该 OAuth 未绑定）
-
-  # ==========================================================================
-  # 邮箱绑定
-  # ==========================================================================
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
   /profile/bindEmail:
     post:
       tags: [邮箱绑定]
@@ -1132,7 +1070,17 @@ paths:
                   description: 要绑定的第三方邮箱
       responses:
         "200":
-          description: 验证码已发送
+          description: |-
+            验证码已发送
+
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `10016` 绑定邮箱数量已达上限（2 个）
+            - `10017` 邮箱已被其他用户绑定
+            - `10018` 解绑冷却中
+            - `30003` 邮箱格式错误
+            - `10008` 操作太频繁
           content:
             application/json:
               schema:
@@ -1144,17 +1092,6 @@ paths:
                     properties:
                       bindEmailTicket:
                         type: string
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
-            - `10016` 绑定邮箱数量已达上限（2 个）
-            - `10017` 邮箱已被其他用户绑定
-            - `10018` 解绑冷却中
-            - `30003` 邮箱格式错误
-            - `10008` 操作太频繁
-
   /profile/verifyBindEmail:
     post:
       tags: [邮箱绑定]
@@ -1180,20 +1117,19 @@ paths:
                   description: 邮箱验证码
       responses:
         "200":
-          description: 绑定成功
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
+          description: |-
+            绑定成功
+
             常见错误码：
             - `10009` 权限不足（未携带有效 Token）
             - `20004` Token 无效
             - `30004` 绑定邮箱验证码错误
             - `30005` 绑定邮箱 Ticket 无效
             - `80003` 邮箱绑定失败
-
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
   /profile/unbindEmail:
     post:
       tags: [邮箱绑定]
@@ -1216,7 +1152,13 @@ paths:
                   description: 要解绑的邮箱
       responses:
         "200":
-          description: 验证码已发送
+          description: |-
+            验证码已发送
+
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `10008` 操作太频繁
           content:
             application/json:
               schema:
@@ -1228,13 +1170,6 @@ paths:
                     properties:
                       unbindEmailTicket:
                         type: string
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
-            - `10008` 操作太频繁
-
   /profile/confirmUnbindEmail:
     post:
       tags: [邮箱绑定]
@@ -1259,19 +1194,18 @@ paths:
                   type: string
       responses:
         "200":
-          description: 解绑成功
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UnifiedResponse"
-        "200-Error":
-          description: |
+          description: |-
+            解绑成功
+
             常见错误码：
             - `10009` 权限不足（未携带有效 Token）
             - `20004` Token 无效
             - `30006` 解绑验证码错误
             - `10008` 操作太频繁
-
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
   /profile/emails:
     get:
       tags: [邮箱绑定]
@@ -1281,7 +1215,12 @@ paths:
         - BearerAuth: []
       responses:
         "200":
-          description: 成功
+          description: |-
+            成功
+
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
           content:
             application/json:
               schema:
@@ -1292,15 +1231,6 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/BindEmailItem"
-        "200-Error":
-          description: |
-            常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
-
-  # ==========================================================================
-  # OAuth 2.1 授权服务端
-  # ==========================================================================
   /oauth2/authorize:
     get:
       tags: [OAuth 2.1 授权服务端]
