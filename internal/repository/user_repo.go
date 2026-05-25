@@ -40,6 +40,18 @@ func (r *userRepo) FindByEmail(ctx context.Context, email string) (*domain.User,
 	return &user, nil
 }
 
+func (r *userRepo) FindByStudentID(ctx context.Context, studentID string) (*domain.User, error) {
+	var user domain.User
+	err := r.db.WithContext(ctx).Where("student_id = ?", studentID).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 func (r *userRepo) FindByUID(ctx context.Context, uid string) (*domain.User, error) {
 	var user domain.User
 	err := r.db.WithContext(ctx).Where("uid = ?", uid).First(&user).Error

@@ -10,6 +10,7 @@ import (
 type UserRepository interface {
 	FindByID(ctx context.Context, id int64) (*domain.User, error)
 	FindByEmail(ctx context.Context, email string) (*domain.User, error)
+	FindByStudentID(ctx context.Context, studentID string) (*domain.User, error)
 	FindByUID(ctx context.Context, uid string) (*domain.User, error)
 	Create(ctx context.Context, user *domain.User) error
 	UpdatePassword(ctx context.Context, id int64, hash string) error
