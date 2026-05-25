@@ -9,8 +9,8 @@ type ChangeProfileRequest struct {
 	Nickname string         `json:"nickname"`
 	OrgID    int16          `json:"orgId"`
 	Bio      string         `json:"bio"`
-	Link     []LinkItem     `json:"link"`
-	Hide     datatypes.JSON `json:"hide"`
+	Link     []LinkItem `json:"link"`
+	Hide     []string   `json:"hide"`
 }
 
 // BindEmailRequest 发起邮箱绑定 (POST /profile/bindEmail)
@@ -20,8 +20,9 @@ type BindEmailRequest struct {
 
 // VerifyBindEmailRequest 验证并完成邮箱绑定 (POST /profile/verifyBindEmail)
 type VerifyBindEmailRequest struct {
-	Email   string `json:"email" binding:"required"`
-	Captcha string `json:"captcha" binding:"required"`
+	Email           string `json:"email" binding:"required"`
+	Captcha         string `json:"captcha" binding:"required"`
+	BindEmailTicket string `json:"bindEmailTicket" binding:"required"`
 }
 
 // UnbindEmailRequest 发起邮箱解绑 (POST /profile/unbindEmail)
@@ -31,8 +32,9 @@ type UnbindEmailRequest struct {
 
 // ConfirmUnbindEmailRequest 确认解绑邮箱 (POST /profile/confirmUnbindEmail)
 type ConfirmUnbindEmailRequest struct {
-	Email   string `json:"email" binding:"required"`
-	Captcha string `json:"captcha" binding:"required"`
+	Email             string `json:"email" binding:"required"`
+	Captcha           string `json:"captcha" binding:"required"`
+	UnbindEmailTicket string `json:"unbindEmailTicket" binding:"required"`
 }
 
 // UnbindOAuthRequest 解除第三方 OAuth 绑定 (POST /profile/unbind)
@@ -52,7 +54,7 @@ type ProfileResponse struct {
 	Bio      string         `json:"bio,omitempty"`
 	Link     []LinkItem     `json:"link,omitempty"`
 	Badge    datatypes.JSON `json:"badge,omitempty"`
-	Hide     datatypes.JSON `json:"hide,omitempty"`
+	Hide     []string       `json:"hide,omitempty"`
 }
 
 // ProfileOrg 组织信息

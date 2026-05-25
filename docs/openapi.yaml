@@ -370,7 +370,7 @@ paths:
         `flag=2` 重置密码：校验账号是否存在，返回 ResetPwd-Ticket。
         学号与邮箱共用 `username` 字段（学号作为账号标识存储）。
       parameters:
-        - name: email
+        - name: username
           in: query
           required: true
           schema:
@@ -406,12 +406,12 @@ paths:
       tags: [验证]
       summary: 验证码校验
       description: |
-        校验邮箱验证码。支持所有含邮箱验证的 Ticket 类型
-        （Register/Login/ResetPwd/OAuth/BindEmail/UnbindEmail）。
+        校验邮箱验证码。支持含邮箱验证的 Ticket 类型
+        （Register/ResetPwd/OAuth/BindEmail/UnbindEmail）。
+        登录流程无需此步骤。校验通过后 Ticket 标记为已验码，后续 register/resetPassword 无需再传 captcha。
         限流 10 次/分钟/IP。
       security:
         - RegisterTicketAuth: []
-        - LoginTicketAuth: []
         - ResetPwdTicketAuth: []
         - OAuthTicketAuth: []
         - BindEmailTicketAuth: []
@@ -491,7 +491,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [captcha, password]
+              required: [password]
               properties:
                 password:
                   type: string
@@ -1145,17 +1145,15 @@ paths:
       tags: [邮箱绑定]
       summary: 验证并完成邮箱绑定
       description: |
-        验证 BindEmail-Ticket + 验证码后完成绑定。上限 2 个邮箱/用户。
+        验证 bindEmailTicket + 验证码后完成绑定。上限 2 个邮箱/用户。
         限流 10 次/分钟/IP。
-      security:
-        - BindEmailTicketAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [email, captcha]
+              required: [email, captcha, bindEmailTicket]
               properties:
                 email:
                   type: string
@@ -1163,14 +1161,15 @@ paths:
                 captcha:
                   type: string
                   description: 邮箱验证码
+                bindEmailTicket:
+                  type: string
+                  description: bindEmail 接口返回的阶段凭证
       responses:
         "200":
           description: |-
             绑定成功
 
             常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
             - `30004` 绑定邮箱验证码错误
             - `30005` 绑定邮箱 Ticket 无效
             - `80003` 邮箱绑定失败
@@ -1223,32 +1222,33 @@ paths:
       tags: [邮箱绑定]
       summary: 确认解绑邮箱
       description: |
-        验证 UnbindEmail-Ticket + 验证码后完成解绑。
+        验证 unbindEmailTicket + 验证码后完成解绑。
         解绑后该邮箱进入 1 分钟冷却期（Redis TTL 60s），冷却期内不可重新绑定。
-      security:
-        - UnbindEmailTicketAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [email, captcha]
+              required: [email, captcha, unbindEmailTicket]
               properties:
                 email:
                   type: string
                   format: email
                 captcha:
                   type: string
+                  description: 邮箱验证码
+                unbindEmailTicket:
+                  type: string
+                  description: unbindEmail 接口返回的阶段凭证
       responses:
         "200":
           description: |-
             解绑成功
 
             常见错误码：
-            - `10009` 权限不足（未携带有效 Token）
-            - `20004` Token 无效
             - `30006` 解绑验证码错误
+            - `30005` 解绑邮箱 Ticket 无效
             - `10008` 操作太频繁
           content:
             application/json:
