@@ -1,0 +1,1514 @@
+openapi: 3.0.3
+info:
+  title: SAST Link Backend V2 API
+  description: |
+    SAST 统一身份认证与人员管理系统 V2 API。
+    所有业务端点返回统一结构 `{ Success, ErrCode, ErrMsg, Data }`，
+    HTTP 状态码统一 200，业务状态通过 ErrCode 表达。
+    OAuth 2.1 端点（`/oauth2/*`、`/.well-known/*`）使用标准响应格式，不遵循统一结构。
+  version: 1.2.0
+  contact:
+    name: SAST Link Team
+
+servers:
+  - url: /
+    description: 当前域名
+
+tags:
+  - name: 验证
+    description: 账号验证、验证码发送与校验
+  - name: 用户
+    description: 注册、登录、登出、改密、重置密码、用户信息
+  - name: 资料
+    description: 用户资料查看/编辑、头像上传、邮箱绑定
+  - name: OAuth 登录
+    description: GitHub / 飞书 OAuth 登录与绑定
+  - name: 邮箱绑定
+    description: 第三方邮箱绑定与解绑
+  - name: OAuth 2.1 授权服务端
+    description: OAuth 2.1 标准授权服务端
+  - name: 系统
+    description: 健康检查、客户端注册
+
+# ============================================================================
+# Security Schemes
+# ============================================================================
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access Token，15 分钟有效期，放 Authorization: Bearer Header
+    RefreshTokenAuth:
+      type: apiKey
+      in: header
+      name: Refresh-Token
+      description: Refresh Token，7 天有效期，opaque token
+    LoginTicketAuth:
+      type: apiKey
+      in: header
+      name: X-Login-Ticket
+      description: 登录流程阶段凭证，有效期 5 分钟
+    RegisterTicketAuth:
+      type: apiKey
+      in: header
+      name: X-Register-Ticket
+      description: 注册流程阶段凭证，有效期 5 分钟
+    ResetPwdTicketAuth:
+      type: apiKey
+      in: header
+      name: X-ResetPwd-Ticket
+      description: 重置密码流程阶段凭证，有效期 6 分钟
+    OAuthTicketAuth:
+      type: apiKey
+      in: header
+      name: X-OAuth-Ticket
+      description: OAuth 注册补全流程凭证，有效期 3 分钟
+    BindEmailTicketAuth:
+      type: apiKey
+      in: header
+      name: X-BindEmail-Ticket
+      description: 邮箱绑定流程凭证，有效期 5 分钟
+    UnbindEmailTicketAuth:
+      type: apiKey
+      in: header
+      name: X-UnbindEmail-Ticket
+      description: 邮箱解绑流程凭证，有效期 5 分钟
+
+  # ============================================================================
+  # Schemas
+  # ============================================================================
+  schemas:
+    # ---- 统一响应 ----
+    UnifiedResponse:
+      type: object
+      required: [Success, ErrCode, ErrMsg, Data]
+      properties:
+        Success:
+          type: boolean
+          description: 请求是否成功
+        ErrCode:
+          type: integer
+          description: 业务状态码，成功为 200
+        ErrMsg:
+          type: string
+          description: 错误信息，成功为空字符串
+        Data:
+          type: object
+          description: 响应数据
+
+    # ---- 用户相关 ----
+    UserInfo:
+      type: object
+      properties:
+        userId:
+          type: string
+          description: 用户唯一标识 uid
+        email:
+          type: string
+          description: 主邮箱
+
+    UserProfile:
+      type: object
+      required: [userId, nickname, email, avatar]
+      properties:
+        userId:
+          type: string
+        nickname:
+          type: string
+        email:
+          type: string
+        avatar:
+          type: string
+          description: 头像 URL
+        org:
+          type: object
+          properties:
+            dep:
+              type: string
+              description: 部门名称
+            org:
+              type: string
+              description: 组织名称
+        bio:
+          type: string
+          description: 个人简介
+        link:
+          type: array
+          items:
+            type: string
+          description: 社交链接数组
+        badge:
+          type: array
+          items:
+            type: object
+          description: 徽章 JSON 数组
+        hide:
+          type: array
+          items:
+            type: string
+          description: 隐藏字段数组
+
+    ChangeProfileRequest:
+      type: object
+      minProperties: 1
+      properties:
+        nickname:
+          type: string
+        orgId:
+          type: integer
+        bio:
+          type: string
+        link:
+          type: array
+          items:
+            type: string
+        hide:
+          type: array
+          items:
+            type: string
+
+    # ---- 认证相关 ----
+    TokenPair:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        expiresIn:
+          type: integer
+          description: Access Token 剩余有效秒数
+
+    BindStatus:
+      type: object
+      properties:
+        github:
+          type: boolean
+          description: 是否已绑定 GitHub
+        lark:
+          type: boolean
+          description: 是否已绑定飞书
+
+    BindEmailItem:
+      type: object
+      properties:
+        email:
+          type: string
+        isVerified:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    # ---- OAuth 2.1 ----
+    OAuthTokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: 秒数
+        refresh_token:
+          type: string
+        scope:
+          type: string
+
+    IntrospectResponse:
+      type: object
+      properties:
+        active:
+          type: boolean
+        scope:
+          type: string
+        client_id:
+          type: string
+        username:
+          type: string
+        exp:
+          type: integer
+          description: 过期时间戳
+
+    JWKS:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            required: [kty, kid, n, e]
+            properties:
+              kty:
+                type: string
+              kid:
+                type: string
+              use:
+                type: string
+              n:
+                type: string
+              e:
+                type: string
+
+    OAuthClientRegistration:
+      type: object
+      required: [client_name, redirect_uris]
+      properties:
+        client_name:
+          type: string
+        redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+        grant_types:
+          type: array
+          items:
+            type: string
+            enum: [authorization_code, refresh_token]
+        scope:
+          type: string
+
+    OAuthClientResponse:
+      type: object
+      required: [client_id, client_type, redirect_uris, allowed_scopes, token_endpoint_auth_method]
+      properties:
+        client_id:
+          type: string
+        client_secret:
+          type: string
+        client_secret_expires_at:
+          type: integer
+          description: 0 表示永不过期
+        client_type:
+          type: string
+          enum: [confidential, public]
+          description: 客户端类型
+        redirect_uris:
+          type: array
+          items:
+            type: string
+        allowed_scopes:
+          type: string
+          description: 允许请求的 scope 列表，空格分隔
+        token_endpoint_auth_method:
+          type: string
+          enum: [client_secret_basic, client_secret_post, none]
+          description: Token 端点认证方式
+
+    # ---- 错误 ----
+    OAuthError:
+      type: object
+      properties:
+        error:
+          type: string
+        error_description:
+          type: string
+
+# ============================================================================
+# Paths
+# ============================================================================
+paths:
+  # ==========================================================================
+  # 验证
+  # ==========================================================================
+  /verify/account:
+    get:
+      tags: [验证]
+      summary: 账号验证
+      description: |
+        验证账号是否存在/可用，返回对应 Ticket。
+        注册场景返回 Register-Ticket，登录场景返回 Login-Ticket，重置密码场景返回 ResetPwd-Ticket。
+        为避免账号枚举，注册场景下账号已存在与登录/重置场景下账号不存在均返回模糊错误。
+      parameters:
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+            format: email
+          description: 邮箱地址
+      responses:
+        "200":
+          description: 验证通过，返回 Ticket
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    type: object
+                    properties:
+                      ticket:
+                        type: string
+                        description: 阶段凭证
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10003` 邮箱格式错误
+            - `40001` 账号验证失败（模糊错误，不区分账号是否存在）
+
+  /verify/captcha:
+    post:
+      tags: [验证]
+      summary: 验证码校验
+      description: |
+        校验邮箱验证码。支持所有含邮箱验证的 Ticket 类型
+        （Register/Login/ResetPwd/OAuth/BindEmail/UnbindEmail）。
+        限流 10 次/分钟/IP。
+      security:
+        - RegisterTicketAuth: []
+        - LoginTicketAuth: []
+        - ResetPwdTicketAuth: []
+        - OAuthTicketAuth: []
+        - BindEmailTicketAuth: []
+        - UnbindEmailTicketAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [captcha]
+              properties:
+                captcha:
+                  type: string
+                  description: 验证码，格式 `S-XXXXX`（5位）
+      responses:
+        "200":
+          description: 校验通过
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `30002` 验证码错误
+            - `20008` Ticket 不存在或过期
+
+  /sendEmail:
+    post:
+      tags: [验证]
+      summary: 发送验证邮件
+      description: |
+        发送含验证码的邮件。限流 2 次/分钟/邮箱。
+        不同场景使用不同的 Ticket Header。
+      security:
+        - RegisterTicketAuth: []
+        - LoginTicketAuth: []
+        - ResetPwdTicketAuth: []
+        - OAuthTicketAuth: []
+        - BindEmailTicketAuth: []
+        - UnbindEmailTicketAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "200":
+          description: 邮件已发送
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `30001` 邮件发送失败
+            - `10008` 操作太频繁（限流）
+
+  # ==========================================================================
+  # 用户
+  # ==========================================================================
+  /user/register:
+    post:
+      tags: [用户]
+      summary: 用户注册
+      description: |
+        完成注册。需携带 Register-Ticket，密码 6-64 位必须同时含字母和数字。
+        注册成功后自动创建默认资料，返回双 Token。
+        限流 3 次/分钟/IP。
+      security:
+        - RegisterTicketAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [captcha, password]
+              properties:
+                captcha:
+                  type: string
+                  description: 邮箱验证码，格式 `S-XXXXX`
+                password:
+                  type: string
+                  minLength: 6
+                  maxLength: 64
+                  description: 密码，必须同时含字母和数字
+      responses:
+        "200":
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    $ref: "#/components/schemas/TokenPair"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10003` 密码格式错误
+            - `30002` 验证码错误
+            - `70001` 注册信息不完整
+            - `70002` 注册阶段错误
+
+  /user/login:
+    post:
+      tags: [用户]
+      summary: 用户登录
+      description: |
+        用户登录。需携带 Login-Ticket，支持学号/邮箱+密码登录。
+        最多 5 设备同时登录，新登录淘汰最旧设备。
+        登录时同时查 `user.email`（教育邮箱）和 `user_emails.email`（绑定邮箱）。
+      security:
+        - LoginTicketAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password:
+                  type: string
+                  description: 密码
+      responses:
+        "200":
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    $ref: "#/components/schemas/TokenPair"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10005` 登录失败（账号或密码错误）
+            - `10006` 账号不存在
+            - `20007` Ticket 不正确
+            - `20009` Token 版本不匹配（密码已被修改）
+            - `10008` 操作太频繁（限流锁定 15 分钟）
+
+  /user/logout:
+    post:
+      tags: [用户]
+      summary: 用户登出
+      description: |
+        使当前设备的 Access Token 和 Refresh Token 同时失效。
+        仅清除当前设备 Token，不影响其他设备。
+      security:
+        - BearerAuth: []
+        - RefreshTokenAuth: []
+      responses:
+        "200":
+          description: 登出成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+
+  /user/changePassword:
+    post:
+      tags: [用户]
+      summary: 修改密码
+      description: |
+        验证旧密码后修改为新密码。成功后递增 token_version，使所有现有 Token 失效。
+        限流 3 次/小时/账号。
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [oldPassword, newPassword]
+              properties:
+                oldPassword:
+                  type: string
+                  description: 旧密码
+                newPassword:
+                  type: string
+                  minLength: 6
+                  maxLength: 64
+                  description: 新密码，必须同时含字母和数字
+      responses:
+        "200":
+          description: 修改成功，需重新登录
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `40003` 旧密码错误
+            - `10003` 新密码格式错误
+            - `10008` 操作太频繁
+
+  /user/resetPassword:
+    post:
+      tags: [用户]
+      summary: 重置密码
+      description: |
+        通过 ResetPwd-Ticket 重置密码。成功后递增 token_version，使所有现有 Token 失效。
+        限流 3 次/小时/账号。
+      security:
+        - ResetPwdTicketAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [captcha, password]
+              properties:
+                captcha:
+                  type: string
+                  description: 邮箱验证码，格式 `S-XXXXX`
+                password:
+                  type: string
+                  minLength: 6
+                  maxLength: 64
+                  description: 新密码，必须同时含字母和数字
+      responses:
+        "200":
+          description: 重置成功，需重新登录
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10003` 密码格式错误
+            - `20008` Ticket 不存在或过期
+            - `30002` 验证码错误
+            - `70004` 重置密码失败
+
+  /user/info:
+    get:
+      tags: [用户]
+      summary: 获取用户信息
+      description: 返回当前登录用户的 email 和 userId。
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    $ref: "#/components/schemas/UserInfo"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+
+  /user/oauthRegister:
+    post:
+      tags: [用户]
+      summary: OAuth 注册补全
+      description: |
+        OAuth 首次登录后补全注册。需携带 OAuth-Ticket，绑定邮箱并设置密码。
+        系统自动生成 uid（`u{8位随机字母数字}`）。
+        限流 3 次/分钟/IP。
+      security:
+        - OAuthTicketAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, captcha, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: 绑定的教育邮箱（@njupt.edu.cn）
+                captcha:
+                  type: string
+                  description: 邮箱验证码
+                password:
+                  type: string
+                  minLength: 6
+                  maxLength: 64
+                  description: 密码
+      responses:
+        "200":
+          description: 注册补全成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    $ref: "#/components/schemas/TokenPair"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10003` 密码格式错误
+            - `10007` 邮箱已被注册
+            - `10015` OAuth 注册补全时邮箱已被占用
+            - `30002` 验证码错误
+            - `70005` OAuth 注册补全失败
+
+  /user/oauthBindExisting:
+    post:
+      tags: [用户]
+      summary: OAuth 绑定已有账号
+      description: |
+        OAuth 注册时邮箱已被占用，将 OAuth 账号绑定到已有用户。
+        无需登录态，凭邮箱+密码验证账号所有权。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  description: 已有账号的密码
+      responses:
+        "200":
+          description: 绑定成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10005` 密码错误
+            - `10006` 账号不存在
+            - `10012` OAuth 已绑定其他账号
+
+  # ==========================================================================
+  # 资料
+  # ==========================================================================
+  /profile/getProfile:
+    get:
+      tags: [资料]
+      summary: 获取用户资料
+      description: |
+        返回用户完整资料。查看自己资料需登录态，查看他人资料通过 query 参数。
+        尊重用户隐私设置（hide 字段中的内容不返回）。
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: userId
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 目标用户 uid，不传则返回当前登录用户资料
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    $ref: "#/components/schemas/UserProfile"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `80000` 用户资料不存在
+
+  /profile/changeProfile:
+    post:
+      tags: [资料]
+      summary: 修改用户资料
+      description: 修改昵称、组织、简介、社交链接、隐私设置。
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeProfileRequest"
+      responses:
+        "200":
+          description: 修改成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `80001` 组织 ID 无效
+            - `80002` 隐藏字段无效
+
+  /profile/uploadAvatar:
+    post:
+      tags: [资料]
+      summary: 上传头像
+      description: |
+        上传头像到腾讯云 COS，触发内容审核。审核通过后自动更新 profile.avatar。
+        返回头像 URL 字符串。限流 10 次/分钟/用户。
+        限制：文件大小不超过 5MB，仅支持 image/jpeg、image/png、image/webp 格式。
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 头像图片文件
+      responses:
+        "200":
+          description: 上传成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    type: object
+                    properties:
+                      url:
+                        type: string
+                        description: 头像 URL
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `90001` 图片处理失败
+            - `90002` 图片 URL 无效
+            - `10008` 操作太频繁
+
+  /profile/bindStatus:
+    get:
+      tags: [资料]
+      summary: OAuth 绑定状态
+      description: 返回当前用户已绑定的 OAuth provider 列表。
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    $ref: "#/components/schemas/BindStatus"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+
+  # ==========================================================================
+  # OAuth 登录
+  # ==========================================================================
+  /login/github:
+    get:
+      tags: [OAuth 登录]
+      summary: GitHub 登录（发起）
+      description: 302 重定向到 GitHub OAuth 授权页。
+      responses:
+        "302":
+          description: 重定向到 GitHub
+
+  /login/github/callback:
+    get:
+      tags: [OAuth 登录]
+      summary: GitHub 登录（回调）
+      description: |
+        GitHub OAuth 回调。已绑定账号直接登录返回双 Token；
+        未绑定返回 OAuth-Ticket + 临时用户信息，前端引导补全注册。
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: GitHub 授权码
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+          description: CSRF 防护状态值
+      responses:
+        "200":
+          description: 已绑定，登录成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    $ref: "#/components/schemas/TokenPair"
+        "200-Ticket":
+          description: 未绑定，返回 OAuth-Ticket
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    type: object
+                    properties:
+                      oauthTicket:
+                        type: string
+                      nickname:
+                        type: string
+                      avatar:
+                        type: string
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10010` OAuth 未绑定
+            - `10013` OAuth 绑定失败
+
+  /login/lark:
+    get:
+      tags: [OAuth 登录]
+      summary: 飞书登录（发起）
+      description: 302 重定向到飞书 OAuth 授权页。
+      responses:
+        "302":
+          description: 重定向到飞书
+
+  /login/lark/callback:
+    get:
+      tags: [OAuth 登录]
+      summary: 飞书登录（回调）
+      description: |
+        飞书 OAuth 回调。已绑定账号直接登录返回双 Token；
+        未绑定返回 OAuth-Ticket + 临时用户信息，前端引导补全注册。
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: 飞书授权码
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+          description: CSRF 防护状态值
+      responses:
+        "200":
+          description: 已绑定，登录成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    $ref: "#/components/schemas/TokenPair"
+        "200-Ticket":
+          description: 未绑定，返回 OAuth-Ticket
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    type: object
+                    properties:
+                      oauthTicket:
+                        type: string
+                      nickname:
+                        type: string
+                      avatar:
+                        type: string
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10010` OAuth 未绑定
+            - `10013` OAuth 绑定失败
+
+  /profile/bind/github:
+    get:
+      tags: [OAuth 登录]
+      summary: GitHub 绑定（发起）
+      description: 需登录态，302 重定向到 GitHub 授权页。
+      security:
+        - BearerAuth: []
+      responses:
+        "302":
+          description: 重定向到 GitHub
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+
+  /profile/bind/github/callback:
+    get:
+      tags: [OAuth 登录]
+      summary: GitHub 绑定（回调）
+      description: 绑定回调，成功后返回绑定结果。
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: 绑定成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `10012` OAuth 已绑定其他账号
+            - `10013` OAuth 绑定失败
+
+  /profile/bind/lark:
+    get:
+      tags: [OAuth 登录]
+      summary: 飞书绑定（发起）
+      description: 需登录态，302 重定向到飞书授权页。
+      security:
+        - BearerAuth: []
+      responses:
+        "302":
+          description: 重定向到飞书
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+
+  /profile/bind/lark/callback:
+    get:
+      tags: [OAuth 登录]
+      summary: 飞书绑定（回调）
+      description: 同 GitHub 绑定回调逻辑。
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: 绑定成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+
+  /profile/unbind:
+    post:
+      tags: [OAuth 登录]
+      summary: 解除第三方 OAuth 绑定
+      description: |
+        解除指定 provider（github/lark）的 OAuth 绑定。
+        解绑后需保证至少有一种登录方式可用。教育邮箱不可解绑。
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider]
+              properties:
+                provider:
+                  type: string
+                  enum: [github, lark]
+                  description: 要解绑的 provider
+      responses:
+        "200":
+          description: 解绑成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `10014` 解绑失败（解绑后无可用登录方式，或该 OAuth 未绑定）
+
+  # ==========================================================================
+  # 邮箱绑定
+  # ==========================================================================
+  /profile/bindEmail:
+    post:
+      tags: [邮箱绑定]
+      summary: 发起邮箱绑定
+      description: |
+        已登录用户绑定第三方邮箱。发送验证码到指定邮箱，生成 BindEmail-Ticket。
+        限流 2 次/分钟。禁止绑定 @njupt.edu.cn 邮箱。
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: 要绑定的第三方邮箱
+      responses:
+        "200":
+          description: 验证码已发送
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    type: object
+                    properties:
+                      bindEmailTicket:
+                        type: string
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `10016` 绑定邮箱数量已达上限（2 个）
+            - `10017` 邮箱已被其他用户绑定
+            - `10018` 解绑冷却中
+            - `30003` 邮箱格式错误
+            - `10008` 操作太频繁
+
+  /profile/verifyBindEmail:
+    post:
+      tags: [邮箱绑定]
+      summary: 验证并完成邮箱绑定
+      description: |
+        验证 BindEmail-Ticket + 验证码后完成绑定。上限 2 个邮箱/用户。
+        限流 10 次/分钟/IP。
+      security:
+        - BindEmailTicketAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, captcha]
+              properties:
+                email:
+                  type: string
+                  format: email
+                captcha:
+                  type: string
+                  description: 邮箱验证码
+      responses:
+        "200":
+          description: 绑定成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `30004` 绑定邮箱验证码错误
+            - `30005` 绑定邮箱 Ticket 无效
+            - `80003` 邮箱绑定失败
+
+  /profile/unbindEmail:
+    post:
+      tags: [邮箱绑定]
+      summary: 发起邮箱解绑
+      description: |
+        发送解绑验证码到指定邮箱，生成 UnbindEmail-Ticket。限流 2 次/分钟。
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: 要解绑的邮箱
+      responses:
+        "200":
+          description: 验证码已发送
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    type: object
+                    properties:
+                      unbindEmailTicket:
+                        type: string
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `10008` 操作太频繁
+
+  /profile/confirmUnbindEmail:
+    post:
+      tags: [邮箱绑定]
+      summary: 确认解绑邮箱
+      description: |
+        验证 UnbindEmail-Ticket + 验证码后完成解绑。
+        解绑后该邮箱进入 1 分钟冷却期（Redis TTL 60s），冷却期内不可重新绑定。
+      security:
+        - UnbindEmailTicketAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, captcha]
+              properties:
+                email:
+                  type: string
+                  format: email
+                captcha:
+                  type: string
+      responses:
+        "200":
+          description: 解绑成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnifiedResponse"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+            - `30006` 解绑验证码错误
+            - `10008` 操作太频繁
+
+  /profile/emails:
+    get:
+      tags: [邮箱绑定]
+      summary: 获取已绑定邮箱
+      description: 返回当前用户已绑定的第三方邮箱列表。
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnifiedResponse"
+                properties:
+                  Data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BindEmailItem"
+        "200-Error":
+          description: |
+            常见错误码：
+            - `10009` 权限不足（未携带有效 Token）
+            - `20004` Token 无效
+
+  # ==========================================================================
+  # OAuth 2.1 授权服务端
+  # ==========================================================================
+  /oauth2/authorize:
+    get:
+      tags: [OAuth 2.1 授权服务端]
+      summary: 授权端点
+      description: |
+        OAuth 2.1 授权端点。用户需先通过第一方登录获取 Session Cookie，
+        未登录时 302 重定向到登录页。PKCE-S256 强制。
+      parameters:
+        - name: response_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [code]
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: redirect_uri
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uri
+          description: 必须在客户端注册的白名单内
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 空格分隔的权限列表，如 `profile email`
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+          description: CSRF 防护，原样回传
+        - name: code_challenge
+          in: query
+          required: true
+          schema:
+            type: string
+          description: PKCE - Base64URL(SHA256(code_verifier))
+        - name: code_challenge_method
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [S256]
+      responses:
+        "302":
+          description: |
+            成功：重定向到 `redirect_uri?code={授权码}&state={state}`，授权码 10 分钟有效，单次使用
+            用户未登录：重定向到登录页
+            用户拒绝：重定向到 `redirect_uri?error=access_denied`
+            参数错误：重定向到 `redirect_uri?error=invalid_request`
+
+  /oauth2/token:
+    post:
+      tags: [OAuth 2.1 授权服务端]
+      summary: Token 端点
+      description: |
+        交换授权码获取 Token，或刷新 Token。
+        confidential client 需提供 client_secret，public client（含第一方）无需。
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, client_id]
+              properties:
+                grant_type:
+                  type: string
+                  enum: [authorization_code, refresh_token]
+                code:
+                  type: string
+                  description: 授权码（authorization_code 时必填）
+                refresh_token:
+                  type: string
+                  description: Refresh Token（refresh_token 时必填）
+                redirect_uri:
+                  type: string
+                  format: uri
+                  description: 必须与授权请求一致（authorization_code 时必填）
+                client_id:
+                  type: string
+                client_secret:
+                  type: string
+                  description: confidential client 必填
+                code_verifier:
+                  type: string
+                  description: PKCE 原始 code_verifier（authorization_code 时必填）
+      responses:
+        "200":
+          description: Token 颁发成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthTokenResponse"
+        "400":
+          description: 请求错误
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+
+  /oauth2/revoke:
+    post:
+      tags: [OAuth 2.1 授权服务端]
+      summary: 撤销端点
+      description: 撤销 Access Token 或 Refresh Token。
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  description: 要撤销的 Token
+                token_type_hint:
+                  type: string
+                  enum: [access_token, refresh_token]
+                  description: 可选，提示 Token 类型
+      responses:
+        "200":
+          description: 撤销成功（无论 Token 是否存在都返回 200）
+
+  /oauth2/introspect:
+    post:
+      tags: [OAuth 2.1 授权服务端]
+      summary: 自省端点
+      description: 检查 Token 状态。
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        "200":
+          description: 自省结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntrospectResponse"
+
+  /.well-known/jwks.json:
+    get:
+      tags: [OAuth 2.1 授权服务端]
+      summary: JWKS 端点
+      description: 暴露 RS256 公钥集，支持资源服务器独立验签。
+      responses:
+        "200":
+          description: JWK Set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JWKS"
+
+  # ==========================================================================
+  # 系统
+  # ==========================================================================
+  /ping:
+    get:
+      tags: [系统]
+      summary: 健康检查
+      description: 服务健康检查端点。
+      responses:
+        "200":
+          description: 服务正常
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: pong
+
+  /oauth2/register:
+    post:
+      tags: [系统]
+      summary: OAuth2 客户端注册
+      description: |
+        动态注册 OAuth 2.1 客户端。开放注册，任何人可调用。
+        限流 5 次/小时/IP。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuthClientRegistration"
+      responses:
+        "200":
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthClientResponse"
+        "400":
+          description: 请求参数错误
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
