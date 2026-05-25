@@ -6,9 +6,9 @@ import "gorm.io/datatypes"
 
 // ChangeProfileRequest 修改用户资料请求 (POST /profile/changeProfile)
 type ChangeProfileRequest struct {
-	Nickname string         `json:"nickname"`
-	OrgID    int16          `json:"orgId"`
-	Bio      string         `json:"bio"`
+	Nickname string     `json:"nickname"`
+	OrgID    int16      `json:"orgId"`
+	Bio      string     `json:"bio"`
 	Link     []LinkItem `json:"link"`
 	Hide     []string   `json:"hide"`
 }

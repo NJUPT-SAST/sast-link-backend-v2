@@ -2,6 +2,7 @@ package domain
 
 import "time"
 
+// User represents a registered user account.
 type User struct {
 	ID        int64     `gorm:"column:id;primaryKey;autoIncrement"`
 	UID       string    `gorm:"column:uid;type:varchar(32);uniqueIndex;not null"`

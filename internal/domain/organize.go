@@ -1,5 +1,6 @@
 package domain
 
+// Organize represents a department or organization unit.
 type Organize struct {
 	ID  int16  `gorm:"column:id;type:smallint;primaryKey"`
 	Dep string `gorm:"column:dep;type:varchar(64);not null"`

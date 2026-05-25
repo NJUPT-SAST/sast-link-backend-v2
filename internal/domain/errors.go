@@ -90,7 +90,7 @@ const (
 	ErrRegisterFail ErrCode = 70003
 	// ErrResetPasswordFail indicates password reset failure.
 	ErrResetPasswordFail ErrCode = 70004
-	// ErrOAuthRegistrationCompleitonFail indicates OAuth registration completion failure.
+	// ErrOAuthRegistrationCompletionFail indicates OAuth registration completion failure.
 	ErrOAuthRegistrationCompletionFail ErrCode = 70005
 
 	// ErrProfileNotFound indicates the user profile does not exist.
