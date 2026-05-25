@@ -26,6 +26,30 @@ const (
 	ErrOAuthNotBound ErrCode = 10010
 	// ErrUserNotFound indicates the user does not exist.
 	ErrUserNotFound ErrCode = 10011
+	// ErrOAuthAlreadyBound indicates the OAuth user is already bound to another account.
+	ErrOAuthAlreadyBound ErrCode = 10012
+	// ErrOAuthBindFailed indicates the OAuth binding failed.
+	ErrOAuthBindFailed ErrCode = 10013
+	// ErrUnbindFailed indicates the unbinding failed.
+	ErrUnbindFailed ErrCode = 10014
+	// ErrEmailAlreadyRegistered indicates the email is already registered.
+	ErrEmailAlreadyRegistered ErrCode = 10015
+	// ErrInvalidRequest indicates the OAuth 2.1 request parameters are invalid.
+	ErrInvalidRequest ErrCode = 10016
+	// ErrInvalidClient indicates OAuth 2.1 client authentication failed.
+	ErrInvalidClient ErrCode = 10017
+	// ErrInvalidGrant indicates the grant type or credentials are invalid.
+	ErrInvalidGrant ErrCode = 10018
+	// ErrUnauthorizedClient indicates the client is unauthorized to use the grant type.
+	ErrUnauthorizedClient ErrCode = 10019
+	// ErrUnsupportedGrantType indicates the grant type is not supported.
+	ErrUnsupportedGrantType ErrCode = 10020
+	// ErrInvalidScope indicates the requested scope is invalid, unknown, or malformed.
+	ErrInvalidScope ErrCode = 10021
+	// ErrServerError indicates an OAuth 2.1 internal server error.
+	ErrServerError ErrCode = 10022
+	// ErrTemporarilyUnavailable indicates the OAuth 2.1 server is temporarily unavailable.
+	ErrTemporarilyUnavailable ErrCode = 10023
 
 	// ErrTokenExpired indicates the token has expired.
 	ErrTokenExpired ErrCode = 20002
@@ -66,6 +90,8 @@ const (
 	ErrRegisterFail ErrCode = 70003
 	// ErrResetPasswordFail indicates password reset failure.
 	ErrResetPasswordFail ErrCode = 70004
+	// ErrOAuthRegistrationCompleitonFail indicates OAuth registration completion failure.
+	ErrOAuthRegistrationCompletionFail ErrCode = 70005
 
 	// ErrProfileNotFound indicates the user profile does not exist.
 	ErrProfileNotFound ErrCode = 80000
