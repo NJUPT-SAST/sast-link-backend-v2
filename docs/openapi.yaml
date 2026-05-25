@@ -137,7 +137,12 @@ components:
         link:
           type: array
           items:
-            type: string
+            type: object
+            properties:
+              title:
+                type: string
+              url:
+                type: string
           description: 社交链接数组
         badge:
           type: array
@@ -163,7 +168,12 @@ components:
         link:
           type: array
           items:
-            type: string
+            type: object
+            properties:
+              title:
+                type: string
+              url:
+                type: string
         hide:
           type: array
           items:
@@ -180,6 +190,38 @@ components:
         expiresIn:
           type: integer
           description: Access Token 剩余有效秒数
+
+    OAuthTempUserInfo:
+      type: object
+      properties:
+        nickname:
+          type: string
+          description: OAuth provider 返回的昵称
+        avatar:
+          type: string
+          description: OAuth provider 返回的头像 URL
+
+    OAuthPendingResponse:
+      type: object
+      required: [oauthTicket, profile]
+      properties:
+        oauthTicket:
+          type: string
+          description: OAuth 注册补全阶段凭证，放 X-OAuth-Ticket Header
+        profile:
+          $ref: "#/components/schemas/OAuthTempUserInfo"
+
+    VerifyAccountTicket:
+      type: object
+      required: [ticket, ticketType]
+      properties:
+        ticket:
+          type: string
+          description: 阶段凭证
+        ticketType:
+          type: string
+          enum: [register, login, resetPwd]
+          description: Ticket 类型，对应 X-Register-Ticket / X-Login-Ticket / X-ResetPwd-Ticket Header
 
     BindStatus:
       type: object
@@ -318,29 +360,39 @@ paths:
   # 验证
   # ==========================================================================
   /verify/account:
-    get:
+    post:
       tags: [验证]
       summary: 账号验证
       description: |
         验证账号是否存在/可用，返回对应 Ticket。
-        注册场景返回 Register-Ticket，登录场景返回 Login-Ticket，重置密码场景返回 ResetPwd-Ticket。
-        为避免账号枚举，注册场景下账号已存在与登录/重置场景下账号不存在均返回模糊错误。
+        `flag=0` 注册：校验 @njupt.edu.cn 邮箱格式及是否已注册，返回 Register-Ticket。
+        `flag=1` 登录：查询 user.email 或 user_emails.email，返回 Login-Ticket。
+        `flag=2` 重置密码：校验账号是否存在，返回 ResetPwd-Ticket。
+        学号与邮箱共用 `username` 字段（学号作为账号标识存储）。
       parameters:
         - name: email
           in: query
           required: true
           schema:
             type: string
-            format: email
-          description: 邮箱地址
+          description: 学号或 @njupt.edu.cn 邮箱
+        - name: flag
+          in: query
+          required: true
+          schema:
+            type: integer
+            enum: [0, 1, 2]
+          description: 0=注册, 1=登录, 2=重置密码
       responses:
         "200":
           description: |-
             验证通过，返回 Ticket
 
             常见错误码：
-            - `10003` 邮箱格式错误
-            - `40001` 账号验证失败（模糊错误，不区分账号是否存在）
+            - `10002` 用户名格式错误
+            - `10006` 账号不存在（登录/重置场景）
+            - `10007` 账号已存在（注册场景）
+            - `40001` 账号验证失败
           content:
             application/json:
               schema:
@@ -348,11 +400,7 @@ paths:
                   - $ref: "#/components/schemas/UnifiedResponse"
                 properties:
                   Data:
-                    type: object
-                    properties:
-                      ticket:
-                        type: string
-                        description: 阶段凭证
+                    $ref: "#/components/schemas/VerifyAccountTicket"
   /verify/captcha:
     post:
       tags: [验证]
@@ -400,7 +448,6 @@ paths:
         不同场景使用不同的 Ticket Header。
       security:
         - RegisterTicketAuth: []
-        - LoginTicketAuth: []
         - ResetPwdTicketAuth: []
         - OAuthTicketAuth: []
         - BindEmailTicketAuth: []
@@ -433,7 +480,7 @@ paths:
       tags: [用户]
       summary: 用户注册
       description: |
-        完成注册。需携带 Register-Ticket，密码 6-64 位必须同时含字母和数字。
+        完成注册。需携带已通过 verify/captcha 的 Register-Ticket，密码 6-64 位必须同时含字母和数字。
         注册成功后自动创建默认资料，返回双 Token。
         限流 3 次/分钟/IP。
       security:
@@ -446,9 +493,6 @@ paths:
               type: object
               required: [captcha, password]
               properties:
-                captcha:
-                  type: string
-                  description: 邮箱验证码，格式 `S-XXXXX`
                 password:
                   type: string
                   minLength: 6
@@ -461,7 +505,7 @@ paths:
 
             常见错误码：
             - `10003` 密码格式错误
-            - `30002` 验证码错误
+            - `20008` Ticket 不存在或过期（含未验码）
             - `70001` 注册信息不完整
             - `70002` 注册阶段错误
           content:
@@ -579,7 +623,7 @@ paths:
       tags: [用户]
       summary: 重置密码
       description: |
-        通过 ResetPwd-Ticket 重置密码。成功后递增 token_version，使所有现有 Token 失效。
+        通过已通过 verify/captcha 的 ResetPwd-Ticket 重置密码。成功后递增 token_version，使所有现有 Token 失效。
         限流 3 次/小时/账号。
       security:
         - ResetPwdTicketAuth: []
@@ -589,11 +633,8 @@ paths:
           application/json:
             schema:
               type: object
-              required: [captcha, password]
+              required: [password]
               properties:
-                captcha:
-                  type: string
-                  description: 邮箱验证码，格式 `S-XXXXX`
                 password:
                   type: string
                   minLength: 6
@@ -606,8 +647,7 @@ paths:
 
             常见错误码：
             - `10003` 密码格式错误
-            - `20008` Ticket 不存在或过期
-            - `30002` 验证码错误
+            - `20008` Ticket 不存在或过期（含未验码）
             - `70004` 重置密码失败
           content:
             application/json:
@@ -644,16 +684,17 @@ paths:
         OAuth 首次登录后补全注册。需携带 OAuth-Ticket，绑定邮箱并设置密码。
         系统自动生成 uid（`u{8位随机字母数字}`）。
         限流 3 次/分钟/IP。
-      security:
-        - OAuthTicketAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [email, captcha, password]
+              required: [oauthTicket, email, captcha, password]
               properties:
+                oauthTicket:
+                  type: string
+                  description: OAuth 回调返回的阶段凭证
                 email:
                   type: string
                   format: email
@@ -691,15 +732,18 @@ paths:
       summary: OAuth 绑定已有账号
       description: |
         OAuth 注册时邮箱已被占用，将 OAuth 账号绑定到已有用户。
-        无需登录态，凭邮箱+密码验证账号所有权。
+        无需登录态，凭 oauthTicket + 邮箱 + 密码验证账号所有权。
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [email, password]
+              required: [oauthTicket, email, password]
               properties:
+                oauthTicket:
+                  type: string
+                  description: OAuth 回调返回的阶段凭证
                 email:
                   type: string
                   format: email
@@ -821,9 +865,9 @@ paths:
                   Data:
                     type: object
                     properties:
-                      url:
+                      filePath:
                         type: string
-                        description: 头像 URL
+                        description: 头像 URL 路径
   /profile/bindStatus:
     get:
       tags: [资料]
@@ -893,7 +937,9 @@ paths:
                   - $ref: "#/components/schemas/UnifiedResponse"
                 properties:
                   Data:
-                    $ref: "#/components/schemas/TokenPair"
+                    oneOf:
+                      - $ref: "#/components/schemas/TokenPair"
+                      - $ref: "#/components/schemas/OAuthPendingResponse"
   /login/lark:
     get:
       tags: [OAuth 登录]
@@ -940,7 +986,9 @@ paths:
                   - $ref: "#/components/schemas/UnifiedResponse"
                 properties:
                   Data:
-                    $ref: "#/components/schemas/TokenPair"
+                    oneOf:
+                      - $ref: "#/components/schemas/TokenPair"
+                      - $ref: "#/components/schemas/OAuthPendingResponse"
   /profile/bind/github:
     get:
       tags: [OAuth 登录]
@@ -1406,7 +1454,7 @@ paths:
     get:
       tags: [系统]
       summary: 健康检查
-      description: 服务健康检查端点。
+      description: 服务存活检查，返回 pong。
       responses:
         "200":
           description: 服务正常
@@ -1415,6 +1463,37 @@ paths:
               schema:
                 type: string
                 example: pong
+
+  /health:
+    get:
+      tags: [系统]
+      summary: 深度健康检查
+      description: 检查数据库与 Redis 连接状态。
+      responses:
+        "200":
+          description: 所有依赖正常
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  version:
+                    type: string
+                  checks:
+                    type: object
+                    properties:
+                      database:
+                        type: string
+                      redis:
+                        type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+        "503":
+          description: 存在依赖不可用
 
   /oauth2/register:
     post:

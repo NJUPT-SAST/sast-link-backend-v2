@@ -15,14 +15,23 @@ type OAuthLoginRequest struct {
 
 // ==================== 响应 DTO ====================
 
-// OAuthLoginResponse OAuth 登录响应
-// 已绑定返回 loginToken，未绑定返回 oauthTicket
-type OAuthLoginResponse struct {
-	LoginToken  string `json:"loginToken,omitempty"`
-	OauthTicket string `json:"oauthTicket,omitempty"`
+// OAuthTempUserInfo OAuth 未绑定时的临时用户信息
+type OAuthTempUserInfo struct {
+	Nickname string `json:"nickname"`
+	Avatar   string `json:"avatar"`
 }
 
-// OAuthBindRequest OAuth 绑定请求（登录时附带 OAUTH-TICKET）
-type OAuthBindRequest struct {
-	OauthTicket string `header:"OAUTH-TICKET"`
+// OAuthPendingResponse OAuth 回调未绑定响应
+type OAuthPendingResponse struct {
+	OAuthTicket string            `json:"oauthTicket"`
+	Profile     OAuthTempUserInfo `json:"profile"`
+}
+
+// OAuthCallbackResponse OAuth 登录回调响应（已绑定返回 Token，未绑定返回 Pending）
+type OAuthCallbackResponse struct {
+	AccessToken  string             `json:"accessToken,omitempty"`
+	RefreshToken string             `json:"refreshToken,omitempty"`
+	ExpiresIn    int                `json:"expiresIn,omitempty"`
+	OAuthTicket  string             `json:"oauthTicket,omitempty"`
+	Profile      *OAuthTempUserInfo `json:"profile,omitempty"`
 }
