@@ -1,44 +1,29 @@
 package dto
 
-import "gorm.io/datatypes"
-
 // ==================== 请求 DTO ====================
 
 // ChangeProfileRequest 修改用户资料请求
 type ChangeProfileRequest struct {
-	Nickname string         `json:"nickname"`
-	OrgID    int16          `json:"org_id"`
-	Bio      string         `json:"bio"`
-	Link     datatypes.JSON `json:"link"`
-	Hide     datatypes.JSON `json:"hide"`
+	Nickname   string `json:"nickname"`
+	Department string `json:"department"`
+	Intro      string `json:"intro"`
+	BlogURL    string `json:"blogUrl"`
+	GitHubURL  string `json:"githubUrl"`
 }
 
 // ==================== 响应 DTO ====================
 
-// ProfileResponse 用户资料响应 (GET /profile/getProfile)
+// ProfileResponse 用户资料响应
 type ProfileResponse struct {
-	ID        int64          `json:"id"`
-	Nickname  string         `json:"nickname"`
-	OrgID     int16          `json:"org_id"`
-	Bio       string         `json:"bio,omitempty"`
-	Avatar    string         `json:"avatar,omitempty"`
-	Link      datatypes.JSON `json:"link,omitempty"`
-	Badge     datatypes.JSON `json:"badge,omitempty"`
-	Hide      datatypes.JSON `json:"hide,omitempty"`
-	CreatedAt string         `json:"created_at"`
-	UpdatedAt string         `json:"updated_at"`
-}
-
-// BadgeItem 纪念卡条目结构
-type BadgeItem struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Image     string `json:"image"`
-	CreatedAt string `json:"created_at"`
-}
-
-// LinkItem 社交链接条目结构
-type LinkItem struct {
-	Title string `json:"title"`
-	URL   string `json:"url"`
+	ID         int64  `json:"id"`
+	UserID     int64  `json:"userId"`
+	Nickname   string `json:"nickname,omitempty"`
+	Department string `json:"department,omitempty"`
+	Intro      string `json:"intro,omitempty"`
+	Email      string `json:"email,omitempty"`
+	Avatar     string `json:"avatar,omitempty"`
+	BlogURL    string `json:"blogUrl,omitempty"`
+	GitHubURL  string `json:"githubUrl,omitempty"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
 }
