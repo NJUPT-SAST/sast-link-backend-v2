@@ -15,8 +15,11 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/domain"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/handler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/infra"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/pkg/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service"
 )
 
 func main() {
@@ -60,8 +63,19 @@ func main() {
 		}
 	}()
 
-	_ = db
-	_ = redisClient
+	// Repositories
+	userRepo := repository.NewUserRepo(db)
+	profileRepo := repository.NewProfileRepo(db)
+
+	// Services
+	captchaSvc := service.NewCaptchaService(redisClient)
+	emailSvc := service.NewEmailService(cfg.SMTP)
+	registerSvc := service.NewRegisterService(userRepo, profileRepo, emailSvc, captchaSvc)
+	profileSvc := service.NewProfileService(profileRepo)
+
+	// Handlers
+	authHandler := handler.NewAuthHandler(registerSvc)
+	profileHandler := handler.NewProfileHandler(profileSvc)
 
 	r.GET("/ping", func(c *gin.Context) {
 		c.String(http.StatusOK, "pong")
@@ -96,6 +110,14 @@ func main() {
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 		})
 	})
+
+	// Auth routes
+	r.POST("/sendEmail", authHandler.SendEmail)
+	r.POST("/user/register", authHandler.Register)
+
+	// Profile routes (auth required — TODO: add auth middleware)
+	r.GET("/profile", profileHandler.GetProfile)
+	r.POST("/profile/changeProfile", profileHandler.UpdateProfile)
 
 	r.NoRoute(func(c *gin.Context) {
 		response.ErrWithStatus(c, http.StatusNotFound, domain.ErrInternal, "not found")
