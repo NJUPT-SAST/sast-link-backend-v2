@@ -46,9 +46,15 @@ func (s *ProfileService) UpdateProfile(ctx context.Context, userID int64, req dt
 	if req.Department != "" {
 		p.Department = domain.Department(req.Department)
 	}
-	p.Intro = req.Intro
-	p.BlogURL = req.BlogURL
-	p.GitHubURL = req.GitHubURL
+	if req.Intro != "" {
+		p.Intro = req.Intro
+	}
+	if req.BlogURL != "" {
+		p.BlogURL = req.BlogURL
+	}
+	if req.GitHubURL != "" {
+		p.GitHubURL = req.GitHubURL
+	}
 
 	if err := s.profileRepo.Update(ctx, p); err != nil {
 		return fmt.Errorf("update profile: %w", err)
