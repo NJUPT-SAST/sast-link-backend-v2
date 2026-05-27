@@ -56,6 +56,10 @@ func (r *userRepo) Create(ctx context.Context, user *domain.User) error {
 	return r.db.WithContext(ctx).Create(user).Error
 }
 
+func (r *userRepo) Update(ctx context.Context, user *domain.User) error {
+	return r.db.WithContext(ctx).Save(user).Error
+}
+
 func (r *userRepo) UpdatePassword(ctx context.Context, id int64, hash string) error {
 	return r.db.WithContext(ctx).Model(&domain.User{}).Where("id = ?", id).Update("password", hash).Error
 }

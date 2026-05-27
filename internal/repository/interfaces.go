@@ -12,6 +12,7 @@ type UserRepository interface {
 	FindByLoginEmail(ctx context.Context, email string) (*domain.User, error)
 	FindByStudentID(ctx context.Context, studentID string) (*domain.User, error)
 	Create(ctx context.Context, user *domain.User) error
+	Update(ctx context.Context, user *domain.User) error
 	UpdatePassword(ctx context.Context, id int64, hash string) error
 	UpdateState(ctx context.Context, id int64, state domain.UserState) error
 }
