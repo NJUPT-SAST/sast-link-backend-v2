@@ -15,6 +15,11 @@ type VerifyCaptchaRequest struct {
 	Captcha string `form:"captcha" binding:"required"`
 }
 
+// SendEmailRequest 发送验证邮件请求
+type SendEmailRequest struct {
+	Email string `json:"email" binding:"required"`
+}
+
 // ==================== 响应 DTO ====================
 
 // TicketResponse Ticket 响应（registerTicket / loginTicket / resetPwdTicket）
