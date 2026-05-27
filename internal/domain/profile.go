@@ -1,27 +1,21 @@
 package domain
 
-import (
-	"time"
-
-	"gorm.io/datatypes"
-)
+import "time"
 
 type Profile struct {
-	ID        int64          `gorm:"column:id;primaryKey;autoIncrement"`
-	UserID    int64          `gorm:"column:user_id;not null;index"`
-	Nickname  string         `gorm:"column:nickname;type:varchar(64);not null"`
-	Email     string         `gorm:"column:email;type:varchar(128);not null"`
-	Avatar    string         `gorm:"column:avatar;type:varchar(256);not null;default:''"`
-	OrgID     int16          `gorm:"column:org_id;type:smallint;default:-1"`
-	Bio       string         `gorm:"column:bio;type:text;default:null"`
-	Link      []string       `gorm:"column:link;type:varchar(256)[];default:null"`
-	Badge     datatypes.JSON `gorm:"column:badge;type:jsonb;default:null"`
-	Hide      []string       `gorm:"column:hide;type:varchar(30)[];default:null"`
-	UpdatedAt time.Time      `gorm:"column:updated_at;autoUpdateTime;not null"`
-	IsDeleted bool           `gorm:"column:is_deleted;default:false;not null"`
+	ID         int64      `gorm:"column:id;primaryKey;autoIncrement"`
+	UserID     int64      `gorm:"column:user_id;not null;uniqueIndex;index"`
+	Nickname   string     `gorm:"column:nickname;type:varchar(255)"`
+	Department Department `gorm:"column:department;type:department_enum"`
+	Intro      string     `gorm:"column:intro;type:varchar(255)"`
+	Email      string     `gorm:"column:email;type:varchar(255)"`
+	Avatar     string     `gorm:"column:avatar;type:varchar(512)"`
+	BlogURL    string     `gorm:"column:blog_url;type:varchar(512)"`
+	GitHubURL  string     `gorm:"column:github_url;type:varchar(512)"`
+	CreatedAt  time.Time  `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt  time.Time  `gorm:"column:updated_at;autoUpdateTime"`
 }
 
-// TableName overrides the default table name.
 func (Profile) TableName() string {
 	return "profile"
 }

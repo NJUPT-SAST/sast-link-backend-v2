@@ -28,9 +28,9 @@ func (r *userRepo) FindByID(ctx context.Context, id int64) (*domain.User, error)
 	return &user, nil // Return the found user
 }
 
-func (r *userRepo) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
+func (r *userRepo) FindByLoginEmail(ctx context.Context, loginEmail string) (*domain.User, error) {
 	var user domain.User
-	err := r.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
+	err := r.db.WithContext(ctx).Where("login_email = ?", loginEmail).First(&user).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -52,18 +52,6 @@ func (r *userRepo) FindByStudentID(ctx context.Context, studentID string) (*doma
 	return &user, nil
 }
 
-func (r *userRepo) FindByUID(ctx context.Context, uid string) (*domain.User, error) {
-	var user domain.User
-	err := r.db.WithContext(ctx).Where("uid = ?", uid).First(&user).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &user, nil
-}
-
 func (r *userRepo) Create(ctx context.Context, user *domain.User) error {
 	return r.db.WithContext(ctx).Create(user).Error
 }
@@ -72,6 +60,6 @@ func (r *userRepo) UpdatePassword(ctx context.Context, id int64, hash string) er
 	return r.db.WithContext(ctx).Model(&domain.User{}).Where("id = ?", id).Update("password", hash).Error
 }
 
-func (r *userRepo) SoftDelete(ctx context.Context, id int64) error {
-	return r.db.WithContext(ctx).Model(&domain.User{}).Where("id = ?", id).Update("is_deleted", true).Error
+func (r *userRepo) UpdateState(ctx context.Context, id int64, state domain.UserState) error {
+	return r.db.WithContext(ctx).Model(&domain.User{}).Where("id = ?", id).Update("state", state).Error
 }

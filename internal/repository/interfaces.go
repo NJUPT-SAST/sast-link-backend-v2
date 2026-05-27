@@ -9,12 +9,11 @@ import (
 // UserRepository defines the data access contract for the user table.
 type UserRepository interface {
 	FindByID(ctx context.Context, id int64) (*domain.User, error)
-	FindByEmail(ctx context.Context, email string) (*domain.User, error)
+	FindByLoginEmail(ctx context.Context, email string) (*domain.User, error)
 	FindByStudentID(ctx context.Context, studentID string) (*domain.User, error)
-	FindByUID(ctx context.Context, uid string) (*domain.User, error)
 	Create(ctx context.Context, user *domain.User) error
 	UpdatePassword(ctx context.Context, id int64, hash string) error
-	SoftDelete(ctx context.Context, id int64) error
+	UpdateState(ctx context.Context, id int64, state domain.UserState) error
 }
 
 // ProfileRepository defines the data access contract for the profile table.
