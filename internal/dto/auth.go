@@ -20,11 +20,6 @@ type SendEmailRequest struct {
 	Email string `json:"email" form:"email" binding:"required"`
 }
 
-// SendEmailRequest 发送验证邮件请求
-type SendEmailRequest struct {
-	Email string `json:"email" binding:"required"`
-}
-
 // ==================== 响应 DTO ====================
 
 // VerifyAccountResponse 账号验证 Ticket 响应

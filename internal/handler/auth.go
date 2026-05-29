@@ -61,7 +61,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	response.OK(c, gin.H{
-		"userId":       user.ID,
-		"loginEmail":   user.LoginEmail,
+		"userId":     user.ID,
+		"loginEmail": user.LoginEmail,
 	})
 }
