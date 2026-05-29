@@ -2,6 +2,7 @@ package domain
 
 import "time"
 
+// Profile represents a user's public profile information.
 type Profile struct {
 	ID         int64      `gorm:"column:id;primaryKey;autoIncrement"`
 	UserID     int64      `gorm:"column:user_id;not null;uniqueIndex;index"`

@@ -1,3 +1,4 @@
+// Package repository defines data access contracts for the application.
 package repository
 
 import (

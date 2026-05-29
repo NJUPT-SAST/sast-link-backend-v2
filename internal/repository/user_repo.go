@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/domain"
 	"gorm.io/gorm"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/domain"
 )
 
 type userRepo struct {
 	db *gorm.DB
 }
 
+// NewUserRepo creates a new UserRepository implementation.
 func NewUserRepo(db *gorm.DB) UserRepository {
 	return &userRepo{db: db}
 }
