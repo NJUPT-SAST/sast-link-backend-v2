@@ -11,11 +11,11 @@ import (
 
 // EmailService handles sending emails via SMTP.
 type EmailService struct {
-	cfg config.SMTPConfig
+	cfg *config.SMTPConfig
 }
 
 // NewEmailService creates a new EmailService.
-func NewEmailService(cfg config.SMTPConfig) *EmailService {
+func NewEmailService(cfg *config.SMTPConfig) *EmailService {
 	return &EmailService{cfg: cfg}
 }
 

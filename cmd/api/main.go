@@ -69,7 +69,7 @@ func main() {
 
 	// Services
 	captchaSvc := service.NewCaptchaService(redisClient)
-	emailSvc := service.NewEmailService(cfg.SMTP)
+	emailSvc := service.NewEmailService(&cfg.SMTP)
 	registerSvc := service.NewRegisterService(userRepo, profileRepo, emailSvc, captchaSvc)
 	profileSvc := service.NewProfileService(profileRepo)
 
