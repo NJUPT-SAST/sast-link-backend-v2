@@ -5,7 +5,13 @@ package dto
 // RegisterRequest 用户注册请求 (POST /user/register)
 // 需已通过 verify/captcha，仅设置密码
 type RegisterRequest struct {
-	Password string `json:"password" binding:"required"`
+	StudentID string `json:"studentId"`
+	Email     string `json:"email" binding:"required"`
+	Captcha   string `json:"captcha" binding:"required"`
+	Password  string `json:"password" binding:"required"`
+	Name      string `json:"name" binding:"required"`
+	Phone     string `json:"phone" binding:"required"`
+	QQNumber  string `json:"qqNumber" binding:"required"`
 }
 
 // LoginRequest 用户登录请求 (POST /user/login)

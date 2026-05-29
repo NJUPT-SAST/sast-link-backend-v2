@@ -1,80 +1,31 @@
 package dto
 
-import "gorm.io/datatypes"
-
 // ==================== 请求 DTO ====================
 
 // ChangeProfileRequest 修改用户资料请求 (POST /profile/changeProfile)
 type ChangeProfileRequest struct {
-	Nickname string     `json:"nickname"`
-	OrgID    int16      `json:"orgId"`
-	Bio      string     `json:"bio"`
-	Link     []LinkItem `json:"link"`
-	Hide     []string   `json:"hide"`
-}
-
-// BindEmailRequest 发起邮箱绑定 (POST /profile/bindEmail)
-type BindEmailRequest struct {
-	Email string `json:"email" binding:"required"`
-}
-
-// VerifyBindEmailRequest 验证并完成邮箱绑定 (POST /profile/verifyBindEmail)
-type VerifyBindEmailRequest struct {
-	Email           string `json:"email" binding:"required"`
-	Captcha         string `json:"captcha" binding:"required"`
-	BindEmailTicket string `json:"bindEmailTicket" binding:"required"`
-}
-
-// UnbindEmailRequest 发起邮箱解绑 (POST /profile/unbindEmail)
-type UnbindEmailRequest struct {
-	Email string `json:"email" binding:"required"`
-}
-
-// ConfirmUnbindEmailRequest 确认解绑邮箱 (POST /profile/confirmUnbindEmail)
-type ConfirmUnbindEmailRequest struct {
-	Email             string `json:"email" binding:"required"`
-	Captcha           string `json:"captcha" binding:"required"`
-	UnbindEmailTicket string `json:"unbindEmailTicket" binding:"required"`
-}
-
-// UnbindOAuthRequest 解除第三方 OAuth 绑定 (POST /profile/unbind)
-type UnbindOAuthRequest struct {
-	Provider string `json:"provider" binding:"required,oneof=github lark"`
+	Nickname   string `json:"nickname"`
+	Department string `json:"department"`
+	Intro      string `json:"intro"`
+	BlogURL    string `json:"blogUrl"`
+	GitHubURL  string `json:"githubUrl"`
 }
 
 // ==================== 响应 DTO ====================
 
-// ProfileResponse 用户资料响应 (GET /profile/getProfile)
+// ProfileResponse 用户资料响应
 type ProfileResponse struct {
-	UserID   string         `json:"userId"`
-	Nickname string         `json:"nickname"`
-	Email    string         `json:"email"`
-	Avatar   string         `json:"avatar,omitempty"`
-	Org      *ProfileOrg    `json:"org,omitempty"`
-	Bio      string         `json:"bio,omitempty"`
-	Link     []LinkItem     `json:"link,omitempty"`
-	Badge    datatypes.JSON `json:"badge,omitempty"`
-	Hide     []string       `json:"hide,omitempty"`
-}
-
-// ProfileOrg 组织信息
-type ProfileOrg struct {
-	Dep string `json:"dep"`
-	Org string `json:"org"`
-}
-
-// BadgeItem 纪念卡条目结构
-type BadgeItem struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Image     string `json:"image"`
-	CreatedAt string `json:"created_at"`
-}
-
-// LinkItem 社交链接条目结构
-type LinkItem struct {
-	Title string `json:"title"`
-	URL   string `json:"url"`
+	ID         int64  `json:"id"`
+	UserID     int64  `json:"userId"`
+	Nickname   string `json:"nickname,omitempty"`
+	Department string `json:"department,omitempty"`
+	Intro      string `json:"intro,omitempty"`
+	Email      string `json:"email,omitempty"`
+	Avatar     string `json:"avatar,omitempty"`
+	BlogURL    string `json:"blogUrl,omitempty"`
+	GitHubURL  string `json:"githubUrl,omitempty"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
 }
 
 // BindEmailTicketResponse 邮箱绑定 Ticket 响应
