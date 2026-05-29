@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/domain"
 	"gorm.io/gorm"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/domain"
 )
 
 type profileRepo struct {

@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/crypto/pbkdf2"
+
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/domain"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/dto"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
-	"golang.org/x/crypto/pbkdf2"
 )
 
 // RegisterService handles user registration.
@@ -57,7 +58,7 @@ func (s *RegisterService) SendVerificationEmail(ctx context.Context, email strin
 }
 
 // Register verifies the captcha and creates a new user with profile.
-func (s *RegisterService) Register(ctx context.Context, req dto.RegisterRequest) (*domain.User, error) {
+func (s *RegisterService) Register(ctx context.Context, req *dto.RegisterRequest) (*domain.User, error) {
 	emailType, err := resolveEmailType(req.Email)
 	if err != nil {
 		return nil, err

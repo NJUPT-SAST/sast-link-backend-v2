@@ -31,7 +31,7 @@ func (s *ProfileService) GetProfile(ctx context.Context, userID int64) (*dto.Pro
 }
 
 // UpdateProfile updates fields on the user's profile.
-func (s *ProfileService) UpdateProfile(ctx context.Context, userID int64, req dto.ChangeProfileRequest) error {
+func (s *ProfileService) UpdateProfile(ctx context.Context, userID int64, req *dto.ChangeProfileRequest) error {
 	p, err := s.profileRepo.FindByUserID(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("update profile: %w", err)

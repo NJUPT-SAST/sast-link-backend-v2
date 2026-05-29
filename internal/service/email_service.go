@@ -51,13 +51,13 @@ func (s *EmailService) send(to, subject, htmlBody string) error {
 		if err != nil {
 			return fmt.Errorf("smtp tls dial: %w", err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		client, err := smtp.NewClient(conn, s.cfg.Host)
 		if err != nil {
 			return fmt.Errorf("smtp client: %w", err)
 		}
-		defer client.Quit()
+		defer func() { _ = client.Quit() }()
 
 		if err := client.Auth(auth); err != nil {
 			return fmt.Errorf("smtp auth: %w", err)
