@@ -14,6 +14,7 @@ type ProfileService struct {
 	profileRepo repository.ProfileRepository
 }
 
+// NewProfileService creates a new ProfileService.
 func NewProfileService(profileRepo repository.ProfileRepository) *ProfileService {
 	return &ProfileService{profileRepo: profileRepo}
 }

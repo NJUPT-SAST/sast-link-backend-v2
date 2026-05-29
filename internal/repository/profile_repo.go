@@ -13,6 +13,7 @@ type profileRepo struct {
 	db *gorm.DB
 }
 
+// NewProfileRepo creates a new ProfileRepository.
 func NewProfileRepo(db *gorm.DB) ProfileRepository {
 	return &profileRepo{db: db}
 }

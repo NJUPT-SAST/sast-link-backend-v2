@@ -23,6 +23,7 @@ type RegisterService struct {
 	captchaSvc  *CaptchaService
 }
 
+// NewRegisterService creates a new RegisterService.
 func NewRegisterService(
 	userRepo repository.UserRepository,
 	profileRepo repository.ProfileRepository,

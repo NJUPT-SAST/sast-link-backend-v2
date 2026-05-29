@@ -16,6 +16,7 @@ type ProfileHandler struct {
 	profileSvc *service.ProfileService
 }
 
+// NewProfileHandler creates a new ProfileHandler.
 func NewProfileHandler(profileSvc *service.ProfileService) *ProfileHandler {
 	return &ProfileHandler{profileSvc: profileSvc}
 }

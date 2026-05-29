@@ -14,6 +14,7 @@ type EmailService struct {
 	cfg config.SMTPConfig
 }
 
+// NewEmailService creates a new EmailService.
 func NewEmailService(cfg config.SMTPConfig) *EmailService {
 	return &EmailService{cfg: cfg}
 }

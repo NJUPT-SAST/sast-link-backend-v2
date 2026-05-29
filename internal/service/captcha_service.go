@@ -1,3 +1,4 @@
+// Package service implements business logic for SAST Link.
 package service
 
 import (
@@ -22,6 +23,7 @@ type CaptchaService struct {
 	rdb *redis.Client
 }
 
+// NewCaptchaService creates a new CaptchaService.
 func NewCaptchaService(rdb *redis.Client) *CaptchaService {
 	return &CaptchaService{rdb: rdb}
 }
