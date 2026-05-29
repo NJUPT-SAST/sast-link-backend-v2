@@ -18,6 +18,7 @@ type User struct {
 	UpdatedAt  time.Time `gorm:"column:updated_at;autoUpdateTime"`
 }
 
+// TableName overrides the default table name.
 func (User) TableName() string {
 	return "user"
 }

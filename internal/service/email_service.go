@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/smtp"
@@ -29,10 +30,10 @@ func (s *EmailService) SendVerificationCode(to, code string) error {
 </body>
 </html>`, code)
 
-	return s.send(to, subject, body)
+	return s.send(context.Background(), to, subject, body)
 }
 
-func (s *EmailService) send(to, subject, htmlBody string) error {
+func (s *EmailService) send(ctx context.Context, to, subject, htmlBody string) error {
 	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
 
 	msg := fmt.Sprintf("From: %s\r\n"+
@@ -46,8 +47,8 @@ func (s *EmailService) send(to, subject, htmlBody string) error {
 	auth := smtp.PlainAuth("", s.cfg.Username, s.cfg.Password, s.cfg.Host)
 
 	if s.cfg.UseTLS {
-		tlsConfig := &tls.Config{ServerName: s.cfg.Host}
-		conn, err := tls.Dial("tcp", addr, tlsConfig)
+		dialer := &tls.Dialer{Config: &tls.Config{ServerName: s.cfg.Host}}
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
 			return fmt.Errorf("smtp tls dial: %w", err)
 		}

@@ -7,9 +7,9 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/spf13/viper v1.21.0
+	golang.org/x/crypto v0.48.0
 	gorm.io/datatypes v1.2.7
 	gorm.io/driver/postgres v1.6.0
-	golang.org/x/crypto v0.48.0
 	gorm.io/gorm v1.31.1
 )
 
