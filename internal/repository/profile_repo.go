@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/domain"
 	"gorm.io/gorm"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/domain"
 )
 
 type profileRepo struct {
 	db *gorm.DB
 }
 
+// NewProfileRepo creates a new ProfileRepository.
 func NewProfileRepo(db *gorm.DB) ProfileRepository {
 	return &profileRepo{db: db}
 }

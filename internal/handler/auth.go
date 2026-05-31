@@ -1,3 +1,4 @@
+// Package handler implements HTTP handlers for the SAST Link API.
 package handler
 
 import (
@@ -16,6 +17,7 @@ type AuthHandler struct {
 	registerSvc *service.RegisterService
 }
 
+// NewAuthHandler creates a new AuthHandler.
 func NewAuthHandler(registerSvc *service.RegisterService) *AuthHandler {
 	return &AuthHandler{registerSvc: registerSvc}
 }
@@ -49,7 +51,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	user, err := h.registerSvc.Register(c.Request.Context(), req)
+	user, err := h.registerSvc.Register(c.Request.Context(), &req)
 	if err != nil {
 		var appErr *domain.AppError
 		if errors.As(err, &appErr) {
@@ -61,7 +63,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	response.OK(c, gin.H{
-		"userId":       user.ID,
-		"loginEmail":   user.LoginEmail,
+		"userId":     user.ID,
+		"loginEmail": user.LoginEmail,
 	})
 }

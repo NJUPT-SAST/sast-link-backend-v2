@@ -16,6 +16,7 @@ type ProfileHandler struct {
 	profileSvc *service.ProfileService
 }
 
+// NewProfileHandler creates a new ProfileHandler.
 func NewProfileHandler(profileSvc *service.ProfileService) *ProfileHandler {
 	return &ProfileHandler{profileSvc: profileSvc}
 }
@@ -57,7 +58,7 @@ func (h *ProfileHandler) UpdateProfile(c *gin.Context) {
 		return
 	}
 
-	if err := h.profileSvc.UpdateProfile(c.Request.Context(), userID, req); err != nil {
+	if err := h.profileSvc.UpdateProfile(c.Request.Context(), userID, &req); err != nil {
 		var appErr *domain.AppError
 		if errors.As(err, &appErr) {
 			response.Err(c, appErr.Code, appErr.Message)

@@ -17,6 +17,7 @@ type Profile struct {
 	UpdatedAt  time.Time  `gorm:"column:updated_at;autoUpdateTime"`
 }
 
+// TableName overrides the default table name.
 func (Profile) TableName() string {
 	return "profile"
 }
