@@ -6,6 +6,7 @@
 - **认证方式**: JWT Bearer Token（`Authorization: Bearer <access_token>`）
 - **Content-Type**: `application/json`
 - **OAuth 2.1**: 授权端点使用 PKCE-S256，第一方应用无需 client_secret
+- **OIDC**: 基于 OAuth 2.1 的 OpenID Connect Provider，scope 含 `openid` 时返回 ID Token
 - **响应格式**: 所有接口统一使用标准化响应信封，OAuth 端点遵循 RFC 6749 错误格式
 
 ---
@@ -895,6 +896,8 @@ GET /oauth/authorize
 POST /oauth/token
 ```
 
+支持 `authorization_code` 和 `refresh_token` 两种 grant_type。第一方应用使用 PKCE 无需 `client_secret`，第三方应用需提供 `client_secret`。scope 包含 `openid` 时响应额外返回 `id_token`（RS256 签名 JWT）。此端点不遵循标准响应信封，成功和错误均使用 RFC 6749 格式。
+
 **Request**（第一方应用 / PKCE）:
 ```json
 {
@@ -925,9 +928,12 @@ POST /oauth/token
   "refresh_token": "rt_abc123...",
   "token_type": "Bearer",
   "expires_in": 3600,
+  "id_token": "eyJhbGciOiJSUzI1NiIs...",
   "scopes": "openid profile"
 }
 ```
+
+**说明**：scope 包含 `openid` 时响应体额外返回 `id_token`（RS256 签名 JWT），详见 [8.4 ID Token](#84-id-token)。scope 不含 `openid` 时不返回 `id_token` 字段。
 
 **Refresh Token 模式**（第一方应用）:
 ```json
@@ -1288,6 +1294,231 @@ GET /health
   "redis": "ok"
 }
 ```
+
+---
+
+## 8. OIDC Provider
+
+SAST Link v2 作为 OpenID Connect Provider，在 OAuth 2.1 授权服务之上提供标准化的身份认证层。OIDC 协议栈：
+
+- 授权码流（Authorization Code Flow + PKCE）— 推荐，opaque redirect-based
+- RS256 签名 ID Token + JWKS 公钥分发
+- Discovery 元数据（`.well-known/openid-configuration`）
+
+**触发条件**：授权请求的 `scopes` 包含 `openid` 时，Token 端点响应额外返回 `id_token`。
+
+### 8.1 Discovery
+
+```
+GET /.well-known/openid-configuration
+```
+
+**Response** `200`:
+
+```json
+{
+  "issuer": "https://link.sast.fun/v2",
+  "authorization_endpoint": "https://link.sast.fun/v2/oauth/authorize",
+  "token_endpoint": "https://link.sast.fun/v2/oauth/token",
+  "userinfo_endpoint": "https://link.sast.fun/v2/userinfo",
+  "jwks_uri": "https://link.sast.fun/v2/.well-known/jwks.json",
+  "revocation_endpoint": "https://link.sast.fun/v2/oauth/revoke",
+  "scopes_supported": ["openid", "profile", "email"],
+  "response_types_supported": ["code"],
+  "grant_types_supported": ["authorization_code", "refresh_token"],
+  "subject_types_supported": ["public"],
+  "id_token_signing_alg_values_supported": ["RS256"],
+  "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+  "claims_supported": [
+    "sub", "iss", "aud", "exp", "iat", "auth_time", "nonce",
+    "name", "picture", "preferred_username", "profile",
+    "email", "email_verified", "updated_at"
+  ],
+  "code_challenge_methods_supported": ["S256", "plain"],
+  "response_modes_supported": ["query"],
+  "claim_types_supported": ["normal"],
+  "request_parameter_supported": false,
+  "request_uri_parameter_supported": false,
+  "claims_parameter_supported": false
+}
+```
+
+---
+
+### 8.2 JWKS 公钥集
+
+```
+GET /.well-known/jwks.json
+```
+
+**Response** `200`:
+
+```json
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "use": "sig",
+      "kid": "link-v2-2026-06",
+      "alg": "RS256",
+      "n": "0vx7agoebGcQSuuPiLgX...",
+      "e": "AQAB"
+    }
+  ]
+}
+```
+
+**说明**：公钥用于验证 ID Token 和 Access Token 的 RS256 签名。`kid` 与 JWT Header 中的 `kid` 对应，支持密钥轮换。
+
+---
+
+### 8.3 UserInfo
+
+```
+GET /userinfo
+POST /userinfo
+```
+
+**Headers**: `Authorization: Bearer <access_token>`
+
+**Response** `200`（根据 scope 返回不同 claims）：
+
+`openid` scope 时至少返回 `sub`：
+
+```json
+{
+  "sub": "1"
+}
+```
+
+`openid profile email` scope 时返回完整信息：
+
+```json
+{
+  "sub": "1",
+  "name": "张三",
+  "picture": "https://cos.example.com/avatar/1.jpg",
+  "preferred_username": "张三",
+  "profile": "https://link.sast.fun/card/1",
+  "email": "b2404****@njupt.edu.cn",
+  "email_verified": true,
+  "updated_at": 1717396400
+}
+```
+
+**错误响应**：
+
+```json
+{
+  "error": "invalid_token",
+  "error_description": "The access token is invalid or expired"
+}
+```
+
+**说明**：
+- `sub` 为用户唯一标识（`user.id` 字符串），始终返回
+- `email` 为注册邮箱（非对外展示邮箱）。`email_verified` 固定为 `true`（SAST Link 注册时已校验邮箱）
+- `updated_at` 为 Unix timestamp
+
+---
+
+### 8.4 ID Token
+
+当 scope 包含 `openid` 时，Token 端点（`POST /oauth/token`）的响应额外包含 `id_token` 字段：
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "refresh_token": "rt_abc123...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "id_token": "eyJhbGciOiJSUzI1NiIsImtpZCI6ImxpbmstdjItMjAyNi0wNiIsInR5cCI6IkpXVCJ9...",
+  "scopes": "openid profile email"
+}
+```
+
+**ID Token Payload 示例**（解码后）：
+
+```json
+{
+  "iss": "https://link.sast.fun/v2",
+  "sub": "1",
+  "aud": "381c34b9-14a4-4df9-a9db-40c2455be09f",
+  "exp": 1717400000,
+  "iat": 1717396400,
+  "auth_time": 1717396400,
+  "nonce": "n-0S6_WzA2Mj",
+  "name": "张三",
+  "picture": "https://cos.example.com/avatar/1.jpg",
+  "preferred_username": "张三",
+  "profile": "https://link.sast.fun/card/1",
+  "email": "b2404****@njupt.edu.cn",
+  "email_verified": true,
+  "updated_at": 1717396400
+}
+```
+
+**ID Token Claims 说明**：
+
+| Claim | Scope 要求 | 说明 |
+|-------|-----------|------|
+| `iss` | — | Issuer，固定为 `https://link.sast.fun/v2` |
+| `sub` | `openid` | 用户唯一标识（`user.id` 字符串） |
+| `aud` | — | 客户端 `client_id` |
+| `exp` | — | 过期时间（Unix timestamp） |
+| `iat` | — | 签发时间（Unix timestamp） |
+| `auth_time` | — | 用户认证时间（授权确认时间） |
+| `nonce` | — | 防重放值，与授权请求参数一致（可选） |
+| `name` | `profile` | 真实姓名 |
+| `picture` | `profile` | 头像 URL |
+| `preferred_username` | `profile` | 昵称 |
+| `profile` | `profile` | 用户主页 URL |
+| `email` | `email` | 注册邮箱 |
+| `email_verified` | `email` | 邮箱已验证，固定 `true` |
+| `updated_at` | `profile` | 用户信息最后修改时间 |
+
+**OIDC 授权码流完整交互**：
+
+```
+RP (Relying Party)                         SAST Link v2 (OIDC Provider)
+      |                                              |
+      | GET /oauth/authorize?                        |
+      |   response_type=code                         |
+      |   client_id=xxx                              |
+      |   redirect_uri=https://rp.example/cb         |
+      |   scopes=openid+profile+email                |
+      |   state=random_state                         |
+      |   code_challenge=S256(challenge)             |
+      |   code_challenge_method=S256                 |
+      |   nonce=random_nonce                         |
+      |--------------------------------------------->|
+      |                                              | 用户登录 + 授权确认
+      | 302 ?code=auth_code&state=random_state       |
+      |<---------------------------------------------|
+      |                                              |
+      | POST /oauth/token                            |
+      |   grant_type=authorization_code              |
+      |   code=auth_code                             |
+      |   redirect_uri=https://rp.example/cb         |
+      |   client_id=xxx                              |
+      |   code_verifier=challenge                   |
+      |--------------------------------------------->|
+      |                                              | 校验 code / PKCE / nonce
+      | { access_token, refresh_token,               |
+      |   id_token, expires_in, scopes }             |
+      |<---------------------------------------------|
+      |                                              |
+      | 验证 id_token 签名 (/.well-known/jwks.json)   |
+      | 对比 nonce / iss / aud                       |
+      |                                              |
+      | GET /userinfo                                |
+      |   Authorization: Bearer <access_token>       |
+      |--------------------------------------------->|
+      | { sub, name, email, ... }                    |
+      |<---------------------------------------------|
+```
+
+---
 
 ## 附录
 

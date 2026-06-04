@@ -8,6 +8,7 @@ info:
     - 认证方式: JWT Bearer Token（`Authorization: Bearer <access_token>`）
     - Content-Type: `application/json`
     - OAuth 2.1: 授权端点使用 PKCE-S256，第一方应用无需 client_secret
+    - OIDC Provider: 基于 OAuth 2.1 的 OpenID Connect 认证层，scope 含 openid 时返回 ID Token
     - 响应格式: 所有接口统一使用标准化响应信封，OAuth 端点遵循 RFC 6749 错误格式
   version: 2.0.0
   contact:
@@ -21,6 +22,7 @@ tags:
   - name: OAuth 2.1 Server
   - name: Admin
   - name: Health
+  - name: OIDC
 paths:
   /auth/register/send-code:
     post:
@@ -993,6 +995,7 @@ paths:
         支持 grant_type: `authorization_code` 和 `refresh_token`。
         第一方应用使用 PKCE 无需 client_secret，第三方应用需提供 client_secret。
         此端点不遵循标准响应信封，成功和错误均使用 RFC 6749 格式。
+        scope 包含 `openid` 时，响应额外返回 `id_token`（RS256 签名 JWT）。
       operationId: oauthToken
       tags:
         - OAuth 2.1 Server
@@ -1091,6 +1094,116 @@ paths:
                 $ref: '#/components/schemas/OAuthRevokeResponse'
           headers: {}
       security: []
+  /.well-known/openid-configuration:
+    get:
+      summary: OIDC Discovery
+      deprecated: false
+      description: |
+        返回 OpenID Connect Discovery 文档，描述 OIDC Provider 的端点、支持的作用域、签名算法等元数据。
+        符合 [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) 规范。
+      operationId: oidcDiscovery
+      tags:
+        - OIDC
+      parameters: []
+      responses:
+        '200':
+          description: OIDC Discovery 文档
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenIDConfiguration'
+          headers: {}
+      security: []
+  /.well-known/jwks.json:
+    get:
+      summary: JWKS 公钥集
+      deprecated: false
+      description: |
+        返回 RS256 签名公钥集（JSON Web Key Set），用于验证 ID Token 和 Access Token 的签名。
+      operationId: oidcJwks
+      tags:
+        - OIDC
+      parameters: []
+      responses:
+        '200':
+          description: JWK Set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JWKS'
+          headers: {}
+      security: []
+  /userinfo:
+    get:
+      summary: UserInfo 端点（GET）
+      deprecated: false
+      description: |
+        返回当前认证用户的身份信息。响应内容根据 Token 的 scopes 决定：
+        - `openid` 至少返回 `sub`
+        - `profile` 额外返回 name / picture / preferred_username / profile 等
+        - `email` 额外返回 email / email_verified
+
+        符合 [OpenID Connect Core 1.0 — UserInfo Endpoint](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo) 规范。
+      operationId: oidcUserInfoGet
+      tags:
+        - OIDC
+      parameters: []
+      responses:
+        '200':
+          description: 用户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfoResponse'
+          headers: {}
+        '401':
+          description: 未认证或 Token 无效
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: invalid_token
+                  error_description:
+                    type: string
+                    example: The access token is invalid or expired
+      security:
+        - bearerAuth: []
+    post:
+      summary: UserInfo 端点（POST）
+      deprecated: false
+      description: |
+        UserInfo 端点的 POST 变体，功能与 GET 完全一致。
+        部分 OIDC 客户端偏好 POST 以避免 Token 出现在服务器日志中。
+      operationId: oidcUserInfoPost
+      tags:
+        - OIDC
+      parameters: []
+      responses:
+        '200':
+          description: 用户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfoResponse'
+          headers: {}
+        '401':
+          description: 未认证或 Token 无效
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: invalid_token
+                  error_description:
+                    type: string
+                    example: The access token is invalid or expired
+      security:
+        - bearerAuth: []
   /admin/users:
     get:
       summary: 用户列表
@@ -2362,7 +2475,10 @@ components:
               description: 每页条数
     OAuthTokenResponse:
       type: object
-      description: OAuth Token 响应（RFC 6749 格式，不使用标准信封）
+      description: |
+        OAuth 2.1 Token 响应（RFC 6749 格式，不使用 SAST Link 标准响应信封）。
+        scope 包含 `openid` 时，额外返回 OIDC ID Token。
+        注意：字段名 `scopes` 为项目约定，RFC 标准名为 `scope`（单数）。
       properties:
         access_token:
           type: string
@@ -2379,6 +2495,12 @@ components:
           type: integer
           description: Access Token 有效期（秒）
           example: 3600
+        id_token:
+          type: string
+          description: |
+            OIDC ID Token（RS256 签名 JWT）。仅在 scope 包含 `openid` 时返回。
+            ID Token 包含以下 OIDC 标准 claims，具体内容取决于授权 scopes。
+          example: eyJhbGciOiJSUzI1NiIs...
         scopes:
           type: string
           description: 授权范围，空格分隔，取值见 OAuthScope 枚举（openid / profile / email）
@@ -2407,6 +2529,289 @@ components:
           type: string
           description: Redis 状态
           example: ok
+    OpenIDConfiguration:
+      type: object
+      description: |
+        OIDC Discovery 文档，符合 [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) 规范。
+      properties:
+        issuer:
+          type: string
+          description: OIDC Provider 唯一标识，与 ID Token 中的 iss 一致
+          example: https://link.sast.fun/v2
+        authorization_endpoint:
+          type: string
+          description: OAuth 2.0 授权端点
+          example: https://link.sast.fun/v2/oauth/authorize
+        token_endpoint:
+          type: string
+          description: OAuth 2.0 Token 端点
+          example: https://link.sast.fun/v2/oauth/token
+        userinfo_endpoint:
+          type: string
+          description: UserInfo 端点
+          example: https://link.sast.fun/v2/userinfo
+        jwks_uri:
+          type: string
+          description: JWKS 公钥集端点
+          example: https://link.sast.fun/v2/.well-known/jwks.json
+        revocation_endpoint:
+          type: string
+          description: Token 撤销端点
+          example: https://link.sast.fun/v2/oauth/revoke
+        scopes_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 scope
+          example:
+            - openid
+            - profile
+            - email
+        response_types_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 response_type
+          example:
+            - code
+        grant_types_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 grant_type
+          example:
+            - authorization_code
+            - refresh_token
+        subject_types_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 subject 类型
+          example:
+            - public
+        id_token_signing_alg_values_supported:
+          type: array
+          items:
+            type: string
+          description: ID Token 签名算法
+          example:
+            - RS256
+        token_endpoint_auth_methods_supported:
+          type: array
+          items:
+            type: string
+          description: Token 端点客户端认证方式
+          example:
+            - none
+            - client_secret_post
+        claims_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 claims
+          example:
+            - sub
+            - iss
+            - aud
+            - exp
+            - iat
+            - auth_time
+            - nonce
+            - name
+            - picture
+            - preferred_username
+            - profile
+            - email
+            - email_verified
+            - updated_at
+        code_challenge_methods_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 PKCE 挑战方法
+          example:
+            - S256
+            - plain
+        request_parameter_supported:
+          type: boolean
+          description: 是否支持 request 参数
+          example: false
+        request_uri_parameter_supported:
+          type: boolean
+          description: 是否支持 request_uri 参数
+          example: false
+        claims_parameter_supported:
+          type: boolean
+          description: 是否支持 claims 参数
+          example: false
+        response_modes_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 response_mode
+          example:
+            - query
+        claim_types_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 claim 类型
+          example:
+            - normal
+    JWKS:
+      type: object
+      description: JSON Web Key Set，符合 [RFC 7517](https://datatracker.ietf.org/doc/html/rfc7517) 规范
+      properties:
+        keys:
+          type: array
+          description: 公钥列表
+          items:
+            $ref: '#/components/schemas/JWK'
+    JWK:
+      type: object
+      description: JSON Web Key，RS256 公钥
+      properties:
+        kty:
+          type: string
+          description: 密钥类型
+          example: RSA
+        use:
+          type: string
+          description: 用途
+          example: sig
+        kid:
+          type: string
+          description: 密钥 ID，用于匹配 JWT 头中的 kid
+          example: link-v2-2026-06
+        alg:
+          type: string
+          description: 签名算法
+          example: RS256
+        n:
+          type: string
+          description: RSA 公钥 modulus（Base64URL）
+          example: 0vx7agoebGcQSuuPiLgX...
+        e:
+          type: string
+          description: RSA 公钥 exponent（Base64URL）
+          example: AQAB
+    UserInfoResponse:
+      type: object
+      description: |
+        OIDC UserInfo 端点响应。返回的 claims 取决于 Access Token 的 scopes：
+        - `openid` → sub（必返）
+        - `profile` → name, picture, preferred_username, profile, updated_at
+        - `email` → email, email_verified
+      properties:
+        sub:
+          type: string
+          description: 用户唯一标识（user.id 字符串）。openid scope 时必返
+          example: '1'
+        name:
+          type: string
+          description: 真实姓名。需 profile scope
+          example: 张三
+        picture:
+          type: string
+          format: uri
+          description: 头像 URL。需 profile scope
+          example: https://cos.example.com/avatar/1.jpg
+          nullable: true
+        preferred_username:
+          type: string
+          description: 昵称（fallback 至姓名）。需 profile scope
+          example: 张三
+          nullable: true
+        profile:
+          type: string
+          format: uri
+          description: 用户主页（SAST Link 个人卡片）。需 profile scope
+          example: https://link.sast.fun/card/1
+          nullable: true
+        email:
+          type: string
+          format: email
+          description: 注册邮箱。需 email scope
+          example: b2404****@njupt.edu.cn
+        email_verified:
+          type: boolean
+          description: 邮箱是否已验证。需 email scope。SAST Link 注册时已校验邮箱，固定为 true
+          example: true
+        updated_at:
+          type: integer
+          description: 用户信息最后修改时间（Unix timestamp）。需 profile scope
+          example: 1717396400
+          nullable: true
+    IDTokenClaims:
+      type: object
+      description: |
+        ID Token claims 说明（仅供文档参考，非实际返回结构）。
+        ID Token 是一个 RS256 签名的 JWT，当 scope 包含 `openid` 时在 token 端点响应中返回。
+        其 Header 包含 `alg=RS256` 和 `kid`，Payload 包含以下 claims。
+      properties:
+        iss:
+          type: string
+          description: Issuer，OIDC Provider 标识
+          example: https://link.sast.fun/v2
+        sub:
+          type: string
+          description: Subject，用户唯一标识（user.id 字符串）
+          example: '1'
+        aud:
+          type: string
+          description: Audience，客户端 client_id
+          example: 381c34b9-14a4-4df9-a9db-40c2455be09f
+        exp:
+          type: integer
+          description: 过期时间（Unix timestamp）
+          example: 1717400000
+        iat:
+          type: integer
+          description: 签发时间（Unix timestamp）
+          example: 1717396400
+        auth_time:
+          type: integer
+          description: 用户完成认证的时间（Unix timestamp）。授权码模式下为授权确认时间
+          example: 1717396400
+        nonce:
+          type: string
+          description: 防重放值，与授权请求中的 nonce 一致
+          example: n-0S6_WzA2Mj
+        name:
+          type: string
+          description: 真实姓名（需 profile scope）
+          example: 张三
+        picture:
+          type: string
+          format: uri
+          description: 头像 URL（需 profile scope）
+          example: https://cos.example.com/avatar/1.jpg
+          nullable: true
+        preferred_username:
+          type: string
+          description: 昵称 / 常用用户名（需 profile scope）
+          example: 张三
+          nullable: true
+        profile:
+          type: string
+          format: uri
+          description: 用户主页 URL（需 profile scope）
+          example: https://link.sast.fun/card/1
+          nullable: true
+        email:
+          type: string
+          format: email
+          description: 注册邮箱（需 email scope）
+          example: b2404****@njupt.edu.cn
+        email_verified:
+          type: boolean
+          description: 邮箱已验证（需 email scope，SAST Link 固定为 true）
+          example: true
+        updated_at:
+          type: integer
+          description: 用户信息最后修改时间，Unix timestamp（需 profile scope）
+          example: 1717396400
+          nullable: true
   responses:
     BadRequest:
       description: 参数错误（400xx）
