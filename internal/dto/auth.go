@@ -68,7 +68,7 @@ type ResetPasswordRequest struct {
 	NewPassword string `json:"new_password" binding:"required,min=8"`
 }
 
-// ExchangeCodeRequest 交换登录码请求 (POST /auth/exchange-code)
+// ExchangeCodeRequest 交换登录码请求 (POST /oauth/exchange-code)
 type ExchangeCodeRequest struct {
 	Code string `json:"code" binding:"required"`
 }

@@ -487,7 +487,7 @@ GET /oauth/lark/callback?code=...&state=...
 用 OAuth 回调中的一次性 `login_code` 换取 token。
 
 ```
-POST /auth/exchange-code
+POST /oauth/exchange-code
 ```
 
 **Request**:

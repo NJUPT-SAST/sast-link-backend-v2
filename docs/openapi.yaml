@@ -513,7 +513,7 @@ paths:
           description: 重定向至前端
           headers: {}
       security: []
-  /auth/exchange-code:
+  /oauth/exchange-code:
     post:
       summary: 交换登录码
       deprecated: false
