@@ -123,7 +123,7 @@
 | `42200` | 业务校验失败 |
 | `42201` | 密码长度不足（最短 8 位） |
 | `42202` | 新旧密码不能相同 |
-| `42203` | 不能解绑唯一登录方式 |
+
 
 #### 频率限制（429xx）
 
@@ -233,7 +233,8 @@ POST /auth/register
 | `student_id` | 是 | 学号 |
 | `college` | 是 | 学院，枚举值见附录 A |
 | `major` | 是 | 专业 |
-| `oauth_state` | 否 | 第三方 OAuth 回调的绑定凭证 |
+| `registration_state` | 否 | 第三方 OAuth 回调下发的注册暂存令牌（Redis 一次性消费），内含 provider + identity_data + oauth_state |
+| `oauth_state` | 否 | 原始 OAuth 授权 state 参数（CSRF 校验值），需与 registration_state 内暂存值匹配 |
 
 **Response** `201`:
 ```json
@@ -254,7 +255,7 @@ POST /auth/register
 }
 ```
 
-**说明**: Register-Ticket 已包含验证过的邮箱，无需再次传入 `login_email`；密码最短 8 位；注册成功后自动签发 Token，无需单独登录。`oauth_state` 为可选字段，来自第三方 OAuth 回调（GitHub / 飞书）的无绑定分支——传入后注册成功的同时自动创建对应的 identities 绑定记录。
+**说明**: Register-Ticket 已包含验证过的邮箱，无需再次传入 `login_email`；密码最短 8 位；注册成功后自动签发 Token，无需单独登录。`registration_state` + `oauth_state` 为可选字段，来自第三方 OAuth 回调（GitHub / 飞书）的无绑定分支——传入双值后注册成功的同时校验匹配并自动创建对应的 identities 绑定记录。
 
 ---
 
@@ -451,7 +452,7 @@ GET /oauth/github/callback?code=...&state=...
 
 **处理分支**:
 - 已有绑定 → 签发一次性 `login_code`（Redis，60s），302 重定向至前端 `?code=<login_code>`
-- 无绑定 → 生成 `oauth_state`（Redis，10min，暂存 provider + provider_id + identity_data），302 重定向至注册补全页 `?oauth_state=<oauth_state>&provider=github&name=<login>&avatar=<url>`，供注册时自动绑定
+- 无绑定 → 生成 `registration_state`（Redis，15min，暂存 provider + provider_id + identity_data + oauth_state），302 重定向至注册补全页 `?registration_state=<registration_state>&provider=github&name=<login>&avatar=<url>`
 
 ---
 
@@ -477,7 +478,7 @@ GET /oauth/lark/callback?code=...&state=...
 
 **处理分支**:
 - 已有绑定 → 签发一次性 `login_code`（Redis，60s），302 重定向至前端 `?code=<login_code>`
-- 无绑定 → 生成 `oauth_state`（Redis，10min，暂存 provider + provider_id + identity_data），302 重定向至注册补全页 `?oauth_state=<oauth_state>&provider=lark&name=<name>&avatar=<url>`，供注册时自动绑定
+- 无绑定 → 生成 `registration_state`（Redis，15min，暂存 provider + provider_id + identity_data + oauth_state），302 重定向至注册补全页 `?registration_state=<registration_state>&provider=lark&name=<name>&avatar=<url>`
 - 非 SAST 企业用户 → 拒绝，提示"仅限 SAST 成员登录"
 
 ---
@@ -999,7 +1000,7 @@ GET /admin/users
 | `page` | 页码，默认 1 |
 | `page_size` | 每页条数，默认 20，最大 100 |
 | `role` | 筛选角色：freshman / member / lecturer / admin |
-| `state` | 筛选状态：on-sast / retired-sast / njupter / is_deleted |
+| `state` | 筛选状态：on_sast / retired_sast / njupter / is_deleted |
 | `department` | 筛选部门：software / media |
 | `college` | 筛选学院，枚举值见附录 A |
 | `major` | 筛选专业 |
@@ -1083,7 +1084,7 @@ PUT /admin/users/:id
   "college": "计算机学院、软件学院、网络空间安全学院",
   "major": "软件工程",
   "role": "member",
-  "state": "on-sast",
+  "state": "on_sast",
   "email_type": "njupt_email"
 }
 ```
@@ -1262,7 +1263,7 @@ GET /admin/audit-logs
       "action": "login",
       "resource": "user",
       "resource_id": "1",
-      "detail": { "ip": "10.0.0.1" },
+      "detail": { "method": "password" },
       "client_ip": "10.0.0.1",
       "user_agent": "Mozilla/5.0...",
       "success": true,
@@ -1527,7 +1528,7 @@ RP (Relying Party)                         SAST Link v2 (OIDC Provider)
 | 枚举类型 | 值 |
 |----------|-----|
 | `user_role` | `freshman` / `member` / `lecturer` / `admin` |
-| `state` | `njupter` / `on-sast` / `retired-sast` / `is_deleted` |
+| `state` | `njupter` / `on_sast` / `retired_sast` / `is_deleted` |
 | `department` | `software` / `media` |
 | `email_type` | `njupt_email` / `sast_email` |
 | `login_method` | `github` / `lark` / `other_mail` |

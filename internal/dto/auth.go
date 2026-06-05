@@ -28,15 +28,16 @@ type RegisterTicketResponse struct {
 
 // RegisterRequest 完成注册请求 (POST /auth/register)
 type RegisterRequest struct {
-	RegisterTicket string `json:"register_ticket" binding:"required"`
-	Password       string `json:"password" binding:"required,min=8"`
-	Name           string `json:"name" binding:"required"`
-	PhoneNumber    string `json:"phone_number" binding:"required"`
-	QQNumber       string `json:"qq_number" binding:"required"`
-	StudentID      string `json:"student_id" binding:"required"`
-	College        string `json:"college" binding:"required"`
-	Major          string `json:"major" binding:"required"`
-	OAuthState     string `json:"oauth_state,omitempty"`
+	RegisterTicket    string `json:"register_ticket" binding:"required"`
+	Password          string `json:"password" binding:"required,min=8"`
+	Name              string `json:"name" binding:"required"`
+	PhoneNumber       string `json:"phone_number" binding:"required"`
+	QQNumber          string `json:"qq_number" binding:"required"`
+	StudentID         string `json:"student_id" binding:"required"`
+	College           string `json:"college" binding:"required"`
+	Major             string `json:"major" binding:"required"`
+	RegistrationState string `json:"registration_state,omitempty"`
+	OAuthState        string `json:"oauth_state,omitempty"`
 }
 
 // LoginRequest 密码登录请求 (POST /user/login)

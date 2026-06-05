@@ -32,8 +32,8 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Redis.Host != "localhost" {
 		t.Errorf("Redis.Host = %q, want localhost", cfg.Redis.Host)
 	}
-	if cfg.JWT.Expiry != "168h" {
-		t.Errorf("JWT.Expiry = %q, want 168h", cfg.JWT.Expiry)
+	if cfg.JWT.AccessTokenExpiry != "1h" {
+		t.Errorf("JWT.AccessTokenExpiry = %q, want 1h", cfg.JWT.AccessTokenExpiry)
 	}
 }
 
@@ -47,7 +47,7 @@ func TestLoad_CustomValues(t *testing.T) {
 	t.Setenv("LOG_LEVEL", "debug")
 	t.Setenv("DB_HOST", "db.example.com")
 	t.Setenv("REDIS_HOST", "redis.example.com")
-	t.Setenv("JWT_EXPIRY", "24h")
+	t.Setenv("JWT_ACCESS_TOKEN_EXPIRY", "24h")
 	t.Setenv("JWT_SECRET_KEY_PREV", "previous-secret-key-at-least-32-bytes")
 
 	cfg, err := Load()
@@ -70,8 +70,8 @@ func TestLoad_CustomValues(t *testing.T) {
 	if cfg.Redis.Host != "redis.example.com" {
 		t.Errorf("Redis.Host = %q, want redis.example.com", cfg.Redis.Host)
 	}
-	if cfg.JWT.Expiry != "24h" {
-		t.Errorf("JWT.Expiry = %q, want 24h", cfg.JWT.Expiry)
+	if cfg.JWT.AccessTokenExpiry != "24h" {
+		t.Errorf("JWT.AccessTokenExpiry = %q, want 24h", cfg.JWT.AccessTokenExpiry)
 	}
 	if cfg.JWT.SecretKeyPrev != "previous-secret-key-at-least-32-bytes" {
 		t.Errorf("JWT.SecretKeyPrev = %q, want previous-secret-key...", cfg.JWT.SecretKeyPrev)

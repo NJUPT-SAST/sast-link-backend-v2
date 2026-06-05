@@ -27,8 +27,8 @@ CREATE TYPE login_method_enum AS ENUM (
 -- 用户状态（状态机）
 CREATE TYPE state_enum AS ENUM (
     'is_deleted',     -- 账号已注销
-    'on-sast',        -- 现任 SAST 成员
-    'retired-sast',   -- 已毕业 / 已离开 SAST
+    'on_sast',        -- 现任 SAST 成员
+    'retired_sast',   -- 已毕业 / 已离开 SAST
     'njupter'         -- NJUPT 在校生，尚未加入 SAST（招新阶段）
 );
 
@@ -101,7 +101,7 @@ CREATE TABLE "user" (
 |password|密码，不可为空|
 |token_version|Token 版本号，改密/重置密码后递增，JWT 校验时比对，不匹配则拒绝|
 |student_id|学号|
-|state|enum {'is_deleted','on-sast','retired-sast','njupter'}|
+|state|enum {'is_deleted','on_sast','retired_sast','njupter'}|
 |email_type|注册邮箱类型，见 `email_enum`|
 |login_email|注册邮箱|
 |created_at|创建时间|
@@ -143,8 +143,6 @@ CREATE TABLE profile (
 |updated_at|最后更新时间|
 
 ## identities 表 第三方账号绑定
-
-> Warning: 应用层对 access_token 和 refresh_token 加密后再存储
 
 ```sql
 CREATE TABLE identities (
@@ -248,17 +246,35 @@ CREATE TABLE audit_logs (
 |`action`|操作类型：register / login / logout / change_password / reset_password / oauth_bind / oauth_unbind / update_profile / upload_avatar / admin_action|
 |`resource`|操作对象类型|
 |`resource_id`|操作对象 ID|
-|`detail`|详情|
+|`detail`|JSONB 详情，各 action 结构见下文|
 |`client_ip`|客户端 IP|
 |`user_agent`|User-Agent|
 |`success`|是否成功|
 |`err_code`|错误码|
 |`created_at`||
 
+**detail JSONB 结构**（按 action）：
+
+| action | 字段 |
+|--------|------|
+| `register` | `{"login_email": "string"}` |
+| `login` | `{"method": "password" \| "github" \| "lark" \| "other_mail"}` |
+| `logout` | `{}` |
+| `change_password` | `{}` |
+| `reset_password` | `{}` |
+| `oauth_bind` | `{"provider": "github" \| "lark" \| "other_mail", "provider_id": "string"}` |
+| `oauth_unbind` | `{"provider": "github" \| "lark" \| "other_mail", "provider_id": "string"}` |
+| `update_profile` | `{"changed_fields": ["field1", "field2", ...]}` |
+| `upload_avatar` | `{"avatar_url": "string"}` |
+| `admin_action` | `{"target_user_id": 123, "sub_action": "edit_user" \| "delete_user" \| "restore_user" \| "manage_oauth_client"}` |
+
+**数据保留**：audit_logs 保留 90 天，通过 pg_cron 每天清理过期数据（见[定时清理](#定时清理)）。
+
 ```sql
 CREATE INDEX idx_audit_logs_user_created ON audit_logs(user_id, created_at DESC);
 CREATE INDEX idx_audit_logs_action ON audit_logs(action);
 CREATE INDEX idx_audit_logs_created_at ON audit_logs(created_at);
+CREATE INDEX idx_audit_logs_action_created ON audit_logs(action, created_at DESC);
 ```
 
 ## oauth_clients 客户端注册表
@@ -618,6 +634,13 @@ SELECT cron.schedule(
     '0 3 * * *',
     $$DELETE FROM oauth_refresh_tokens WHERE revoked_at IS NOT NULL AND expires_at < NOW() - INTERVAL '1 day'$$
 );
+
+-- 每天凌晨 4 点：清理超过 90 天保留期的审计日志
+SELECT cron.schedule(
+    'cleanup-expired-audit-logs',
+    '0 4 * * *',
+    $$DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL '90 days'$$
+);
 ```
 
 #### 管理命令
@@ -641,6 +664,7 @@ SELECT cron.unschedule(<job_id>);
 | `oauth_authorizations` | 已过期，无论是否使用 | 每小时 | `expires_at` + 1h（留缓冲防时钟偏差） |
 | `oauth_access_tokens` | 已过期元数据 | 每小时 | `expires_at` + 1h |
 | `oauth_refresh_tokens` | 已撤销 **且** 已过期 | 每天 | `expires_at` + 1d（只清已撤销的，未撤销的 refresh_token 过期后仍可查审计） |
+| `audit_logs` | 超过保留期数据 | 每天 | `created_at` + 90d（90 天保留期） |
 
 ---
 

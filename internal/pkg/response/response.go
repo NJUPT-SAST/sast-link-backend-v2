@@ -38,9 +38,14 @@ func Created(c *gin.Context, data any) {
 	})
 }
 
-// Err sends an error response (HTTP 200 with error code).
+// Err sends an error response with the HTTP status derived from the error code.
+// Error codes follow the pattern {HTTPStatus}{sequence} (e.g. 40105 → HTTP 401).
 func Err(c *gin.Context, code domain.ErrCode, msg string) {
-	c.JSON(http.StatusOK, Envelope{
+	httpStatus := int(code) / 100
+	if httpStatus < 400 || httpStatus > 599 {
+		httpStatus = http.StatusInternalServerError
+	}
+	c.JSON(httpStatus, Envelope{
 		Code:    int(code),
 		Message: msg,
 		Data:    nil,

@@ -64,8 +64,9 @@ func TestErr(t *testing.T) {
 
 	Err(c, domain.ErrInvalidParams, "请求参数错误")
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	// 400xx → HTTP 400
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 
 	var resp Envelope

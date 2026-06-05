@@ -36,8 +36,8 @@ type UserState string
 // User states.
 const (
 	UserStateIsDeleted   UserState = "is_deleted"
-	UserStateOnSAST      UserState = "on-sast"
-	UserStateRetiredSAST UserState = "retired-sast"
+	UserStateOnSAST      UserState = "on_sast"
+	UserStateRetiredSAST UserState = "retired_sast"
 	UserStateNJUPter     UserState = "njupter"
 )
 

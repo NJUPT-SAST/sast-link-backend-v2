@@ -87,8 +87,6 @@ const (
 	ErrPasswordTooShort ErrCode = 42201
 	// ErrPasswordSameAsOld indicates the new password is the same as the old one.
 	ErrPasswordSameAsOld ErrCode = 42202
-	// ErrCannotUnbindOnlyLoginMethod indicates the only login method cannot be unbound.
-	ErrCannotUnbindOnlyLoginMethod ErrCode = 42203
 
 	// 429xx: rate limiting errors
 
