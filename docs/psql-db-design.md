@@ -178,7 +178,7 @@ CREATE UNIQUE INDEX uq_identities_user_lark
 |`id`|主键|
 |`user_id`|关联的 SAST 用户|
 |`provider`|绑定类型：github / lark / other_mail|
-|`provider_id`|第三方唯一 ID（GitHub ID / 飞书 open_id / 绑定的邮箱地址）|
+|`provider_id`|第三方唯一 ID（GitHub ID / 飞书 union_id / 绑定的邮箱地址）|
 |`identity_data`|第三方平台资料，Schema 见下方|
 |`access_token`|第三方 OAuth 访问令牌|
 |`refresh_token`|第三方 OAuth 刷新令牌|
@@ -191,7 +191,7 @@ identity_data JSON 结构
 |Provider|JSON 结构|说明|
 |---|---|---|
 |`github`|`{"login": "github_username"}`|OAuth 流程：https://docs.github.com/zh/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps|
-|`lark`|见下方示例|获取用户信息：https://open.feishu.cn/document/server-docs/authentication-management/login-state-management/get|
+|`lark`|见下方示例|获取用户信息：https://open.feishu.cn/document/server-docs/authentication-management/login-state-management/get<br><br>**provider_id 存储 `union_id`**（非 `open_id`）。`union_id` 在同一租户下跨应用一致，`open_id` 按应用变化，仅作为 identity_data 的一部分存储。|
 |`other_mail`|`{"email": "xxx@example.com"}`|额外绑定邮箱，`provider_id` 同时存该邮箱地址。每行一条，最多 2 行|
 
 `lark` 示例（存储飞书 API 返回的 `data` 对象，不含外层 `code`/`msg` 包）：

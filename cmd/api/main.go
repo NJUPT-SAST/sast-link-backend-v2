@@ -70,57 +70,55 @@ func main() {
 	// Services
 	captchaSvc := service.NewCaptchaService(redisClient)
 	emailSvc := service.NewEmailService(&cfg.SMTP)
-	registerSvc := service.NewRegisterService(userRepo, profileRepo, emailSvc, captchaSvc)
-	profileSvc := service.NewProfileService(profileRepo)
+	registerSvc := service.NewRegisterService(userRepo, profileRepo, emailSvc, captchaSvc, redisClient)
+	profileSvc := service.NewProfileService(userRepo, profileRepo)
 
 	// Handlers
 	authHandler := handler.NewAuthHandler(registerSvc)
 	profileHandler := handler.NewProfileHandler(profileSvc)
 
-	r.GET("/ping", func(c *gin.Context) {
-		c.String(http.StatusOK, "pong")
-	})
-
+	// ────────────── Health ──────────────
 	r.GET("/health", func(c *gin.Context) {
-		checks := map[string]string{
-			"database": "ok",
-			"redis":    "ok",
-		}
+		dbStatus := "ok"
+		redisStatus := "ok"
+
 		if err := infra.HealthCheckDB(c.Request.Context(), db); err != nil {
-			checks["database"] = "fail"
+			dbStatus = "fail"
 			slog.Warn("health check db failed", "error", err)
 		}
-		if err := redisClient.Ping(context.Background()).Err(); err != nil {
-			checks["redis"] = "fail"
+		if err := redisClient.Ping(c.Request.Context()).Err(); err != nil {
+			redisStatus = "fail"
 			slog.Warn("health check redis failed", "error", err)
 		}
 
-		status := http.StatusOK
-		for _, v := range checks {
-			if v != "ok" {
-				status = http.StatusServiceUnavailable
-				break
-			}
+		overallStatus := "ok"
+		httpStatus := http.StatusOK
+		if dbStatus != "ok" || redisStatus != "ok" {
+			overallStatus = "degraded"
+			httpStatus = http.StatusServiceUnavailable
 		}
 
-		c.JSON(status, gin.H{
-			"status":    "ok",
-			"version":   "1.0.0",
-			"checks":    checks,
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		c.JSON(httpStatus, gin.H{
+			"status": overallStatus,
+			"db":     dbStatus,
+			"redis":  redisStatus,
 		})
 	})
 
-	// Auth routes
-	r.POST("/sendEmail", authHandler.SendEmail)
-	r.POST("/user/register", authHandler.Register)
+	// ────────────── Auth ──────────────
+	auth := r.Group("/auth")
+	auth.POST("/register/send-code", authHandler.SendRegisterCode)
+	auth.POST("/register/verify-code", authHandler.VerifyRegisterCode)
+	auth.POST("/register", authHandler.CompleteRegister)
 
-	// Profile routes (auth required — TODO: add auth middleware)
-	r.GET("/profile", profileHandler.GetProfile)
-	r.POST("/profile/changeProfile", profileHandler.UpdateProfile)
+	// ────────────── User / Profile ──────────────
+	userGroup := r.Group("/user")
+	userGroup.GET("/profile", profileHandler.GetProfile)
+	userGroup.PUT("/profile", profileHandler.UpdateProfile)
 
+	// ────────────── 404 ──────────────
 	r.NoRoute(func(c *gin.Context) {
-		response.ErrWithStatus(c, http.StatusNotFound, domain.ErrInternal, "not found")
+		response.ErrWithStatus(c, http.StatusNotFound, domain.ErrResourceNotFound, "资源不存在")
 	})
 
 	srv := &http.Server{

@@ -559,8 +559,8 @@ GET /user/profile
     {
       "id": 1,
       "provider": "lark",
-      "provider_id": "ou_xxx",
-      "identity_data": { "name": "张三", "avatar_url": "...", "open_id": "ou_xxx" },
+      "provider_id": "on_xxx",
+      "identity_data": { "name": "张三", "avatar_url": "...", "open_id": "ou_xxx", "union_id": "on_xxx" },
       "token_expires_at": "2026-05-28T14:00:00Z",
       "created_at": "2026-05-28T12:00:00Z",
       "updated_at": "2026-05-28T12:00:00Z"
@@ -675,8 +675,8 @@ GET /user/identities
     {
       "id": 1,
       "provider": "lark",
-      "provider_id": "ou_xxx",
-      "identity_data": { "name": "张三", "avatar_url": "...", "open_id": "ou_xxx" },
+      "provider_id": "on_xxx",
+      "identity_data": { "name": "张三", "avatar_url": "...", "open_id": "ou_xxx", "union_id": "on_xxx" },
       "token_expires_at": "2026-05-28T14:00:00Z",
       "created_at": "2026-05-28T12:00:00Z",
       "updated_at": "2026-05-28T12:00:00Z"
@@ -726,8 +726,8 @@ POST /user/identities/lark
   "identity": {
     "id": 1,
     "provider": "lark",
-    "provider_id": "ou_xxx",
-    "identity_data": { "name": "张三", "avatar_url": "...", "open_id": "ou_xxx" },
+    "provider_id": "on_xxx",
+    "identity_data": { "name": "张三", "avatar_url": "...", "open_id": "ou_xxx", "union_id": "on_xxx" },
     "token_expires_at": null,
     "created_at": "2026-05-28T12:00:00Z",
     "updated_at": "2026-05-28T12:00:00Z"

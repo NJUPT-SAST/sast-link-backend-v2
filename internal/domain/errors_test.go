@@ -14,7 +14,7 @@ func TestAppError_Error(t *testing.T) {
 		{
 			name: "without cause",
 			err:  NewError(ErrInvalidParams, "bad request"),
-			want: "[10001] bad request",
+			want: "[40000] bad request",
 		},
 		{
 			name: "with cause",
@@ -47,12 +47,12 @@ func TestAppError_Unwrap(t *testing.T) {
 }
 
 func TestNewError(t *testing.T) {
-	err := NewError(ErrLoginFailed, "login failed")
-	if err.Code != ErrLoginFailed {
-		t.Errorf("Code = %d, want %d", err.Code, ErrLoginFailed)
+	err := NewError(ErrPasswordWrong, "wrong password")
+	if err.Code != ErrPasswordWrong {
+		t.Errorf("Code = %d, want %d", err.Code, ErrPasswordWrong)
 	}
-	if err.Message != "login failed" {
-		t.Errorf("Message = %q, want login failed", err.Message)
+	if err.Message != "wrong password" {
+		t.Errorf("Message = %q, want wrong password", err.Message)
 	}
 	if err.Cause != nil {
 		t.Error("Cause should be nil")
@@ -61,11 +61,39 @@ func TestNewError(t *testing.T) {
 
 func TestWrapError(t *testing.T) {
 	cause := errors.New("cause")
-	err := WrapError(ErrTokenExpired, "token expired", cause)
-	if err.Code != ErrTokenExpired {
-		t.Errorf("Code = %d, want %d", err.Code, ErrTokenExpired)
+	err := WrapError(ErrAccessTokenExpired, "token expired", cause)
+	if err.Code != ErrAccessTokenExpired {
+		t.Errorf("Code = %d, want %d", err.Code, ErrAccessTokenExpired)
 	}
 	if err.Cause != cause {
 		t.Error("Cause mismatch")
+	}
+}
+
+func TestSuccessCode(t *testing.T) {
+	if Success != 0 {
+		t.Errorf("Success code = %d, want 0", Success)
+	}
+}
+
+func TestErrorCodesDistinct(t *testing.T) {
+	codes := map[ErrCode]bool{
+		Success:                   true,
+		ErrInvalidParams:          true,
+		ErrCaptchaInvalid:         true,
+		ErrEmailDomainNotAllowed:  true,
+		ErrNotLoggedIn:            true,
+		ErrPasswordWrong:          true,
+		ErrPermissionDenied:       true,
+		ErrUserNotFound:           true,
+		ErrEmailAlreadyRegistered: true,
+		ErrPasswordTooShort:       true,
+		ErrTooManyRequests:        true,
+		ErrInternal:               true,
+		ErrEmailSendFailed:        true,
+		ErrDatabaseError:          true,
+	}
+	if len(codes) != 14 {
+		t.Errorf("expected 14 distinct codes, got %d", len(codes))
 	}
 }

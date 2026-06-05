@@ -2,152 +2,109 @@ package domain
 
 import "fmt"
 
-// ErrCode is the unified error code type.
-// All codes are 5-digit integers, fully compatible with the legacy backend.
+// ErrCode is the unified error code type (5-digit, HTTP-status-prefixed).
+// 0 means success. Non-zero codes follow the pattern {HTTPStatus}{Sequence}.
 type ErrCode int
 
 const (
-	// Success is the success code compatible with the legacy backend.
-	Success ErrCode = 200
+	// Success indicates a successful operation.
+	Success ErrCode = 0
 
-	// --- 1xxxx: 请求/账号相关 ---
+	// 400xx: parameter errors
 
 	// ErrInvalidParams indicates request parameter errors.
-	ErrInvalidParams ErrCode = 10001
-	// ErrUsernameInvalid indicates the username format is incorrect.
-	ErrUsernameInvalid ErrCode = 10002
-	// ErrPasswordFormat indicates the password format is invalid.
-	ErrPasswordFormat ErrCode = 10003
-	// ErrPasswordEmpty indicates the password is empty.
-	ErrPasswordEmpty ErrCode = 10004
-	// ErrLoginFailed indicates login failure (wrong password).
-	ErrLoginFailed ErrCode = 10005
-	// ErrAccountNotFound indicates the account does not exist.
-	ErrAccountNotFound ErrCode = 10006
-	// ErrAccountExists indicates the account already exists.
-	ErrAccountExists ErrCode = 10007
-	// ErrRateLimited indicates the operation is rate-limited.
-	ErrRateLimited ErrCode = 10008
-	// ErrPermissionDenied indicates insufficient permissions.
-	ErrPermissionDenied ErrCode = 10009
-	// ErrOAuthNotBound indicates the OAuth provider is not bound to any account.
-	ErrOAuthNotBound ErrCode = 10010
-	// ErrUserNotFound indicates the user does not exist.
-	ErrUserNotFound ErrCode = 10011
-	// ErrOAuthAlreadyBound indicates the OAuth provider is already bound to another account.
-	ErrOAuthAlreadyBound ErrCode = 10012
-	// ErrOAuthBindFailed indicates OAuth binding failed.
-	ErrOAuthBindFailed ErrCode = 10013
-	// ErrUnbindFailed indicates OAuth unbinding failed.
-	ErrUnbindFailed ErrCode = 10014
-	// ErrEmailAlreadyRegistered indicates the email is already registered.
-	ErrEmailAlreadyRegistered ErrCode = 10015
-	// ErrBindEmailLimitReached indicates the user has reached the max bound email count.
-	ErrBindEmailLimitReached ErrCode = 10016
-	// ErrEmailAlreadyBound indicates the email is already bound to another user.
-	ErrEmailAlreadyBound ErrCode = 10017
-	// ErrUnbindCooldown indicates the email is in the unbind cooldown period.
-	ErrUnbindCooldown ErrCode = 10018
-
-	// --- 2xxxx: Token/Ticket 相关 ---
-
-	// ErrTokenExpired indicates the token has expired (generic).
-	ErrTokenExpired ErrCode = 20001
-	// ErrAccessTokenExpired indicates the access token has expired.
-	ErrAccessTokenExpired ErrCode = 20002
-	// ErrTokenGenFailed indicates token generation failure.
-	ErrTokenGenFailed ErrCode = 20003
-	// ErrTokenInvalid indicates the token is invalid.
-	ErrTokenInvalid ErrCode = 20004
-	// ErrRefreshTokenInvalid indicates the refresh token is invalid or expired.
-	ErrRefreshTokenInvalid ErrCode = 20005
-	// ErrTokenParseFail indicates token parsing failure.
-	ErrTokenParseFail ErrCode = 20006
-	// ErrTicketInvalid indicates the ticket is incorrect.
-	ErrTicketInvalid ErrCode = 20007
-	// ErrTicketNotFound indicates the ticket does not exist or has expired.
-	ErrTicketNotFound ErrCode = 20008
-	// ErrTokenVersionMismatch indicates token_version validation failed.
-	ErrTokenVersionMismatch ErrCode = 20009
-
-	// --- 3xxxx: 邮件/验证码相关 ---
-
-	// ErrEmailSendFailed indicates email sending failure.
-	ErrEmailSendFailed ErrCode = 30001
+	ErrInvalidParams ErrCode = 40000
+	// ErrMissingRequiredParam indicates a required parameter is missing.
+	ErrMissingRequiredParam ErrCode = 40001
+	// ErrInvalidParamFormat indicates a parameter format is invalid.
+	ErrInvalidParamFormat ErrCode = 40002
 	// ErrCaptchaInvalid indicates the verification code is wrong.
-	ErrCaptchaInvalid ErrCode = 30002
-	// ErrEmailFormat indicates the email format is invalid.
-	ErrEmailFormat ErrCode = 30003
-	// ErrBindEmailCaptchaInvalid indicates bind-email captcha is wrong.
-	ErrBindEmailCaptchaInvalid ErrCode = 30004
-	// ErrBindEmailTicketInvalid indicates the BindEmail-Ticket is invalid or expired.
-	ErrBindEmailTicketInvalid ErrCode = 30005
-	// ErrUnbindCaptchaInvalid indicates unbind-email captcha is wrong.
-	ErrUnbindCaptchaInvalid ErrCode = 30006
+	ErrCaptchaInvalid ErrCode = 40010
+	// ErrCaptchaExpired indicates the verification code has expired.
+	ErrCaptchaExpired ErrCode = 40011
+	// ErrCaptchaRateLimited indicates captcha sending is rate-limited.
+	ErrCaptchaRateLimited ErrCode = 40012
+	// ErrEmailDomainNotAllowed indicates the email domain is not allowed.
+	ErrEmailDomainNotAllowed ErrCode = 40020
 
-	// --- 4xxxx: 账号/密码验证相关 ---
+	// 401xx: authentication errors
 
-	// ErrVerifyAccountFail indicates account verification failure.
-	ErrVerifyAccountFail ErrCode = 40001
-	// ErrVerifyPasswordFail indicates password verification failure.
-	ErrVerifyPasswordFail ErrCode = 40002
-	// ErrOldPasswordWrong indicates the old password is incorrect.
-	ErrOldPasswordWrong ErrCode = 40003
+	// ErrNotLoggedIn indicates the user is not logged in (missing or invalid Authorization header).
+	ErrNotLoggedIn ErrCode = 40100
+	// ErrAccessTokenExpired indicates the access token has expired.
+	ErrAccessTokenExpired ErrCode = 40101
+	// ErrAccessTokenInvalid indicates the access token is invalid or has been revoked.
+	ErrAccessTokenInvalid ErrCode = 40102
+	// ErrRegisterTicketInvalid indicates the Register-Ticket is invalid or has expired.
+	ErrRegisterTicketInvalid ErrCode = 40103
+	// ErrBindTicketInvalid indicates the Bind-Ticket is invalid or has expired.
+	ErrBindTicketInvalid ErrCode = 40104
+	// ErrPasswordWrong indicates the password is incorrect.
+	ErrPasswordWrong ErrCode = 40105
+	// ErrLoginEmailNotFound indicates the login email does not exist.
+	ErrLoginEmailNotFound ErrCode = 40106
+	// ErrLoginCodeInvalid indicates the login_code is invalid or has expired.
+	ErrLoginCodeInvalid ErrCode = 40107
 
-	// --- 5xxxx: 服务端错误 ---
+	// 403xx: permission errors
 
-	// ErrInternal is the catch-all unknown server error.
+	// ErrPermissionDenied indicates insufficient permissions.
+	ErrPermissionDenied ErrCode = 40300
+	// ErrAccountDeleted indicates the account has been deleted.
+	ErrAccountDeleted ErrCode = 40301
+	// ErrNotSASTLarkUser indicates the user is not a SAST enterprise Lark user.
+	ErrNotSASTLarkUser ErrCode = 40302
+
+	// 404xx: resource not found errors
+
+	// ErrResourceNotFound indicates the requested resource does not exist.
+	ErrResourceNotFound ErrCode = 40400
+	// ErrUserNotFound indicates the user does not exist.
+	ErrUserNotFound ErrCode = 40401
+	// ErrOAuthClientNotFound indicates the OAuth client does not exist.
+	ErrOAuthClientNotFound ErrCode = 40402
+
+	// 409xx: resource conflict errors
+
+	// ErrResourceAlreadyExists indicates the resource already exists.
+	ErrResourceAlreadyExists ErrCode = 40900
+	// ErrEmailAlreadyRegistered indicates the email is already registered.
+	ErrEmailAlreadyRegistered ErrCode = 40901
+	// ErrStudentIDAlreadyTaken indicates the student ID is already taken.
+	ErrStudentIDAlreadyTaken ErrCode = 40902
+	// ErrIdentityAlreadyBound indicates the third-party account is already bound to another user.
+	ErrIdentityAlreadyBound ErrCode = 40903
+	// ErrIdentityTypeAlreadyBound indicates this type of account is already bound.
+	ErrIdentityTypeAlreadyBound ErrCode = 40904
+	// ErrBindEmailLimitReached indicates the max number of bound emails (2) has been reached.
+	ErrBindEmailLimitReached ErrCode = 40905
+
+	// 422xx: business validation errors
+
+	// ErrBusinessValidationFailed indicates a generic business validation failure.
+	ErrBusinessValidationFailed ErrCode = 42200
+	// ErrPasswordTooShort indicates the password is too short (minimum 8 characters).
+	ErrPasswordTooShort ErrCode = 42201
+	// ErrPasswordSameAsOld indicates the new password is the same as the old one.
+	ErrPasswordSameAsOld ErrCode = 42202
+	// ErrCannotUnbindOnlyLoginMethod indicates the only login method cannot be unbound.
+	ErrCannotUnbindOnlyLoginMethod ErrCode = 42203
+
+	// 429xx: rate limiting errors
+
+	// ErrTooManyRequests indicates the request rate limit has been exceeded.
+	ErrTooManyRequests ErrCode = 42900
+
+	// 500xx: server errors
+
+	// ErrInternal indicates an internal server error.
 	ErrInternal ErrCode = 50000
-
-	// --- 6xxxx: OAuth 2.1 标准错误 ---
-
-	// ErrInvalidRequest indicates an OAuth 2.1 invalid_request error.
-	ErrInvalidRequest ErrCode = 60001
-	// ErrInvalidClient indicates an OAuth 2.1 invalid_client error.
-	ErrInvalidClient ErrCode = 60002
-	// ErrInvalidGrant indicates an OAuth 2.1 invalid_grant error.
-	ErrInvalidGrant ErrCode = 60003
-	// ErrUnauthorizedClient indicates an OAuth 2.1 unauthorized_client error.
-	ErrUnauthorizedClient ErrCode = 60004
-	// ErrUnsupportedGrantType indicates an OAuth 2.1 unsupported_grant_type error.
-	ErrUnsupportedGrantType ErrCode = 60005
-	// ErrInvalidScope indicates an OAuth 2.1 invalid_scope error.
-	ErrInvalidScope ErrCode = 60006
-	// ErrServerError indicates an OAuth 2.1 server_error.
-	ErrServerError ErrCode = 60007
-	// ErrTemporarilyUnavailable indicates an OAuth 2.1 temporarily_unavailable error.
-	ErrTemporarilyUnavailable ErrCode = 60008
-
-	// --- 7xxxx: 注册/重置相关 ---
-
-	// ErrRegistrationIncomplete indicates required fields are missing during registration.
-	ErrRegistrationIncomplete ErrCode = 70001
-	// ErrRegistrationStageFail indicates a generic registration stage error.
-	ErrRegistrationStageFail ErrCode = 70002
-	// ErrResetPasswordFail indicates password reset failure.
-	ErrResetPasswordFail ErrCode = 70004
-	// ErrOAuthRegistrationCompletionFail indicates OAuth registration completion failure.
-	ErrOAuthRegistrationCompletionFail ErrCode = 70005
-
-	// --- 8xxxx: 用户资料相关 ---
-
-	// ErrProfileNotFound indicates the user profile does not exist.
-	ErrProfileNotFound ErrCode = 80000
-	// ErrOrgIDInvalid indicates the organization ID is invalid.
-	ErrOrgIDInvalid ErrCode = 80001
-	// ErrHideFieldInvalid indicates a hide field value is invalid.
-	ErrHideFieldInvalid ErrCode = 80002
-	// ErrEmailBindFailed indicates email binding failed.
-	ErrEmailBindFailed ErrCode = 80003
-
-	// --- 9xxxx: 通知/文件相关 ---
-
-	// ErrNotificationSendFail indicates audit notification sending failure.
-	ErrNotificationSendFail ErrCode = 90000
-	// ErrImageProcessFail indicates image processing failure.
-	ErrImageProcessFail ErrCode = 90001
-	// ErrImageURLInvalid indicates the image URL is invalid.
-	ErrImageURLInvalid ErrCode = 90002
+	// ErrEmailSendFailed indicates email sending failed.
+	ErrEmailSendFailed ErrCode = 50001
+	// ErrObjectStorageUploadFailed indicates object storage upload failed.
+	ErrObjectStorageUploadFailed ErrCode = 50002
+	// ErrDatabaseError indicates a database error.
+	ErrDatabaseError ErrCode = 50003
 )
 
 // AppError is the unified application error.

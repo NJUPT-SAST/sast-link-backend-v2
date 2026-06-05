@@ -16,6 +16,7 @@ type UserRepository interface {
 	Update(ctx context.Context, user *domain.User) error
 	UpdatePassword(ctx context.Context, id int64, hash string) error
 	UpdateState(ctx context.Context, id int64, state domain.UserState) error
+	BumpTokenVersion(ctx context.Context, id int64) error
 }
 
 // ProfileRepository defines the data access contract for the profile table.

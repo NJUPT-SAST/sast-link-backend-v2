@@ -59,7 +59,7 @@ func (r *userRepo) Create(ctx context.Context, user *domain.User) error {
 }
 
 func (r *userRepo) Update(ctx context.Context, user *domain.User) error {
-	return r.db.WithContext(ctx).Save(user).Error
+	return r.db.WithContext(ctx).Model(user).Omit("id", "created_at").Updates(user).Error
 }
 
 func (r *userRepo) UpdatePassword(ctx context.Context, id int64, hash string) error {
@@ -68,4 +68,10 @@ func (r *userRepo) UpdatePassword(ctx context.Context, id int64, hash string) er
 
 func (r *userRepo) UpdateState(ctx context.Context, id int64, state domain.UserState) error {
 	return r.db.WithContext(ctx).Model(&domain.User{}).Where("id = ?", id).Update("state", state).Error
+}
+
+func (r *userRepo) BumpTokenVersion(ctx context.Context, id int64) error {
+	return r.db.WithContext(ctx).Model(&domain.User{}).
+		Where("id = ?", id).
+		UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error
 }

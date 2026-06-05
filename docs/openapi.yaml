@@ -1855,7 +1855,11 @@ components:
           $ref: '#/components/schemas/LoginMethod'
         provider_id:
           type: string
-          description: 第三方平台唯一标识
+          description: |
+            第三方平台唯一标识：
+            - `github` → GitHub 用户 ID
+            - `lark` → 飞书 union_id（非 open_id，union_id 在同一租户下跨应用一致）
+            - `other_mail` → 绑定邮箱地址
         identity_data:
           type: object
           description: 第三方平台资料（JSONB），结构随 provider 不同而变化

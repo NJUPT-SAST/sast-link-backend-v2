@@ -93,7 +93,7 @@ services:
     networks:
       - sastlink
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ping || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health | grep -q '\"status\":\"ok\"' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
