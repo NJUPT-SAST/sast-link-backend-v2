@@ -20,8 +20,7 @@ type Config struct {
 	CORS       CORSConfig       `mapstructure:"cors"`
 	OAuth      OAuthConfig      `mapstructure:"oauth"`
 	Storage    StorageConfig    `mapstructure:"storage"`
-	RateLimit  RateLimitConfig  `mapstructure:"rate_limit"`
-	SuperAdmin SuperAdminConfig `mapstructure:"super_admin"`
+	RateLimit RateLimitConfig `mapstructure:"rate_limit"`
 }
 
 // AppConfig holds application-level settings.
@@ -50,10 +49,13 @@ type RedisConfig struct {
 }
 
 // JWTConfig holds JWT signing settings.
+// SecretKey / SecretKeyPrev are RSA private keys (PEM) for RS256,
+// matching the env var names used in PRD §3.2 (JWT_SECRET_KEY / JWT_SECRET_KEY_PREV).
 type JWTConfig struct {
-	SecretKey     string `mapstructure:"secret_key"`
-	SecretKeyPrev string `mapstructure:"secret_key_prev"`
-	Expiry        string `mapstructure:"expiry"`
+	SecretKey          string `mapstructure:"secret_key"`
+	SecretKeyPrev      string `mapstructure:"secret_key_prev"`
+	AccessTokenExpiry  string `mapstructure:"access_token_expiry"`
+	RefreshTokenExpiry string `mapstructure:"refresh_token_expiry"`
 }
 
 // SMTPConfig holds email server settings.
@@ -81,10 +83,8 @@ type OAuthProviderConfig struct {
 
 // OAuthConfig holds all OAuth provider settings.
 type OAuthConfig struct {
-	Feishu    OAuthProviderConfig `mapstructure:"feishu"`
-	GitHub    OAuthProviderConfig `mapstructure:"github"`
-	Microsoft OAuthProviderConfig `mapstructure:"microsoft"`
-	QQ        OAuthProviderConfig `mapstructure:"qq"`
+	Feishu OAuthProviderConfig `mapstructure:"feishu"`
+	GitHub OAuthProviderConfig `mapstructure:"github"`
 }
 
 // StorageConfig holds object storage settings.
@@ -105,11 +105,6 @@ type RateLimitConfig struct {
 	SendEmailRPM int `mapstructure:"send_email_rpm"` // send email requests per minute per account
 	CaptchaRPM   int `mapstructure:"captcha_rpm"`    // captcha verify requests per minute per IP
 	RegisterRPH  int `mapstructure:"register_rph"`   // register requests per hour per IP
-}
-
-// SuperAdminConfig holds initial super admin settings.
-type SuperAdminConfig struct {
-	UID string `mapstructure:"uid"`
 }
 
 // Load reads configuration from environment variables.
@@ -141,7 +136,8 @@ func Load() (*Config, error) {
 	// JWT defaults
 	v.SetDefault("jwt.secret_key", getEnv("JWT_SECRET_KEY", ""))
 	v.SetDefault("jwt.secret_key_prev", getEnv("JWT_SECRET_KEY_PREV", ""))
-	v.SetDefault("jwt.expiry", getEnv("JWT_EXPIRY", "168h"))
+	v.SetDefault("jwt.access_token_expiry", getEnv("JWT_ACCESS_TOKEN_EXPIRY", "1h"))
+	v.SetDefault("jwt.refresh_token_expiry", getEnv("JWT_REFRESH_TOKEN_EXPIRY", "720h"))
 
 	// SMTP defaults
 	v.SetDefault("smtp.host", getEnv("SMTP_HOST", ""))
@@ -163,14 +159,6 @@ func Load() (*Config, error) {
 	v.SetDefault("oauth.github.client_id", getEnv("OAUTH_GITHUB_CLIENT_ID", ""))
 	v.SetDefault("oauth.github.client_secret", getEnv("OAUTH_GITHUB_CLIENT_SECRET", ""))
 	v.SetDefault("oauth.github.redirect_uri", getEnv("OAUTH_GITHUB_REDIRECT_URI", ""))
-	v.SetDefault("oauth.microsoft.enabled", getEnvBool("OAUTH_MICROSOFT_ENABLED", false))
-	v.SetDefault("oauth.microsoft.client_id", getEnv("OAUTH_MICROSOFT_CLIENT_ID", ""))
-	v.SetDefault("oauth.microsoft.client_secret", getEnv("OAUTH_MICROSOFT_CLIENT_SECRET", ""))
-	v.SetDefault("oauth.microsoft.redirect_uri", getEnv("OAUTH_MICROSOFT_REDIRECT_URI", ""))
-	v.SetDefault("oauth.qq.enabled", getEnvBool("OAUTH_QQ_ENABLED", false))
-	v.SetDefault("oauth.qq.client_id", getEnv("OAUTH_QQ_CLIENT_ID", ""))
-	v.SetDefault("oauth.qq.client_secret", getEnv("OAUTH_QQ_CLIENT_SECRET", ""))
-	v.SetDefault("oauth.qq.redirect_uri", getEnv("OAUTH_QQ_REDIRECT_URI", ""))
 
 	// Storage defaults
 	v.SetDefault("storage.provider", getEnv("STORAGE_PROVIDER", "minio"))
@@ -187,9 +175,6 @@ func Load() (*Config, error) {
 	v.SetDefault("rate_limit.send_email_rpm", getEnvInt("RATE_LIMIT_SEND_EMAIL_RPM", 3))
 	v.SetDefault("rate_limit.captcha_rpm", getEnvInt("RATE_LIMIT_CAPTCHA_RPM", 5))
 	v.SetDefault("rate_limit.register_rph", getEnvInt("RATE_LIMIT_REGISTER_RPH", 3))
-
-	// Super admin defaults
-	v.SetDefault("super_admin.uid", getEnv("INITIAL_SUPER_ADMIN_UID", ""))
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {

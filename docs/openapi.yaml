@@ -152,9 +152,12 @@ paths:
                   type: string
                   description: QQ 号
                   example: '1234567890'
+                registration_state:
+                  type: string
+                  description: 第三方 OAuth 回调下发的注册暂存令牌（可选，需与 oauth_state 配套使用）
                 oauth_state:
                   type: string
-                  description: 第三方 OAuth 回调下发的状态令牌（可选）。传入后注册成功时自动绑定对应第三方账号。
+                  description: 原始 OAuth CSRF state 参数（可选，与 registration_state 配套校验）
                 college:
                   $ref: '#/components/schemas/College'
                   description: 学院
@@ -442,8 +445,8 @@ paths:
 
         - 已有绑定 → 签发一次性 login_code，302 重定向至前端 `?code=<login_code>`
 
-        - 无绑定 → 生成 oauth_state（Redis，10min），302 重定向至注册补全页
-        `?oauth_state=<oauth_state>&provider=github&name=<login>&avatar=<url>`
+        - 无绑定 → 生成 registration_state（Redis，15min），302 重定向至注册补全页
+        `?registration_state=<registration_state>&provider=github&name=<login>&avatar=<url>`
       operationId: oauthGithubCallback
       tags:
         - OAuth Login
@@ -488,8 +491,8 @@ paths:
 
         - 已有绑定 → 签发一次性 login_code，302 重定向至前端
 
-        - 无绑定 → 生成 oauth_state（Redis，10min），302 重定向至注册补全页
-        `?oauth_state=<oauth_state>&provider=lark&name=<name>&avatar=<url>`
+        - 无绑定 → 生成 registration_state（Redis，15min），302 重定向至注册补全页
+        `?registration_state=<registration_state>&provider=lark&name=<name>&avatar=<url>`
 
         - 非 SAST 企业用户 → 拒绝
       operationId: oauthLarkCallback
@@ -1725,10 +1728,10 @@ components:
       type: string
       enum:
         - njupter
-        - on-sast
-        - retired-sast
+        - on_sast
+        - retired_sast
         - is_deleted
-      description: 用户状态 — njupter（在校未加入）/ on-sast（现任成员）/ retired-sast（已离开）/ is_deleted（已注销）
+      description: 用户状态 — njupter（在校未加入）/ on_sast（现任成员）/ retired_sast（已离开）/ is_deleted（已注销）
     Department:
       type: string
       enum:
@@ -2020,10 +2023,10 @@ components:
           description: 操作对象 ID
         detail:
           type: object
-          description: 操作详情（JSONB）
+          description: 操作详情（JSONB），结构因 action 类型而异
           properties: {}
           example:
-            ip: 10.0.0.1
+            method: password
         client_ip:
           type: string
           description: 客户端 IP
@@ -3011,12 +3014,7 @@ components:
                 code: 42201
                 message: 密码长度不足（最短 8 位）
                 data: null
-            cannot_unbind:
-              summary: cannot_unbind
-              value:
-                code: 42203
-                message: 不能解绑唯一登录方式
-                data: null
+
     TooManyRequests:
       description: 频率限制（429xx）
       content:

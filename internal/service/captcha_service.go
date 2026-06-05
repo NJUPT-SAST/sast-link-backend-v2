@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	captchaKeyPrefix = "sastlink:captcha:"
+	captchaKeyPrefix = "sastlink:verify:"
 	captchaTTL       = 5 * time.Minute
 	captchaCodeLen   = 5
 )

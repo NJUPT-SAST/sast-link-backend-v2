@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	registerTicketPrefix = "sastlink:register_ticket:"
+	registerTicketPrefix = "sastlink:auth:register_ticket:"
 	registerTicketTTL    = 5 * time.Minute
 	registerTicketLen    = 32
 )
@@ -110,6 +110,11 @@ func (s *RegisterService) Register(ctx context.Context, req *dto.RegisterRequest
 		return nil, fmt.Errorf("register: get ticket: %w", err)
 	}
 
+	// TODO: Handle RegistrationState + OAuthState for OAuth registration binding.
+	// When both are provided: GetDel RegistrationState from Redis → verify OAuthState
+	// matches the stored oauth_state → create identities binding.
+	// See PRD §4.3 and §4.5 for the full flow.
+
 	emailType, err := resolveEmailType(email)
 	if err != nil {
 		return nil, err
@@ -170,6 +175,9 @@ func (s *RegisterService) Register(ctx context.Context, req *dto.RegisterRequest
 		_ = s.userRepo.UpdateState(ctx, user.ID, domain.UserStateIsDeleted)
 		return nil, fmt.Errorf("register: create profile: %w", err)
 	}
+
+	// TODO: Write audit_logs record (action="register", detail={"login_email": email}).
+	// See PRD §4.13 for audit log detail schema.
 
 	return user, nil
 }
