@@ -77,6 +77,11 @@ func TestStringArrayScan(t *testing.T) {
 			in:   `{"quote\"me","back\\slash"}`,
 			want: StringArray{"quote\"me", `back\slash`},
 		},
+		{
+			name: "quoted NULL string",
+			in:   `{"NULL"}`,
+			want: StringArray{"NULL"},
+		},
 	}
 
 	for _, c := range cases {
@@ -97,6 +102,8 @@ func TestStringArrayScanInvalid(t *testing.T) {
 		123,
 		"not-array",
 		`{"unterminated}`,
+		`{NULL}`,
+		`{openid,NULL}`,
 	}
 
 	for _, c := range cases {

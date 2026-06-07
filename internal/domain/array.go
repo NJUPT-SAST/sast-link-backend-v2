@@ -54,14 +54,15 @@ func (a *StringArray) scanString(src string) error {
 	escaped := false
 	quoted := false
 
-	flush := func() {
+	flush := func() error {
 		value := item.String()
 		if !quoted && value == "NULL" {
-			value = ""
+			return fmt.Errorf("scan StringArray: NULL array element is not supported in %q", src)
 		}
 		items = append(items, value)
 		item.Reset()
 		quoted = false
+		return nil
 	}
 
 	for _, r := range src[1 : len(src)-1] {
@@ -88,7 +89,9 @@ func (a *StringArray) scanString(src string) error {
 			inQuotes = true
 			quoted = true
 		case ',':
-			flush()
+			if err := flush(); err != nil {
+				return err
+			}
 		default:
 			item.WriteRune(r)
 		}
@@ -97,7 +100,9 @@ func (a *StringArray) scanString(src string) error {
 	if escaped || inQuotes {
 		return fmt.Errorf("scan StringArray: unterminated quoted element in %q", src)
 	}
-	flush()
+	if err := flush(); err != nil {
+		return err
+	}
 
 	*a = StringArray(items)
 	return nil
