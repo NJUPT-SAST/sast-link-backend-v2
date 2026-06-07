@@ -72,16 +72,25 @@
 
 ### 1.6 领域模型（`internal/domain/`）
 
-- 状态：已完成
+- 状态：部分完成 — 8 张 DB 表中 4 张已有模型（user / profile / audit_logs / organize），4 张缺失
 
-| 文件          | 说明                                                                                                                       |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `user.go`     | `User` 实体（GORM，15 个字段，表名 `"user"`）                                                                              |
-| `profile.go`  | `Profile` 实体（与 User 一对一，表名 `"profile"`）                                                                         |
-| `audit.go`    | `AuditLog` 实体 + `AuditAction` 枚举（10 种操作类型）                                                                      |
-| `organize.go` | `Organize` 实体（表名 `"organize"`）                                                                                       |
-| `enums.go`    | 7 种枚举：`UserRole`(4)、`Department`(2)、`LoginMethod`(3)、`UserState`(4)、`EmailType`(2)、`ClientType`(2)、`College`(20) |
-| `errors.go`   | `ErrCode`（5 位错误码，36 个常量：35 个非零错误码 + `Success=0`）、`AppError` 结构体、`NewError` / `WrapError`                                             |
+| 文件 | 说明 |
+|------|------|
+| `user.go` | `User` 实体（GORM，15 字段全对齐 DDL） |
+| `profile.go` | `Profile` 实体（11 字段全对齐 DDL） |
+| `audit.go` | `AuditLog` 实体 + `AuditAction` 枚举（10 种操作类型）。⚠️ 2 个 tag 微差：`success` 缺 `default:true`，`err_code` 缺 `type:int` |
+| `organize.go` | `Organize` 实体（3 字段全对齐） |
+| `enums.go` | 7 种枚举：`UserRole`(4)、`Department`(2)、`LoginMethod`(3)、`UserState`(4)、`EmailType`(2)、`ClientType`(2)、`College`(20) |
+| `errors.go` | `ErrCode`（36 个常量：35 个非零 + `Success=0`）、`AppError`、`NewError` / `WrapError` |
+
+**缺失的模型**（按优先级）：
+
+| 缺失 | 对应表 | 优先级 | 原因 |
+|------|--------|--------|------|
+| `identity.go` | `identities` | 🔴 当前冲刺 | 第 4 步「OAuth 绑定」+ 第 1 步密码登录（第三方邮箱反查）都依赖 |
+| `oauth_token.go` | `oauth_access_tokens` + `oauth_refresh_tokens` | 🔴 当前冲刺 | 第 1 步密码登录/刷新 Token 需写入（PRD §4.4） |
+| `oauth_client.go` | `oauth_clients` | 🟡 第 8-10 步 | OAuth 服务端步骤才用 |
+| `oauth_auth.go` | `oauth_authorizations` | 🟡 第 8 步 | OAuth 授权码步骤才用 |
 
 ### 1.7 DTO 层（`internal/dto/`）
 
@@ -148,6 +157,7 @@ POST /auth/register                → GetDel 消费 Ticket → 校验 → PBKDF
 - 状态：未开始
 - DTO `LoginRequest` 已定义（`login_email` + `password`）
 - PRD 要求：查 user / identities → 检查登录失败次数（Redis 15min 窗口 ≥ 10 次锁定）→ PBKDF2 校验 → 检查账号状态 → 设备数管理 → 签发 Token Pair → 写审计日志
+- 注意：第三方邮箱（`other_mail`）登录需查 `identities` 表反查 user_id，此路径依赖 `IdentityRepository`。可先实现教育邮箱登录（直查 `user.login_email`），第三方邮箱登录作为后续增强
 
 ### 2.3 JWT 鉴权
 
@@ -234,8 +244,9 @@ POST /auth/register                → GetDel 消费 Ticket → 校验 → PBKDF
 ### 4.2 修改资料
 
 - 状态：部分完成
-- 已实现：部分更新 user 表（name / phone / qq / college / major / student_id）和 profile 表（nickname / department / intro / email / blog_url / github_url / avatar）
+- 已实现：部分更新 user 表（name / phone_number / qq_number / student_id / college / major）和 profile 表（nickname / department / intro / email / blog_url / github_url）
 - `UpdateProfile` 若 profile 行不存在则自动创建
+- 头像（`avatar`）通过独立端点 `PUT /user/avatar` 上传，不走此接口（PRD §4.9）
 - 待补：无审计日志写入；College / Department 校验在 service 层重复（DB 层也有限制）
 
 ### 4.3 上传头像
@@ -261,7 +272,9 @@ POST /auth/register                → GetDel 消费 Ticket → 校验 → PBKDF
 | `DELETE /user/identities/:id` — 解绑                | 未开始 |
 
 - `IdentityRepository` 接口与实现均未创建
+- 领域模型 `domain.Identity`（GORM）也未创建 — 组件链缺口：model → repository → service → handler
 - DB 表 `identities` 已在 `docs/psql-db-design.md` 中完整设计（含约束、索引、触发器）
+- OAuth 注册绑定流程（`registration_state` + `oauth_state`）依赖 identities 写入能力，参见 PRD §4.5
 
 ---
 
@@ -436,12 +449,37 @@ POST /auth/register                → GetDel 消费 Ticket → 校验 → PBKDF
 
 ---
 
-## 10. 建议优先级
+## 10. 实现优先级
 
-1. **JWT 服务** — RS256 签名/验签，密钥轮换支持（解锁登录、中间件、Token 签发）
-2. **JWT 中间件** — 替换 `currentUserID()` 占位，校验 token_version
-3. **密码登录** — `POST /user/login`（DTO 已具备）
-4. **Identity 仓储 + 绑定** — 解锁 OAuth 登录和资料页的 identities 数据
-5. **OAuth 2.1 authorize + token 端点** — OIDC Provider 核心
-6. **Service / Repository 层测试** — 当前测试覆盖最大缺口
-7. **数据库事务** — 替换 `Register()` 中的尽力回滚
+### 总体路线（PRD §11）
+
+1. 用户认证 — 注册 / 登录 / JWT 签发验证 / 验证码 / 改密 / 重置密码 / 登出
+2. 用户资料管理 — 查看 / 编辑 / 头像上传
+3. OAuth 登录 — GitHub / 飞书 回调 + login_code 交换
+4. OAuth 绑定 / 解绑 + 注册补全 — registration_state + oauth_state 双重校验
+5. 限流与防刷中间件
+6. 审计日志 + 健康检查
+7. 头像内容审核（腾讯云 COS）
+8. OAuth 2.1 授权服务端 — authorize / token / revoke + PKCE
+9. OIDC Provider — discovery / JWKS / UserInfo / ID Token
+10. OAuth 客户端注册 API
+11. 管理后台 — 用户管理 / OAuth 客户端管理 / 审计日志查询
+12. pg_cron 定时清理
+13. 个人卡片页面
+14. 测试、联调、上线
+
+### 当前冲刺：第 1 步「用户认证」分解
+
+> 第 1 步内部依赖链：JWT 服务 → JWT 中间件 → 密码登录 → Refresh Token → 改密/重置密码 → 登出。
+> 第三方邮箱登录依赖 identities 表（第 4 步），可先实现教育邮箱登录再补。
+
+1. **JWT 服务** — RS256 签名/验签，密钥轮换支持（`JWT_SECRET_KEY` + `JWT_SECRET_KEY_PREV`）
+2. **JWT 中间件** — 替换 `currentUserID()` 占位，校验签名 → jti 黑名单 → token_version → 账号状态
+3. **密码登录** — `POST /user/login`（教育邮箱路径，不含第三方邮箱）
+4. **Refresh Token 旋转** — opaque token + HMAC-SHA256 hash + family 链 + rotation 检测
+5. **改密 / 重置密码** — token_version 自增 + jti 黑名单撤销
+6. **登出** — jti 黑名单 + family 链撤销
+7. **数据库事务** — 替换 `Register()` 中的尽力回滚，同时覆盖登录 Token 签发路径
+8. **Service / Repository 层测试** — 当前测试覆盖最大缺口
+
+> 第 1 步完成后，教育邮箱注册+登录闭环可走通，再进入第 2 步（资料管理）和第 3-4 步（OAuth + identities）。
