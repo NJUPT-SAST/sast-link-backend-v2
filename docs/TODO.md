@@ -72,25 +72,23 @@
 
 ### 1.6 领域模型（`internal/domain/`）
 
-- 状态：部分完成 — 8 张 DB 表中 4 张已有模型（user / profile / audit_logs / organize），4 张缺失
+- 状态：已完成 — `docs/psql-db-design.md` 中 8 张核心表均有 GORM domain 模型覆盖，nullable 字段已按 DDL 用 pointer 表达
 
 | 文件 | 说明 |
 |------|------|
-| `user.go` | `User` 实体（GORM，15 字段全对齐 DDL） |
-| `profile.go` | `Profile` 实体（11 字段全对齐 DDL） |
-| `audit.go` | `AuditLog` 实体 + `AuditAction` 枚举（10 种操作类型）。⚠️ 2 个 tag 微差：`success` 缺 `default:true`，`err_code` 缺 `type:int` |
+| `user.go` | `User` 实体（15 字段对齐 DDL；`student_id` 为 nullable `*string`） |
+| `profile.go` | `Profile` 实体（11 字段对齐 DDL；展示字段与 `department` 均为 nullable） |
+| `identity.go` | `Identity` 实体（`identities` 表，含 provider/provider_id 唯一约束、GitHub/Lark partial unique index tag） |
+| `oauth_client.go` | `OAuthClient` 实体（`oauth_clients` 表，含 nullable `client_secret`、TEXT[] 数组字段） |
+| `oauth_auth.go` | `OAuthAuthorization` 实体（`oauth_authorizations` 表；无 `updated_at`，对齐 DDL 生命周期） |
+| `oauth_token.go` | `OAuthAccessToken` + `OAuthRefreshToken` 实体（Token 元数据、refresh token family/sequence） |
+| `audit.go` | `AuditLog` 实体 + `AuditAction` 枚举（10 种操作类型；nullable 字段、`success default:true`、`err_code type:int` 已对齐） |
 | `organize.go` | `Organize` 实体（3 字段全对齐） |
+| `array.go` | `StringArray`，用于 PostgreSQL `TEXT[]` 字段（OAuth scopes / grant_types / redirect_uris） |
 | `enums.go` | 7 种枚举：`UserRole`(4)、`Department`(2)、`LoginMethod`(3)、`UserState`(4)、`EmailType`(2)、`ClientType`(2)、`College`(20) |
-| `errors.go` | `ErrCode`（36 个常量：35 个非零 + `Success=0`）、`AppError`、`NewError` / `WrapError` |
+| `errors.go` | `ErrCode`（35 个非零常量 + `Success=0`）、`AppError`、`NewError` / `WrapError` |
 
-**缺失的模型**（按优先级）：
-
-| 缺失 | 对应表 | 优先级 | 原因 |
-|------|--------|--------|------|
-| `identity.go` | `identities` | 🔴 当前冲刺 | 第 4 步「OAuth 绑定」+ 第 1 步密码登录（第三方邮箱反查）都依赖 |
-| `oauth_token.go` | `oauth_access_tokens` + `oauth_refresh_tokens` | 🔴 当前冲刺 | 第 1 步密码登录/刷新 Token 需写入（PRD §4.4） |
-| `oauth_client.go` | `oauth_clients` | 🟡 第 8-10 步 | OAuth 服务端步骤才用 |
-| `oauth_auth.go` | `oauth_authorizations` | 🟡 第 8 步 | OAuth 授权码步骤才用 |
+**后续缺口**：domain 层已补齐；下一步是为 identities / OAuth token/client/auth 表补 repository、service 和 handler。
 
 ### 1.7 DTO 层（`internal/dto/`）
 
@@ -272,7 +270,7 @@ POST /auth/register                → GetDel 消费 Ticket → 校验 → PBKDF
 | `DELETE /user/identities/:id` — 解绑                | 未开始 |
 
 - `IdentityRepository` 接口与实现均未创建
-- 领域模型 `domain.Identity`（GORM）也未创建 — 组件链缺口：model → repository → service → handler
+- 领域模型 `domain.Identity` 已创建；当前组件链缺口从 repository 开始：repository → service → handler
 - DB 表 `identities` 已在 `docs/psql-db-design.md` 中完整设计（含约束、索引、触发器）
 - OAuth 注册绑定流程（`registration_state` + `oauth_state`）依赖 identities 写入能力，参见 PRD §4.5
 
@@ -286,7 +284,7 @@ POST /auth/register                → GetDel 消费 Ticket → 校验 → PBKDF
 | ------------------------------------------------------------------------------------------------------------- | ---------------------- |
 | [6.1 授权端点](#61-授权端点)（authorize / token / revoke）                                                    | 未开始                 |
 | [6.2 OIDC Provider](#62-oidc-provider)（Discovery / JWKS / UserInfo）                                         | 未开始                 |
-| [6.3 数据表](#63-数据表)（oauth_clients / oauth_authorizations / oauth_access_tokens / oauth_refresh_tokens） | DDL 已完成，代码未开始 |
+| [6.3 数据表](#63-数据表)（oauth_clients / oauth_authorizations / oauth_access_tokens / oauth_refresh_tokens） | DDL + domain 已完成，repository/service 未开始 |
 | 密钥管理（RS256 双密钥轮换，`JWT_SECRET_KEY` + `JWT_SECRET_KEY_PREV`）                                        | 设计已完成             |
 
 ### 6.1 授权端点
@@ -315,10 +313,10 @@ POST /auth/register                → GetDel 消费 Ticket → 校验 → PBKDF
 
 | 事项                                                                 | 状态       |
 | -------------------------------------------------------------------- | ---------- |
-| `oauth_clients` — 客户端注册表                                       | DDL 已完成 |
-| `oauth_authorizations` — 授权码表                                    | DDL 已完成 |
-| `oauth_access_tokens` — Access Token 元数据表                        | DDL 已完成 |
-| `oauth_refresh_tokens` — Refresh Token 表（含 family_id + sequence） | DDL 已完成 |
+| `oauth_clients` — 客户端注册表                                       | DDL + domain 已完成 |
+| `oauth_authorizations` — 授权码表                                    | DDL + domain 已完成 |
+| `oauth_access_tokens` — Access Token 元数据表                        | DDL + domain 已完成 |
+| `oauth_refresh_tokens` — Refresh Token 表（含 family_id + sequence） | DDL + domain 已完成 |
 | pg_cron 定时清理过期授权码 / Token / Refresh Token                   | DDL 已完成 |
 
 ---
@@ -436,7 +434,7 @@ POST /auth/register                → GetDel 消费 Ticket → 校验 → PBKDF
 | 包               | 测试文件              | 覆盖内容                                                 | 状态       |
 | ---------------- | --------------------- | -------------------------------------------------------- | ---------- |
 | `config`         | `config_test.go`      | 默认值加载、自定义值、缺失密钥、DSN、Addr、工具函数      | 已覆盖     |
-| `domain`         | `errors_test.go`      | AppError.Error/Unwrap、NewError、WrapError、错误码唯一性 | 已覆盖     |
+| `domain`         | `errors_test.go`, `array_test.go` | AppError.Error/Unwrap、NewError、WrapError、错误码唯一性；StringArray PostgreSQL TEXT[] 映射 | 已覆盖     |
 | `infra`          | `db_test.go`          | 无效 DSN、DSN 格式、空指针健康检查                       | 已覆盖     |
 | `infra`          | `redis_test.go`       | 已有                                                     | 已覆盖     |
 | `infra`          | `log_test.go`         | 已有                                                     | 已覆盖     |
