@@ -1,7 +1,7 @@
 # SAST Link Backend v2 — 项目进度
 
 > 最后更新：2026-06-07
-> 最新提交：2026-06-05 `7820001` — Merge pull request #8 (fix/prd-alignment)
+> 最新提交：2026-06-07 `02317e4` — fix: docker-compose and .env alignment
 
 ---
 
@@ -39,13 +39,14 @@
 - 状态：已完成
 - Go 1.26.4 + Gin v1.12 + GORM v1.31
 - 标准 Go 项目布局：`cmd/api`、`internal/{config,domain,dto,handler,service,repository,infra,pkg}`
-- Docker 多阶段构建 + docker-compose（PostgreSQL 15 + Redis 7）
+- Docker 多阶段构建 + docker-compose（API 仅含自身容器；接入服务器已有 PostgreSQL / Redis 实例，通过外部 bridge 网络 `postgres` + `redis` 通信）
 
 ### 1.2 配置（`internal/config/config.go`）
 
 - 状态：已完成
-- 全部配置组：App、DB、Redis、JWT、SMTP、CORS、OAuth、Storage、RateLimit
+- 全部配置组：App、DB、Redis、JWT（AccessTokenExpiry 1h + RefreshTokenExpiry 720h）、SMTP、CORS、OAuth（仅 Feishu + GitHub）、Storage（COS）、RateLimit
 - 完全由环境变量驱动，均有默认值
+- JWT 密钥为 RSA 私钥（PEM），通过 `JWT_SECRET_KEY` / `JWT_SECRET_KEY_PREV` 注入，支持 RS256 签名 + JWKS 密钥轮换
 - 关键密钥非空校验（JWT_SECRET_KEY、DB_PASSWORD、REDIS_PASSWORD）
 
 ### 1.3 数据库 / Redis 连接（`internal/infra/`）
@@ -75,12 +76,12 @@
 
 | 文件          | 说明                                                                                                                       |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `user.go`     | `User` 实体（GORM，19 个字段，表名 `"user"`）                                                                              |
+| `user.go`     | `User` 实体（GORM，15 个字段，表名 `"user"`）                                                                              |
 | `profile.go`  | `Profile` 实体（与 User 一对一，表名 `"profile"`）                                                                         |
 | `audit.go`    | `AuditLog` 实体 + `AuditAction` 枚举（10 种操作类型）                                                                      |
 | `organize.go` | `Organize` 实体（表名 `"organize"`）                                                                                       |
 | `enums.go`    | 7 种枚举：`UserRole`(4)、`Department`(2)、`LoginMethod`(3)、`UserState`(4)、`EmailType`(2)、`ClientType`(2)、`College`(20) |
-| `errors.go`   | `ErrCode`（5 位错误码，共 35 个）、`AppError` 结构体、`NewError` / `WrapError`                                             |
+| `errors.go`   | `ErrCode`（5 位错误码，36 个常量：35 个非零错误码 + `Success=0`）、`AppError` 结构体、`NewError` / `WrapError`                                             |
 
 ### 1.7 DTO 层（`internal/dto/`）
 
