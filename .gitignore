@@ -62,3 +62,6 @@ migrate
 
 # Build artifacts
 dist/
+
+# CodeGraph
+.codegraph/
