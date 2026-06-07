@@ -44,7 +44,7 @@ func (s *ProfileService) GetProfile(ctx context.Context, userID int64) (*dto.Use
 		EmailType:   string(u.EmailType),
 		PhoneNumber: u.Phone,
 		QQNumber:    u.QQNumber,
-		StudentID:   u.StudentID,
+		StudentID:   stringValue(u.StudentID),
 		College:     string(u.College),
 		Major:       u.Major,
 		CreatedAt:   u.CreatedAt.Format("2006-01-02T15:04:05Z"),
@@ -53,13 +53,13 @@ func (s *ProfileService) GetProfile(ctx context.Context, userID int64) (*dto.Use
 
 	if p != nil {
 		result.Profile = &dto.ProfileData{
-			Nickname:   p.Nickname,
-			Department: string(p.Department),
-			Intro:      p.Intro,
-			Email:      p.Email,
-			Avatar:     p.Avatar,
-			BlogURL:    p.BlogURL,
-			GitHubURL:  p.GitHubURL,
+			Nickname:   stringValue(p.Nickname),
+			Department: departmentValue(p.Department),
+			Intro:      stringValue(p.Intro),
+			Email:      stringValue(p.Email),
+			Avatar:     stringValue(p.Avatar),
+			BlogURL:    stringValue(p.BlogURL),
+			GitHubURL:  stringValue(p.GitHubURL),
 			CreatedAt:  p.CreatedAt.Format("2006-01-02T15:04:05Z"),
 			UpdatedAt:  p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 		}
@@ -107,7 +107,7 @@ func (s *ProfileService) UpdateProfile(ctx context.Context, userID int64, req *d
 		userChanged = true
 	}
 	if req.StudentID != "" {
-		u.StudentID = req.StudentID
+		u.StudentID = stringPtr(req.StudentID)
 		userChanged = true
 	}
 
@@ -132,7 +132,7 @@ func (s *ProfileService) UpdateProfile(ctx context.Context, userID int64, req *d
 
 	profileChanged := false
 	if req.Nickname != "" {
-		p.Nickname = req.Nickname
+		p.Nickname = stringPtr(req.Nickname)
 		profileChanged = true
 	}
 	if req.Department != "" {
@@ -140,23 +140,23 @@ func (s *ProfileService) UpdateProfile(ctx context.Context, userID int64, req *d
 		if !isValidDepartment(dep) {
 			return domain.NewError(domain.ErrInvalidParams, "无效的部门值，可选值为 software 或 media")
 		}
-		p.Department = dep
+		p.Department = &dep
 		profileChanged = true
 	}
 	if req.Intro != "" {
-		p.Intro = req.Intro
+		p.Intro = stringPtr(req.Intro)
 		profileChanged = true
 	}
 	if req.Email != "" {
-		p.Email = req.Email
+		p.Email = stringPtr(req.Email)
 		profileChanged = true
 	}
 	if req.BlogURL != "" {
-		p.BlogURL = req.BlogURL
+		p.BlogURL = stringPtr(req.BlogURL)
 		profileChanged = true
 	}
 	if req.GitHubURL != "" {
-		p.GitHubURL = req.GitHubURL
+		p.GitHubURL = stringPtr(req.GitHubURL)
 		profileChanged = true
 	}
 
@@ -167,6 +167,13 @@ func (s *ProfileService) UpdateProfile(ctx context.Context, userID int64, req *d
 	}
 
 	return nil
+}
+
+func departmentValue(v *domain.Department) string {
+	if v == nil {
+		return ""
+	}
+	return string(*v)
 }
 
 // isValidDepartment checks whether a department value is valid.

@@ -30,12 +30,12 @@ type AuditLog struct {
 	UserID     *int64         `gorm:"column:user_id;index" json:"user_id,omitempty"`
 	Action     AuditAction    `gorm:"column:action;type:varchar(50);not null;index" json:"action"`
 	Resource   string         `gorm:"column:resource;type:varchar(50);not null" json:"resource"`
-	ResourceID string         `gorm:"column:resource_id;type:varchar(255)" json:"resource_id,omitempty"`
+	ResourceID *string        `gorm:"column:resource_id;type:varchar(255)" json:"resource_id,omitempty"`
 	Detail     datatypes.JSON `gorm:"column:detail;type:jsonb;default:'{}'" json:"detail"`
-	ClientIP   string         `gorm:"column:client_ip;type:inet" json:"client_ip,omitempty"`
-	UserAgent  string         `gorm:"column:user_agent;type:text" json:"user_agent,omitempty"`
-	Success    bool           `gorm:"column:success;not null" json:"success"`
-	ErrCode    *int           `gorm:"column:err_code" json:"err_code,omitempty"`
+	ClientIP   *string        `gorm:"column:client_ip;type:inet" json:"client_ip,omitempty"`
+	UserAgent  *string        `gorm:"column:user_agent;type:text" json:"user_agent,omitempty"`
+	Success    bool           `gorm:"column:success;not null;default:true" json:"success"`
+	ErrCode    *int           `gorm:"column:err_code;type:int" json:"err_code,omitempty"`
 	CreatedAt  time.Time      `gorm:"column:created_at;type:timestamptz;not null;default:now()" json:"created_at"`
 }
 

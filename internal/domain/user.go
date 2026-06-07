@@ -11,7 +11,7 @@ type User struct {
 	QQNumber     string    `gorm:"column:qq_number;type:varchar(20);not null"`
 	Password     string    `gorm:"column:password;type:varchar(512);not null"`
 	TokenVersion int       `gorm:"column:token_version;type:int;not null;default:0"`
-	StudentID    string    `gorm:"column:student_id;type:varchar(50);uniqueIndex"`
+	StudentID    *string   `gorm:"column:student_id;type:varchar(50);uniqueIndex"`
 	State        UserState `gorm:"column:state;type:state_enum;not null;default:njupter"`
 	EmailType    EmailType `gorm:"column:email_type;type:email_enum;not null"`
 	LoginEmail   string    `gorm:"column:login_email;type:varchar(255);uniqueIndex;not null"`

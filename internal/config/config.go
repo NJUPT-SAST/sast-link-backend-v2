@@ -12,14 +12,14 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	App        AppConfig        `mapstructure:"app"`
-	DB         DBConfig         `mapstructure:"db"`
-	Redis      RedisConfig      `mapstructure:"redis"`
-	JWT        JWTConfig        `mapstructure:"jwt"`
-	SMTP       SMTPConfig       `mapstructure:"smtp"`
-	CORS       CORSConfig       `mapstructure:"cors"`
-	OAuth      OAuthConfig      `mapstructure:"oauth"`
-	Storage    StorageConfig    `mapstructure:"storage"`
+	App       AppConfig       `mapstructure:"app"`
+	DB        DBConfig        `mapstructure:"db"`
+	Redis     RedisConfig     `mapstructure:"redis"`
+	JWT       JWTConfig       `mapstructure:"jwt"`
+	SMTP      SMTPConfig      `mapstructure:"smtp"`
+	CORS      CORSConfig      `mapstructure:"cors"`
+	OAuth     OAuthConfig     `mapstructure:"oauth"`
+	Storage   StorageConfig   `mapstructure:"storage"`
 	RateLimit RateLimitConfig `mapstructure:"rate_limit"`
 }
 
