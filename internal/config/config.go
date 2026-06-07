@@ -89,7 +89,7 @@ type OAuthConfig struct {
 
 // StorageConfig holds object storage settings.
 type StorageConfig struct {
-	Provider  string `mapstructure:"provider"` // s3, cos, minio
+	Provider  string `mapstructure:"provider"` // cos
 	Endpoint  string `mapstructure:"endpoint"`
 	Region    string `mapstructure:"region"`
 	Bucket    string `mapstructure:"bucket"`
@@ -100,8 +100,8 @@ type StorageConfig struct {
 
 // RateLimitConfig holds rate limiting settings.
 type RateLimitConfig struct {
-	GlobalRPS    int `mapstructure:"global_rps"`     // global requests per minute per IP
-	LoginRPM     int `mapstructure:"login_rpm"`      // login requests per minute per account
+	GlobalRPS    int `mapstructure:"global_rps"`     // global requests per second per IP
+	LoginRPM     int `mapstructure:"login_rpm"`      // login requests per minute per IP
 	SendEmailRPM int `mapstructure:"send_email_rpm"` // send email requests per minute per account
 	CaptchaRPM   int `mapstructure:"captcha_rpm"`    // captcha verify requests per minute per IP
 	RegisterRPH  int `mapstructure:"register_rph"`   // register requests per hour per IP
@@ -161,7 +161,7 @@ func Load() (*Config, error) {
 	v.SetDefault("oauth.github.redirect_uri", getEnv("OAUTH_GITHUB_REDIRECT_URI", ""))
 
 	// Storage defaults
-	v.SetDefault("storage.provider", getEnv("STORAGE_PROVIDER", "minio"))
+	v.SetDefault("storage.provider", getEnv("STORAGE_PROVIDER", "cos"))
 	v.SetDefault("storage.endpoint", getEnv("STORAGE_ENDPOINT", ""))
 	v.SetDefault("storage.region", getEnv("STORAGE_REGION", ""))
 	v.SetDefault("storage.bucket", getEnv("STORAGE_BUCKET", ""))

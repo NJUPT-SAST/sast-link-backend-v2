@@ -23,7 +23,7 @@ WORKDIR /app
 RUN apk --no-cache add ca-certificates wget
 
 COPY --from=builder /app/bin/api /app/api
-COPY --from=builder /app/migrations /app/migrations
+COPY --from=builder /app/docs/migrations /app/docs/migrations
 
 RUN adduser -D -g '' appuser
 USER appuser
