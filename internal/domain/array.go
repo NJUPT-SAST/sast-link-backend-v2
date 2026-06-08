@@ -56,7 +56,7 @@ func (a *StringArray) scanString(src string) error {
 
 	flush := func() error {
 		value := item.String()
-		if !quoted && value == "NULL" {
+		if !quoted && strings.EqualFold(value, "NULL") {
 			return fmt.Errorf("scan StringArray: NULL array element is not supported in %q", src)
 		}
 		items = append(items, value)
