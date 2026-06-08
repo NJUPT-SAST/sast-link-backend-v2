@@ -151,7 +151,7 @@ func (s *RegisterService) Register(ctx context.Context, req *dto.RegisterRequest
 		QQNumber:     req.QQNumber,
 		Password:     hash,
 		TokenVersion: 0,
-		StudentID:    req.StudentID,
+		StudentID:    stringPtr(req.StudentID),
 		State:        domain.UserStateNJUPter,
 		EmailType:    emailType,
 		LoginEmail:   email,
@@ -165,8 +165,8 @@ func (s *RegisterService) Register(ctx context.Context, req *dto.RegisterRequest
 
 	profile := &domain.Profile{
 		UserID:   user.ID,
-		Nickname: req.Name,
-		Email:    email,
+		Nickname: stringPtr(req.Name),
+		Email:    stringPtr(email),
 	}
 
 	if err := s.profileRepo.Create(ctx, profile); err != nil {
