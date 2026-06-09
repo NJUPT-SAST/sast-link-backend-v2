@@ -1,0 +1,3079 @@
+openapi: 3.0.1
+info:
+  title: vibe-API-v2.1
+  description: |
+    SAST Link v2 统一认证与用户中心 API。
+
+    - Base URL: `https://link.sast.fun/v2`
+    - 认证方式: JWT Bearer Token（`Authorization: Bearer <access_token>`）
+    - Content-Type: `application/json`
+    - OAuth 2.1: 授权端点使用 PKCE-S256，第一方应用无需 client_secret
+    - OIDC Provider: 基于 OAuth 2.1 的 OpenID Connect 认证层，scope 含 openid 时返回 ID Token
+    - 响应格式: 所有接口统一使用标准化响应信封，OAuth 端点遵循 RFC 6749 错误格式
+  version: 2.0.0
+  contact:
+    name: SAST
+    url: https://sast.fun
+tags:
+  - name: Auth
+  - name: OAuth Login
+  - name: Profile
+  - name: Identities
+  - name: OAuth 2.1 Server
+  - name: Admin
+  - name: Health
+  - name: OIDC
+paths:
+  /auth/register/send-code:
+    post:
+      summary: 发送注册验证码
+      deprecated: false
+      description: 向指定邮箱发送注册验证码。邮箱域名必须为 `@njupt.edu.cn` 或 `@sast.fun`。
+      operationId: authSendRegisterCode
+      tags:
+        - Auth
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - login_email
+              properties:
+                login_email:
+                  type: string
+                  format: email
+                  description: 注册邮箱
+                  example: b2404****@njupt.edu.cn
+            examples: {}
+        required: true
+      responses:
+        '200':
+          description: 验证码已发送
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendCodeResponse'
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: 频率限制（429xx）
+      security: []
+  /auth/register/verify-code:
+    post:
+      summary: 验证注册验证码
+      deprecated: false
+      description: 注册第一步。验证邮箱验证码，返回 Register-Ticket（Redis，5 分钟，一次性）。
+      operationId: authVerifyRegisterCode
+      tags:
+        - Auth
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - login_email
+                - code
+              properties:
+                login_email:
+                  type: string
+                  format: email
+                  description: 注册邮箱
+                code:
+                  type: string
+                  description: 邮箱验证码
+                  example: '123456'
+            examples: {}
+        required: true
+      responses:
+        '200':
+          description: 验证成功，返回 Register-Ticket
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterTicketResponse'
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+      security: []
+  /auth/register:
+    post:
+      summary: 完成注册
+      deprecated: false
+      description: >-
+        注册第二步。凭 Register-Ticket + 补充信息完成注册，成功后自动签发 Token。若传入
+        oauth_state，注册成功后自动创建对应的 identities 绑定记录。
+      operationId: authCompleteRegister
+      tags:
+        - Auth
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - register_ticket
+                - password
+                - name
+                - phone_number
+                - qq_number
+                - college
+                - major
+                - student_id
+              properties:
+                register_ticket:
+                  type: string
+                  description: 验证码验证后下发的 Register-Ticket
+                password:
+                  type: string
+                  minLength: 8
+                  description: 登录密码，最短 8 位
+                  example: your_password
+                name:
+                  type: string
+                  description: 真实姓名
+                  example: 张三
+                phone_number:
+                  type: string
+                  description: 手机号
+                  example: '13800138000'
+                qq_number:
+                  type: string
+                  description: QQ 号
+                  example: '1234567890'
+                registration_state:
+                  type: string
+                  description: 第三方 OAuth 回调下发的注册暂存令牌（可选，需与 oauth_state 配套使用）
+                oauth_state:
+                  type: string
+                  description: 原始 OAuth CSRF state 参数（可选，与 registration_state 配套校验）
+                college:
+                  $ref: '#/components/schemas/College'
+                  description: 学院
+                major:
+                  type: string
+                  description: 专业
+                student_id:
+                  type: string
+                  maxLength: 50
+                  description: 学号
+            examples: {}
+        required: true
+      responses:
+        '201':
+          description: 注册成功并返回 Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResultResponse'
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 资源冲突（409xx）
+      security: []
+  /user/login:
+    post:
+      summary: 密码登录
+      deprecated: false
+      description: 支持教育邮箱和第三方邮箱密码登录。
+      operationId: authPasswordLogin
+      tags:
+        - Auth
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - login_email
+                - password
+              properties:
+                login_email:
+                  type: string
+                  format: email
+                  description: 登录邮箱
+                password:
+                  type: string
+                  description: 登录密码
+            examples: {}
+        required: true
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResultResponse'
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+      security: []
+  /auth/refresh:
+    post:
+      summary: 刷新 Token（内部登录用）
+      deprecated: false
+      description: >-
+        Refresh Token 旋转机制，每次使用后旧 token 撤销，下发新 token。OAuth 客户端请用 `POST
+        /oauth/token`（grant_type=refresh_token）。
+      operationId: authRefreshToken
+      tags:
+        - Auth
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - refresh_token
+              properties:
+                refresh_token:
+                  type: string
+                  description: 刷新令牌
+                  example: rt_abc123...
+            examples: {}
+        required: true
+      responses:
+        '200':
+          description: Token 刷新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenRefreshResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+      security: []
+  /auth/logout:
+    post:
+      summary: 登出
+      deprecated: false
+      description: 撤销当前 access_token（jti）及整条 refresh_token family。
+      operationId: authLogout
+      tags:
+        - Auth
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - refresh_token
+              properties:
+                refresh_token:
+                  type: string
+                  description: 刷新令牌
+        required: true
+      responses:
+        '200':
+          description: 登出成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+          headers: {}
+      security:
+        - bearerAuth: []
+  /auth/change-password:
+    post:
+      summary: 修改密码
+      deprecated: false
+      description: 新密码最短 8 位，修改成功后撤销该用户所有 token family。
+      operationId: authChangePassword
+      tags:
+        - Auth
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - old_password
+                - new_password
+              properties:
+                old_password:
+                  type: string
+                  description: 旧密码
+                new_password:
+                  type: string
+                  minLength: 8
+                  description: 新密码，最短 8 位
+        required: true
+      responses:
+        '200':
+          description: 密码修改成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: 业务校验失败（422xx）
+      security:
+        - bearerAuth: []
+  /auth/forgot-password/send-code:
+    post:
+      summary: 发送重置密码验证码
+      deprecated: false
+      description: ''
+      operationId: authSendForgotPasswordCode
+      tags:
+        - Auth
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - login_email
+              properties:
+                login_email:
+                  type: string
+                  format: email
+                  description: 注册邮箱
+            examples: {}
+        required: true
+      responses:
+        '200':
+          description: 验证码已发送
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendCodeResponse'
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: 频率限制（429xx）
+      security: []
+  /auth/reset-password:
+    post:
+      summary: 重置密码
+      deprecated: false
+      description: 新密码最短 8 位。
+      operationId: authResetPassword
+      tags:
+        - Auth
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - login_email
+                - code
+                - new_password
+              properties:
+                login_email:
+                  type: string
+                  format: email
+                  description: 注册邮箱
+                code:
+                  type: string
+                  description: 邮箱验证码
+                new_password:
+                  type: string
+                  minLength: 8
+                  description: 新密码，最短 8 位
+            examples: {}
+        required: true
+      responses:
+        '200':
+          description: 密码重置成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+      security: []
+  /oauth/github:
+    get:
+      summary: GitHub 登录
+      deprecated: false
+      description: 重定向至 GitHub OAuth 授权页。
+      operationId: oauthLoginGithub
+      tags:
+        - OAuth Login
+      parameters: []
+      responses:
+        '302':
+          description: 重定向至 GitHub OAuth 授权页
+          headers: {}
+      security: []
+  /oauth/github/callback:
+    get:
+      summary: GitHub 回调
+      deprecated: false
+      description: >
+        处理 GitHub OAuth 回调。
+
+        - 已有绑定 → 签发一次性 login_code，302 重定向至前端 `?code=<login_code>`
+
+        - 无绑定 → 生成 registration_state（Redis，15min），302 重定向至注册补全页
+        `?registration_state=<registration_state>&provider=github&name=<login>&avatar=<url>`
+      operationId: oauthGithubCallback
+      tags:
+        - OAuth Login
+      parameters:
+        - name: code
+          in: query
+          description: GitHub 授权码
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          description: CSRF 状态值
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: 重定向至前端
+          headers: {}
+      security: []
+  /oauth/lark:
+    get:
+      summary: 飞书登录
+      deprecated: false
+      description: 重定向至飞书 OAuth 授权页。
+      operationId: oauthLoginLark
+      tags:
+        - OAuth Login
+      parameters: []
+      responses:
+        '302':
+          description: 重定向至飞书 OAuth 授权页
+          headers: {}
+      security: []
+  /oauth/lark/callback:
+    get:
+      summary: 飞书回调
+      deprecated: false
+      description: >
+        处理飞书 OAuth 回调，仅限 SAST 企业内飞书用户。
+
+        - 已有绑定 → 签发一次性 login_code，302 重定向至前端
+
+        - 无绑定 → 生成 registration_state（Redis，15min），302 重定向至注册补全页
+        `?registration_state=<registration_state>&provider=lark&name=<name>&avatar=<url>`
+
+        - 非 SAST 企业用户 → 拒绝
+      operationId: oauthLarkCallback
+      tags:
+        - OAuth Login
+      parameters:
+        - name: code
+          in: query
+          description: 飞书授权码
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          description: CSRF 状态值
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: 重定向至前端
+          headers: {}
+      security: []
+  /oauth/exchange-code:
+    post:
+      summary: 交换登录码
+      deprecated: false
+      description: 用 OAuth 回调中的一次性 login_code（Redis，60 秒）换取 token。
+      operationId: authExchangeLoginCode
+      tags:
+        - OAuth Login
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - code
+              properties:
+                code:
+                  type: string
+                  description: 一次性登录码
+                  example: lc_abc123...
+            examples: {}
+        required: true
+      responses:
+        '200':
+          description: 交换成功，返回 Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResultResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+      security: []
+  /user/profile:
+    get:
+      summary: 获取当前用户信息
+      deprecated: false
+      description: ''
+      operationId: userGetProfile
+      tags:
+        - Profile
+      parameters: []
+      responses:
+        '200':
+          description: 用户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+      security:
+        - bearerAuth: []
+    put:
+      summary: 更新用户资料
+      deprecated: false
+      description: |
+        更新当前登录用户可自助维护的个人信息。允许更新 user 表中的基础信息
+        （真实姓名、手机号、QQ 号、学院、专业、学号）以及 profile 表中的展示资料。
+        登录邮箱、角色、状态、邮箱类型等身份与权限字段不可通过此接口修改。
+      operationId: userUpdateProfile
+      tags:
+        - Profile
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name:
+                  type: string
+                  maxLength: 255
+                  description: 真实姓名
+                  example: 张三
+                phone_number:
+                  type: string
+                  maxLength: 20
+                  description: 手机号
+                  example: '13800138000'
+                qq_number:
+                  type: string
+                  maxLength: 20
+                  description: QQ 号
+                  example: '1234567890'
+                college:
+                  $ref: '#/components/schemas/College'
+                  description: 学院
+                  example: 计算机学院
+                major:
+                  type: string
+                  maxLength: 50
+                  description: 专业
+                  example: 软件工程
+                student_id:
+                  type: string
+                  maxLength: 50
+                  description: 学号
+                  example: B2404****
+                nickname:
+                  type: string
+                  maxLength: 255
+                  description: 昵称
+                  example: 新昵称
+                department:
+                  $ref: '#/components/schemas/Department'
+                intro:
+                  type: string
+                  maxLength: 255
+                  description: 自我介绍
+                  example: 新的自我介绍
+                email:
+                  type: string
+                  format: email
+                  maxLength: 255
+                  description: 对外展示邮箱
+                  example: display@example.com
+                blog_url:
+                  type: string
+                  format: uri
+                  maxLength: 512
+                  description: 个人博客链接
+                  example: https://blog.example.com
+                github_url:
+                  type: string
+                  format: uri
+                  maxLength: 512
+                  description: GitHub 主页链接
+                  example: https://github.com/example
+        required: true
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileUpdateResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: 业务校验失败（422xx）
+      security:
+        - bearerAuth: []
+  /user/avatar:
+    put:
+      summary: 上传头像
+      deprecated: false
+      description: ''
+      operationId: userUploadAvatar
+      tags:
+        - Profile
+      parameters: []
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 图片文件（限制 5MB，格式 jpg/png/webp）
+                  example: ''
+              required:
+                - file
+        required: true
+      responses:
+        '200':
+          description: 上传成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvatarUploadResponse'
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '500':
+          $ref: '#/components/responses/InternalError'
+          description: 服务端错误（500xx）
+      security:
+        - bearerAuth: []
+  /user/identities:
+    get:
+      summary: 获取绑定列表
+      deprecated: false
+      description: ''
+      operationId: userListIdentities
+      tags:
+        - Identities
+      parameters: []
+      responses:
+        '200':
+          description: 绑定列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentitiesListResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+      security:
+        - bearerAuth: []
+  /user/identities/lark:
+    post:
+      summary: 绑定飞书
+      deprecated: false
+      description: 每个用户只能绑定一个飞书账号，每个飞书账号只能绑定一个用户。
+      operationId: userBindLark
+      tags:
+        - Identities
+      parameters:
+        - name: code
+          in: query
+          description: 飞书 OAuth 授权码
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 绑定成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityBindResponse'
+          headers: {}
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 资源冲突（409xx）
+      security:
+        - bearerAuth: []
+  /user/identities/github:
+    post:
+      summary: 绑定 GitHub
+      deprecated: false
+      description: 每个用户只能绑定一个 GitHub 账号，每个 GitHub 账号只能绑定一个用户。
+      operationId: userBindGithub
+      tags:
+        - Identities
+      parameters:
+        - name: code
+          in: query
+          description: GitHub OAuth 授权码
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 绑定成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityBindResponse'
+          headers: {}
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 资源冲突（409xx）
+      security:
+        - bearerAuth: []
+  /user/identities/email:
+    post:
+      summary: 绑定其他邮箱（第一步）
+      deprecated: false
+      description: 返回 Bind-Ticket（Redis，5 分钟，一次性），内部携带待绑定邮箱地址。
+      operationId: userRequestBindEmail
+      tags:
+        - Identities
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: 待绑定的第三方邮箱
+                  example: myemail@qq.com
+        required: true
+      responses:
+        '200':
+          description: 返回 Bind-Ticket
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BindTicketResponse'
+          headers: {}
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 资源冲突（409xx）
+      security:
+        - bearerAuth: []
+  /user/identities/email/verify:
+    post:
+      summary: 确认绑定其他邮箱（第二步）
+      deprecated: false
+      description: 凭 Bind-Ticket + 验证码完成绑定。每个用户最多绑定 2 个第三方邮箱。
+      operationId: userVerifyBindEmail
+      tags:
+        - Identities
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - bind_ticket
+                - code
+              properties:
+                bind_ticket:
+                  type: string
+                  description: 绑定票据
+                code:
+                  type: string
+                  description: 邮箱验证码
+        required: true
+      responses:
+        '200':
+          description: 绑定成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityBindResponse'
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 资源冲突（409xx）
+      security:
+        - bearerAuth: []
+  /user/identities/{id}:
+    delete:
+      summary: 解绑第三方账号
+      deprecated: false
+      description: 必须输入当前密码进行二次确认。主邮箱（user.login_email）不在 identities 中，不可通过此接口解绑。
+      operationId: userUnbindIdentity
+      tags:
+        - Identities
+      parameters:
+        - name: id
+          in: path
+          description: 绑定记录 ID
+          required: true
+          example: 0
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password:
+                  type: string
+                  description: 当前密码，用于二次确认
+              required:
+                - password
+            examples: {}
+        required: true
+      responses:
+        '200':
+          description: 解绑成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: 资源不存在（404xx）
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: 业务校验失败（422xx）
+      security:
+        - bearerAuth: []
+  /oauth/authorize:
+    get:
+      summary: 授权端点
+      deprecated: false
+      description: |
+        检查用户登录状态 → 展示授权页 → 用户同意后重定向至 redirect_uri，携带 code 和 state。
+        使用 PKCE-S256 进行授权码交换。错误时重定向携带 error 参数。
+      operationId: oauthAuthorize
+      tags:
+        - OAuth 2.1 Server
+      parameters:
+        - name: response_type
+          in: query
+          description: 固定值 `code`
+          required: true
+          schema:
+            type: string
+            enum:
+              - code
+        - name: client_id
+          in: query
+          description: 客户端标识
+          required: true
+          schema:
+            type: string
+        - name: redirect_uri
+          in: query
+          description: 回调地址
+          required: true
+          schema:
+            type: string
+            format: uri
+        - name: scopes
+          in: query
+          description: 授权范围，空格分隔（如 `openid profile`），对应数据库 scopes 字段
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          description: CSRF 防护，客户端生成随机字符串，回调时原样返回
+          required: true
+          schema:
+            type: string
+        - name: code_challenge
+          in: query
+          description: PKCE code challenge
+          required: true
+          schema:
+            type: string
+        - name: code_challenge_method
+          in: query
+          description: PKCE 挑战方法（S256 或 plain）
+          required: true
+          schema:
+            type: string
+            enum:
+              - S256
+              - plain
+        - name: nonce
+          in: query
+          description: OIDC nonce（可选参数）
+          required: false
+          schema:
+            type: string
+      responses:
+        '302':
+          description: >-
+            重定向至 redirect_uri，携带 code 和 state。错误时携带 error 参数（如
+            `?error=invalid_request&error_description=...`）。
+          headers: {}
+      security: []
+  /oauth/token:
+    post:
+      summary: Token 端点
+      deprecated: false
+      description: |
+        支持 grant_type: `authorization_code` 和 `refresh_token`。
+        第一方应用使用 PKCE 无需 client_secret，第三方应用需提供 client_secret。
+        此端点不遵循标准响应信封，成功和错误均使用 RFC 6749 格式。
+        scope 包含 `openid` 时，响应额外返回 `id_token`（RS256 签名 JWT）。
+      operationId: oauthToken
+      tags:
+        - OAuth 2.1 Server
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthTokenRequest'
+            examples:
+              auth_code_first_party:
+                value:
+                  grant_type: authorization_code
+                  code: auth_code_abc123...
+                  redirect_uri: https://app.example.com/callback
+                  client_id: 381c34b9-14a4-4df9-a9db-40c2455be09f
+                  code_verifier: pkce_verifier_raw_string...
+                summary: 第一方应用 - 授权码模式
+              auth_code_third_party:
+                value:
+                  grant_type: authorization_code
+                  code: auth_code_abc123...
+                  redirect_uri: https://app.example.com/callback
+                  client_id: 381c34b9-14a4-4df9-a9db-40c2455be09f
+                  client_secret: 3K7mDzX434GbFm9YAePJ9FXQNjT6MF0U
+                  code_verifier: pkce_verifier_raw_string...
+                summary: 第三方应用 - 授权码模式
+              refresh_token_first_party:
+                value:
+                  grant_type: refresh_token
+                  refresh_token: rt_abc123...
+                  client_id: 381c34b9-14a4-4df9-a9db-40c2455be09f
+                summary: 第一方应用 - 刷新 Token
+              refresh_token_third_party:
+                value:
+                  grant_type: refresh_token
+                  refresh_token: rt_abc123...
+                  client_id: 381c34b9-14a4-4df9-a9db-40c2455be09f
+                  client_secret: 3K7mDzX434GbFm9YAePJ9FXQNjT6MF0U
+                summary: 第三方应用 - 刷新 Token
+        required: true
+      responses:
+        '200':
+          description: Token 签发成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthTokenResponse'
+          headers: {}
+        '400':
+          description: OAuth 错误（RFC 6749 格式）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthError'
+          headers: {}
+      security: []
+  /oauth/revoke:
+    post:
+      summary: Token 撤销
+      deprecated: false
+      description: 撤销整条 token family。
+      operationId: oauthRevokeToken
+      tags:
+        - OAuth 2.1 Server
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - token
+                - client_id
+              properties:
+                token:
+                  type: string
+                  description: 待撤销的 token
+                  example: rt_abc123...
+                token_type_hint:
+                  type: string
+                  enum:
+                    - access_token
+                    - refresh_token
+                  description: Token 类型提示
+                client_id:
+                  type: string
+                  description: 客户端标识
+        required: true
+      responses:
+        '200':
+          description: 撤销成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthRevokeResponse'
+          headers: {}
+      security: []
+  /.well-known/openid-configuration:
+    get:
+      summary: OIDC Discovery
+      deprecated: false
+      description: |
+        返回 OpenID Connect Discovery 文档，描述 OIDC Provider 的端点、支持的作用域、签名算法等元数据。
+        符合 [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) 规范。
+      operationId: oidcDiscovery
+      tags:
+        - OIDC
+      parameters: []
+      responses:
+        '200':
+          description: OIDC Discovery 文档
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenIDConfiguration'
+          headers: {}
+      security: []
+  /.well-known/jwks.json:
+    get:
+      summary: JWKS 公钥集
+      deprecated: false
+      description: |
+        返回 RS256 签名公钥集（JSON Web Key Set），用于验证 ID Token 和 Access Token 的签名。
+      operationId: oidcJwks
+      tags:
+        - OIDC
+      parameters: []
+      responses:
+        '200':
+          description: JWK Set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JWKS'
+          headers: {}
+      security: []
+  /userinfo:
+    get:
+      summary: UserInfo 端点（GET）
+      deprecated: false
+      description: |
+        返回当前认证用户的身份信息。响应内容根据 Token 的 scopes 决定：
+        - `openid` 至少返回 `sub`
+        - `profile` 额外返回 name / picture / preferred_username / profile 等
+        - `email` 额外返回 email / email_verified
+
+        符合 [OpenID Connect Core 1.0 — UserInfo Endpoint](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo) 规范。
+      operationId: oidcUserInfoGet
+      tags:
+        - OIDC
+      parameters: []
+      responses:
+        '200':
+          description: 用户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfoResponse'
+          headers: {}
+        '401':
+          description: 未认证或 Token 无效
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: invalid_token
+                  error_description:
+                    type: string
+                    example: The access token is invalid or expired
+      security:
+        - bearerAuth: []
+    post:
+      summary: UserInfo 端点（POST）
+      deprecated: false
+      description: |
+        UserInfo 端点的 POST 变体，功能与 GET 完全一致。
+        部分 OIDC 客户端偏好 POST 以避免 Token 出现在服务器日志中。
+      operationId: oidcUserInfoPost
+      tags:
+        - OIDC
+      parameters: []
+      responses:
+        '200':
+          description: 用户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfoResponse'
+          headers: {}
+        '401':
+          description: 未认证或 Token 无效
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: invalid_token
+                  error_description:
+                    type: string
+                    example: The access token is invalid or expired
+      security:
+        - bearerAuth: []
+  /admin/users:
+    get:
+      summary: 用户列表
+      deprecated: false
+      description: 需 admin 或 lecturer 角色。
+      operationId: adminListUsers
+      tags:
+        - Admin
+      parameters:
+        - name: page
+          in: query
+          description: 页码，默认 1
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          description: 每页条数，默认 20，最大 100
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: role
+          in: query
+          description: 筛选角色
+          required: false
+          schema:
+            $ref: '#/components/schemas/UserRole'
+        - name: state
+          in: query
+          description: 筛选状态
+          required: false
+          schema:
+            $ref: '#/components/schemas/UserState'
+        - name: department
+          in: query
+          description: 筛选部门
+          required: false
+          schema:
+            $ref: '#/components/schemas/Department'
+        - name: college
+          in: query
+          description: 筛选学院
+          required: false
+          schema:
+            $ref: '#/components/schemas/College'
+        - name: major
+          in: query
+          description: 筛选专业
+          required: false
+          schema:
+            type: string
+        - name: keyword
+          in: query
+          description: 搜索关键词（姓名/学号/邮箱模糊匹配）
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 分页用户列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUsersListResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 无权限（403xx）
+      security:
+        - bearerAuth: []
+  /admin/users/{id}:
+    get:
+      summary: 用户详情
+      deprecated: false
+      description: 需 admin 或 lecturer 角色。
+      operationId: adminGetUserDetail
+      tags:
+        - Admin
+      parameters:
+        - name: id
+          in: path
+          description: 用户 ID
+          required: true
+          example: 0
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 用户详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 无权限（403xx）
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: 资源不存在（404xx）
+      security:
+        - bearerAuth: []
+    put:
+      summary: 更新用户
+      deprecated: false
+      description: 需 admin 角色。
+      operationId: adminUpdateUser
+      tags:
+        - Admin
+      parameters:
+        - name: id
+          in: path
+          description: 用户 ID
+          required: true
+          example: 0
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name:
+                  type: string
+                  maxLength: 255
+                  description: 真实姓名
+                phone_number:
+                  type: string
+                  maxLength: 20
+                  description: 手机号
+                qq_number:
+                  type: string
+                  maxLength: 20
+                  description: QQ 号
+                college:
+                  $ref: '#/components/schemas/College'
+                  description: 学院
+                major:
+                  type: string
+                  maxLength: 50
+                  description: 专业
+                student_id:
+                  type: string
+                  maxLength: 50
+                  description: 学号
+                role:
+                  $ref: '#/components/schemas/UserRole'
+                  description: 用户角色
+                state:
+                  $ref: '#/components/schemas/UserState'
+                  description: 用户状态
+                email_type:
+                  $ref: '#/components/schemas/EmailType'
+                  description: 注册邮箱类型
+        required: true
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 无权限（403xx）
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: 资源不存在（404xx）
+      security:
+        - bearerAuth: []
+    delete:
+      summary: 注销用户（软删除）
+      deprecated: false
+      description: 需 admin 角色。将 user.state 设为 is_deleted，保留数据，级联撤销所有 token family。
+      operationId: adminDeleteUser
+      tags:
+        - Admin
+      parameters:
+        - name: id
+          in: path
+          description: 用户 ID
+          required: true
+          example: 0
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 注销成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 无权限（403xx）
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: 资源不存在（404xx）
+      security:
+        - bearerAuth: []
+  /admin/users/{id}/restore:
+    put:
+      summary: 恢复已注销用户
+      deprecated: false
+      description: 需 admin 角色。将 user.state 从 is_deleted 恢复至 njupter。
+      operationId: adminRestoreUser
+      tags:
+        - Admin
+      parameters:
+        - name: id
+          in: path
+          description: 用户 ID
+          required: true
+          example: 0
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 恢复成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 无权限（403xx）
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: 资源不存在（404xx）
+      security:
+        - bearerAuth: []
+  /admin/oauth-clients:
+    get:
+      summary: OAuth 客户端列表
+      deprecated: false
+      description: 需 admin 角色。
+      operationId: adminListOAuthClients
+      tags:
+        - Admin
+      parameters: []
+      responses:
+        '200':
+          description: 客户端列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminOAuthClientsListResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 无权限（403xx）
+      security:
+        - bearerAuth: []
+    post:
+      summary: 注册 OAuth 客户端
+      deprecated: false
+      description: 需 admin 角色。第一方应用不返回 client_secret。
+      operationId: adminCreateOAuthClient
+      tags:
+        - Admin
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - client_name
+                - client_type
+                - redirect_uris
+                - grant_types
+                - scopes
+              properties:
+                client_name:
+                  type: string
+                  description: 应用名称
+                  example: 新应用
+                client_type:
+                  $ref: '#/components/schemas/ClientType'
+                redirect_uris:
+                  type: array
+                  items:
+                    type: string
+                    format: uri
+                  minItems: 1
+                  description: 允许的回调地址列表
+                  example:
+                    - https://app.example.com/callback
+                grant_types:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - authorization_code
+                      - refresh_token
+                  minItems: 1
+                  description: 授权模式
+                  example:
+                    - authorization_code
+                    - refresh_token
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                  description: 授权范围
+                  example:
+                    - openid
+                    - profile
+        required: true
+      responses:
+        '201':
+          description: 客户端创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthClientCreateResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 无权限（403xx）
+      security:
+        - bearerAuth: []
+  /admin/oauth-clients/{id}:
+    put:
+      summary: 更新 OAuth 客户端
+      deprecated: false
+      description: 需 admin 角色。
+      operationId: adminUpdateOAuthClient
+      tags:
+        - Admin
+      parameters:
+        - name: id
+          in: path
+          description: 客户端内部 ID
+          required: true
+          example: 0
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client_name:
+                  type: string
+                  description: 应用名称
+                redirect_uris:
+                  type: array
+                  items:
+                    type: string
+                    format: uri
+                  description: 回调地址列表
+                is_active:
+                  type: boolean
+                  description: 是否启用
+        required: true
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 无权限（403xx）
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: 资源不存在（404xx）
+      security:
+        - bearerAuth: []
+  /admin/audit-logs:
+    get:
+      summary: 查询审计日志
+      deprecated: false
+      description: 需 admin 角色。
+      operationId: adminListAuditLogs
+      tags:
+        - Admin
+      parameters:
+        - name: page
+          in: query
+          description: 页码，默认 1
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          description: 每页条数，默认 50
+          required: false
+          schema:
+            type: integer
+            default: 50
+        - name: user_id
+          in: query
+          description: 按用户筛选
+          required: false
+          schema:
+            type: integer
+        - name: action
+          in: query
+          description: 按操作类型筛选
+          required: false
+          schema:
+            type: string
+        - name: resource
+          in: query
+          description: 按资源类型筛选
+          required: false
+          schema:
+            type: string
+        - name: success
+          in: query
+          description: 是否成功
+          required: false
+          schema:
+            type: boolean
+        - name: start_time
+          in: query
+          description: 开始时间（ISO 8601）
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: end_time
+          in: query
+          description: 结束时间（ISO 8601）
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: 分页审计日志
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogsListResponse'
+          headers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 无权限（403xx）
+      security:
+        - bearerAuth: []
+  /health:
+    get:
+      summary: 健康检查
+      deprecated: false
+      description: ''
+      operationId: healthCheck
+      tags:
+        - Health
+      parameters: []
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+          headers: {}
+      security: []
+components:
+  schemas:
+    UserRole:
+      type: string
+      enum:
+        - freshman
+        - member
+        - lecturer
+        - admin
+      description: 用户角色 — freshman（大一新生）/ member（正式成员）/ lecturer（讲师）/ admin（管理员）
+    OAuthScope:
+      type: string
+      enum:
+        - openid
+        - profile
+        - email
+      description: OAuth 2.1 授权范围 — openid（用户标识，必选）/ profile（个人资料）/ email（邮箱）
+    UserState:
+      type: string
+      enum:
+        - njupter
+        - on_sast
+        - retired_sast
+        - is_deleted
+      description: 用户状态 — njupter（在校未加入）/ on_sast（现任成员）/ retired_sast（已离开）/ is_deleted（已注销）
+    Department:
+      type: string
+      enum:
+        - software
+        - media
+      description: 部门 — software（软件部）/ media（媒体部）
+    EmailType:
+      type: string
+      enum:
+        - njupt_email
+        - sast_email
+      description: 注册邮箱类型 — njupt_email（@njupt.edu.cn）/ sast_email（@sast.fun）
+    LoginMethod:
+      type: string
+      enum:
+        - github
+        - lark
+        - other_mail
+      description: 第三方登录方式
+    ClientType:
+      type: string
+      enum:
+        - first_party
+        - third_party
+      description: OAuth 客户端类型 — first_party（SAST 内部应用）/ third_party（外部接入应用）
+    College:
+      type: string
+      enum:
+        - 贝尔英才学院
+        - 通信与信息工程学院
+        - 电光柔学院
+        - 集成电路科学与工程学院（产教融合学院）
+        - 计算机学院、软件学院、网络空间安全学院
+        - 自动化学院
+        - 人工智能学院
+        - 材料科学与工程学院
+        - 化学与生命科学学院
+        - 物联网学院
+        - 理学院
+        - 现代邮政学院、智慧交通学院
+        - 数字媒体与设计艺术学院
+        - 管理学院
+        - 经济学院
+        - 社会与人口学院、社会工作学院
+        - 外国语学院
+        - 教育科学与技术学院
+        - 波特兰学院
+        - 其他
+      description: 学院枚举
+    AuthUser:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: 用户 ID
+        login_email:
+          type: string
+          format: email
+          description: 登录邮箱
+        name:
+          type: string
+          description: 真实姓名
+        role:
+          $ref: '#/components/schemas/UserRole'
+        state:
+          $ref: '#/components/schemas/UserState'
+        email_type:
+          $ref: '#/components/schemas/EmailType'
+        created_at:
+          type: string
+          format: date-time
+          description: 创建时间
+    LoginUser:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: 用户 ID
+        name:
+          type: string
+          description: 真实姓名
+        login_email:
+          type: string
+          format: email
+          description: 登录邮箱
+        role:
+          $ref: '#/components/schemas/UserRole'
+        state:
+          $ref: '#/components/schemas/UserState'
+    Profile:
+      type: object
+      properties:
+        nickname:
+          type: string
+          description: 昵称
+        department:
+          $ref: '#/components/schemas/Department'
+        intro:
+          type: string
+          description: 自我介绍
+        email:
+          type: string
+          format: email
+          description: 对外展示邮箱
+        avatar:
+          type: string
+          format: uri
+          description: 头像 URL
+        blog_url:
+          type: string
+          format: uri
+          description: 个人博客链接
+        github_url:
+          type: string
+          format: uri
+          description: GitHub 主页链接
+    Identity:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: 绑定记录 ID
+        provider:
+          $ref: '#/components/schemas/LoginMethod'
+        provider_id:
+          type: string
+          description: |
+            第三方平台唯一标识：
+            - `github` → GitHub 用户 ID
+            - `lark` → 飞书 union_id（非 open_id，union_id 在同一租户下跨应用一致）
+            - `other_mail` → 绑定邮箱地址
+        identity_data:
+          type: object
+          description: 第三方平台资料（JSONB），结构随 provider 不同而变化
+          properties: {}
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          description: 绑定时间
+        updated_at:
+          type: string
+          format: date-time
+          description: 更新时间
+    AdminUserItem:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: 用户 ID
+        name:
+          type: string
+          description: 真实姓名
+        student_id:
+          type: string
+          description: 学号
+        login_email:
+          type: string
+          format: email
+          description: 登录邮箱
+        role:
+          $ref: '#/components/schemas/UserRole'
+        state:
+          $ref: '#/components/schemas/UserState'
+        email_type:
+          $ref: '#/components/schemas/EmailType'
+        phone_number:
+          type: string
+          description: 手机号
+        qq_number:
+          type: string
+          description: QQ 号
+        college:
+          $ref: '#/components/schemas/College'
+        major:
+          type: string
+          description: 专业
+        department:
+          $ref: '#/components/schemas/Department'
+        created_at:
+          type: string
+          format: date-time
+          description: 注册时间
+    OAuthClient:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: 内部主键
+        client_id:
+          type: string
+          description: 公开客户端标识符（UUID）
+        client_name:
+          type: string
+          description: 应用名称
+        client_type:
+          $ref: '#/components/schemas/ClientType'
+        redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: 允许的重定向 URI 列表
+        grant_types:
+          type: array
+          items:
+            type: string
+          description: 授权模式
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/OAuthScope'
+          description: 授权范围
+        is_active:
+          type: boolean
+          description: 是否启用
+        created_at:
+          type: string
+          format: date-time
+          description: 创建时间
+        updated_at:
+          type: string
+          format: date-time
+          description: 更新时间
+    OAuthClientWithSecret:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: 内部主键
+        client_id:
+          type: string
+          description: 公开客户端标识符（UUID）
+        client_secret:
+          type: string
+          description: 密钥（第三方应用返回，第一方应用不返回）
+        client_name:
+          type: string
+          description: 应用名称
+        client_type:
+          $ref: '#/components/schemas/ClientType'
+        redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: 允许的重定向 URI 列表
+        grant_types:
+          type: array
+          items:
+            type: string
+          description: 授权模式
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/OAuthScope'
+          description: 授权范围
+        is_active:
+          type: boolean
+          description: 是否启用
+        created_at:
+          type: string
+          format: date-time
+          description: 创建时间
+        updated_at:
+          type: string
+          format: date-time
+          description: 更新时间
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: 日志 ID
+        user_id:
+          type: integer
+          description: 操作用户 ID
+          nullable: true
+        action:
+          type: string
+          description: 操作类型
+          example: login
+        resource:
+          type: string
+          description: 操作对象类型
+          example: user
+        resource_id:
+          type: string
+          description: 操作对象 ID
+        detail:
+          type: object
+          description: 操作详情（JSONB），结构因 action 类型而异
+          properties: {}
+          example:
+            method: password
+        client_ip:
+          type: string
+          description: 客户端 IP
+        user_agent:
+          type: string
+          description: User-Agent
+        success:
+          type: boolean
+          description: 是否成功
+        err_code:
+          type: integer
+          description: 错误码（成功时为 null）
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          description: 操作时间
+    OAuthTokenRequest:
+      type: object
+      required:
+        - grant_type
+      properties:
+        grant_type:
+          type: string
+          enum:
+            - authorization_code
+            - refresh_token
+          description: 授权模式
+        code:
+          type: string
+          description: 授权码（authorization_code 模式必填）
+        redirect_uri:
+          type: string
+          format: uri
+          description: 回调地址（authorization_code 模式必填）
+        client_id:
+          type: string
+          description: 客户端标识（必填）
+        client_secret:
+          type: string
+          description: 客户端密钥（第三方应用必填，第一方应用不使用）
+        code_verifier:
+          type: string
+          description: PKCE code verifier 原始值（authorization_code 模式必填）
+        refresh_token:
+          type: string
+          description: 刷新令牌（refresh_token 模式必填）
+    OAuthError:
+      type: object
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_request
+            - invalid_client
+            - invalid_grant
+            - unauthorized_client
+            - unsupported_grant_type
+            - invalid_scope
+          description: RFC 6749 错误代码
+        error_description:
+          type: string
+          description: 错误描述
+    SendCodeResponse:
+      type: object
+      description: 发送验证码响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码，0 表示成功
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+              description: 提示信息
+              example: 验证码已发送至邮箱
+            expires_in:
+              type: integer
+              description: 验证码有效期（秒）
+              example: 300
+    RegisterTicketResponse:
+      type: object
+      description: 验证注册验证码响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            register_ticket:
+              type: string
+              description: Register-Ticket，有效期 5 分钟，一次性使用
+              example: reg_abc123def456...
+            expires_in:
+              type: integer
+              description: Ticket 有效期（秒）
+              example: 300
+    AuthResultResponse:
+      type: object
+      description: 登录/注册成功响应（含 Token + 用户信息）
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            access_token:
+              type: string
+              description: JWT Access Token，有效期 1 小时
+            refresh_token:
+              type: string
+              description: Refresh Token，有效期 30 天，旋转机制
+            token_type:
+              type: string
+              enum:
+                - Bearer
+              description: Token 类型
+            expires_in:
+              type: integer
+              description: Access Token 有效期（秒）
+              example: 3600
+            user:
+              $ref: '#/components/schemas/AuthUser'
+    TokenRefreshResponse:
+      type: object
+      description: Token 刷新响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            access_token:
+              type: string
+              description: 新的 JWT Access Token
+            refresh_token:
+              type: string
+              description: 新的 Refresh Token（旋转机制）
+            token_type:
+              type: string
+              enum:
+                - Bearer
+              description: Token 类型
+            expires_in:
+              type: integer
+              description: Access Token 有效期（秒）
+              example: 3600
+    MessageResponse:
+      type: object
+      description: 通用消息响应（登出、修改密码、解绑等）
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+              description: 操作结果信息
+              example: 操作成功
+    UserProfileData:
+      type: object
+      description: 用户完整资料
+      properties:
+        id:
+          type: integer
+          description: 用户 ID
+        name:
+          type: string
+          description: 真实姓名
+        login_email:
+          type: string
+          format: email
+          description: 登录邮箱
+        role:
+          $ref: '#/components/schemas/UserRole'
+        state:
+          $ref: '#/components/schemas/UserState'
+        email_type:
+          $ref: '#/components/schemas/EmailType'
+        phone_number:
+          type: string
+          description: 手机号
+        qq_number:
+          type: string
+          description: QQ 号
+        student_id:
+          type: string
+          description: 学号
+        college:
+          $ref: '#/components/schemas/College'
+        major:
+          type: string
+          description: 专业
+        profile:
+          $ref: '#/components/schemas/Profile'
+        identities:
+          type: array
+          description: 第三方账号绑定列表
+          items:
+            $ref: '#/components/schemas/Identity'
+        created_at:
+          type: string
+          format: date-time
+          description: 注册时间
+        updated_at:
+          type: string
+          format: date-time
+          description: 最后更新时间
+    UserProfileResponse:
+      type: object
+      description: 用户资料响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          $ref: '#/components/schemas/UserProfileData'
+    ProfileUpdateResponse:
+      type: object
+      description: 当前用户个人信息更新响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+              description: 操作结果
+              example: 个人信息更新成功
+            user:
+              $ref: '#/components/schemas/UserProfileData'
+    AvatarUploadResponse:
+      type: object
+      description: 头像上传响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            avatar_url:
+              type: string
+              format: uri
+              description: 头像 URL
+              example: https://cos.example.com/avatar/1.jpg
+    IdentitiesListResponse:
+      type: object
+      description: 绑定列表响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            identities:
+              type: array
+              description: 第三方账号绑定列表
+              items:
+                $ref: '#/components/schemas/Identity'
+    IdentityBindResponse:
+      type: object
+      description: 第三方账号绑定响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+              description: 绑定结果描述
+              example: 绑定成功
+            identity:
+              $ref: '#/components/schemas/Identity'
+    BindTicketResponse:
+      type: object
+      description: 获取绑定票据响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            bind_ticket:
+              type: string
+              description: Bind-Ticket，有效期 5 分钟，一次性使用
+              example: be_abc123def456...
+            expires_in:
+              type: integer
+              description: Ticket 有效期（秒）
+              example: 300
+    AdminUsersListResponse:
+      type: object
+      description: 管理后台用户列表响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            users:
+              type: array
+              description: 用户列表
+              items:
+                $ref: '#/components/schemas/AdminUserItem'
+            total:
+              type: integer
+              description: 总记录数
+              example: 500
+            page:
+              type: integer
+              description: 当前页码
+              example: 1
+            page_size:
+              type: integer
+              description: 每页条数
+              example: 20
+    AdminOAuthClientsListResponse:
+      type: object
+      description: OAuth 客户端列表响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            clients:
+              type: array
+              description: 客户端列表
+              items:
+                $ref: '#/components/schemas/OAuthClient'
+    OAuthClientCreateResponse:
+      type: object
+      description: OAuth 客户端创建响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          $ref: '#/components/schemas/OAuthClientWithSecret'
+    AuditLogsListResponse:
+      type: object
+      description: 审计日志列表响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            logs:
+              type: array
+              description: 日志列表
+              items:
+                $ref: '#/components/schemas/AuditLog'
+            total:
+              type: integer
+              description: 总记录数
+            page:
+              type: integer
+              description: 当前页码
+            page_size:
+              type: integer
+              description: 每页条数
+    OAuthTokenResponse:
+      type: object
+      description: |
+        OAuth 2.1 Token 响应（RFC 6749 格式，不使用 SAST Link 标准响应信封）。
+        scope 包含 `openid` 时，额外返回 OIDC ID Token。
+        注意：字段名 `scopes` 为项目约定，RFC 标准名为 `scope`（单数）。
+      properties:
+        access_token:
+          type: string
+          description: JWT Access Token
+        refresh_token:
+          type: string
+          description: Refresh Token
+        token_type:
+          type: string
+          enum:
+            - Bearer
+          description: Token 类型
+        expires_in:
+          type: integer
+          description: Access Token 有效期（秒）
+          example: 3600
+        id_token:
+          type: string
+          description: |
+            OIDC ID Token（RS256 签名 JWT）。仅在 scope 包含 `openid` 时返回。
+            ID Token 包含以下 OIDC 标准 claims，具体内容取决于授权 scopes。
+          example: eyJhbGciOiJSUzI1NiIs...
+        scopes:
+          type: string
+          description: 授权范围，空格分隔，取值见 OAuthScope 枚举（openid / profile / email）
+          example: openid profile
+    OAuthRevokeResponse:
+      type: object
+      description: OAuth Token 撤销响应（不使用标准信封）
+      properties:
+        message:
+          type: string
+          description: 撤销结果
+          example: ok
+    HealthResponse:
+      type: object
+      description: 健康检查响应（不使用标准信封）
+      properties:
+        status:
+          type: string
+          description: 服务状态
+          example: ok
+        db:
+          type: string
+          description: 数据库状态
+          example: ok
+        redis:
+          type: string
+          description: Redis 状态
+          example: ok
+    OpenIDConfiguration:
+      type: object
+      description: |
+        OIDC Discovery 文档，符合 [OpenID Connect Discovery 1.0](https://openid.net/specs/openid-connect-discovery-1_0.html) 规范。
+      properties:
+        issuer:
+          type: string
+          description: OIDC Provider 唯一标识，与 ID Token 中的 iss 一致
+          example: https://link.sast.fun/v2
+        authorization_endpoint:
+          type: string
+          description: OAuth 2.0 授权端点
+          example: https://link.sast.fun/v2/oauth/authorize
+        token_endpoint:
+          type: string
+          description: OAuth 2.0 Token 端点
+          example: https://link.sast.fun/v2/oauth/token
+        userinfo_endpoint:
+          type: string
+          description: UserInfo 端点
+          example: https://link.sast.fun/v2/userinfo
+        jwks_uri:
+          type: string
+          description: JWKS 公钥集端点
+          example: https://link.sast.fun/v2/.well-known/jwks.json
+        revocation_endpoint:
+          type: string
+          description: Token 撤销端点
+          example: https://link.sast.fun/v2/oauth/revoke
+        scopes_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 scope
+          example:
+            - openid
+            - profile
+            - email
+        response_types_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 response_type
+          example:
+            - code
+        grant_types_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 grant_type
+          example:
+            - authorization_code
+            - refresh_token
+        subject_types_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 subject 类型
+          example:
+            - public
+        id_token_signing_alg_values_supported:
+          type: array
+          items:
+            type: string
+          description: ID Token 签名算法
+          example:
+            - RS256
+        token_endpoint_auth_methods_supported:
+          type: array
+          items:
+            type: string
+          description: Token 端点客户端认证方式
+          example:
+            - none
+            - client_secret_post
+        claims_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 claims
+          example:
+            - sub
+            - iss
+            - aud
+            - exp
+            - iat
+            - auth_time
+            - nonce
+            - name
+            - picture
+            - preferred_username
+            - profile
+            - email
+            - email_verified
+            - updated_at
+        code_challenge_methods_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 PKCE 挑战方法
+          example:
+            - S256
+            - plain
+        request_parameter_supported:
+          type: boolean
+          description: 是否支持 request 参数
+          example: false
+        request_uri_parameter_supported:
+          type: boolean
+          description: 是否支持 request_uri 参数
+          example: false
+        claims_parameter_supported:
+          type: boolean
+          description: 是否支持 claims 参数
+          example: false
+        response_modes_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 response_mode
+          example:
+            - query
+        claim_types_supported:
+          type: array
+          items:
+            type: string
+          description: 支持的 claim 类型
+          example:
+            - normal
+    JWKS:
+      type: object
+      description: JSON Web Key Set，符合 [RFC 7517](https://datatracker.ietf.org/doc/html/rfc7517) 规范
+      properties:
+        keys:
+          type: array
+          description: 公钥列表
+          items:
+            $ref: '#/components/schemas/JWK'
+    JWK:
+      type: object
+      description: JSON Web Key，RS256 公钥
+      properties:
+        kty:
+          type: string
+          description: 密钥类型
+          example: RSA
+        use:
+          type: string
+          description: 用途
+          example: sig
+        kid:
+          type: string
+          description: 密钥 ID，用于匹配 JWT 头中的 kid
+          example: link-v2-2026-06
+        alg:
+          type: string
+          description: 签名算法
+          example: RS256
+        n:
+          type: string
+          description: RSA 公钥 modulus（Base64URL）
+          example: 0vx7agoebGcQSuuPiLgX...
+        e:
+          type: string
+          description: RSA 公钥 exponent（Base64URL）
+          example: AQAB
+    UserInfoResponse:
+      type: object
+      description: |
+        OIDC UserInfo 端点响应。返回的 claims 取决于 Access Token 的 scopes：
+        - `openid` → sub（必返）
+        - `profile` → name, picture, preferred_username, profile, updated_at
+        - `email` → email, email_verified
+      properties:
+        sub:
+          type: string
+          description: 用户唯一标识（user.id 字符串）。openid scope 时必返
+          example: '1'
+        name:
+          type: string
+          description: 真实姓名。需 profile scope
+          example: 张三
+        picture:
+          type: string
+          format: uri
+          description: 头像 URL。需 profile scope
+          example: https://cos.example.com/avatar/1.jpg
+          nullable: true
+        preferred_username:
+          type: string
+          description: 昵称（fallback 至姓名）。需 profile scope
+          example: 张三
+          nullable: true
+        profile:
+          type: string
+          format: uri
+          description: 用户主页（SAST Link 个人卡片）。需 profile scope
+          example: https://link.sast.fun/card/1
+          nullable: true
+        email:
+          type: string
+          format: email
+          description: 注册邮箱。需 email scope
+          example: b2404****@njupt.edu.cn
+        email_verified:
+          type: boolean
+          description: 邮箱是否已验证。需 email scope。SAST Link 注册时已校验邮箱，固定为 true
+          example: true
+        updated_at:
+          type: integer
+          description: 用户信息最后修改时间（Unix timestamp）。需 profile scope
+          example: 1717396400
+          nullable: true
+    IDTokenClaims:
+      type: object
+      description: |
+        ID Token claims 说明（仅供文档参考，非实际返回结构）。
+        ID Token 是一个 RS256 签名的 JWT，当 scope 包含 `openid` 时在 token 端点响应中返回。
+        其 Header 包含 `alg=RS256` 和 `kid`，Payload 包含以下 claims。
+      properties:
+        iss:
+          type: string
+          description: Issuer，OIDC Provider 标识
+          example: https://link.sast.fun/v2
+        sub:
+          type: string
+          description: Subject，用户唯一标识（user.id 字符串）
+          example: '1'
+        aud:
+          type: string
+          description: Audience，客户端 client_id
+          example: 381c34b9-14a4-4df9-a9db-40c2455be09f
+        exp:
+          type: integer
+          description: 过期时间（Unix timestamp）
+          example: 1717400000
+        iat:
+          type: integer
+          description: 签发时间（Unix timestamp）
+          example: 1717396400
+        auth_time:
+          type: integer
+          description: 用户完成认证的时间（Unix timestamp）。授权码模式下为授权确认时间
+          example: 1717396400
+        nonce:
+          type: string
+          description: 防重放值，与授权请求中的 nonce 一致
+          example: n-0S6_WzA2Mj
+        name:
+          type: string
+          description: 真实姓名（需 profile scope）
+          example: 张三
+        picture:
+          type: string
+          format: uri
+          description: 头像 URL（需 profile scope）
+          example: https://cos.example.com/avatar/1.jpg
+          nullable: true
+        preferred_username:
+          type: string
+          description: 昵称 / 常用用户名（需 profile scope）
+          example: 张三
+          nullable: true
+        profile:
+          type: string
+          format: uri
+          description: 用户主页 URL（需 profile scope）
+          example: https://link.sast.fun/card/1
+          nullable: true
+        email:
+          type: string
+          format: email
+          description: 注册邮箱（需 email scope）
+          example: b2404****@njupt.edu.cn
+        email_verified:
+          type: boolean
+          description: 邮箱已验证（需 email scope，SAST Link 固定为 true）
+          example: true
+        updated_at:
+          type: integer
+          description: 用户信息最后修改时间，Unix timestamp（需 profile scope）
+          example: 1717396400
+          nullable: true
+  responses:
+    BadRequest:
+      description: 参数错误（400xx）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: integer
+                description: 业务状态码
+              message:
+                type: string
+                description: 错误描述
+              data:
+                type: 'null'
+            required:
+              - code
+              - message
+              - data
+          examples:
+            invalid_params:
+              summary: invalid_params
+              value:
+                code: 40000
+                message: 请求参数错误
+                data: null
+            missing_params:
+              summary: missing_params
+              value:
+                code: 40001
+                message: 缺少必要参数
+                data: null
+            invalid_email_domain:
+              summary: invalid_email_domain
+              value:
+                code: 40020
+                message: 邮箱域名不允许（仅限 @njupt.edu.cn / @sast.fun）
+                data: null
+    Unauthorized:
+      description: 未认证（401xx）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: integer
+              message:
+                type: string
+              data:
+                type: 'null'
+            required:
+              - code
+              - message
+              - data
+          examples:
+            not_logged_in:
+              summary: not_logged_in
+              value:
+                code: 40100
+                message: 未登录（缺少或无效 Authorization Header）
+                data: null
+            wrong_password:
+              summary: wrong_password
+              value:
+                code: 40105
+                message: 密码错误
+                data: null
+            email_not_found:
+              summary: email_not_found
+              value:
+                code: 40106
+                message: 登录邮箱不存在
+                data: null
+    Forbidden:
+      description: 无权限（403xx）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: integer
+              message:
+                type: string
+              data:
+                type: 'null'
+            required:
+              - code
+              - message
+              - data
+          examples:
+            no_permission:
+              summary: no_permission
+              value:
+                code: 40300
+                message: 无权限（需 admin / lecturer 角色）
+                data: null
+            account_deleted:
+              summary: account_deleted
+              value:
+                code: 40301
+                message: 账号已注销
+                data: null
+    NotFound:
+      description: 资源不存在（404xx）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: integer
+              message:
+                type: string
+              data:
+                type: 'null'
+            required:
+              - code
+              - message
+              - data
+          examples:
+            not_found:
+              summary: not_found
+              value:
+                code: 40400
+                message: 资源不存在
+                data: null
+            user_not_found:
+              summary: user_not_found
+              value:
+                code: 40401
+                message: 用户不存在
+                data: null
+    Conflict:
+      description: 资源冲突（409xx）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: integer
+              message:
+                type: string
+              data:
+                type: 'null'
+            required:
+              - code
+              - message
+              - data
+          examples:
+            email_registered:
+              summary: email_registered
+              value:
+                code: 40901
+                message: 邮箱已被注册
+                data: null
+            identity_bound:
+              summary: identity_bound
+              value:
+                code: 40903
+                message: 第三方账号已被其他用户绑定
+                data: null
+            too_many_emails:
+              summary: too_many_emails
+              value:
+                code: 40905
+                message: 第三方邮箱绑定数量已达上限（2 个）
+                data: null
+    Unprocessable:
+      description: 业务校验失败（422xx）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: integer
+              message:
+                type: string
+              data:
+                type: 'null'
+            required:
+              - code
+              - message
+              - data
+          examples:
+            short_password:
+              summary: short_password
+              value:
+                code: 42201
+                message: 密码长度不足（最短 8 位）
+                data: null
+
+    TooManyRequests:
+      description: 频率限制（429xx）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: integer
+              message:
+                type: string
+              data:
+                type: 'null'
+            required:
+              - code
+              - message
+              - data
+          examples:
+            成功示例:
+              summary: 成功示例
+              value:
+                code: 42900
+                message: 请求过于频繁，请稍后再试
+                data: null
+    InternalError:
+      description: 服务端错误（500xx）
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: integer
+              message:
+                type: string
+              data:
+                type: 'null'
+            required:
+              - code
+              - message
+              - data
+          examples:
+            internal:
+              summary: internal
+              value:
+                code: 50000
+                message: 服务器内部错误
+                data: null
+            email_fail:
+              summary: email_fail
+              value:
+                code: 50001
+                message: 邮件发送失败
+                data: null
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT Bearer Token。Access Token 有效期 1 小时。
+servers: []
+security: []
