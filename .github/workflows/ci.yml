@@ -7,13 +7,87 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  noop:
-    name: Manual placeholder
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+env:
+  GO_VERSION: "1.26.4"
 
-      - name: Repository skeleton
-        run: echo "Implementation code has been removed; CI is manual until the backend is rebuilt."
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sastlink
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: sastlink_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run tests
+        env:
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_USER: sastlink
+          DB_PASSWORD: test
+          DB_NAME: sastlink_test
+          DB_SSLMODE: disable
+          REDIS_HOST: localhost
+          REDIS_PORT: "6379"
+          REDIS_DB: "0"
+          JWT_SECRET_KEY: ${{ secrets.CI_JWT_SECRET_KEY || 'test-jwt-key-change-me' }}
+        run: go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build
+        run: go build -v -o bin/api ./cmd/api

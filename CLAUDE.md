@@ -20,11 +20,11 @@ git ls-files
 # Expect warnings when required environment variables are unset; warnings do not by themselves mean the compose file is invalid.
 docker compose config
 
-# Manually run the placeholder CI workflow in GitHub Actions
-# The workflow only checks out the repo and reports that implementation code was removed.
+# Verify Compose no longer references a missing Dockerfile
+docker compose --dry-run build
 ```
 
-The current repository has no runnable build, lint, or test command. `docker-compose.yml` is a runtime configuration reference and expects a prebuilt image via `API_IMAGE` or the default `sastlink-api:current` tag.
+The current repository has no runnable build, lint, or test command because Go application source has not been restored yet. `docker-compose.yml` is a runtime configuration reference and expects a prebuilt image via `API_IMAGE` or the default `sastlink-api:current` tag.
 
 ## Commands Once Go Implementation Is Restored
 
@@ -34,16 +34,26 @@ The preserved design targets Go `1.26.4`, Gin, GORM, PostgreSQL 16+, Redis 8+, a
 # Download modules
 go mod download
 
-# Build the API binary expected by the future container image
+# Build the API binary
 go build -o bin/api ./cmd/api
 
-# Run all tests
-go test ./...
+# Run all tests with race detection and random order
+go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
 
 # Run a single package test
-go test ./path/to/package -run TestName
+go test -race -shuffle=on ./path/to/package -run TestName
 
-# Run security scans matching .github/workflows/security.yml
+# Install and run pre-commit hooks
+pip install pre-commit
+pre-commit install
+
+# Run all hooks manually
+pre-commit run --all-files
+
+# Run lint
+golangci-lint run ./...
+
+# Run security scans (also run weekly via .github/workflows/security.yml)
 go run github.com/securego/gosec/v2/cmd/gosec@latest -fmt text ./...
 govulncheck ./...
 ```
@@ -59,6 +69,9 @@ Update this section when the implementation lands if the actual commands differ.
 - `docs/psql-db-design.md`: PostgreSQL schema design, enum values, indexes, triggers, token-family cascade revocation flow, and pg_cron cleanup jobs.
 - `.env.example`: environment variable names and defaults expected by the future service.
 - `docker-compose.yml`: runtime reference for an API container connected to external PostgreSQL and Redis Docker networks. It expects a prebuilt image set by `API_IMAGE` or `sastlink-api:current`.
+- `.golangci.yml`: golangci-lint rule set (conservative: core correctness + security + godoc comments).
+- `.pre-commit-config.yaml`: pre-commit hook definitions (gofmt, goimports, go-vet, YAML checks, whitespace).
+- `CONTRIBUTING.md`: contribution guide covering environment setup, lint, tests, commit convention, and PR workflow.
 
 ## Target Architecture
 
@@ -116,11 +129,12 @@ GET /health -> { "status": "ok", "db": "ok", "redis": "ok" }
 
 ## CI And Security
 
-`.github/workflows/ci.yml` is currently a manual placeholder. `.github/workflows/security.yml` runs on pushes, pull requests, and weekly schedule, and expects a Go module so it can run:
+`.github/workflows/ci.yml` is a manually triggered (`workflow_dispatch`) pipeline with three parallel jobs:
 
-```powershell
-go run github.com/securego/gosec/v2/cmd/gosec@latest -fmt text ./...
-govulncheck ./...
-```
+- **lint** — golangci-lint (same rule set as `.golangci.yml`)
+- **test** — `go test -race -shuffle=on -cover` against service containers (Postgres 16 + Redis 8)
+- **build** — `go build -o bin/api ./cmd/api`
 
-Until implementation code returns, security workflow jobs may fail because there is no Go module to scan.
+`.github/workflows/security.yml` runs on a weekly schedule (`0 3 * * 1`) and executes `gosec` + `govulncheck`.
+
+Until Go implementation code returns, CI and security jobs will fail because there is no Go module to scan.
