@@ -23,6 +23,7 @@ tags:
   - name: Admin
   - name: Health
   - name: OIDC
+  - name: Card
 paths:
   /auth/register/send-code:
     post:
@@ -374,6 +375,9 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
           description: 参数错误（400xx）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 邮箱不存在（401xx）
         '429':
           $ref: '#/components/responses/TooManyRequests'
           description: 频率限制（429xx）
@@ -421,6 +425,9 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
           description: 参数错误（400xx）
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: 业务校验失败（422xx）
       security: []
   /oauth/github:
     get:
@@ -712,6 +719,34 @@ paths:
           description: 服务端错误（500xx）
       security:
         - bearerAuth: []
+  /card/{id}:
+    get:
+      summary: 获取个人卡片
+      deprecated: false
+      description: |
+        公开端点，无需认证。返回 profile 表中公开字段，用于个人主页展示、homepage 友链及 OIDC profile claim 指向。
+      operationId: cardGetCard
+      tags:
+        - Card
+      parameters:
+        - name: id
+          in: path
+          description: 用户 ID
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 个人卡片数据
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardResponse'
+          headers: {}
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: 用户不存在或已注销
+      security: []
   /user/identities:
     get:
       summary: 获取绑定列表
@@ -1249,15 +1284,9 @@ paths:
           required: false
           schema:
             $ref: '#/components/schemas/Department'
-        - name: college
+        - name: student_id
           in: query
-          description: 筛选学院
-          required: false
-          schema:
-            $ref: '#/components/schemas/College'
-        - name: major
-          in: query
-          description: 筛选专业
+          description: 筛选学号
           required: false
           schema:
             type: string
@@ -1372,6 +1401,11 @@ paths:
                 email_type:
                   $ref: '#/components/schemas/EmailType'
                   description: 注册邮箱类型
+                login_email:
+                  type: string
+                  format: email
+                  maxLength: 255
+                  description: 登录邮箱（修改后触发器 auto_set_email_type 自动重算 email_type）
         required: true
       responses:
         '200':
@@ -1804,23 +1838,6 @@ components:
           type: string
           format: date-time
           description: 创建时间
-    LoginUser:
-      type: object
-      properties:
-        id:
-          type: integer
-          description: 用户 ID
-        name:
-          type: string
-          description: 真实姓名
-        login_email:
-          type: string
-          format: email
-          description: 登录邮箱
-        role:
-          $ref: '#/components/schemas/UserRole'
-        state:
-          $ref: '#/components/schemas/UserState'
     Profile:
       type: object
       properties:
@@ -1848,6 +1865,14 @@ components:
           type: string
           format: uri
           description: GitHub 主页链接
+        created_at:
+          type: string
+          format: date-time
+          description: 首次创建时间
+        updated_at:
+          type: string
+          format: date-time
+          description: 最后更新时间
     Identity:
       type: object
       properties:
@@ -1867,6 +1892,11 @@ components:
           type: object
           description: 第三方平台资料（JSONB），结构随 provider 不同而变化
           properties: {}
+          nullable: true
+        token_expires_at:
+          type: string
+          format: date-time
+          description: 第三方 access_token 过期时间
           nullable: true
         created_at:
           type: string
@@ -2090,6 +2120,31 @@ components:
         error_description:
           type: string
           description: 错误描述
+    # === 通用响应信封（标准端点） ===
+    # 所有标准端点使用 { code: int, message: string, data: object|array|null } 响应信封。
+    # 以下 StandardEnvelope 为通用模板，各端点的 data schema 在内嵌中各自定义。
+    #
+    # 不使用信封的例外：
+    #   - OAuth 端点（/oauth/authorize, /oauth/token, /oauth/revoke）→ RFC 6749 格式
+    #   - UserInfo 错误响应 → RFC 6750 格式（{error, error_description}）
+    #   - /health → 直接 {status, db, redis}
+    #   - /card/{id} → 直接 profile 公开字段
+    #   - /.well-known/* → 协议标准格式
+    StandardEnvelope:
+      type: object
+      description: SAST Link v2 标准响应信封模板
+      properties:
+        code:
+          type: integer
+          description: 业务状态码，0 表示成功，非 0 表示错误
+          example: 0
+        message:
+          type: string
+          description: 可读的描述信息，成功时为 "ok"
+          example: ok
+        data:
+          description: 业务数据载荷，错误时为 null
+    # === 具体响应 schema ===
     SendCodeResponse:
       type: object
       description: 发送验证码响应
@@ -2536,6 +2591,39 @@ components:
           type: string
           description: Redis 状态
           example: ok
+    CardResponse:
+      type: object
+      description: 个人卡片响应（公开端点，不使用标准信封）
+      properties:
+        id:
+          type: integer
+          description: 用户 ID
+          example: 1
+        nickname:
+          type: string
+          description: 昵称
+          example: 张三
+        department:
+          $ref: '#/components/schemas/Department'
+        intro:
+          type: string
+          description: 自我介绍
+          example: 自我介绍
+        avatar:
+          type: string
+          format: uri
+          description: 头像 URL
+          example: https://cos.example.com/avatar/1.jpg
+        blog_url:
+          type: string
+          format: uri
+          description: 个人博客链接
+          example: https://blog.example.com
+        github_url:
+          type: string
+          format: uri
+          description: GitHub 主页链接
+          example: https://github.com/example
     OpenIDConfiguration:
       type: object
       description: |
@@ -3033,8 +3121,8 @@ components:
               - message
               - data
           examples:
-            成功示例:
-              summary: 成功示例
+            rate_limited:
+              summary: rate_limited
               value:
                 code: 42900
                 message: 请求过于频繁，请稍后再试

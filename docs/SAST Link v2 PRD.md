@@ -98,7 +98,7 @@ SAST Link 同时作为 OAuth 2.1 授权服务器和 OIDC Provider：
 
 **两步注册**：
 
-1. `POST /auth/register/send-code` → 校验邮箱域名 → 生成 5 字符 base32 验证码 → SMTP 发送 → 验证码写 Redis（key: `sastlink:verify:{email}`，TTL 5min）
+1. `POST /auth/register/send-code` → 校验邮箱域名 → 生成 6 位数字验证码 → SMTP 发送 → 验证码写 Redis（key: `sastlink:verify:{email}`，TTL 5min）
 2. `POST /auth/register/verify-code` → 校验验证码（成功后删除）→ 返回 Register-Ticket（`reg_` + 32 位 hex，Redis 5min，一次性，GetDel 消费）
 3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱 → 校验所有 user 字段已填且密码 ≥ 8 位 → PBKDF2-SHA512 哈希 → 创建 user + profile → 签发 Token Pair
 
@@ -135,7 +135,7 @@ GET /oauth/github/callback?code=...&state=...
 GET /oauth/lark/callback?code=...&state=...
 ```
 
-**已有绑定用户**：签发一次性 `login_code`（Redis，60s），302 重定向至前端 `?code=<login_code>`，前端调用 `POST /oauth/exchange-code` 换取 Token Pair
+**已有绑定用户**：签发一次性 `login_code`（`lc_` + 32 位 hex，Redis，60s），302 重定向至前端 `?code=<login_code>`，前端调用 `POST /oauth/exchange-code` 换取 Token Pair
 
 **无绑定用户**：
 1. 生成 `registration_state`（Redis，15min，暂存 `provider` + `provider_id` + `identity_data` + `oauth_state`），其中 `oauth_state` 为原始 OAuth 回调的 CSRF `state` 参数
@@ -156,10 +156,10 @@ GET /oauth/lark/callback?code=...&state=...
 |------------|------|--------|------|
 | Access Token | RS256 JWT | 1h | 自包含，含 jti/sub/role/state/token_version/scopes；kid 支持密钥轮换 |
 | Refresh Token | opaque string | 30d | HMAC-SHA256 hash 存 DB（`oauth_refresh_tokens.token_hash`） |
-| Register-Ticket | opaque string | 5min | Redis 存储，一次性使用 |
-| login_code | opaque string | 60s | Redis 存储，一次性使用，OAuth 回调交换用 |
-| registration_state | opaque string | 15min | Redis 存储，GetDel 一次性消费。暂存 `{provider, provider_id, identity_data, oauth_state}`，消费时校验 OAuth state 匹配 |
-| Bind-Ticket | opaque string | 5min | Redis 存储，一次性使用，待绑定邮箱地址内嵌 |
+| Register-Ticket | opaque string (`reg_` 前缀) | 5min | Redis 存储，一次性使用 |
+| login_code | opaque string (`lc_` 前缀) | 60s | Redis 存储，一次性使用，OAuth 回调交换用 |
+| registration_state | opaque string (`rs_` 前缀) | 15min | Redis 存储，GetDel 一次性消费。暂存 `{provider, provider_id, identity_data, oauth_state}`，消费时校验 OAuth state 匹配 |
+| Bind-Ticket | opaque string (`be_` 前缀) | 5min | Redis 存储，一次性使用，待绑定邮箱地址内嵌 |
 | Authorization Code | opaque string | 5min | DB 存储（`oauth_authorizations`），一次性使用 |
 
 #### Refresh Token Rotation & 重放检测
@@ -183,7 +183,7 @@ Body: { "refresh_token": "rt_..." }
 
 - 当前 access_token 的 jti 写入 Redis 黑名单（TTL = 剩余有效期）
 - 整条 refresh_token family 标记 revoked
-- 用户所有设备记录从 Redis 清除
+- 仅删除当前设备记录（`ZREM` + `DEL`），不影响其他设备
 
 ### 4.7 密码管理
 
@@ -554,7 +554,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | `409xx` | 资源冲突 | 40901 邮箱已注册 / 40903 第三方账号已绑定 / 40905 第三方邮箱绑定上限 |
 | `422xx` | 业务校验失败 | 42201 密码长度不足 / 42202 新旧密码相同 |
 | `429xx` | 频率限制 | 42900 请求过于频繁 |
-| `500xx` | 服务端错误 | 50000 内部错误 / 50001 邮件发送失败 |
+| `500xx` | 服务端错误 | 50000 内部错误 / 50001 邮件发送失败 / 50002 对象存储上传失败 / 50003 数据库错误 |
 
 ## 附录 B：枚举值速查
 
@@ -568,16 +568,11 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | `client_type` | `first_party` / `third_party` |
 | `college` | 贝尔英才学院 / 通信与信息工程学院 / 电光柔学院 / 集成电路科学与工程学院（产教融合学院）/ 计算机学院、软件学院、网络空间安全学院 / 自动化学院 / 人工智能学院 / 材料科学与工程学院 / 化学与生命科学学院 / 物联网学院 / 理学院 / 现代邮政学院、智慧交通学院 / 数字媒体与设计艺术学院 / 管理学院 / 经济学院 / 社会与人口学院、社会工作学院 / 外国语学院 / 教育科学与技术学院 / 波特兰学院 / 其他 |
 
-## 附录 C：与现有实现的差异（待对齐）
+## 附录 C：实现状态追踪（待重建）
 
-| 项目 | PRD 定义 | 当前代码 | 行动 |
-|------|----------|----------|------|
-| 密码哈希 | PBKDF2-SHA512 | PBKDF2-SHA512（已实现） | 保持一致，无需改动。V1 已迁移用户若使用旧哈希格式，通过 `password_alg` 字段区分并兼容验签 |
-| JWT 算法 | RS256 | 未实现 | 实现 RS256 签名 + JWKS 分发 |
-| 限流 | 多级限流中间件 | 配置已就绪，中间件未应用 | 实现中间件并挂载路由 |
-| 限流 | 多级限流中间件 | 配置已就绪，中间件未应用 | 实现中间件并挂载路由 |
-
----
+| 模块 | 状态 |
+|------|------|
+| 全部功能 | 待重建 — 仓库中无实现代码，以下为重建目标清单 |
 
 ## 11. 实现顺序
 

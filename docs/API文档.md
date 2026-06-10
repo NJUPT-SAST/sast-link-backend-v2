@@ -219,6 +219,7 @@ POST /auth/register
   "student_id": "B2404****",
   "college": "计算机学院、软件学院、网络空间安全学院",
   "major": "软件工程",
+  "registration_state": "rs_abc123...",
   "oauth_state": "os_abc123..."
 }
 ```
@@ -377,7 +378,9 @@ POST /auth/change-password
 }
 ```
 
-**说明**: 新密码最短 8 位；修改成功后撤销该用户所有 token family，需重新登录。
+**说明**: 新密码最短 8 位；修改成功后撤销该用户所有 token family，需重新登录。若新密码与旧密码相同，返回 42202。
+
+**错误码**: 400xx（参数错误）、40105（密码错误）、42201（密码长度不足）、42202（新旧密码相同）
 
 ---
 
@@ -426,7 +429,9 @@ POST /auth/reset-password
 }
 ```
 
-**说明**: 新密码最短 8 位。
+**说明**: 新密码最短 8 位。若新密码与旧密码相同，返回 42202。
+
+**错误码**: 400xx（参数错误）、40106（邮箱不存在）、42201（密码长度不足）、42202（新旧密码相同）
 
 ---
 
@@ -656,6 +661,37 @@ PUT /user/avatar
   "avatar_url": "https://cos.example.com/avatar/1.jpg"
 }
 ```
+
+---
+
+### 3.4 获取个人卡片
+
+无需认证的公开端点。
+
+```
+GET /card/:id
+```
+
+**Path Parameters**:
+
+| 参数 | 说明 |
+|------|------|
+| `id` | 用户 ID |
+
+**Response** `200`:
+```json
+{
+  "id": 1,
+  "nickname": "张三",
+  "department": "software",
+  "intro": "自我介绍",
+  "avatar": "https://cos.example.com/avatar/1.jpg",
+  "blog_url": "https://blog.example.com",
+  "github_url": "https://github.com/example"
+}
+```
+
+**说明**: 返回 `profile` 表中公开字段，用于公开个人主页、homepage 友链展示及 OIDC `profile` claim 指向。用户 ID 不存在或已注销时返回 404。
 
 ---
 
@@ -1002,8 +1038,7 @@ GET /admin/users
 | `role` | 筛选角色：freshman / member / lecturer / admin |
 | `state` | 筛选状态：on_sast / retired_sast / njupter / is_deleted |
 | `department` | 筛选部门：software / media |
-| `college` | 筛选学院，枚举值见附录 A |
-| `major` | 筛选专业 |
+| `student_id` | 筛选学号 |
 | `keyword` | 搜索关键词（姓名/学号/邮箱模糊匹配） |
 
 **Response** `200`:
@@ -1083,6 +1118,7 @@ PUT /admin/users/:id
   "student_id": "B2404****",
   "college": "计算机学院、软件学院、网络空间安全学院",
   "major": "软件工程",
+  "login_email": "b2404****@njupt.edu.cn",
   "role": "member",
   "state": "on_sast",
   "email_type": "njupt_email"

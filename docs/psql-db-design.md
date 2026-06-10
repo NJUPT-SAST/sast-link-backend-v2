@@ -73,21 +73,21 @@ CREATE TYPE college_enum AS ENUM (
 
 ```sql
 CREATE TABLE "user" (
-    id           BIGSERIAL       PRIMARY KEY,
-    role         user_role_enum  NOT NULL DEFAULT 'freshman',
-    name         VARCHAR(255)    NOT NULL,
-    phone_number VARCHAR(20)     NOT NULL,
-    qq_number    VARCHAR(20)     NOT NULL,
-    password     VARCHAR(512)    NOT NULL,
-    token_version INT             NOT NULL DEFAULT 0,
-    student_id   VARCHAR(50)     UNIQUE,
-    state        state_enum      NOT NULL DEFAULT 'njupter',
-    email_type   email_enum      NOT NULL,
-    login_email        VARCHAR(255)    NOT NULL UNIQUE,
-    created_at   TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
-    updated_at   TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    id            BIGSERIAL       PRIMARY KEY,
+    role          user_role_enum  NOT NULL DEFAULT 'freshman',
+    name          VARCHAR(255)    NOT NULL,
+    phone_number  VARCHAR(20)     NOT NULL,
+    qq_number     VARCHAR(20)     NOT NULL,
+    password      VARCHAR(512)    NOT NULL,
+    student_id    VARCHAR(50)     NOT NULL UNIQUE,
+    state         state_enum      NOT NULL DEFAULT 'njupter',
+    email_type    email_enum      NOT NULL,
+    login_email   VARCHAR(255)    NOT NULL UNIQUE,
+    created_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
     college       college_enum    NOT NULL DEFAULT '其他',
-    major         varchar(50)     NOT NULL DEFAULT ''
+    major         VARCHAR(50)     NOT NULL DEFAULT '',
+    token_version INT             NOT NULL DEFAULT 0
 );
 ```
 
@@ -268,6 +268,10 @@ CREATE TABLE audit_logs (
 | `upload_avatar` | `{"avatar_url": "string"}` |
 | `admin_action` | `{"target_user_id": 123, "sub_action": "edit_user" \| "delete_user" \| "restore_user" \| "manage_oauth_client"}` |
 
+> **历史兼容**：dump 中现有 `audit_logs` 数据为 V1 people_link 迁移产物，detail 格式为
+> `{"source": "people_link_merge", "action_type": "migration", "migrated_at": "...", "needs_password_reset": false}`。
+> 此格式仅在迁移数据中存在，新系统不生成此格式。
+
 **数据保留**：audit_logs 保留 90 天，通过 pg_cron 每天清理过期数据（见[定时清理](#定时清理)）。
 
 ```sql
@@ -370,9 +374,9 @@ CREATE INDEX idx_oauth_authorizations_user_client
     ON oauth_authorizations(user_id, client_id);
 ```
 
-> 此表无 `updated_at`。生命周期为"创建 → 标记已用"。
+> 此表无 `updated_at`。生命周期为"创建 → 标记已用"。已使用 + 已过期的 code 仍被 pg_cron 统一清理；部分索引 `idx_oauth_authorizations_expires_at` 仅覆盖 `is_used = FALSE` 的行，清理 `is_used = TRUE` 过期行需 seq scan
 
-## **oauth_access_tokens 元数据**
+## oauth_access_tokens 元数据
 
 JWT Access Token 为自包含，服务端存储元数据用于撤销追踪与审计
 
@@ -661,9 +665,9 @@ SELECT cron.unschedule(<job_id>);
 
 | 表 | 清理对象 | 频率 | 延迟窗口 |
 |----|---------|------|---------|
-| `oauth_authorizations` | 已过期，无论是否使用 | 每小时 | `expires_at` + 1h（留缓冲防时钟偏差） |
+| `oauth_authorizations` | 已过期，无论是否使用 | 每小时 | `expires_at` + 1h（留缓冲防时钟偏差）。注：索引 `idx_oauth_authorizations_expires_at` 是部分索引（`WHERE is_used = FALSE`），未覆盖 `is_used = TRUE` 的过期行——SAST 规模下可接受，必要时可增设覆盖全过期行的索引 |
 | `oauth_access_tokens` | 已过期元数据 | 每小时 | `expires_at` + 1h |
-| `oauth_refresh_tokens` | 已撤销 **且** 已过期 | 每天 | `expires_at` + 1d（只清已撤销的，未撤销的 refresh_token 过期后仍可查审计） |
+| `oauth_refresh_tokens` | 已撤销且已过期 | 每天 | `expires_at` + 1d（只清已撤销的，未撤销的 refresh_token 过期后仍可查审计） |
 | `audit_logs` | 超过保留期数据 | 每天 | `created_at` + 90d（90 天保留期） |
 
 ---
