@@ -2,9 +2,7 @@ version: "3.8"
 
 services:
   api:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+    image: ${API_IMAGE:-sastlink-api:current}
     container_name: sastlink-api
     restart: unless-stopped
     environment:

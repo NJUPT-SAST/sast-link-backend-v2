@@ -24,7 +24,7 @@ docker compose config
 # The workflow only checks out the repo and reports that implementation code was removed.
 ```
 
-The current repository has no runnable build, lint, or test command. `docker build -f docker/Dockerfile .` is a deployment reference and will fail until Go implementation files such as `go.mod`, `go.sum`, `cmd/api`, and `docs/migrations` are restored.
+The current repository has no runnable build, lint, or test command. `docker-compose.yml` is a runtime configuration reference and expects a prebuilt image via `API_IMAGE` or the default `sastlink-api:current` tag.
 
 ## Commands Once Go Implementation Is Restored
 
@@ -34,7 +34,7 @@ The preserved design targets Go `1.26.4`, Gin, GORM, PostgreSQL 16+, Redis 8+, a
 # Download modules
 go mod download
 
-# Build the API binary expected by docker/Dockerfile
+# Build the API binary expected by the future container image
 go build -o bin/api ./cmd/api
 
 # Run all tests
@@ -58,7 +58,7 @@ Update this section when the implementation lands if the actual commands differ.
 - `docs/openapi.yaml`: machine-readable OpenAPI 3.0.1 contract. Keep it aligned with `docs/API文档.md` when endpoints change.
 - `docs/psql-db-design.md`: PostgreSQL schema design, enum values, indexes, triggers, token-family cascade revocation flow, and pg_cron cleanup jobs.
 - `.env.example`: environment variable names and defaults expected by the future service.
-- `docker-compose.yml` and `docker/Dockerfile`: deployment reference for an API container connected to external PostgreSQL and Redis Docker networks.
+- `docker-compose.yml`: runtime reference for an API container connected to external PostgreSQL and Redis Docker networks. It expects a prebuilt image set by `API_IMAGE` or `sastlink-api:current`.
 
 ## Target Architecture
 
@@ -108,13 +108,11 @@ When rebuilding flows, preserve the double binding between `registration_state` 
 
 ## Deployment Notes
 
-`docker-compose.yml` defines one `api` service listening on `127.0.0.1:${API_PORT:-8080}:8080` with external `postgres` and `redis` networks. The health check expects:
+`docker-compose.yml` defines one `api` service listening on `127.0.0.1:${API_PORT:-8080}:8080` with external `postgres` and `redis` networks. It does not build an image from this repository; provide a prebuilt image through `API_IMAGE` or tag one as `sastlink-api:current`. The health check expects:
 
 ```text
 GET /health -> { "status": "ok", "db": "ok", "redis": "ok" }
 ```
-
-The Dockerfile expects a Go API at `./cmd/api` and copies `docs/migrations` into the runtime image. If the future implementation uses a different migration path or entrypoint, update both `docker/Dockerfile` and this guide together.
 
 ## CI And Security
 

@@ -15,8 +15,8 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 
 保留的工程资料：
 
-- `.github/`：GitHub 配置与手动 CI 工作流
-- `docker/`、`docker-compose.yml`：容器化部署参考
+- `.github/`：GitHub 配置与手动 CI / 安全扫描工作流
+- `docker-compose.yml`：容器运行配置参考
 - `.env.example`：环境变量示例
 - `docs/`：需求、接口与数据库设计文档
 
