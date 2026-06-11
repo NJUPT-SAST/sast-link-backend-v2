@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 SAST Link Backend V2 is the backend design repository for SAST's unified identity/authentication center and personnel information system. The backend implementation code has been removed; the repository currently keeps product, API, database, environment, Docker, and CI reference material for a future rebuild.
 
-Do not assume application source exists yet. At the time this guide was written, there is no `go.mod`, `go.sum`, `cmd/api`, package tree, migrations directory, lint config, or test suite in the working tree.
+Do not assume application source exists yet. At the time this guide was written, there is no `go.mod`, `go.sum`, `cmd/api`, package tree, migrations directory, or test suite in the working tree. Lint config (`.golangci.yml`, `.pre-commit-config.yaml`) and CI workflows are present and validated.
 
 ## Current Commands
 
