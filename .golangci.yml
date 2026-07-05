@@ -1,57 +1,57 @@
-# golangci-lint configuration for SAST Link v2
-# Conservative set: core correctness + security + minimal style, low false-positive rate.
-
+version: "2"
 run:
-  timeout: 5m
   tests: true
-
 linters:
   enable:
-    # core correctness
-    - govet          # go vet — official static analysis
-    - errcheck       # unchecked error returns
-    - staticcheck    # deep static analysis (bugs, performance, simplifications)
-    - unused         # unused variables, constants, functions
-
-    # formatting and imports
-    - gofmt          # go fmt format check
-    - goimports      # import ordering + unused imports removal
-
-    # security and robustness
-    - gosec          # security rules (SQL injection, hardcoded creds, etc.)
-    - bodyclose      # unclosed HTTP response bodies — critical for Gin handlers
-    - noctx          # http.Request without context — ensures GORM calls use WithContext
-    - sqlclosecheck  # unclosed database/sql rows and statements
-
-    # project-specific
-    - misspell       # common English typos
-    - unconvert      # unnecessary type conversions
-
-linters-settings:
-  revive:
+    - bodyclose
+    - gosec
+    - misspell
+    - noctx
+    - sqlclosecheck
+    - unconvert
+  settings:
+    gosec:
+      excludes:
+        - G104
+    govet:
+      disable:
+        - fieldalignment
+      enable-all: true
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+          disabled: false
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: exported
-        severity: warning
-        disabled: false
-
-  gosec:
-    excludes:
-      - G104    # allow unchecked Write / Close return values
-
-  goimports:
-    local-prefixes: github.com/NJUPT-SAST/sast-link-backend-v2
-
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment    # struct field alignment optimization — noisy, enable on demand
-
+      - linters:
+          - revive
+        path: _test\.go
+        text: exported
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - revive
-      text: "exported"
-
   max-issues-per-linter: 0
   max-same-issues: 0
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/NJUPT-SAST/sast-link-backend-v2
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
