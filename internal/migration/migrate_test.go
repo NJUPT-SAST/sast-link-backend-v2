@@ -139,8 +139,8 @@ func insertTestUser(t *testing.T, database *sql.DB) int64 {
 	var userID int64
 	var emailType string
 	err := database.QueryRow(`
-INSERT INTO "user" (name, phone_number, qq_number, password, login_email, college, major)
-VALUES ('Test User', '13800138000', '10000', 'hash', 'user@njupt.edu.cn', '其他', '')
+INSERT INTO "user" (name, phone_number, qq_number, password, login_email, student_id, college, major)
+VALUES ('Test User', '13800138000', '10000', 'hash', 'user@njupt.edu.cn', 'B24040001', '其他', '')
 RETURNING id, email_type
 `).Scan(&userID, &emailType)
 	if err != nil {
@@ -156,8 +156,8 @@ func assertRejectsInvalidEmailDomain(t *testing.T, database *sql.DB) {
 	t.Helper()
 
 	_, err := database.Exec(`
-INSERT INTO "user" (name, phone_number, qq_number, password, login_email, college, major)
-VALUES ('Bad User', '13800138001', '10001', 'hash', 'user@example.com', '其他', '')
+INSERT INTO "user" (name, phone_number, qq_number, password, login_email, student_id, college, major)
+VALUES ('Bad User', '13800138001', '10001', 'hash', 'user@example.com', 'B24040002', '其他', '')
 `)
 	if err == nil {
 		t.Fatal("insert user with invalid email domain succeeded")

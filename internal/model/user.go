@@ -10,7 +10,7 @@ type User struct {
 	PhoneNumber  string
 	QQNumber     string
 	PasswordHash string `gorm:"column:password;not null" json:"-"`
-	StudentID    *string
+	StudentID    string `gorm:"not null"`
 	State        UserState `gorm:"type:state_enum;not null"`
 	EmailType    EmailType `gorm:"type:email_enum;not null"`
 	LoginEmail   string

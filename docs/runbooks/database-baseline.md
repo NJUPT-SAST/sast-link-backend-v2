@@ -10,7 +10,7 @@ Before baselining, obtain an approved maintenance window and a verified database
 
 ## Preflight
 
-First run `.\bin\migrate.exe version`. Then run the guarded baseline command below. The command checks the required V001 identity objects (tables, enum types, and table-bound triggers) before registering the migration; a missing required object, dirty state, or a version other than 1 terminates without modifying application data. This guard is not a substitute for reviewing the schema dump and backup before the maintenance window.
+First run `.\bin\migrate.exe version`. Then run the guarded baseline command below. The command checks the required V001 enum labels, table columns and defaults, constraints, indexes, trigger functions, and trigger definitions before registering the migration; an incompatible required object, dirty state, or a version other than 1 terminates without modifying application data. Extra database objects are allowed. This structured guard is not a substitute for reviewing the schema dump and backup before the maintenance window.
 
 ## Command
 

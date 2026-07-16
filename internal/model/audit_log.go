@@ -12,7 +12,7 @@ type AuditLog struct {
 	Detail     JSONB   `gorm:"type:jsonb"`
 	ClientIP   *string `gorm:"column:client_ip"`
 	UserAgent  *string
-	Success    bool
+	Success    *bool `gorm:"default:(-)"`
 	ErrCode    *int
 	CreatedAt  time.Time
 }

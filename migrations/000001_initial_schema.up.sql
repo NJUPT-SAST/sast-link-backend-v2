@@ -34,7 +34,7 @@ CREATE TABLE "user" (
     phone_number VARCHAR(20) NOT NULL,
     qq_number VARCHAR(20) NOT NULL,
     password VARCHAR(512) NOT NULL,
-    student_id VARCHAR(50) UNIQUE,
+    student_id VARCHAR(50) NOT NULL UNIQUE,
     state state_enum NOT NULL DEFAULT 'njupter',
     email_type email_enum NOT NULL,
     login_email VARCHAR(255) NOT NULL UNIQUE,

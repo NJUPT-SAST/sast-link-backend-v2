@@ -12,7 +12,7 @@ type OAuthClient struct {
 	RedirectURIs     StringArray `gorm:"type:text[]"`
 	GrantTypes       StringArray `gorm:"type:text[]"`
 	Scopes           StringArray `gorm:"type:text[]"`
-	IsActive         bool
+	IsActive         *bool       `gorm:"default:(-)"`
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }

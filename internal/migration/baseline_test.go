@@ -97,6 +97,85 @@ func TestBaselineV1RejectsDirtyVersionOne(t *testing.T) {
 	}
 }
 
+func TestBaselineV1RejectsMissingRequiredConstraint(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	applyUnversionedV1Schema(t, databaseURL)
+
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	if _, err := database.Exec(`
+		ALTER TABLE oauth_refresh_tokens
+		DROP CONSTRAINT uq_oauth_refresh_tokens_family_sequence
+	`); err != nil {
+		t.Fatalf("drop required constraint: %v", err)
+	}
+
+	err := migration.BaselineV1(context.Background(), databaseURL)
+	if err == nil {
+		t.Fatal("BaselineV1() error = nil, want missing-constraint rejection")
+	}
+	if !strings.Contains(err.Error(), "required unique constraint") {
+		t.Fatalf("BaselineV1() error = %v, want missing unique constraint", err)
+	}
+	assertUnversioned(t, databaseURL)
+}
+
+func TestBaselineV1RejectsIncompatibleCatalogObjects(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    string
+		wantError string
+	}{
+		{
+			name:      "column default",
+			mutate:    `ALTER TABLE audit_logs ALTER COLUMN success SET DEFAULT FALSE`,
+			wantError: `required default "audit_logs"."success"`,
+		},
+		{
+			name: "partial index predicate",
+			mutate: `
+				DROP INDEX uq_identities_user_github;
+				CREATE UNIQUE INDEX uq_identities_user_github
+					ON identities(user_id, provider) WHERE provider = 'lark';
+			`,
+			wantError: `required index "uq_identities_user_github"`,
+		},
+		{
+			name:      "disabled trigger",
+			mutate:    `ALTER TABLE "user" DISABLE TRIGGER trg_user_email_domain`,
+			wantError: `required trigger "trg_user_email_domain"`,
+		},
+		{
+			name: "wrong trigger function",
+			mutate: `
+				DROP TRIGGER trg_user_email_domain ON "user";
+				CREATE TRIGGER trg_user_email_domain
+					BEFORE INSERT OR UPDATE OF login_email ON "user"
+					FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+			`,
+			wantError: `required trigger "trg_user_email_domain"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			databaseURL := testutil.StartPostgres(t)
+			applyUnversionedV1Schema(t, databaseURL)
+			database := testutil.OpenSQL(t, databaseURL)
+			t.Cleanup(func() { _ = database.Close() })
+			if _, err := database.Exec(test.mutate); err != nil {
+				t.Fatalf("mutate V001 catalog: %v", err)
+			}
+
+			err := migration.BaselineV1(context.Background(), databaseURL)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("BaselineV1() error = %v, want %q", err, test.wantError)
+			}
+			assertUnversioned(t, databaseURL)
+		})
+	}
+}
+
 func TestBaselineV1RejectsMissingRequiredTrigger(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	applyUnversionedV1Schema(t, databaseURL)
@@ -153,6 +232,18 @@ func TestBaselineV1RejectsTriggerNameCollisionOnWrongTable(t *testing.T) {
 	if !strings.Contains(err.Error(), `missing required trigger "trg_user_email_domain" on table "public"."user"`) {
 		t.Fatalf("BaselineV1() error = %v, want missing trigger on public.user", err)
 	}
+
+	version, dirty, err := migration.Current(databaseURL)
+	if err != nil {
+		t.Fatalf("Current() error = %v", err)
+	}
+	if version != 0 || dirty {
+		t.Fatalf("Current() = (%d, %t), want (0, false)", version, dirty)
+	}
+}
+
+func assertUnversioned(t *testing.T, databaseURL string) {
+	t.Helper()
 
 	version, dirty, err := migration.Current(databaseURL)
 	if err != nil {

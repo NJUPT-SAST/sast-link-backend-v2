@@ -225,8 +225,22 @@ func TestAuditLogRepositoryCreate(t *testing.T) {
 		t.Fatalf("read audit log: %v", err)
 	}
 	if found.UserID != nil || found.Action != entry.Action || found.Resource != entry.Resource ||
+		found.Success == nil || !*found.Success || entry.Success == nil || !*entry.Success ||
 		!jsonEqual(found.Detail, entry.Detail) {
-		t.Fatalf("audit log = %#v, want persisted nil user and detail %s", found, entry.Detail)
+		t.Fatalf("audit log = %#v, want persisted default success and detail %s", found, entry.Detail)
+	}
+
+	falseValue := false
+	failed := &model.AuditLog{Action: "login", Resource: "user", Success: &falseValue}
+	if err := auditLogRepository.Create(context.Background(), failed); err != nil {
+		t.Fatalf("Create(failed) error = %v", err)
+	}
+	var foundFailed model.AuditLog
+	if err := database.First(&foundFailed, failed.ID).Error; err != nil {
+		t.Fatalf("read failed audit log: %v", err)
+	}
+	if foundFailed.Success == nil || *foundFailed.Success {
+		t.Fatalf("failed audit Success = %v, want false", foundFailed.Success)
 	}
 
 	invalid := &model.AuditLog{Action: strings.Repeat("a", 51), Resource: "user"}
@@ -257,6 +271,7 @@ func testUser(loginEmail string) *model.User {
 		QQNumber:     "10000",
 		PasswordHash: "password-hash",
 		LoginEmail:   loginEmail,
+		StudentID:    "B" + loginEmail[:strings.IndexByte(loginEmail, '@')],
 		Role:         model.UserRoleFreshman,
 		State:        model.UserStateNJUPTer,
 		EmailType:    model.EmailTypeNJUpt,
@@ -285,6 +300,9 @@ func createOAuthClient(t *testing.T, database *gorm.DB) *model.OAuthClient {
 	}
 	if err := database.Create(client).Error; err != nil {
 		t.Fatalf("create OAuth client: %v", err)
+	}
+	if client.IsActive == nil || !*client.IsActive {
+		t.Fatalf("OAuth client IsActive = %v, want default true", client.IsActive)
 	}
 	return client
 }

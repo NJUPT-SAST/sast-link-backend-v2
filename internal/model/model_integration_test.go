@@ -30,6 +30,7 @@ func TestModelRoundTripPreservesNullableAndPostgresTypes(t *testing.T) {
 		PhoneNumber:  "13800138000",
 		QQNumber:     "10000",
 		PasswordHash: "password-hash",
+		StudentID:    "B24040001",
 		LoginEmail:   "user@njupt.edu.cn",
 		Role:         model.UserRoleFreshman,
 		State:        model.UserStateNJUPTer,
@@ -68,8 +69,8 @@ func TestModelRoundTripPreservesNullableAndPostgresTypes(t *testing.T) {
 	if err := database.First(&gotUser, user.ID).Error; err != nil {
 		t.Fatalf("read user: %v", err)
 	}
-	if gotUser.StudentID != nil {
-		t.Fatalf("StudentID = %q, want nil", *gotUser.StudentID)
+	if gotUser.StudentID != "B24040001" {
+		t.Fatalf("StudentID = %q, want B24040001", gotUser.StudentID)
 	}
 	var gotProfile model.Profile
 	if err := database.First(&gotProfile, profile.ID).Error; err != nil {
@@ -90,6 +91,10 @@ func TestModelRoundTripPreservesNullableAndPostgresTypes(t *testing.T) {
 	if gotClient.ClientSecretHash != nil {
 		t.Fatalf("ClientSecretHash = %q, want nil", *gotClient.ClientSecretHash)
 	}
+	if client.IsActive == nil || !*client.IsActive || gotClient.IsActive == nil || !*gotClient.IsActive {
+		t.Fatalf("IsActive after default = %v/%v, want true/true", client.IsActive, gotClient.IsActive)
+	}
+	assertBooleanDefaults(t, database, user.ID)
 	assertOAuthModelMappings(t, database, user.ID, client.ID)
 	if !reflect.DeepEqual(gotClient.RedirectURIs, client.RedirectURIs) {
 		t.Fatalf("RedirectURIs = %q, want %q", gotClient.RedirectURIs, client.RedirectURIs)
@@ -131,6 +136,85 @@ func TestStringArrayDistinguishesNullAndEmpty(t *testing.T) {
 	}
 	if values[1].Values == nil || len(values[1].Values) != 0 {
 		t.Fatalf("empty text[] = %#v, want non-nil empty slice", values[1].Values)
+	}
+}
+
+func assertBooleanDefaults(t *testing.T, database *gorm.DB, userID int64) {
+	t.Helper()
+
+	falseValue := false
+	trueValue := true
+	client := model.OAuthClient{
+		ClientID:     "explicit-inactive-client",
+		ClientName:   "Explicit Inactive Client",
+		ClientType:   model.ClientTypeFirstParty,
+		RedirectURIs: model.StringArray{"https://example.test/inactive"},
+		GrantTypes:   model.StringArray{"authorization_code"},
+		Scopes:       model.StringArray{},
+		IsActive:     &falseValue,
+	}
+	if err := database.Create(&client).Error; err != nil {
+		t.Fatalf("create explicitly inactive OAuth client: %v", err)
+	}
+	var gotClient model.OAuthClient
+	if err := database.First(&gotClient, client.ID).Error; err != nil {
+		t.Fatalf("read explicitly inactive OAuth client: %v", err)
+	}
+	if gotClient.IsActive == nil || *gotClient.IsActive {
+		t.Fatalf("explicit IsActive = %v, want false", gotClient.IsActive)
+	}
+
+	activeClient := model.OAuthClient{
+		ClientID:     "explicit-active-client",
+		ClientName:   "Explicit Active Client",
+		ClientType:   model.ClientTypeFirstParty,
+		RedirectURIs: model.StringArray{"https://example.test/active"},
+		GrantTypes:   model.StringArray{"authorization_code"},
+		Scopes:       model.StringArray{},
+		IsActive:     &trueValue,
+	}
+	if err := database.Create(&activeClient).Error; err != nil {
+		t.Fatalf("create explicitly active OAuth client: %v", err)
+	}
+	if activeClient.IsActive == nil || !*activeClient.IsActive {
+		t.Fatalf("explicit IsActive = %v, want true", activeClient.IsActive)
+	}
+
+	defaultAudit := model.AuditLog{Action: "default", Resource: "model"}
+	if err := database.Create(&defaultAudit).Error; err != nil {
+		t.Fatalf("create default-success audit log: %v", err)
+	}
+	if defaultAudit.Success == nil || !*defaultAudit.Success {
+		t.Fatalf("Success after default = %v, want true", defaultAudit.Success)
+	}
+
+	failedAudit := model.AuditLog{
+		UserID:   &userID,
+		Action:   "failed",
+		Resource: "model",
+		Success:  &falseValue,
+	}
+	if err := database.Create(&failedAudit).Error; err != nil {
+		t.Fatalf("create failed audit log: %v", err)
+	}
+	var gotFailedAudit model.AuditLog
+	if err := database.First(&gotFailedAudit, failedAudit.ID).Error; err != nil {
+		t.Fatalf("read failed audit log: %v", err)
+	}
+	if gotFailedAudit.Success == nil || *gotFailedAudit.Success {
+		t.Fatalf("explicit Success = %v, want false", gotFailedAudit.Success)
+	}
+
+	successfulAudit := model.AuditLog{
+		Action:   "successful",
+		Resource: "model",
+		Success:  &trueValue,
+	}
+	if err := database.Create(&successfulAudit).Error; err != nil {
+		t.Fatalf("create explicitly successful audit log: %v", err)
+	}
+	if successfulAudit.Success == nil || !*successfulAudit.Success {
+		t.Fatalf("explicit Success = %v, want true", successfulAudit.Success)
 	}
 }
 
@@ -204,6 +288,9 @@ func assertOAuthModelMappings(t *testing.T, database *gorm.DB, userID int64, cli
 	if gotAuditLog.UserID != nil || gotAuditLog.ResourceID != nil || gotAuditLog.ClientIP != nil ||
 		gotAuditLog.UserAgent != nil || gotAuditLog.ErrCode != nil {
 		t.Fatalf("nullable audit-log fields = %#v, want nil", gotAuditLog)
+	}
+	if auditLog.Success == nil || !*auditLog.Success || gotAuditLog.Success == nil || !*gotAuditLog.Success {
+		t.Fatalf("Success after default = %v/%v, want true/true", auditLog.Success, gotAuditLog.Success)
 	}
 	if !jsonEqual(gotAuditLog.Detail, auditLog.Detail) {
 		t.Fatalf("Detail = %s, want semantically equal JSON %s", gotAuditLog.Detail, auditLog.Detail)
