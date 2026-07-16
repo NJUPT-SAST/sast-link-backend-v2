@@ -58,7 +58,7 @@ temp/
 tmp/
 
 # Migration binary
-migrate
+/migrate
 
 # Build artifacts
 dist/
