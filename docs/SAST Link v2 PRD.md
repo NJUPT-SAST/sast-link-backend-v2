@@ -568,20 +568,26 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | `client_type` | `first_party` / `third_party` |
 | `college` | 贝尔英才学院 / 通信与信息工程学院 / 电光柔学院 / 集成电路科学与工程学院（产教融合学院）/ 计算机学院、软件学院、网络空间安全学院 / 自动化学院 / 人工智能学院 / 材料科学与工程学院 / 化学与生命科学学院 / 物联网学院 / 理学院 / 现代邮政学院、智慧交通学院 / 数字媒体与设计艺术学院 / 管理学院 / 经济学院 / 社会与人口学院、社会工作学院 / 外国语学院 / 教育科学与技术学院 / 波特兰学院 / 其他 |
 
-## 附录 C：实现状态追踪（待重建）
+## 附录 C：实现状态追踪
 
 | 模块 | 状态 |
 |------|------|
-| 全部功能 | 待重建 — 仓库中无实现代码，以下为重建目标清单 |
+| Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
+| 数据基础层 | 已完成 — V001 SQL migration、baseline guard、persistence entities、最小 repositories 与 PostgreSQL 16 integration tests |
+| 用户认证与资料 | 待实现 |
+| OAuth/OIDC | 待实现 |
+| 限流、审计业务接入与 pg_cron | 待实现 |
 
 ## 11. 实现顺序
 
+- [x] Go 服务骨架（配置 / DB 与 Redis 连接 / Web 基础设施 / 健康检查）
+- [x] 数据基础层（V001 migration / baseline / entities / repositories / integration tests）
 - [ ] 用户认证（注册 / 登录 / JWT 签发验证 / 验证码 / 改密 / 重置密码 / 登出）
 - [ ] 用户资料管理（查看 / 编辑 / 头像上传）
 - [ ] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [ ] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
 - [ ] 限流与防刷中间件
-- [ ] 审计日志 + 健康检查
+- [ ] 审计日志业务接入（健康检查已完成）
 - [ ] 头像内容审核（腾讯云 COS）
 - [ ] OAuth 2.1 授权服务端（authorize / token / revoke + PKCE）
 - [ ] OIDC Provider（discovery / JWKS / UserInfo / ID Token）
