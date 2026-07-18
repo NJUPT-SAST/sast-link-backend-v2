@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/migrations"
 	"github.com/golang-migrate/migrate/v4"
@@ -59,7 +60,7 @@ func toMigrationURL(databaseURL string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported PostgreSQL URL scheme %q", parsed.Scheme)
 	}
-	if parsed.Host == "" || parsed.Path == "" {
+	if parsed.Host == "" || strings.Trim(parsed.Path, "/") == "" {
 		return "", fmt.Errorf("PostgreSQL URL must contain host and database name")
 	}
 	query := parsed.Query()

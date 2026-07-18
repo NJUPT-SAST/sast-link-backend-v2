@@ -22,8 +22,8 @@ var requiredConstraints = []requiredConstraint{
 	{table: "user", kind: "u", columns: "login_email"},
 	{table: "oauth_clients", kind: "p", columns: "id"},
 	{table: "oauth_clients", kind: "u", columns: "client_id"},
-	{table: "oauth_clients", kind: "c", check: "array_length(redirect_uris"},
-	{table: "oauth_clients", kind: "c", check: "array_length(grant_types"},
+	{table: "oauth_clients", kind: "c", check: "COALESCE(array_length(redirect_uris, 1), 0) > 0"},
+	{table: "oauth_clients", kind: "c", check: "COALESCE(array_length(grant_types, 1), 0) > 0"},
 	{table: "profile", kind: "p", columns: "id"},
 	{table: "profile", kind: "u", columns: "user_id"},
 	{table: "profile", kind: "f", columns: "user_id", reference: "user.id", deleteAction: "c"},
@@ -35,7 +35,11 @@ var requiredConstraints = []requiredConstraint{
 	{table: "oauth_authorizations", kind: "f", columns: "client_id", reference: "oauth_clients.id", deleteAction: "c"},
 	{table: "oauth_authorizations", kind: "f", columns: "user_id", reference: "user.id", deleteAction: "c"},
 	{table: "oauth_authorizations", kind: "c", check: "expires_at > created_at"},
-	{table: "oauth_authorizations", kind: "c", check: "code_challenge_method"},
+	{
+		table: "oauth_authorizations",
+		kind:  "c",
+		check: "(code_challenge_method)::text = ANY ((ARRAY['S256'::character varying, 'plain'::character varying])::text[])",
+	},
 	{table: "oauth_access_tokens", kind: "p", columns: "id"},
 	{table: "oauth_access_tokens", kind: "u", columns: "token_id"},
 	{table: "oauth_access_tokens", kind: "f", columns: "client_id", reference: "oauth_clients.id", deleteAction: "c"},
@@ -50,8 +54,7 @@ var requiredConstraints = []requiredConstraint{
 	{table: "audit_logs", kind: "f", columns: "user_id", reference: "user.id", deleteAction: "n"},
 }
 
-const constraintQuery = `SELECT EXISTS (
-  SELECT 1
+const constraintQuery = `SELECT pg_catalog.pg_get_constraintdef(con.oid)
   FROM pg_catalog.pg_constraint con
   JOIN pg_catalog.pg_class relation ON relation.oid = con.conrelid
   JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
@@ -75,14 +78,11 @@ const constraintQuery = `SELECT EXISTS (
           ON attribute.attrelid = con.confrelid AND attribute.attnum = key.attnum
       ) = $4
     )
-    AND ($5 = '' OR con.confdeltype = $5::"char")
-    AND ($6 = '' OR position($6 in lower(pg_catalog.pg_get_constraintdef(con.oid))) > 0)
-)`
+    AND ($5 = '' OR con.confdeltype = $5::"char")`
 
 func requireV1Constraints(ctx context.Context, database *sql.DB) error {
 	for _, required := range requiredConstraints {
-		var exists bool
-		if err := database.QueryRowContext(
+		rows, err := database.QueryContext(
 			ctx,
 			constraintQuery,
 			required.table,
@@ -90,11 +90,29 @@ func requireV1Constraints(ctx context.Context, database *sql.DB) error {
 			required.columns,
 			required.reference,
 			required.deleteAction,
-			strings.ToLower(required.check),
-		).Scan(&exists); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("check required constraint on %q (%s): %w", required.table, required.columns, err)
 		}
-		if !exists {
+
+		found := false
+		for rows.Next() {
+			var definition string
+			if err := rows.Scan(&definition); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan required constraint on %q (%s): %w", required.table, required.columns, err)
+			}
+			if required.check == "" || checkConstraintExpressionEqual(definition, required.check) {
+				found = true
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close required constraint rows on %q (%s): %w", required.table, required.columns, err)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("read required constraint on %q (%s): %w", required.table, required.columns, err)
+		}
+		if !found {
 			return fmt.Errorf(
 				"missing required %s constraint on %q (%s)",
 				constraintKind(required.kind), required.table, required.columns,
@@ -102,6 +120,14 @@ func requireV1Constraints(ctx context.Context, database *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func checkConstraintExpressionEqual(definition string, required string) bool {
+	definition = strings.TrimSpace(definition)
+	if len(definition) >= len("CHECK") && strings.EqualFold(definition[:len("CHECK")], "CHECK") {
+		definition = strings.TrimSpace(definition[len("CHECK"):])
+	}
+	return semanticExpressionEqual(definition, required)
 }
 
 func constraintKind(kind string) string {
@@ -180,8 +206,8 @@ func requireV1Indexes(ctx context.Context, database *sql.DB) error {
 		if columns != required.columns || unique != required.unique || !valid || !ready ||
 			!semanticExpressionEqual(predicate, required.predicate) {
 			return fmt.Errorf(
-				"required index %q on %q has incompatible definition",
-				required.name, required.table,
+				"required index %q on %q has incompatible definition: predicate %q normalized %q want %q normalized %q",
+				required.name, required.table, predicate, normalizeCatalogExpression(predicate), required.predicate, normalizeCatalogExpression(required.predicate),
 			)
 		}
 	}
@@ -189,16 +215,107 @@ func requireV1Indexes(ctx context.Context, database *sql.DB) error {
 }
 
 func semanticExpressionEqual(actual string, required string) bool {
-	normalized := normalizeCatalogExpression(actual)
-	required = normalizeCatalogExpression(required)
-	return normalized == required || strings.Contains(normalized, required)
+	return normalizeCatalogExpression(actual) == normalizeCatalogExpression(required)
 }
 
 func normalizeCatalogExpression(expression string) string {
-	expression = strings.ToLower(strings.Join(strings.Fields(expression), " "))
-	expression = strings.ReplaceAll(expression, "::text", "")
-	expression = strings.ReplaceAll(expression, "::character varying", "")
-	expression = strings.ReplaceAll(expression, "(('", "('")
-	expression = strings.ReplaceAll(expression, "'))", "')")
-	return strings.Trim(expression, "()")
+	var normalized strings.Builder
+	normalized.Grow(len(expression))
+	inQuote := false
+	for index := 0; index < len(expression); index++ {
+		character := expression[index]
+		if character == '\'' {
+			normalized.WriteByte(character)
+			if inQuote && index+1 < len(expression) && expression[index+1] == '\'' {
+				normalized.WriteByte(expression[index+1])
+				index++
+				continue
+			}
+			inQuote = !inQuote
+			continue
+		}
+		if !inQuote {
+			if strings.ContainsRune(" \t\r\n\f\v", rune(character)) {
+				continue
+			}
+			if character >= 'A' && character <= 'Z' {
+				character += 'a' - 'A'
+			}
+		}
+		normalized.WriteByte(character)
+	}
+	return trimRedundantOuterParentheses(stripCatalogCasts(normalized.String()))
+}
+
+func stripCatalogCasts(expression string) string {
+	casts := []string{"::charactervarying", "::login_method_enum", "::text"}
+	var normalized strings.Builder
+	normalized.Grow(len(expression))
+	inQuote := false
+	for index := 0; index < len(expression); {
+		if expression[index] == '\'' {
+			normalized.WriteByte(expression[index])
+			if inQuote && index+1 < len(expression) && expression[index+1] == '\'' {
+				normalized.WriteByte(expression[index+1])
+				index += 2
+				continue
+			}
+			inQuote = !inQuote
+			index++
+			continue
+		}
+		if !inQuote {
+			removed := false
+			for _, cast := range casts {
+				if strings.HasPrefix(expression[index:], cast) {
+					index += len(cast)
+					removed = true
+					break
+				}
+			}
+			if removed {
+				continue
+			}
+		}
+		normalized.WriteByte(expression[index])
+		index++
+	}
+	return normalized.String()
+}
+
+func trimRedundantOuterParentheses(expression string) string {
+	for hasOuterParentheses(expression) {
+		expression = expression[1 : len(expression)-1]
+	}
+	return expression
+}
+
+func hasOuterParentheses(expression string) bool {
+	if len(expression) < 2 || expression[0] != '(' || expression[len(expression)-1] != ')' {
+		return false
+	}
+	depth := 0
+	inQuote := false
+	for index, character := range expression {
+		if character == '\'' {
+			if inQuote && index+1 < len(expression) && expression[index+1] == '\'' {
+				continue
+			}
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		switch character {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 && index != len(expression)-1 {
+				return false
+			}
+		}
+	}
+	return depth == 0 && !inQuote
 }

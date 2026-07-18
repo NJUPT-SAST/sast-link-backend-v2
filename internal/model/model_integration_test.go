@@ -107,6 +107,105 @@ func TestModelRoundTripPreservesNullableAndPostgresTypes(t *testing.T) {
 	}
 }
 
+func TestModelCreateUsesPersistenceDefaultsAndPreservesExplicitValues(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	migrateV1(t, databaseURL)
+	database := testutil.OpenGORM(t, databaseURL)
+
+	defaultUser := model.User{
+		Name:         "Default User",
+		PhoneNumber:  "13800138001",
+		QQNumber:     "10001",
+		PasswordHash: "password-hash",
+		StudentID:    "B24040002",
+		LoginEmail:   "default@sast.fun",
+	}
+	if err := database.Create(&defaultUser).Error; err != nil {
+		t.Fatalf("create user with defaults: %v", err)
+	}
+	if defaultUser.Role != model.UserRoleFreshman || defaultUser.State != model.UserStateNJUPTer ||
+		defaultUser.College != model.CollegeOther || defaultUser.EmailType != model.EmailTypeSAST {
+		t.Fatalf("default user = %#v, want DB defaults and trigger-derived email type", defaultUser)
+	}
+
+	explicitUser := model.User{
+		Role:         model.UserRoleAdmin,
+		Name:         "Explicit User",
+		PhoneNumber:  "13800138002",
+		QQNumber:     "10002",
+		PasswordHash: "password-hash",
+		StudentID:    "B24040003",
+		State:        model.UserStateOnSAST,
+		EmailType:    model.EmailTypeSAST,
+		LoginEmail:   "explicit@njupt.edu.cn",
+		College:      model.CollegeComputerSoftwareCybersecurity,
+	}
+	if err := database.Create(&explicitUser).Error; err != nil {
+		t.Fatalf("create user with explicit values: %v", err)
+	}
+	if explicitUser.Role != model.UserRoleAdmin || explicitUser.State != model.UserStateOnSAST ||
+		explicitUser.College != model.CollegeComputerSoftwareCybersecurity || explicitUser.EmailType != model.EmailTypeNJUpt {
+		t.Fatalf("explicit user = %#v, want role/state/college preserved and email type trigger-derived", explicitUser)
+	}
+
+	defaultClient := model.OAuthClient{
+		ClientID:     "default-scopes-client",
+		ClientName:   "Default Scopes Client",
+		ClientType:   model.ClientTypeFirstParty,
+		RedirectURIs: model.StringArray{"https://example.test/default"},
+		GrantTypes:   model.StringArray{"authorization_code"},
+	}
+	if err := database.Create(&defaultClient).Error; err != nil {
+		t.Fatalf("create OAuth client with default scopes: %v", err)
+	}
+	if defaultClient.Scopes == nil || len(defaultClient.Scopes) != 0 {
+		t.Fatalf("default Scopes = %#v, want non-nil empty array", defaultClient.Scopes)
+	}
+
+	explicitScopes := model.StringArray{"openid", "profile"}
+	explicitClient := model.OAuthClient{
+		ClientID:     "explicit-scopes-client",
+		ClientName:   "Explicit Scopes Client",
+		ClientType:   model.ClientTypeFirstParty,
+		RedirectURIs: model.StringArray{"https://example.test/explicit"},
+		GrantTypes:   model.StringArray{"authorization_code"},
+		Scopes:       explicitScopes,
+	}
+	if err := database.Create(&explicitClient).Error; err != nil {
+		t.Fatalf("create OAuth client with explicit scopes: %v", err)
+	}
+	if !reflect.DeepEqual(explicitClient.Scopes, explicitScopes) {
+		t.Fatalf("explicit Scopes = %#v, want %#v", explicitClient.Scopes, explicitScopes)
+	}
+
+	defaultAudit := model.AuditLog{Action: "default-detail", Resource: "model"}
+	if err := database.Create(&defaultAudit).Error; err != nil {
+		t.Fatalf("create audit log with default detail: %v", err)
+	}
+	if !jsonEqual(defaultAudit.Detail, model.JSONB(`{}`)) {
+		t.Fatalf("default Detail = %s, want empty JSON object", defaultAudit.Detail)
+	}
+	explicitDetail := model.JSONB(`{"source":"explicit"}`)
+	explicitAudit := model.AuditLog{Action: "explicit-detail", Resource: "model", Detail: explicitDetail}
+	if err := database.Create(&explicitAudit).Error; err != nil {
+		t.Fatalf("create audit log with explicit detail: %v", err)
+	}
+	if !jsonEqual(explicitAudit.Detail, explicitDetail) {
+		t.Fatalf("explicit Detail = %s, want %s", explicitAudit.Detail, explicitDetail)
+	}
+}
+
+func TestStringArrayValueRejectsNUL(t *testing.T) {
+	var valuer driver.Valuer = model.StringArray{"valid", "contains\x00nul"}
+	value, err := valuer.Value()
+	if err == nil {
+		t.Fatalf("Value() = %#v, nil; want NUL error", value)
+	}
+	if value != nil {
+		t.Fatalf("Value() = %#v, want nil on error", value)
+	}
+}
+
 func TestStringArrayDistinguishesNullAndEmpty(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	migrateV1(t, databaseURL)

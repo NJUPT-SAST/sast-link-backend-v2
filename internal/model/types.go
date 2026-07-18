@@ -121,6 +121,11 @@ func (a StringArray) Value() (driver.Value, error) {
 	if a == nil {
 		return nil, nil
 	}
+	for _, element := range a {
+		if strings.ContainsRune(element, '\x00') {
+			return nil, fmt.Errorf("value PostgreSQL text[]: element contains NUL")
+		}
+	}
 
 	var builder strings.Builder
 	builder.WriteByte('{')

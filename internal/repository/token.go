@@ -10,6 +10,12 @@ import (
 	"gorm.io/gorm"
 )
 
+const tokenFamilyAdvisoryLockNamespace int32 = 0x53415354
+
+// ErrTokenFamilyRevoked indicates that a token pair cannot be added to a
+// family that already contains revoked token metadata.
+var ErrTokenFamilyRevoked = errors.New("token family is revoked")
+
 // TokenRepository persists and revokes OAuth token metadata.
 type TokenRepository struct {
 	database *gorm.DB
@@ -31,6 +37,19 @@ func (r *TokenRepository) CreatePair(
 	}
 
 	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		familyID := *access.FamilyID
+		if err := lockTokenFamily(transaction, familyID); err != nil {
+			return fmt.Errorf("lock token family: %w", err)
+		}
+
+		familyRevoked, err := tokenFamilyHasRevokedAccess(transaction, familyID)
+		if err != nil {
+			return fmt.Errorf("check token family revocation: %w", err)
+		}
+		if familyRevoked {
+			return ErrTokenFamilyRevoked
+		}
+
 		if err := transaction.Create(access).Error; err != nil {
 			return fmt.Errorf("create access token: %w", err)
 		}
@@ -39,6 +58,24 @@ func (r *TokenRepository) CreatePair(
 		}
 		return nil
 	})
+}
+
+func lockTokenFamily(transaction *gorm.DB, familyID string) error {
+	return transaction.Exec(
+		"SELECT pg_advisory_xact_lock(?, hashtext(?))",
+		tokenFamilyAdvisoryLockNamespace,
+		familyID,
+	).Error
+}
+
+func tokenFamilyHasRevokedAccess(transaction *gorm.DB, familyID string) (bool, error) {
+	var revoked bool
+	err := transaction.Raw(`
+		SELECT EXISTS (
+			SELECT 1 FROM oauth_access_tokens
+			WHERE family_id = ? AND revoked_at IS NOT NULL
+		)`, familyID).Scan(&revoked).Error
+	return revoked, err
 }
 
 func validateTokenPair(access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error {
@@ -74,12 +111,17 @@ func (r *TokenRepository) FindRefreshToken(
 }
 
 // RevokeFamily revokes unrevoked access and refresh tokens in one token family.
+// Revoking a family without existing rows is a no-op; it does not create a tombstone.
 func (r *TokenRepository) RevokeFamily(
 	ctx context.Context,
 	familyID string,
 	revokedAt time.Time,
 ) error {
 	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := lockTokenFamily(transaction, familyID); err != nil {
+			return fmt.Errorf("lock token family: %w", err)
+		}
+
 		if err := transaction.Model(&model.OAuthAccessToken{}).
 			Where("family_id = ? AND revoked_at IS NULL", familyID).
 			Update("revoked_at", revokedAt).Error; err != nil {

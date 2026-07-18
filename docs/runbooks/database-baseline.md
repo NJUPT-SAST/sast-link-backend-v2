@@ -6,7 +6,7 @@ Register V001 for the pre-existing production schema without executing the V001 
 
 ## Preconditions
 
-Before baselining, obtain an approved maintenance window and a verified database backup. Set the production `DB_*` environment configuration, build the migration binary from the target release, and ensure no concurrent deployment is running.
+Before baselining, obtain an approved maintenance window and a verified database backup. Set the production `DB_*` environment configuration, build the migration binary from the target release, and ensure no concurrent deployment is running. Quiesce every schema-changing job and DDL-capable administrative session for the entire baseline command; the catalog preflight and migration-version registration use separate database operations and cannot protect against an uncooperative concurrent DDL session.
 
 ## Preflight
 

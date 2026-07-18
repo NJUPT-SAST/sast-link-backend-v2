@@ -2,6 +2,7 @@ package migration_test
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/migration"
@@ -21,6 +22,27 @@ const triggerExistsQuery = `SELECT EXISTS (
   SELECT 1 FROM pg_catalog.pg_trigger
   WHERE tgname = $1 AND NOT tgisinternal
 )`
+
+func TestNewRejectsMissingDatabaseName(t *testing.T) {
+	for _, databaseURL := range []string{
+		"postgres://user:password@localhost",
+		"postgres://user:password@localhost/",
+	} {
+		t.Run(databaseURL, func(t *testing.T) {
+			instance, err := migration.New(databaseURL)
+			if instance != nil {
+				_, _ = instance.Close()
+				t.Fatal("New() instance is non-nil, want nil")
+			}
+			if err == nil {
+				t.Fatal("New() error = nil, want missing database name error")
+			}
+			if !strings.Contains(err.Error(), "database name") {
+				t.Fatalf("New() error = %v, want missing database name error", err)
+			}
+		})
+	}
+}
 
 func TestUpCreatesV1Schema(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)

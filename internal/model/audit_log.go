@@ -9,7 +9,7 @@ type AuditLog struct {
 	Action     string
 	Resource   string
 	ResourceID *string
-	Detail     JSONB   `gorm:"type:jsonb"`
+	Detail     JSONB   `gorm:"type:jsonb;default:(-)"`
 	ClientIP   *string `gorm:"column:client_ip"`
 	UserAgent  *string
 	Success    *bool `gorm:"default:(-)"`

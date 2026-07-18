@@ -25,6 +25,13 @@ func (r *UserRepository) CreateWithProfile(
 	user *model.User,
 	profile *model.Profile,
 ) error {
+	if user == nil {
+		return fmt.Errorf("%w: user is nil", ErrInvalidArgument)
+	}
+	if profile == nil {
+		return fmt.Errorf("%w: profile is nil", ErrInvalidArgument)
+	}
+
 	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		if err := transaction.Create(user).Error; err != nil {
 			return fmt.Errorf("create user: %w", err)

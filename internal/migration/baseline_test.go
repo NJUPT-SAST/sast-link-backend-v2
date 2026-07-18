@@ -141,6 +141,77 @@ func TestBaselineV1RejectsIncompatibleCatalogObjects(t *testing.T) {
 			wantError: `required index "uq_identities_user_github"`,
 		},
 		{
+			name: "narrowed partial index predicate",
+			mutate: `
+				DROP INDEX uq_identities_user_github;
+				CREATE UNIQUE INDEX uq_identities_user_github
+					ON identities(user_id, provider)
+					WHERE provider = 'github' AND user_id > 0;
+			`,
+			wantError: `required index "uq_identities_user_github"`,
+		},
+		{
+			name: "weakened check constraint",
+			mutate: `
+				ALTER TABLE oauth_clients DROP CONSTRAINT ck_oauth_clients_redirect_uris;
+				ALTER TABLE oauth_clients ADD CONSTRAINT ck_oauth_clients_redirect_uris
+					CHECK (COALESCE(array_length(redirect_uris, 1), 0) >= 0);
+			`,
+			wantError: `required check constraint`,
+		},
+		{
+			name: "changed challenge method literal",
+			mutate: `
+				ALTER TABLE oauth_authorizations DROP CONSTRAINT ck_oauth_authorizations_challenge_method;
+				ALTER TABLE oauth_authorizations ADD CONSTRAINT ck_oauth_authorizations_challenge_method
+					CHECK (code_challenge_method IN ('s256', 'plain'));
+			`,
+			wantError: `required check constraint`,
+		},
+		{
+			name:      "replica trigger",
+			mutate:    `ALTER TABLE "user" ENABLE REPLICA TRIGGER trg_user_email_domain`,
+			wantError: `required trigger "trg_user_email_domain"`,
+		},
+		{
+			name: "conditional trigger",
+			mutate: `
+				DROP TRIGGER trg_user_email_domain ON "user";
+				CREATE TRIGGER trg_user_email_domain
+					BEFORE INSERT OR UPDATE OF login_email ON "user"
+					FOR EACH ROW WHEN (false)
+					EXECUTE FUNCTION auto_set_email_type();
+			`,
+			wantError: `required trigger "trg_user_email_domain"`,
+		},
+		{
+			name: "trigger with extra event",
+			mutate: `
+				DROP TRIGGER trg_user_updated_at ON "user";
+				CREATE TRIGGER trg_user_updated_at
+					BEFORE UPDATE OR DELETE ON "user"
+					FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+			`,
+			wantError: `required trigger "trg_user_updated_at"`,
+		},
+		{
+			name:      "trigger function configuration",
+			mutate:    `ALTER FUNCTION check_other_mail_limit() SET search_path = pg_catalog`,
+			wantError: `required trigger function "check_other_mail_limit"`,
+		},
+		{
+			name: "no-op trigger function",
+			mutate: `
+				CREATE OR REPLACE FUNCTION auto_set_email_type() RETURNS trigger
+				LANGUAGE plpgsql AS $$
+				BEGIN
+					RETURN NEW;
+				END;
+				$$;
+			`,
+			wantError: `required trigger function "auto_set_email_type"`,
+		},
+		{
 			name:      "disabled trigger",
 			mutate:    `ALTER TABLE "user" DISABLE TRIGGER trg_user_email_domain`,
 			wantError: `required trigger "trg_user_email_domain"`,

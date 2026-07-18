@@ -11,7 +11,7 @@ type OAuthClient struct {
 	ClientType       ClientType  `gorm:"type:client_enum;not null"`
 	RedirectURIs     StringArray `gorm:"type:text[]"`
 	GrantTypes       StringArray `gorm:"type:text[]"`
-	Scopes           StringArray `gorm:"type:text[]"`
+	Scopes           StringArray `gorm:"type:text[];default:(-)"`
 	IsActive         *bool       `gorm:"default:(-)"`
 	CreatedAt        time.Time
 	UpdatedAt        time.Time

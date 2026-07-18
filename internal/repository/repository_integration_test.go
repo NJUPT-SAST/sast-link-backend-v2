@@ -43,6 +43,31 @@ func TestUserRepositoryCreateWithProfileIsAtomic(t *testing.T) {
 	}
 }
 
+func TestUserRepositoryCreateWithProfileRejectsNilInputs(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+
+	user := testUser("nil-profile@njupt.edu.cn")
+	if err := userRepository.CreateWithProfile(context.Background(), user, nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("CreateWithProfile(user, nil) error = %v, want ErrInvalidArgument", err)
+	}
+	var userCount int64
+	if err := database.Model(&model.User{}).Where("login_email = ?", user.LoginEmail).Count(&userCount).Error; err != nil {
+		t.Fatalf("count user after nil profile: %v", err)
+	}
+	if userCount != 0 || user.ID != 0 {
+		t.Fatalf("nil-profile user count/ID = %d/%d, want 0/0", userCount, user.ID)
+	}
+
+	profile := &model.Profile{}
+	if err := userRepository.CreateWithProfile(context.Background(), nil, profile); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("CreateWithProfile(nil, profile) error = %v, want ErrInvalidArgument", err)
+	}
+	if profile.ID != 0 || profile.UserID != 0 {
+		t.Fatalf("profile after nil user = %#v, want unmodified", profile)
+	}
+}
+
 func TestUserRepositoryFindByLoginIdentifier(t *testing.T) {
 	database := setupDatabase(t)
 	userRepository := repository.NewUser(database)
