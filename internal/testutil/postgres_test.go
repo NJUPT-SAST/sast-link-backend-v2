@@ -19,3 +19,7 @@ func TestStartPostgres(t *testing.T) {
 		t.Fatal("PostgreSQL version is empty")
 	}
 }
+
+func TestRequireProviderChecksDocker(t *testing.T) {
+	testutil.RequireProvider(t)
+}

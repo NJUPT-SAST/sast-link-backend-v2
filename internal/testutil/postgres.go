@@ -14,6 +14,20 @@ import (
 	"gorm.io/gorm"
 )
 
+// RequireProvider calls t.Fatal if the Docker provider is not healthy.
+// Use this in TestMain or environment-guarded helpers for environments where
+// skipped integration tests should surface as explicit failures.
+func RequireProvider(t *testing.T) {
+	t.Helper()
+	provider, err := testcontainers.NewDockerProvider()
+	if err != nil {
+		t.Fatalf("Testcontainers Docker provider is required but unavailable: %v", err)
+	}
+	if err := provider.Health(context.Background()); err != nil {
+		t.Fatalf("Testcontainers Docker health check failed: %v", err)
+	}
+}
+
 // StartPostgres starts an isolated PostgreSQL 16 database and returns its URL.
 func StartPostgres(t *testing.T) string {
 	t.Helper()
