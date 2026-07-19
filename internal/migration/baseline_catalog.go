@@ -193,6 +193,9 @@ func requireV1Columns(ctx context.Context, database *sql.DB) error {
 			}
 			return fmt.Errorf("check required column %q.%q: %w", required.table, required.name, err)
 		}
+		if strings.HasPrefix(dataType, "public.") {
+			dataType = strings.TrimPrefix(dataType, "public.")
+		}
 		if dataType != required.dataType || notNull != required.notNull || hasDefault != required.hasDefault {
 			return fmt.Errorf(
 				"required column %q.%q = (%s, not null %t, default %t), want (%s, not null %t, default %t)",
@@ -266,7 +269,12 @@ func requireV1Defaults(ctx context.Context, database *sql.DB) error {
 func normalizeDefaultExpression(expression string) string {
 	expression = strings.ToLower(strings.Join(strings.Fields(expression), ""))
 	for _, typeCast := range []string{
-		"::character varying", "::user_role_enum", "::state_enum", "::college_enum", "::text[]", "::jsonb",
+		"::public.character varying", "::character varying",
+		"::public.user_role_enum", "::user_role_enum",
+		"::public.state_enum", "::state_enum",
+		"::public.college_enum", "::college_enum",
+		"::pg_catalog.text[]", "::text[]",
+		"::pg_catalog.jsonb", "::jsonb",
 	} {
 		expression = strings.ReplaceAll(expression, strings.ReplaceAll(typeCast, " ", ""), "")
 	}

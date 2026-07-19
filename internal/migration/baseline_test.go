@@ -169,6 +169,15 @@ func TestBaselineV1RejectsIncompatibleCatalogObjects(t *testing.T) {
 			wantError: `required check constraint`,
 		},
 		{
+			name: "weakened challenge constraint with suffix",
+			mutate: `
+				ALTER TABLE oauth_authorizations DROP CONSTRAINT ck_oauth_authorizations_challenge_method;
+				ALTER TABLE oauth_authorizations ADD CONSTRAINT ck_oauth_authorizations_challenge_method
+					CHECK (code_challenge_method IN ('S256', 'plain') OR TRUE);
+			`,
+			wantError: `required check constraint`,
+		},
+		{
 			name:      "replica trigger",
 			mutate:    `ALTER TABLE "user" ENABLE REPLICA TRIGGER trg_user_email_domain`,
 			wantError: `required trigger "trg_user_email_domain"`,

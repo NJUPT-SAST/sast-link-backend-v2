@@ -244,11 +244,68 @@ func normalizeCatalogExpression(expression string) string {
 		}
 		normalized.WriteByte(character)
 	}
-	return trimRedundantOuterParentheses(stripCatalogCasts(normalized.String()))
+	return canonicalizeTextArrayAny(trimRedundantOuterParentheses(stripCatalogCasts(normalized.String())))
+}
+
+func canonicalizeTextArrayAny(expression string) string {
+	expression = trimRedundantOuterParentheses(expression)
+	anyIndex := strings.Index(expression, "=any(")
+	if anyIndex < 0 {
+		return expression
+	}
+	openIndex := anyIndex + len("=any")
+	closeIndex := matchingClosingParenthesis(expression, openIndex)
+	if closeIndex < 0 {
+		return expression
+	}
+	argument := trimRedundantOuterParentheses(expression[openIndex+1 : closeIndex])
+	if !strings.HasPrefix(argument, "array[") {
+		return expression
+	}
+	argument = strings.ReplaceAll(argument, "[('", "['")
+	argument = strings.ReplaceAll(argument, "'),('", "','")
+	argument = strings.ReplaceAll(argument, "')]", "']")
+	return expression[:openIndex+1] + argument + expression[closeIndex:]
+}
+
+func matchingClosingParenthesis(expression string, openIndex int) int {
+	if openIndex >= len(expression) || expression[openIndex] != '(' {
+		return -1
+	}
+	depth := 0
+	inQuote := false
+	for index := openIndex; index < len(expression); index++ {
+		character := expression[index]
+		if character == '\'' {
+			if inQuote && index+1 < len(expression) && expression[index+1] == '\'' {
+				index++
+				continue
+			}
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		switch character {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return index
+			}
+		}
+	}
+	return -1
 }
 
 func stripCatalogCasts(expression string) string {
-	casts := []string{"::charactervarying", "::login_method_enum", "::text"}
+	casts := []string{
+		"::public.charactervarying", "::charactervarying",
+		"::public.login_method_enum", "::login_method_enum",
+		"::public.text", "::text",
+	}
 	var normalized strings.Builder
 	normalized.Grow(len(expression))
 	inQuote := false
