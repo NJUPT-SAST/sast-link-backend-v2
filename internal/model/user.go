@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-// User persists an identity account. It is not an API DTO.
+// User persists an identity account.
 type User struct {
 	ID           int64
 	Role         UserRole `gorm:"type:user_role_enum;not null;default:(-)"`
@@ -28,7 +28,7 @@ func (User) TableName() string {
 	return "user"
 }
 
-// Profile persists the optional display-card data for a User. It is not an API DTO.
+// Profile persists the optional display-card data for a User.
 type Profile struct {
 	ID         int64
 	UserID     int64
@@ -48,7 +48,7 @@ func (Profile) TableName() string {
 	return "profile"
 }
 
-// Identity persists a third-party login binding. It is not an API DTO.
+// Identity persists a third-party login binding.
 type Identity struct {
 	ID             int64
 	UserID         int64

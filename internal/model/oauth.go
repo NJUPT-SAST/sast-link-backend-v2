@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-// OAuthClient persists a registered OAuth client. It is not an API DTO.
+// OAuthClient persists a registered OAuth client.
 type OAuthClient struct {
 	ID               int64
 	ClientID         string
@@ -22,7 +22,7 @@ func (OAuthClient) TableName() string {
 	return "oauth_clients"
 }
 
-// OAuthAuthorization persists a single-use OAuth authorization code. It is not an API DTO.
+// OAuthAuthorization persists a single-use OAuth authorization code.
 type OAuthAuthorization struct {
 	ID                  int64
 	Code                string `json:"-"`
@@ -44,7 +44,7 @@ func (OAuthAuthorization) TableName() string {
 	return "oauth_authorizations"
 }
 
-// OAuthAccessToken persists access-token metadata. It is not an API DTO.
+// OAuthAccessToken persists access-token metadata.
 type OAuthAccessToken struct {
 	ID        int64
 	TokenID   string
@@ -62,7 +62,7 @@ func (OAuthAccessToken) TableName() string {
 	return "oauth_access_tokens"
 }
 
-// OAuthRefreshToken persists a rotated opaque refresh-token hash. It is not an API DTO.
+// OAuthRefreshToken persists a rotated opaque refresh-token hash.
 type OAuthRefreshToken struct {
 	ID        int64
 	TokenHash string `json:"-"`

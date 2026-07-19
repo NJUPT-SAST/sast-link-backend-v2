@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-// AuditLog persists an authentication or administration audit event. It is not an API DTO.
+// AuditLog persists an authentication or administration audit event.
 type AuditLog struct {
 	ID         int64
 	UserID     *int64
