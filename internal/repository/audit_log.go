@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"gorm.io/gorm"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
 
 // AuditLogRepository persists audit events.

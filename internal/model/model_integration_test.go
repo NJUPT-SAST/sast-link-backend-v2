@@ -8,10 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/migration"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/testutil"
-	"gorm.io/gorm"
 )
 
 func TestUserTableName(t *testing.T) {
@@ -423,17 +424,20 @@ func TestJSONBScannerAndValuer(t *testing.T) {
 	if !reflect.DeepEqual(stored, []byte(`{"key":"value"}`)) {
 		t.Fatalf("Value() = %#v, want JSON bytes", stored)
 	}
-	if err := value.Scan(nil); err != nil {
-		t.Fatalf("Scan(nil) error = %v", err)
+	scanErr := value.Scan(nil)
+	if scanErr != nil {
+		t.Fatalf("Scan(nil) error = %v", scanErr)
 	}
 	if value != nil {
 		t.Fatalf("Scan(nil) = %s, want nil", value)
 	}
-	if err := value.Scan("not bytes"); err == nil {
+	scanErr = value.Scan("not bytes")
+	if scanErr == nil {
 		t.Fatal("Scan(string) error = nil, want unsupported type error")
 	}
 	invalid := model.JSONB(`not-json`)
-	if _, err := invalid.Value(); err == nil {
+	_, invalidErr := invalid.Value()
+	if invalidErr == nil {
 		t.Fatal("Value(invalid JSON) error = nil, want invalid JSON error")
 	}
 	var valuer driver.Valuer = model.JSONB(nil)
@@ -448,8 +452,8 @@ func TestJSONBScannerAndValuer(t *testing.T) {
 
 func TestSensitiveModelFieldsAreJSONHidden(t *testing.T) {
 	passwordHash := "password-hash"
-	accessToken := "third-party-access-token"
-	refreshToken := "third-party-refresh-token"
+	accessToken := "third-party-access-token"   //nolint:gosec // Non-secret fixture used to verify JSON redaction.
+	refreshToken := "third-party-refresh-token" //nolint:gosec // Non-secret fixture used to verify JSON redaction.
 	clientSecretHash := "client-secret-hash"
 	authorizationCode := "authorization-code"
 

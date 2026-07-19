@@ -47,7 +47,7 @@ func requireV1Enums(ctx context.Context, database *sql.DB) error {
 		for rows.Next() {
 			var label string
 			if err := rows.Scan(&label); err != nil {
-				_ = rows.Close()
+				_ = rows.Close() //nolint:sqlclosecheck // Close immediately on scan failure; normal path checks Close below.
 				return fmt.Errorf("scan required enum %q: %w", required.name, err)
 			}
 			labels = append(labels, label)
@@ -193,9 +193,7 @@ func requireV1Columns(ctx context.Context, database *sql.DB) error {
 			}
 			return fmt.Errorf("check required column %q.%q: %w", required.table, required.name, err)
 		}
-		if strings.HasPrefix(dataType, "public.") {
-			dataType = strings.TrimPrefix(dataType, "public.")
-		}
+		dataType = strings.TrimPrefix(dataType, "public.")
 		if dataType != required.dataType || notNull != required.notNull || hasDefault != required.hasDefault {
 			return fmt.Errorf(
 				"required column %q.%q = (%s, not null %t, default %t), want (%s, not null %t, default %t)",

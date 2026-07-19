@@ -1,13 +1,15 @@
 package migration_test
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"testing"
 
+	"github.com/golang-migrate/migrate/v4"
+
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/migration"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/testutil"
-	"github.com/golang-migrate/migrate/v4"
 )
 
 const tableExistsQuery = `SELECT to_regclass('public.' || $1) IS NOT NULL`
@@ -124,7 +126,7 @@ func TestDownDropsV1Schema(t *testing.T) {
 	t.Cleanup(func() { _ = database.Close() })
 
 	var table sql.NullString
-	if err := database.QueryRow(`SELECT to_regclass('public.user')`).Scan(&table); err != nil {
+	if err := database.QueryRowContext(context.Background(), `SELECT to_regclass('public.user')`).Scan(&table); err != nil {
 		t.Fatalf("query user table: %v", err)
 	}
 	if table.Valid {
@@ -147,7 +149,7 @@ func assertExists(t *testing.T, database *sql.DB, query string, name string) {
 	t.Helper()
 
 	var exists bool
-	if err := database.QueryRow(query, name).Scan(&exists); err != nil {
+	if err := database.QueryRowContext(context.Background(), query, name).Scan(&exists); err != nil {
 		t.Fatalf("query existence for %q: %v", name, err)
 	}
 	if !exists {
@@ -160,7 +162,7 @@ func insertTestUser(t *testing.T, database *sql.DB) int64 {
 
 	var userID int64
 	var emailType string
-	err := database.QueryRow(`
+	err := database.QueryRowContext(context.Background(), `
 INSERT INTO "user" (name, phone_number, qq_number, password, login_email, student_id, college, major)
 VALUES ('Test User', '13800138000', '10000', 'hash', 'user@njupt.edu.cn', 'B24040001', '其他', '')
 RETURNING id, email_type
@@ -177,7 +179,7 @@ RETURNING id, email_type
 func assertRejectsInvalidEmailDomain(t *testing.T, database *sql.DB) {
 	t.Helper()
 
-	_, err := database.Exec(`
+	_, err := database.ExecContext(context.Background(), `
 INSERT INTO "user" (name, phone_number, qq_number, password, login_email, student_id, college, major)
 VALUES ('Bad User', '13800138001', '10001', 'hash', 'user@example.com', 'B24040002', '其他', '')
 `)
@@ -190,7 +192,7 @@ func assertOtherMailLimit(t *testing.T, database *sql.DB, userID int64) {
 	t.Helper()
 
 	for _, providerID := range []string{"first@example.com", "second@example.com"} {
-		if _, err := database.Exec(
+		if _, err := database.ExecContext(context.Background(),
 			`INSERT INTO identities (user_id, provider, provider_id) VALUES ($1, 'other_mail', $2)`,
 			userID,
 			providerID,
@@ -199,7 +201,7 @@ func assertOtherMailLimit(t *testing.T, database *sql.DB, userID int64) {
 		}
 	}
 
-	_, err := database.Exec(
+	_, err := database.ExecContext(context.Background(),
 		`INSERT INTO identities (user_id, provider, provider_id) VALUES ($1, 'other_mail', $2)`,
 		userID,
 		"third@example.com",
@@ -213,7 +215,7 @@ func assertRefreshTokenFamilySequenceUnique(t *testing.T, database *sql.DB, user
 	t.Helper()
 
 	var clientID int64
-	err := database.QueryRow(`
+	err := database.QueryRowContext(context.Background(), `
 INSERT INTO oauth_clients (client_id, client_name, client_type, redirect_uris, grant_types)
 VALUES (
     'test-client',
@@ -228,14 +230,15 @@ RETURNING id
 		t.Fatalf("insert OAuth client: %v", err)
 	}
 
-	if _, err := database.Exec(`
+	_, insertErr := database.ExecContext(context.Background(), `
 INSERT INTO oauth_refresh_tokens (token_hash, family_id, sequence, client_id, user_id, expires_at)
 VALUES ('token-hash-one', 'family-one', 0, $1, $2, NOW() + INTERVAL '1 hour')
-`, clientID, userID); err != nil {
-		t.Fatalf("insert first refresh token: %v", err)
+`, clientID, userID)
+	if insertErr != nil {
+		t.Fatalf("insert first refresh token: %v", insertErr)
 	}
 
-	_, err = database.Exec(`
+	_, err = database.ExecContext(context.Background(), `
 INSERT INTO oauth_refresh_tokens (token_hash, family_id, sequence, client_id, user_id, expires_at)
 VALUES ('token-hash-two', 'family-one', 0, $1, $2, NOW() + INTERVAL '1 hour')
 `, clientID, userID)

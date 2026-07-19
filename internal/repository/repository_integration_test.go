@@ -9,11 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/migration"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/testutil"
-	"gorm.io/gorm"
 )
 
 func TestUserRepositoryCreateWithProfileIsAtomic(t *testing.T) {

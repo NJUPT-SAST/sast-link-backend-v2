@@ -10,9 +10,10 @@ import (
 	"net/url"
 	"os"
 
+	"github.com/golang-migrate/migrate/v4"
+
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/migration"
-	"github.com/golang-migrate/migrate/v4"
 )
 
 type commandKind uint8
@@ -37,7 +38,7 @@ func main() {
 }
 
 func run(args []string) error {
-	command, err := parseCommand(args)
+	parsedCommand, err := parseCommand(args)
 	if err != nil {
 		return err
 	}
@@ -48,9 +49,9 @@ func run(args []string) error {
 	}
 	databaseURL := postgresURL(cfg)
 
-	switch command.kind {
+	switch parsedCommand.kind {
 	case commandUp:
-		if cfg.AppEnv == "production" && !command.confirmProduction {
+		if cfg.AppEnv == "production" && !parsedCommand.confirmProduction {
 			return errors.New("migration up in production requires --confirm-production")
 		}
 		return runUp(databaseURL)

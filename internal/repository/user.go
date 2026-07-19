@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"gorm.io/gorm"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
 
 // UserRepository persists and retrieves user accounts.

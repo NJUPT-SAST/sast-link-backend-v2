@@ -39,7 +39,7 @@ func applyUnversionedV1Schema(t *testing.T, databaseURL string) {
 
 	database := testutil.OpenSQL(t, databaseURL)
 	defer func() { _ = database.Close() }()
-	if _, err := database.Exec(`DROP TABLE schema_migrations`); err != nil {
+	if _, err := database.ExecContext(context.Background(), `DROP TABLE schema_migrations`); err != nil {
 		t.Fatalf("drop migration table to simulate existing schema: %v", err)
 	}
 }
@@ -65,8 +65,9 @@ func TestBaselineV1RejectsWrongVersion(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	t.Cleanup(func() { _, _ = instance.Close() })
-	if err := instance.Force(2); err != nil {
-		t.Fatalf("Force(2) error = %v", err)
+	forceErr := instance.Force(2)
+	if forceErr != nil {
+		t.Fatalf("Force(2) error = %v", forceErr)
 	}
 
 	err = migration.BaselineV1(context.Background(), databaseURL)
@@ -84,7 +85,7 @@ func TestBaselineV1RejectsDirtyVersionOne(t *testing.T) {
 
 	database := testutil.OpenSQL(t, databaseURL)
 	t.Cleanup(func() { _ = database.Close() })
-	if _, err := database.Exec(`UPDATE schema_migrations SET dirty = true`); err != nil {
+	if _, err := database.ExecContext(context.Background(), `UPDATE schema_migrations SET dirty = true`); err != nil {
 		t.Fatalf("mark migration dirty: %v", err)
 	}
 
@@ -103,7 +104,7 @@ func TestBaselineV1RejectsMissingRequiredConstraint(t *testing.T) {
 
 	database := testutil.OpenSQL(t, databaseURL)
 	t.Cleanup(func() { _ = database.Close() })
-	if _, err := database.Exec(`
+	if _, err := database.ExecContext(context.Background(), `
 		ALTER TABLE oauth_refresh_tokens
 		DROP CONSTRAINT uq_oauth_refresh_tokens_family_sequence
 	`); err != nil {
@@ -243,7 +244,7 @@ func TestBaselineV1RejectsIncompatibleCatalogObjects(t *testing.T) {
 			applyUnversionedV1Schema(t, databaseURL)
 			database := testutil.OpenSQL(t, databaseURL)
 			t.Cleanup(func() { _ = database.Close() })
-			if _, err := database.Exec(test.mutate); err != nil {
+			if _, err := database.ExecContext(context.Background(), test.mutate); err != nil {
 				t.Fatalf("mutate V001 catalog: %v", err)
 			}
 
@@ -262,7 +263,7 @@ func TestBaselineV1RejectsMissingRequiredTrigger(t *testing.T) {
 
 	database := testutil.OpenSQL(t, databaseURL)
 	t.Cleanup(func() { _ = database.Close() })
-	if _, err := database.Exec(`DROP TRIGGER trg_user_email_domain ON "user"`); err != nil {
+	if _, err := database.ExecContext(context.Background(), `DROP TRIGGER trg_user_email_domain ON "user"`); err != nil {
 		t.Fatalf("drop required trigger: %v", err)
 	}
 
@@ -289,7 +290,7 @@ func TestBaselineV1RejectsTriggerNameCollisionOnWrongTable(t *testing.T) {
 
 	database := testutil.OpenSQL(t, databaseURL)
 	t.Cleanup(func() { _ = database.Close() })
-	if _, err := database.Exec(`
+	if _, err := database.ExecContext(context.Background(), `
 		DROP TRIGGER trg_user_email_domain ON "user";
 		CREATE TABLE trigger_name_collision (id BIGINT PRIMARY KEY);
 		CREATE FUNCTION trigger_name_collision_function() RETURNS trigger

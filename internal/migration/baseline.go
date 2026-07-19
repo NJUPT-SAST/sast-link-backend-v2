@@ -35,8 +35,9 @@ func BaselineV1(ctx context.Context, databaseURL string) error {
 
 	version, dirty, err := instance.Version()
 	if errors.Is(err, migrate.ErrNilVersion) {
-		if err := instance.Force(1); err != nil {
-			return fmt.Errorf("record V001 baseline: %w", err)
+		forceErr := instance.Force(1)
+		if forceErr != nil {
+			return fmt.Errorf("record V001 baseline: %w", forceErr)
 		}
 		return nil
 	}

@@ -99,7 +99,7 @@ func requireV1Constraints(ctx context.Context, database *sql.DB) error {
 		for rows.Next() {
 			var definition string
 			if err := rows.Scan(&definition); err != nil {
-				_ = rows.Close()
+				_ = rows.Close() //nolint:sqlclosecheck // Close immediately on scan failure; normal path checks Close below.
 				return fmt.Errorf("scan required constraint on %q (%s): %w", required.table, required.columns, err)
 			}
 			if required.check == "" || checkConstraintExpressionEqual(definition, required.check) {

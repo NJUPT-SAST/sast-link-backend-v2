@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"gorm.io/gorm"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
 
 const tokenFamilyAdvisoryLockNamespace int32 = 0x53415354

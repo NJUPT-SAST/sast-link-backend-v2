@@ -7,10 +7,11 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/migrations"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/migrations"
 )
 
 // New creates a migration instance using embedded SQL and the pgx/v5 driver.

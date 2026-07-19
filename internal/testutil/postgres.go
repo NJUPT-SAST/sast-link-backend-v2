@@ -49,8 +49,9 @@ func StartPostgres(t *testing.T) string {
 	}
 
 	t.Cleanup(func() {
-		if err := testcontainers.TerminateContainer(container); err != nil {
-			t.Errorf("terminate PostgreSQL container: %v", err)
+		terminateErr := testcontainers.TerminateContainer(container)
+		if terminateErr != nil {
+			t.Errorf("terminate PostgreSQL container: %v", terminateErr)
 		}
 	})
 
@@ -69,7 +70,7 @@ func OpenSQL(t *testing.T, databaseURL string) *sql.DB {
 	if err != nil {
 		t.Fatalf("open PostgreSQL SQL connection: %v", err)
 	}
-	if err := database.Ping(); err != nil {
+	if err := database.PingContext(context.Background()); err != nil {
 		_ = database.Close()
 		t.Fatalf("ping PostgreSQL SQL connection: %v", err)
 	}
