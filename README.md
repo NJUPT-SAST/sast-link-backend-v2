@@ -2,7 +2,9 @@
 
 SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一身份认证中心与人员信息管理系统。
 
-当前仓库保留产品、接口、数据库设计与部署参考文档，后端实现代码已清空，后续将基于现有设计重新实现。
+当前仓库已完成 Go 服务骨架与数据基础层：HTTP API 入口、PostgreSQL/Redis 连接、健康检查、V001 SQL migration、持久化实体、最小 Auth repositories 以及 PostgreSQL 16 integration tests。认证、OAuth/OIDC、限流和 pg_cron 运维任务仍待实现。
+
+`cmd/api` 只负责运行 HTTP 服务，启动时不会执行 DDL 或 schema migration。数据库结构只能通过 `cmd/migrate` 显式管理。
 
 ## Documents
 
@@ -11,14 +13,35 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 - [OpenAPI 规范](./docs/openapi.yaml)
 - [API 文档](./docs/API文档.md)
 
-## Project Skeleton
+## Development
 
-保留的工程资料：
+完整 integration tests 会通过 Testcontainers 启动 disposable PostgreSQL 16，需要本机 Docker：
 
-- `.github/`：GitHub 配置与手动 CI / 安全扫描工作流
-- `docker-compose.yml`：容器运行配置参考
-- `.env.example`：环境变量示例
-- `docs/`：需求、接口与数据库设计文档
+```powershell
+go test -shuffle=on ./...
+go build -o bin/api.exe ./cmd/api
+go build -o bin/migrate.exe ./cmd/migrate
+golangci-lint run ./...
+```
+
+## Database migrations
+
+```powershell
+.\bin\migrate.exe version
+.\bin\migrate.exe up
+```
+
+现有生产数据库已具备 V001 schema，不能运行 V001 `up`。接管 migration version 前必须遵循 [V001 baseline runbook](./docs/runbooks/database-baseline.md)。
+
+主要目录：
+
+- `cmd/api/`：HTTP API 服务，不执行 migration
+- `cmd/migrate/`：唯一 migration runner
+- `migrations/`：embedded versioned SQL migrations
+- `internal/model/`：GORM persistence entities 与 PostgreSQL 类型
+- `internal/repository/`：最小 user/token/audit repositories
+- `internal/migration/`：migration runner 与 V001 baseline guard
+- `internal/testutil/`：PostgreSQL 16 Testcontainers 测试基础设施
 
 ## License
 
