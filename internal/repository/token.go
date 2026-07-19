@@ -81,16 +81,16 @@ func tokenFamilyHasRevokedAccess(transaction *gorm.DB, familyID string) (bool, e
 
 func validateTokenPair(access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error {
 	if access == nil || refresh == nil {
-		return errors.New("create token pair: access and refresh tokens are required")
+		return fmt.Errorf("%w: create token pair requires access and refresh tokens", ErrInvalidArgument)
 	}
 	if access.FamilyID == nil || *access.FamilyID != refresh.FamilyID {
-		return errors.New("create token pair: family IDs do not match")
+		return fmt.Errorf("%w: create token pair family IDs do not match", ErrInvalidArgument)
 	}
 	if access.ClientID != refresh.ClientID {
-		return errors.New("create token pair: client IDs do not match")
+		return fmt.Errorf("%w: create token pair client IDs do not match", ErrInvalidArgument)
 	}
 	if access.UserID != refresh.UserID {
-		return errors.New("create token pair: user IDs do not match")
+		return fmt.Errorf("%w: create token pair user IDs do not match", ErrInvalidArgument)
 	}
 	return nil
 }
