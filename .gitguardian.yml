@@ -1,0 +1,8 @@
+version: 2
+
+secret:
+  ignored_paths:
+    - cmd/migrate/main_test.go
+  ignored_matches:
+    - name: OAuth client secret used only in API documentation examples
+      match: 3K7mDzX434GbFm9YAePJ9FXQNjT6MF0U

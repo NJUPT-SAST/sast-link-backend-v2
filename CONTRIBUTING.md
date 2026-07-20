@@ -2,7 +2,7 @@
 
 ## 开发环境
 
-- **Go**：1.26.4
+- **Go**：1.26.5
 - **数据库**：PostgreSQL 16+
 - **缓存**：Redis 8+
 
@@ -48,8 +48,8 @@ Hook 配置见 `.pre-commit-config.yaml`，当前包含：
 Hook 覆盖了快速检查，深度 lint 仍需手动运行。规则集定义在 `.golangci.yml`。
 
 ```powershell
-# 安装 golangci-lint（仅需一次）
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+# 安装与 CI 相同版本的 golangci-lint（仅需一次）
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
 # 运行 lint
 golangci-lint run ./...
@@ -57,24 +57,25 @@ golangci-lint run ./...
 
 CI 中的 lint job 必须在合入前通过。建议推送前本地先跑，避免来回修复。
 
-强制规则速查：
+当前规则速查（golangci-lint v2 默认规则与项目显式规则的合集）：
 
-| 规则 | 检查内容 |
-|------|---------|
-| `govet` | Go 官方静态分析 |
-| `staticcheck` | 深层 bug、性能、简化检查 |
-| `errcheck` | 未处理的 error 返回值 |
-| `gofmt` / `goimports` | 格式一致性与 import 排序 |
-| `gosec` | 安全问题（SQL 注入、硬编码密钥等） |
-| `bodyclose` / `sqlclosecheck` | 未关闭的 HTTP body 和 DB 资源 |
-| `exported` | 所有导出符号必须有 godoc 注释 |
+| 规则 | 来源 | 检查内容 |
+|------|------|---------|
+| `govet` | 默认启用，项目开启全部 analyzer 并排除 `fieldalignment` | Go 官方静态分析 |
+| `staticcheck` | 默认启用 | 深层 bug、性能、简化检查 |
+| `errcheck` | 默认启用 | 未处理的 error 返回值 |
+| `gofmt` / `goimports` | 项目显式 formatter | 格式一致性与 import 排序 |
+| `gosec` | 项目显式启用 | 安全问题（项目排除 `G104`） |
+| `bodyclose` / `sqlclosecheck` | 项目显式启用 | 未关闭的 HTTP body 和 DB 资源 |
+| `misspell` / `noctx` / `unconvert` | 项目显式启用 | 拼写、缺失 context 与冗余转换 |
+| `exported` | 项目显式 revive 规则 | 导出符号必须有 godoc 注释（测试文件除外） |
 
 ## 测试
 
 ### 编写测试
 
 - 使用 Go 标准库 `testing` 包。
-- 涉及 PostgreSQL 或 Redis 的集成测试，推荐使用 [testcontainers-go](https://golang.testcontainers.org/) 或依赖 `.github/workflows/ci.yml` 中配置的 CI service containers（Postgres 16 + Redis 8）。
+- 涉及 PostgreSQL 的集成测试使用 [testcontainers-go](https://golang.testcontainers.org/) 启动 disposable PostgreSQL 16，完整测试需要本机 Docker。当前 Redis 测试不依赖外部 Redis 服务。
 - 测试必须支持并发运行和任意顺序执行，禁止测试函数之间依赖共享全局状态。
 
 ### 运行测试
@@ -90,6 +91,8 @@ go test -race -shuffle=on ./path/to/package -run TestName
 CI 中所有测试均携带：
 - `-race` — 数据竞争检测。本项目 token 刷新、设备管理、限流等均为并发场景，此项不可省略
 - `-shuffle=on` — 随机化测试执行顺序，暴露测试间隐式依赖
+
+本地执行 `-race` 需要启用 CGO 并安装可用的 C compiler；完整 integration tests 还要求 Docker provider 健康。Windows 环境不满足这些前置条件时，可在具备 Docker socket 与 C toolchain 的 Linux/WSL 环境执行，但不能用非 race 测试代替合入验证。
 
 ### 测试要求
 
@@ -123,7 +126,7 @@ chore(deps): 升级 golang.org/x/crypto 至 v0.35.0
 1. 从 `main` 分支创建，使用描述性分支名（如 `feat/oauth-pkce`、`fix/token-race`）。
 2. 保持改动聚焦。如果 PR 涉及多个不相关变更，请拆分。
 3. 确保 `golangci-lint run ./...` 和 `go test -race -shuffle=on ./...` 在本地通过。
-4. CI（当前代码骨架阶段通过 `workflow_dispatch` 手动触发）必须通过。
+4. CI（PR 更新时自动触发，也可通过 `workflow_dispatch` 手动触发）必须通过。
 5. PR 描述写清楚：改了什么、为什么改、如何验证。
 6. 至少一名团队成员 review 通过后方可合入。
 
