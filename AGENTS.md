@@ -48,4 +48,4 @@ Production already contains the V001 schema. Follow `docs/runbooks/database-base
 
 ## CI And Security
 
-The manually dispatched CI workflow lints the Go module, runs race-enabled tests against PostgreSQL 16 and Redis 8 service containers, and builds `cmd/api`. The weekly security workflow runs `gosec` and `govulncheck` against the current Go module.
+The CI workflow runs automatically for pull requests targeting `main` and can also be manually dispatched. It lints the Go module, runs race-enabled PostgreSQL 16 Testcontainers tests, and builds both `cmd/api` and `cmd/migrate`. The weekly or manually dispatched security workflow runs version-pinned `gosec` and `govulncheck` scans against the current Go module.

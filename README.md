@@ -18,7 +18,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 完整 integration tests 会通过 Testcontainers 启动 disposable PostgreSQL 16，需要本机 Docker：
 
 ```powershell
-go test -shuffle=on ./...
+go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
 go build -o bin/api.exe ./cmd/api
 go build -o bin/migrate.exe ./cmd/migrate
 golangci-lint run ./...
@@ -31,7 +31,17 @@ golangci-lint run ./...
 .\bin\migrate.exe up
 ```
 
-现有生产数据库已具备 V001 schema，不能运行 V001 `up`。接管 migration version 前必须遵循 [V001 baseline runbook](./docs/runbooks/database-baseline.md)。
+现有生产数据库已具备 V001 schema，不能运行 V001 `up`。接管 migration version 前必须遵循 [V001 baseline runbook](./docs/runbooks/database-baseline.md)。完成 runbook 的 preflight 后，使用：
+
+```powershell
+.\bin\migrate.exe force 1 --confirm-existing-baseline
+```
+
+后续生产 migration 必须显式确认：
+
+```powershell
+.\bin\migrate.exe up --confirm-production
+```
 
 主要目录：
 

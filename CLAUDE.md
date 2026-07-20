@@ -10,7 +10,7 @@ SAST Link Backend V2 is the backend for SAST's unified identity/authentication c
 
 ## Current Commands
 
-The project targets Go `1.26.4`, Gin, GORM, PostgreSQL 16+, Redis 8+, and testcontainers-go. Full integration tests provision PostgreSQL 16 through Testcontainers and require Docker.
+The project targets Go `1.26.5`, Gin, GORM, PostgreSQL 16+, Redis 8+, and testcontainers-go. Full integration tests provision PostgreSQL 16 through Testcontainers and require Docker.
 
 ```powershell
 # Download modules
@@ -106,10 +106,10 @@ GET /health -> { "status": "ok", "db": "ok", "redis": "ok" }
 
 ## CI And Security
 
-`.github/workflows/ci.yml` is a manually triggered (`workflow_dispatch`) pipeline with three parallel jobs:
+`.github/workflows/ci.yml` runs for pull requests targeting `main` and supports manual dispatch. It has three parallel jobs:
 
 - **lint** — golangci-lint using `.golangci.yml` against the Go module.
-- **test** — `go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...` against PostgreSQL 16 and Redis 8 service containers.
-- **build** — `go build -v -o bin/api ./cmd/api`.
+- **test** — `go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...`; PostgreSQL integration tests provision isolated PostgreSQL 16 containers through Testcontainers and require a healthy Docker provider.
+- **build** — builds both `./cmd/api` and `./cmd/migrate`.
 
-`.github/workflows/security.yml` runs weekly (`0 3 * * 1`) and scans the Go module with `gosec` and `govulncheck`.
+`.github/workflows/security.yml` runs weekly (`0 3 * * 1`) or by manual dispatch and scans the Go module with version-pinned `gosec` and `govulncheck`.
