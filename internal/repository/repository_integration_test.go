@@ -282,7 +282,6 @@ func TestTokenRepositoryRotateRefreshToken(t *testing.T) {
 		"rotate-current-refresh",
 		newAccess,
 		newRefresh,
-		before,
 	); err != nil {
 		t.Fatalf("RotateRefreshToken() error = %v", err)
 	}
@@ -358,16 +357,6 @@ func TestTokenRepositoryRotateRefreshTokenRejectsInvalidInputs(t *testing.T) {
 		},
 	}
 
-	if err := tokenRepository.RotateRefreshToken(
-		context.Background(),
-		"rotate-invalid-current-refresh",
-		accessToken("zero-time-access", client.ID, user.ID, &familyID),
-		refreshToken("zero-time-refresh", familyID, 1, client.ID, user.ID),
-		time.Time{},
-	); !errors.Is(err, repository.ErrInvalidArgument) {
-		t.Fatalf("RotateRefreshToken(zero revoked time) error = %v, want ErrInvalidArgument", err)
-	}
-
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			access := accessToken(test.name+"-access", client.ID, user.ID, &familyID)
@@ -376,7 +365,7 @@ func TestTokenRepositoryRotateRefreshTokenRejectsInvalidInputs(t *testing.T) {
 				test.mutate(access, refresh)
 			}
 
-			err := tokenRepository.RotateRefreshToken(context.Background(), test.currentHash, access, refresh, time.Now())
+			err := tokenRepository.RotateRefreshToken(context.Background(), test.currentHash, access, refresh)
 			if !errors.Is(err, test.want) {
 				t.Fatalf("RotateRefreshToken() error = %v, want %v", err, test.want)
 			}
@@ -409,7 +398,7 @@ func TestTokenRepositoryRotateRefreshTokenReplayRevokesFamilyAndReturnsReplay(t 
 	newAccess := accessToken("rotate-replay-new-access", client.ID, user.ID, &familyID)
 	newRefresh := refreshToken("rotate-replay-new-refresh", familyID, 1, client.ID, user.ID)
 	beforeReplay := time.Now().UTC()
-	err := tokenRepository.RotateRefreshToken(context.Background(), "rotate-replay-current-refresh", newAccess, newRefresh, beforeReplay)
+	err := tokenRepository.RotateRefreshToken(context.Background(), "rotate-replay-current-refresh", newAccess, newRefresh)
 	if !errors.Is(err, repository.ErrTokenReplay) {
 		t.Fatalf("RotateRefreshToken(replay) error = %v, want ErrTokenReplay", err)
 	}
@@ -443,7 +432,6 @@ func TestTokenRepositoryRotateRefreshTokenReplayIgnoresMalformedReplacement(t *t
 		"rotate-malformed-replay-old-refresh",
 		newAccess,
 		newRefresh,
-		beforeReplay,
 	)
 	if !errors.Is(err, repository.ErrTokenReplay) {
 		t.Fatalf("RotateRefreshToken(replay) error = %v, want ErrTokenReplay", err)
@@ -481,7 +469,7 @@ func TestTokenRepositoryRotateRefreshTokenRejectsExpiredCurrent(t *testing.T) {
 
 	newAccess := accessToken("rotate-expired-new-access", client.ID, user.ID, &familyID)
 	newRefresh := refreshToken("rotate-expired-new-refresh", familyID, 1, client.ID, user.ID)
-	err := tokenRepository.RotateRefreshToken(context.Background(), "rotate-expired-current-refresh", newAccess, newRefresh, time.Now())
+	err := tokenRepository.RotateRefreshToken(context.Background(), "rotate-expired-current-refresh", newAccess, newRefresh)
 	if !errors.Is(err, repository.ErrTokenExpired) {
 		t.Fatalf("RotateRefreshToken(expired) error = %v, want ErrTokenExpired", err)
 	}

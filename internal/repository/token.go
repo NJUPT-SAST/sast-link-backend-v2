@@ -78,13 +78,9 @@ func (r *TokenRepository) RotateRefreshToken(
 	currentRefreshTokenHash string,
 	newAccess *model.OAuthAccessToken,
 	newRefresh *model.OAuthRefreshToken,
-	revokedAt time.Time,
 ) error {
 	if currentRefreshTokenHash == "" {
 		return fmt.Errorf("%w: current refresh token hash is empty", ErrInvalidArgument)
-	}
-	if revokedAt.IsZero() {
-		return fmt.Errorf("%w: revoked time is zero", ErrInvalidArgument)
 	}
 	if err := validateTokenPair(newAccess, newRefresh); err != nil {
 		return err

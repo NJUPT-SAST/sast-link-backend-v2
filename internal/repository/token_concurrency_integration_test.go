@@ -94,7 +94,7 @@ func TestTokenRepositoryFamilyOperationsWaitForSameAdvisoryLock(t *testing.T) {
 		refresh := refreshToken("locked-rotate-next-refresh", familyID, 1, client.ID, user.ID)
 
 		assertWaitsForTokenFamilyLock(t, database, familyID, func(ctx context.Context) error {
-			return tokenRepository.RotateRefreshToken(ctx, "locked-rotate-refresh", access, refresh, time.Now())
+			return tokenRepository.RotateRefreshToken(ctx, "locked-rotate-refresh", access, refresh)
 		})
 	})
 }
@@ -124,7 +124,6 @@ func TestTokenRepositoryRotateRefreshTokenConcurrentSingleSuccess(t *testing.T) 
 				"rotate-concurrent-current-refresh",
 				access,
 				refresh,
-				time.Now(),
 			)
 		}(index)
 	}
@@ -206,7 +205,6 @@ func TestTokenRepositoryRotateRefreshTokenRejectsTokenExpiredWhileWaitingForFami
 			"rotate-lock-expired-current-refresh",
 			newAccess,
 			newRefresh,
-			time.Now(),
 		)
 	}()
 	time.Sleep(350 * time.Millisecond)
