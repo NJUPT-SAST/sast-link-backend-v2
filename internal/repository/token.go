@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"gorm.io/gorm"
@@ -272,7 +271,19 @@ func validateTokenPair(access *model.OAuthAccessToken, refresh *model.OAuthRefre
 }
 
 func sameScopes(left model.StringArray, right model.StringArray) bool {
-	return reflect.DeepEqual([]string(left), []string(right))
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(left))
+	for _, scope := range left {
+		seen[scope] = struct{}{}
+	}
+	for _, scope := range right {
+		if _, ok := seen[scope]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // FindRefreshToken finds a refresh token by its opaque token hash.

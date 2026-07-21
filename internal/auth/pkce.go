@@ -19,7 +19,7 @@ func ValidatePKCEVerifier(verifier string) error {
 		return ErrInvalidInput
 	}
 	for _, character := range verifier {
-		if character > unicode.MaxASCII || !isPKCEAlphaNumeric(character) && !strings.ContainsRune("-._~", character) {
+		if character > unicode.MaxASCII || (!isPKCEAlphaNumeric(character) && !strings.ContainsRune("-._~", character)) {
 			return ErrInvalidInput
 		}
 	}

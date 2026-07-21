@@ -80,6 +80,9 @@ func redisInt(value any) (int, error) {
 	case int:
 		return typed, nil
 	case int64:
+		if typed < 0 || typed > int64(math.MaxInt) {
+			return 0, fmt.Errorf("redis integer: %w", ErrInvalidArgument)
+		}
 		return int(typed), nil
 	case uint64:
 		if typed > uint64(math.MaxInt) {

@@ -48,6 +48,9 @@ func (m RefreshTokenManager) VerifyRefreshTokenHash(token, expectedHash string) 
 	if err != nil {
 		return err
 	}
+	if len(actualHash) != len(expectedHash) {
+		return ErrInvalidSecret
+	}
 	actual, err := base64.RawURLEncoding.DecodeString(actualHash)
 	if err != nil {
 		return ErrInvalidInput
