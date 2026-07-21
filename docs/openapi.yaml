@@ -1,15 +1,15 @@
 openapi: 3.0.1
 info:
-  title: vibe-API-v2.1
+  title: SAST Link v2 API
   description: |
     SAST Link v2 统一认证与用户中心 API。
 
     - Base URL: `https://link.sast.fun/v2`
     - 认证方式: JWT Bearer Token（`Authorization: Bearer <access_token>`）
-    - Content-Type: `application/json`
+    - Content-Type: 标准业务接口使用 `application/json`；OAuth Token/Revoke 使用 `application/x-www-form-urlencoded`
     - OAuth 2.1: 授权端点使用 PKCE-S256，第一方应用无需 client_secret
     - OIDC Provider: 基于 OAuth 2.1 的 OpenID Connect 认证层，scope 含 openid 时返回 ID Token
-    - 响应格式: 所有接口统一使用标准化响应信封，OAuth 端点遵循 RFC 6749 错误格式
+    - 响应格式: 标准业务接口使用标准化响应信封；OAuth/OIDC/健康检查/公开卡片等协议或直出端点见 StandardEnvelope 注释
   version: 2.0.0
   contact:
     name: SAST
@@ -959,7 +959,7 @@ paths:
       deprecated: false
       description: |
         检查用户登录状态 → 展示授权页 → 用户同意后重定向至 redirect_uri，携带 code 和 state。
-        使用 PKCE-S256 进行授权码交换。错误时重定向携带 error 参数。
+        使用 PKCE-S256 进行授权码交换，仅接受 code_challenge_method=S256。错误时重定向携带 error 参数。
       operationId: oauthAuthorize
       tags:
         - OAuth 2.1 Server
@@ -985,9 +985,9 @@ paths:
           schema:
             type: string
             format: uri
-        - name: scopes
+        - name: scope
           in: query
-          description: 授权范围，空格分隔（如 `openid profile`），对应数据库 scopes 字段
+          description: 授权范围，空格分隔（如 `openid profile`）。OAuth 线协议字段为单数 `scope`，数据库列保留 `scopes`
           required: true
           schema:
             type: string
@@ -1005,13 +1005,12 @@ paths:
             type: string
         - name: code_challenge_method
           in: query
-          description: PKCE 挑战方法（S256 或 plain）
+          description: PKCE 挑战方法，仅支持 S256
           required: true
           schema:
             type: string
             enum:
               - S256
-              - plain
         - name: nonce
           in: query
           description: OIDC nonce（可选参数）
@@ -1032,7 +1031,7 @@ paths:
       description: |
         支持 grant_type: `authorization_code` 和 `refresh_token`。
         第一方应用使用 PKCE 无需 client_secret，第三方应用需提供 client_secret。
-        此端点不遵循标准响应信封，成功和错误均使用 RFC 6749 格式。
+        此端点不遵循标准响应信封，请求体必须使用 application/x-www-form-urlencoded，成功和错误均使用 RFC 6749 格式。
         scope 包含 `openid` 时，响应额外返回 `id_token`（RS256 签名 JWT）。
       operationId: oauthToken
       tags:
@@ -1040,7 +1039,7 @@ paths:
       parameters: []
       requestBody:
         content:
-          application/json:
+          application/x-www-form-urlencoded:
             schema:
               $ref: '#/components/schemas/OAuthTokenRequest'
             examples:
@@ -1095,14 +1094,16 @@ paths:
     post:
       summary: Token 撤销
       deprecated: false
-      description: 撤销整条 token family。
+      description: |
+        撤销整条 token family。请求体必须使用 application/x-www-form-urlencoded。
+        遵循 RFC 7009，成功固定返回 200 OK 且响应体为空。
       operationId: oauthRevokeToken
       tags:
         - OAuth 2.1 Server
       parameters: []
       requestBody:
         content:
-          application/json:
+          application/x-www-form-urlencoded:
             schema:
               type: object
               required:
@@ -1125,11 +1126,14 @@ paths:
         required: true
       responses:
         '200':
-          description: 撤销成功
+          description: 撤销成功，RFC 7009 要求返回 200 OK 且响应体为空
+          headers: {}
+        '400':
+          description: OAuth 错误（RFC 6749 / RFC 7009 格式）
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/OAuthRevokeResponse'
+                $ref: '#/components/schemas/OAuthError'
           headers: {}
       security: []
   /.well-known/openid-configuration:
@@ -1176,7 +1180,7 @@ paths:
       summary: UserInfo 端点（GET）
       deprecated: false
       description: |
-        返回当前认证用户的身份信息。响应内容根据 Token 的 scopes 决定：
+        返回当前认证用户的身份信息。响应内容根据 Token 的 scope 决定：
         - `openid` 至少返回 `sub`
         - `profile` 额外返回 name / picture / preferred_username / profile 等
         - `email` 额外返回 email / email_verified
@@ -2078,6 +2082,7 @@ components:
       type: object
       required:
         - grant_type
+        - client_id
       properties:
         grant_type:
           type: string
@@ -2125,11 +2130,14 @@ components:
     # 以下 StandardEnvelope 为通用模板，各端点的 data schema 在内嵌中各自定义。
     #
     # 不使用信封的例外：
-    #   - OAuth 端点（/oauth/authorize, /oauth/token, /oauth/revoke）→ RFC 6749 格式
-    #   - UserInfo 错误响应 → RFC 6750 格式（{error, error_description}）
+    #   - /oauth/authorize → 成功/错误均为 redirect response，query 携带 code/state 或 error/error_description
+    #   - /oauth/token → application/x-www-form-urlencoded 请求；成功/错误均为 OAuth JSON，字段名使用 scope（单数）
+    #   - /oauth/revoke → application/x-www-form-urlencoded 请求；RFC 7009 成功为 200 空响应体，错误为 OAuth JSON
+    #   - /userinfo → 成功为 OIDC UserInfo claims；错误为 RFC 6750 Bearer Token 格式
     #   - /health → 直接 {status, db, redis}
     #   - /card/{id} → 直接 profile 公开字段
-    #   - /.well-known/* → 协议标准格式
+    #   - /.well-known/openid-configuration → OIDC Discovery JSON
+    #   - /.well-known/jwks.json → JWKS JSON
     StandardEnvelope:
       type: object
       description: SAST Link v2 标准响应信封模板
@@ -2540,7 +2548,7 @@ components:
       description: |
         OAuth 2.1 Token 响应（RFC 6749 格式，不使用 SAST Link 标准响应信封）。
         scope 包含 `openid` 时，额外返回 OIDC ID Token。
-        注意：字段名 `scopes` 为项目约定，RFC 标准名为 `scope`（单数）。
+        字段名 `scope` 为 OAuth 线协议标准单数字段；数据库列仍保留 `scopes`。
       properties:
         access_token:
           type: string
@@ -2561,20 +2569,12 @@ components:
           type: string
           description: |
             OIDC ID Token（RS256 签名 JWT）。仅在 scope 包含 `openid` 时返回。
-            ID Token 包含以下 OIDC 标准 claims，具体内容取决于授权 scopes。
+            ID Token 包含以下 OIDC 标准 claims，具体内容取决于授权 scope。
           example: eyJhbGciOiJSUzI1NiIs...
-        scopes:
+        scope:
           type: string
           description: 授权范围，空格分隔，取值见 OAuthScope 枚举（openid / profile / email）
           example: openid profile
-    OAuthRevokeResponse:
-      type: object
-      description: OAuth Token 撤销响应（不使用标准信封）
-      properties:
-        message:
-          type: string
-          description: 撤销结果
-          example: ok
     HealthResponse:
       type: object
       description: 健康检查响应（不使用标准信封）
@@ -2723,10 +2723,9 @@ components:
           type: array
           items:
             type: string
-          description: 支持的 PKCE 挑战方法
+          description: 支持的 PKCE 挑战方法（S256-only；V001 数据库历史约束曾允许 plain，V002 收紧）
           example:
             - S256
-            - plain
         request_parameter_supported:
           type: boolean
           description: 是否支持 request 参数
@@ -2793,7 +2792,7 @@ components:
     UserInfoResponse:
       type: object
       description: |
-        OIDC UserInfo 端点响应。返回的 claims 取决于 Access Token 的 scopes：
+        OIDC UserInfo 端点响应。返回的 claims 取决于 Access Token 的 scope：
         - `openid` → sub（必返）
         - `profile` → name, picture, preferred_username, profile, updated_at
         - `email` → email, email_verified

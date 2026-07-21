@@ -320,7 +320,9 @@ CREATE TABLE oauth_clients (
 
 ## oauth_authorizations 授权码
 
-Authorization Code + PKCE 流程中的短期授权码。一次性使用，过期后定时任务清理
+Authorization Code + PKCE 流程中的短期授权码。一次性使用，过期后定时任务清理。
+
+> 协议层要求 PKCE S256-only。V001 历史迁移中的 `ck_oauth_authorizations_challenge_method` 仍允许 `plain`，用于保留已发布 schema 的真实状态；V002 迁移应将约束收紧为仅允许 `S256`。
 
 ```sql
 CREATE TABLE oauth_authorizations (
@@ -343,7 +345,7 @@ CREATE TABLE oauth_authorizations (
     CONSTRAINT ck_oauth_authorizations_expiry
         CHECK (expires_at > created_at),
     CONSTRAINT ck_oauth_authorizations_challenge_method
-        CHECK (code_challenge_method IN ('S256', 'plain'))
+        CHECK (code_challenge_method IN ('S256', 'plain'))  -- V002 replaces this with = 'S256'
 );
 ```
 
@@ -356,7 +358,7 @@ CREATE TABLE oauth_authorizations (
 |`redirect_uri`|授权请求时的 redirect_uri|
 |`scopes`|请求范围|
 |`code_challenge`|PKCE code_challenge 值|
-|`code_challenge_method`|`S256` 或 `plain`|
+|`code_challenge_method`|V001 历史约束允许 `S256` 或 `plain`；协议层 S256-only，V002 收紧为仅 `S256`|
 |`nonce`|OIDC nonce|
 |`is_used`|是否已使用|
 |`family_id`|Token Family UUID。code 被重放时，通过此字段级联撤销整条 token 链|

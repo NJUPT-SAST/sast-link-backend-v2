@@ -59,7 +59,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 
 | 密钥类型 | 存储方式 | 轮换策略 |
 |----------|----------|----------|
-| JWT 签名私钥 (RS256) | 环境变量 / Secret Manager | 支持双密钥（`JWT_SECRET_KEY` + `JWT_SECRET_KEY_PREV`），新 Token 用新 key 签，旧 key 仅用于验签，过渡期后废弃 |
+| JWT 签名密钥 (RS256) | 环境变量 / Secret Manager | 支持双密钥（`JWT_SECRET_KEY` + `JWT_SECRET_KEY_PREV`）；active 必须为 RSA private PEM，新 Token 用 active key 签名；previous 可为 RSA public/private PEM，仅用于验签，过渡期后废弃 |
 | OAuth client_secret | DB 存储 bcrypt hash | 可随时重置，不影响已签发 Token |
 
 ### 3.3 部署架构
@@ -77,7 +77,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 
 SAST Link 内部使用 JWT RS256 签名 Access Token + opaque Refresh Token：
 
-- **Access Token**：RS256 签名 JWT，有效期 1 小时，含 `jti`（撤销）、`sub`（user.id）、`role`、`state`、`token_version`、`scopes` 等 claims。自包含，业务服务可离线验签
+- **Access Token**：RS256 签名 JWT，有效期 1 小时，含 `jti`（撤销）、`sub`（user.id）、`role`、`state`、`token_version`、`scope` 等 claims。自包含，业务服务可离线验签
 - **Refresh Token**：opaque 随机字符串，有效期 30 天，HMAC-SHA256 hash 后存 DB。采用 **rotation + family 链** 机制（见 4.6）
 - **登录态校验**：每次请求校验 Access Token 签名 → 检查 jti 是否在黑名单（Redis）→ 检查 `token_version`（Redis 缓存，未命中回源 DB）→ 检查账号状态（非 is_deleted）
 - **登出**：Access Token 的 jti 写入 Redis 黑名单（TTL = 剩余有效期）；Refresh Token family 链全部撤销（`revoked_at` = NOW）
@@ -154,7 +154,7 @@ GET /oauth/lark/callback?code=...&state=...
 
 | Token 类型 | 格式 | 有效期 | 说明 |
 |------------|------|--------|------|
-| Access Token | RS256 JWT | 1h | 自包含，含 jti/sub/role/state/token_version/scopes；kid 支持密钥轮换 |
+| Access Token | RS256 JWT | 1h | 自包含，含 jti/sub/role/state/token_version/scope；kid 支持密钥轮换 |
 | Refresh Token | opaque string | 30d | HMAC-SHA256 hash 存 DB（`oauth_refresh_tokens.token_hash`） |
 | Register-Ticket | opaque string (`reg_` 前缀) | 5min | Redis 存储，一次性使用 |
 | login_code | opaque string (`lc_` 前缀) | 60s | Redis 存储，一次性使用，OAuth 回调交换用 |
@@ -262,14 +262,14 @@ Body: { "password": "current_password" }
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/oauth/authorize` | GET | 授权端点。强制参数：response_type=code / client_id / redirect_uri / scopes / state / code_challenge / code_challenge_method；可选：nonce（OIDC） |
+| `/oauth/authorize` | GET | 授权端点。强制参数：response_type=code / client_id / redirect_uri / scope / state / code_challenge / code_challenge_method；可选：nonce（OIDC） |
 | `/oauth/token` | POST | Token 端点。支持 grant_type: authorization_code / refresh_token。第一方用 PKCE（无 client_secret），第三方用 client_secret_post。scope 含 openid 时额外返回 id_token |
 | `/oauth/revoke` | POST | 撤销整条 token family |
 
 #### 安全约束
 
 - Authorization Code 有效期 5min，单次使用（is_used 标记），过期后 pg_cron 每小时清理
-- PKCE-S256 强制，`code_challenge_method` 允许 `plain` 但前端应引导使用 S256
+- PKCE-S256 强制，仅接受 `code_challenge_method=S256`。V001 数据库历史约束仍允许 `plain` 存量值，实际协议层由 V002 迁移收紧为 S256-only。
 - State 参数强制，回调时必须校验
 - Redirect URI 必须精确匹配 `oauth_clients.redirect_uris` 之一
 - 第一方应用（`first_party`）：无 client_secret，PKCE 认证；可请求任意 scope
@@ -278,10 +278,11 @@ Body: { "password": "current_password" }
 
 #### 响应格式
 
-OAuth 端点不遵循 SAST Link 标准响应信封，使用 RFC 6749 格式：
+OAuth 端点不遵循 SAST Link 标准响应信封：
 
-成功：`{ "access_token", "refresh_token", "token_type", "expires_in", "scopes" }`
-错误：`{ "error": "invalid_grant", "error_description": "..." }`
+- `/oauth/authorize`：成功/错误均使用 redirect response。
+- `/oauth/token`：请求体为 `application/x-www-form-urlencoded`；成功 `200` 返回 `{ "access_token", "refresh_token", "token_type", "expires_in", "scope" }`，错误使用 RFC 6749 JSON `{ "error": "invalid_grant", "error_description": "..." }`。
+- `/oauth/revoke`：请求体为 `application/x-www-form-urlencoded`；遵循 RFC 7009，成功固定 `200 OK` 空响应体，错误使用 OAuth JSON 格式。
 
 ### 4.11 OIDC Provider
 
@@ -524,9 +525,11 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ### 10.1 响应规范
 
 - **标准端点**：统一响应信封 `{ "code": 0, "message": "ok", "data": {...} }`
-- **OAuth 端点**（`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`）：RFC 6749 格式 `{ "error": "...", "error_description": "..." }`
+- **OAuth 端点**：`/oauth/authorize` 成功/错误均使用 redirect response；`/oauth/token` 成功和错误均使用 RFC 6749 JSON 格式；`/oauth/revoke` 使用 RFC 7009，成功固定 `200 OK` 空响应体，错误使用 OAuth JSON 格式。
 - **OIDC UserInfo 端点**：错误时 RFC 6750 格式 `{ "error": "invalid_token", "error_description": "..." }`
+- **OIDC Discovery / JWKS**：直接返回协议标准 JSON（`/.well-known/openid-configuration`、`/.well-known/jwks.json`）
 - **健康检查**：直接返回 `{ "status", "db", "redis" }`
+- **个人卡片公开端点**：`/card/{id}` 直接返回公开 profile 字段
 
 ### 10.2 Base URL
 
