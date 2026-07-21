@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -62,7 +63,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("JWT_ACCESS_TOKEN_EXPIRY must be positive")
 	case c.JWTRefreshTokenExpiry <= 0:
 		return fmt.Errorf("JWT_REFRESH_TOKEN_EXPIRY must be positive")
-	case (c.JWTSecretKeyPrev == "") != (c.JWTPreviousKID == ""):
+	case (strings.TrimSpace(c.JWTSecretKeyPrev) == "") != (strings.TrimSpace(c.JWTPreviousKID) == ""):
 		return fmt.Errorf("JWT_SECRET_KEY_PREV and JWT_PREVIOUS_KID must be both set or both empty")
 	}
 	return nil

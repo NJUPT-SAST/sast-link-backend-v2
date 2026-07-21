@@ -28,7 +28,9 @@ func NewJWTManager(config JWTConfig) (*JWTManager, error) {
 	if issuer == "" || audience == "" || activeKID == "" || activeKeyPEM == "" {
 		return nil, ErrInvalidInput
 	}
-	if (config.PreviousKID == "") != (config.PreviousKeyPEM == "") {
+	previousKID := strings.TrimSpace(config.PreviousKID)
+	previousKeyPEM := strings.TrimSpace(config.PreviousKeyPEM)
+	if (previousKID == "") != (previousKeyPEM == "") {
 		return nil, ErrInvalidInput
 	}
 
@@ -45,9 +47,7 @@ func NewJWTManager(config JWTConfig) (*JWTManager, error) {
 		Active:   JWTKeyPair{KID: activeKID, Private: active},
 		Clock:    config.Clock,
 	}
-	if config.PreviousKeyPEM != "" {
-		previousKeyPEM := strings.TrimSpace(config.PreviousKeyPEM)
-		previousKID := strings.TrimSpace(config.PreviousKID)
+	if previousKeyPEM != "" {
 		previous, err := parseRSAPublicKey(previousKeyPEM)
 		if err != nil {
 			return nil, fmt.Errorf("parse previous JWT key: %w", err)

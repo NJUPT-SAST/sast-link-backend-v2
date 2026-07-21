@@ -150,6 +150,16 @@ func TestLoadRejectsPreviousKeyWithoutPreviousKID(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsWhitespacePreviousKIDWithPreviousKey(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("JWT_PREVIOUS_KID", "   ")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "JWT_SECRET_KEY_PREV and JWT_PREVIOUS_KID must be both set or both empty") {
+		t.Fatalf("Load() error = %v, want trimmed previous key/kid pair validation", err)
+	}
+}
+
 func TestLoadRejectsPreviousKIDWithoutPreviousKey(t *testing.T) {
 	setConfigEnv(t, "user", "pass", "db")
 	t.Setenv("JWT_SECRET_KEY_PREV", "")

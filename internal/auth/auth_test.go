@@ -143,6 +143,16 @@ func TestJWTManagerParsesConfiguredKeys(t *testing.T) {
 	if _, err := NewJWTManager(JWTConfig{
 		Issuer:         "issuer",
 		Audience:       "audience",
+		ActiveKID:      "active",
+		ActiveKeyPEM:   activePEM,
+		PreviousKID:    "   ",
+		PreviousKeyPEM: previousPEM,
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("NewJWTManager whitespace previous kid error = %v, want ErrInvalidInput", err)
+	}
+	if _, err := NewJWTManager(JWTConfig{
+		Issuer:         "issuer",
+		Audience:       "audience",
 		ActiveKID:      "duplicate",
 		ActiveKeyPEM:   activePEM,
 		PreviousKID:    "duplicate",
