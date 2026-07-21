@@ -18,7 +18,7 @@ type oneTimePayload struct {
 
 func TestKeys(t *testing.T) {
 	keys := NewKeys("sast-link:test")
-	if got, want := keys.OneTime("oauth:state", "abc"), "sast-link:test:oauth:state:abc"; got != want {
+	if got, want := keys.OneTime("oauth:state", "abc"), "sast-link:test:oauth%3Astate:abc"; got != want {
 		t.Fatalf("OneTime key = %q, want %q", got, want)
 	}
 	if got, want := keys.VerifyCode("a@example.com"), "sast-link:test:verify:a@example.com"; got != want {
@@ -51,8 +51,14 @@ func TestKeys(t *testing.T) {
 	if plain, wrapped := keys.OAuthState("state"), keys.OAuthState(":state:"); plain == wrapped {
 		t.Fatalf("OAuthState keys collided for dynamic state values: %q", plain)
 	}
-	if got, want := keys.RateLimit("login", "::1"), "sast-link:test:ratelimit:::1:login"; got != want {
+	if got, want := keys.RateLimit("login", "::1"), "sast-link:test:ratelimit:%3A%3A1:login"; got != want {
 		t.Fatalf("RateLimit IPv6 key = %q, want %q", got, want)
+	}
+	if left, right := keys.RateLimit("login", "::1"), keys.RateLimit(":1:login", ":"); left == right {
+		t.Fatalf("RateLimit keys collided for distinct tuples: %q", left)
+	}
+	if empty, nonEmpty := keys.OneTime("oauth:state", ""), keys.OneTime("oauth", "state"); empty == nonEmpty {
+		t.Fatalf("OneTime keys collided for empty and non-empty tuples: %q", empty)
 	}
 }
 

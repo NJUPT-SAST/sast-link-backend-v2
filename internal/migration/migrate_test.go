@@ -150,6 +150,18 @@ func TestV2RejectsExistingPlainPKCEChallengeMethod(t *testing.T) {
 	if !strings.Contains(err.Error(), "non-S256 code_challenge_method") {
 		t.Fatalf("Up() error = %v, want non-S256 blocker", err)
 	}
+	var constraintDefinition string
+	if queryErr := database.QueryRowContext(context.Background(), `
+SELECT pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'oauth_authorizations'::regclass
+  AND conname = 'ck_oauth_authorizations_challenge_method'
+`).Scan(&constraintDefinition); queryErr != nil {
+		t.Fatalf("read challenge-method constraint after failed V002: %v", queryErr)
+	}
+	if !strings.Contains(constraintDefinition, "plain") {
+		t.Fatalf("constraint after failed V002 = %q, want original V001 plain allowance", constraintDefinition)
+	}
 }
 
 func TestBaselineV1CanMigrateToV2(t *testing.T) {

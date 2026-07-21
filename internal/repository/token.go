@@ -58,6 +58,9 @@ func (r *TokenRepository) CreatePair(
 		if familyRevoked {
 			return ErrTokenFamilyRevoked
 		}
+		if err := validateTokenFamilyAppend(transaction, refresh); err != nil {
+			return err
+		}
 
 		if err := transaction.Create(access).Error; err != nil {
 			return fmt.Errorf("create access token: %w", err)
@@ -106,10 +109,6 @@ func (r *TokenRepository) RotateRefreshToken(
 		if current.FamilyID != familyID {
 			return fmt.Errorf("%w: refresh token family changed during rotation", ErrInvalidArgument)
 		}
-		if validationErr := validateRefreshRotation(current, newAccess, newRefresh); validationErr != nil {
-			return validationErr
-		}
-
 		if current.RevokedAt != nil {
 			if revokeErr := revokeFamilyInTransaction(transaction, familyID, rotationTime); revokeErr != nil {
 				return revokeErr
@@ -117,6 +116,10 @@ func (r *TokenRepository) RotateRefreshToken(
 			replayDetected = true
 			return nil
 		}
+		if validationErr := validateRefreshRotation(current, newAccess, newRefresh); validationErr != nil {
+			return validationErr
+		}
+
 		if !current.ExpiresAt.After(rotationTime) {
 			return ErrTokenExpired
 		}
@@ -221,6 +224,36 @@ func tokenFamilyHasRevokedAccess(transaction *gorm.DB, familyID string) (bool, e
 			WHERE family_id = ? AND revoked_at IS NOT NULL
 		)`, familyID).Scan(&revoked).Error
 	return revoked, err
+}
+
+func validateTokenFamilyAppend(transaction *gorm.DB, refresh *model.OAuthRefreshToken) error {
+	var existing []model.OAuthRefreshToken
+	if err := transaction.
+		Where("family_id = ?", refresh.FamilyID).
+		Order("sequence ASC").
+		Find(&existing).Error; err != nil {
+		return fmt.Errorf("read refresh token family: %w", err)
+	}
+	if len(existing) == 0 {
+		if refresh.Sequence != 0 {
+			return fmt.Errorf("%w: initial refresh sequence = %d, want 0", ErrInvalidArgument, refresh.Sequence)
+		}
+		return nil
+	}
+
+	latest := existing[len(existing)-1]
+	for _, token := range existing {
+		if token.RevokedAt == nil {
+			return fmt.Errorf("%w: token family already has an active refresh token", ErrInvalidArgument)
+		}
+	}
+	if refresh.ClientID != latest.ClientID || refresh.UserID != latest.UserID || !sameScopes(refresh.Scopes, latest.Scopes) {
+		return fmt.Errorf("%w: token pair does not match existing family", ErrInvalidArgument)
+	}
+	if refresh.Sequence != latest.Sequence+1 {
+		return fmt.Errorf("%w: refresh sequence = %d, want %d", ErrInvalidArgument, refresh.Sequence, latest.Sequence+1)
+	}
+	return nil
 }
 
 func validateTokenPair(access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error {

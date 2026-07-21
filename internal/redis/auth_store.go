@@ -44,43 +44,65 @@ func (k Keys) join(parts ...string) string {
 	if k.Prefix != "" {
 		filtered = append(filtered, k.Prefix)
 	}
-	for _, part := range parts {
-		if part != "" {
-			filtered = append(filtered, part)
-		}
-	}
+	filtered = append(filtered, parts...)
 	return strings.Join(filtered, ":")
 }
 
+func dynamicKeySegment(value string) string {
+	if value == "" {
+		return "%00"
+	}
+	value = strings.ReplaceAll(value, "%", "%25")
+	return strings.ReplaceAll(value, ":", "%3A")
+}
+
 // OneTime returns a key for one-time OAuth/auth payloads.
-func (k Keys) OneTime(kind, id string) string { return k.join(kind, id) }
+func (k Keys) OneTime(kind, id string) string {
+	return k.join(dynamicKeySegment(kind), dynamicKeySegment(id))
+}
 
 // VerifyCode returns a verification-code key.
-func (k Keys) VerifyCode(email string) string { return k.join("verify", email) }
+func (k Keys) VerifyCode(email string) string { return k.join("verify", dynamicKeySegment(email)) }
 
 // OAuthState returns an OAuth state key.
-func (k Keys) OAuthState(state string) string { return k.join("oauth", "state", state) }
+func (k Keys) OAuthState(state string) string {
+	return k.join("oauth", "state", dynamicKeySegment(state))
+}
 
 // OAuthRegistration returns an OAuth registration-state key.
-func (k Keys) OAuthRegistration(state string) string { return k.join("oauth", "registration", state) }
+func (k Keys) OAuthRegistration(state string) string {
+	return k.join("oauth", "registration", dynamicKeySegment(state))
+}
 
 // RegisterTicket returns a registration-ticket key.
-func (k Keys) RegisterTicket(ticket string) string { return k.join("auth", "register_ticket", ticket) }
+func (k Keys) RegisterTicket(ticket string) string {
+	return k.join("auth", "register_ticket", dynamicKeySegment(ticket))
+}
 
 // BindTicket returns a binding-ticket key.
-func (k Keys) BindTicket(ticket string) string { return k.join("auth", "bind_ticket", ticket) }
+func (k Keys) BindTicket(ticket string) string {
+	return k.join("auth", "bind_ticket", dynamicKeySegment(ticket))
+}
 
 // LoginCode returns an OAuth login-code key.
-func (k Keys) LoginCode(code string) string { return k.join("auth", "login_code", code) }
+func (k Keys) LoginCode(code string) string {
+	return k.join("auth", "login_code", dynamicKeySegment(code))
+}
 
 // JTIBlacklist returns a JWT blacklist key.
-func (k Keys) JTIBlacklist(jti string) string { return k.join("token", "blacklist", jti) }
+func (k Keys) JTIBlacklist(jti string) string {
+	return k.join("token", "blacklist", dynamicKeySegment(jti))
+}
 
 // TokenVersion returns a token-version cache key.
-func (k Keys) TokenVersion(userID string) string { return k.join("token", "version", userID) }
+func (k Keys) TokenVersion(userID string) string {
+	return k.join("token", "version", dynamicKeySegment(userID))
+}
 
 // RateLimit returns a fixed-window rate-limiter key.
-func (k Keys) RateLimit(scope, id string) string { return k.join("ratelimit", id, scope) }
+func (k Keys) RateLimit(scope, id string) string {
+	return k.join("ratelimit", dynamicKeySegment(id), dynamicKeySegment(scope))
+}
 
 // Store provides typed Redis auth helpers.
 type Store struct {

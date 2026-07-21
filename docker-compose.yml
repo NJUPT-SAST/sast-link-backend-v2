@@ -9,9 +9,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DB_HOST: ${DB_HOST:-postgres-postgres-1}
       DB_PORT: ${DB_PORT:-5432}
-      DB_USER: ${POSTGRES_USER:-sastlink}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
-      DB_NAME: ${POSTGRES_DB:-sastlink}
+      DB_USER: ${DB_USER:-sastlink}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME:-sastlink}
       DB_SSLMODE: ${DB_SSLMODE:-disable}
       REDIS_HOST: ${REDIS_HOST:-redis-redis-1}
       REDIS_PORT: ${REDIS_PORT:-6379}

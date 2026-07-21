@@ -176,6 +176,36 @@ func TestTokenRepositoryCreatePairAndFindRefreshToken(t *testing.T) {
 	}
 }
 
+func TestTokenRepositoryCreatePairRejectsInvalidFamilyAppend(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "token-family-append@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	tokenRepository := repository.NewToken(database)
+
+	t.Run("new family must start at zero", func(t *testing.T) {
+		familyID := "new-family-gap"
+		access := accessToken("new-family-gap-access", client.ID, user.ID, &familyID)
+		refresh := refreshToken("new-family-gap-refresh", familyID, 9, client.ID, user.ID)
+		err := tokenRepository.CreatePair(context.Background(), access, refresh)
+		if !errors.Is(err, repository.ErrInvalidArgument) {
+			t.Fatalf("CreatePair() error = %v, want ErrInvalidArgument", err)
+		}
+		assertTokenPairAbsent(t, database, access.TokenID, refresh.TokenHash)
+	})
+
+	t.Run("active family cannot gain another refresh", func(t *testing.T) {
+		familyID := "active-family-append"
+		createTokenPair(t, tokenRepository, "active-family-current", familyID, 0, client.ID, user.ID)
+		access := accessToken("active-family-new-access", client.ID, user.ID, &familyID)
+		refresh := refreshToken("active-family-new-refresh", familyID, 1, client.ID, user.ID)
+		err := tokenRepository.CreatePair(context.Background(), access, refresh)
+		if !errors.Is(err, repository.ErrInvalidArgument) {
+			t.Fatalf("CreatePair() error = %v, want ErrInvalidArgument", err)
+		}
+		assertTokenPairAbsent(t, database, access.TokenID, refresh.TokenHash)
+	})
+}
+
 func TestTokenRepositoryCreatePairRejectsMismatchedPair(t *testing.T) {
 	database := setupDatabase(t)
 	user := createUserWithProfile(t, repository.NewUser(database), "token-mismatch@njupt.edu.cn")
@@ -268,7 +298,7 @@ func TestTokenRepositoryRotateRefreshTokenRejectsInvalidInputs(t *testing.T) {
 	client := createOAuthClient(t, database)
 	tokenRepository := repository.NewToken(database)
 	familyID := "rotate-invalid-family"
-	createTokenPair(t, tokenRepository, "rotate-invalid-current", familyID, 3, client.ID, user.ID)
+	createTokenPair(t, tokenRepository, "rotate-invalid-current", familyID, 0, client.ID, user.ID)
 
 	tests := []struct {
 		name        string
@@ -314,7 +344,7 @@ func TestTokenRepositoryRotateRefreshTokenRejectsInvalidInputs(t *testing.T) {
 			currentHash: "rotate-invalid-current-refresh",
 			want:        repository.ErrInvalidArgument,
 			mutate: func(_ *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) {
-				refresh.Sequence = 5
+				refresh.Sequence = 2
 			},
 		},
 		{
@@ -332,7 +362,7 @@ func TestTokenRepositoryRotateRefreshTokenRejectsInvalidInputs(t *testing.T) {
 		context.Background(),
 		"rotate-invalid-current-refresh",
 		accessToken("zero-time-access", client.ID, user.ID, &familyID),
-		refreshToken("zero-time-refresh", familyID, 4, client.ID, user.ID),
+		refreshToken("zero-time-refresh", familyID, 1, client.ID, user.ID),
 		time.Time{},
 	); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("RotateRefreshToken(zero revoked time) error = %v, want ErrInvalidArgument", err)
@@ -341,7 +371,7 @@ func TestTokenRepositoryRotateRefreshTokenRejectsInvalidInputs(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			access := accessToken(test.name+"-access", client.ID, user.ID, &familyID)
-			refresh := refreshToken(test.name+"-refresh", familyID, 4, client.ID, user.ID)
+			refresh := refreshToken(test.name+"-refresh", familyID, 1, client.ID, user.ID)
 			if test.mutate != nil {
 				test.mutate(access, refresh)
 			}
@@ -362,18 +392,18 @@ func TestTokenRepositoryRotateRefreshTokenReplayRevokesFamilyAndReturnsReplay(t 
 	tokenRepository := repository.NewToken(database)
 	familyID := "rotate-replay-family"
 	createTokenPair(t, tokenRepository, "rotate-replay-current", familyID, 0, client.ID, user.ID)
-	createTokenPair(t, tokenRepository, "rotate-replay-active", familyID, 1, client.ID, user.ID)
 
 	oldRevokedAt := time.Date(2026, time.February, 1, 0, 0, 0, 0, time.UTC)
-	if err := database.Model(&model.OAuthAccessToken{}).
-		Where("token_id = ?", "rotate-replay-current-access").
-		Update("revoked_at", oldRevokedAt).Error; err != nil {
-		t.Fatalf("pre-revoke access token: %v", err)
-	}
 	if err := database.Model(&model.OAuthRefreshToken{}).
 		Where("token_hash = ?", "rotate-replay-current-refresh").
 		Update("revoked_at", oldRevokedAt).Error; err != nil {
 		t.Fatalf("pre-revoke refresh token: %v", err)
+	}
+	createTokenPair(t, tokenRepository, "rotate-replay-active", familyID, 1, client.ID, user.ID)
+	if err := database.Model(&model.OAuthAccessToken{}).
+		Where("token_id = ?", "rotate-replay-current-access").
+		Update("revoked_at", oldRevokedAt).Error; err != nil {
+		t.Fatalf("pre-revoke access token: %v", err)
 	}
 
 	newAccess := accessToken("rotate-replay-new-access", client.ID, user.ID, &familyID)
@@ -387,6 +417,46 @@ func TestTokenRepositoryRotateRefreshTokenReplayRevokesFamilyAndReturnsReplay(t 
 	assertTokenPairAbsent(t, database, newAccess.TokenID, newRefresh.TokenHash)
 	assertTokenRevokedAt(t, database, "rotate-replay-current-access", "rotate-replay-current-refresh", oldRevokedAt)
 	assertTokenRevokedBetween(t, database, "rotate-replay-active-access", "rotate-replay-active-refresh", beforeReplay, afterReplay)
+}
+
+func TestTokenRepositoryRotateRefreshTokenReplayIgnoresMalformedReplacement(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "rotate-malformed-replay@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	tokenRepository := repository.NewToken(database)
+	familyID := "rotate-malformed-replay-family"
+	createTokenPair(t, tokenRepository, "rotate-malformed-replay-old", familyID, 0, client.ID, user.ID)
+
+	oldRevokedAt := time.Date(2026, time.February, 1, 0, 0, 0, 0, time.UTC)
+	if err := database.Model(&model.OAuthRefreshToken{}).
+		Where("token_hash = ?", "rotate-malformed-replay-old-refresh").
+		Update("revoked_at", oldRevokedAt).Error; err != nil {
+		t.Fatalf("pre-revoke old refresh token: %v", err)
+	}
+	createTokenPair(t, tokenRepository, "rotate-malformed-replay-active", familyID, 1, client.ID, user.ID)
+
+	newAccess := accessToken("rotate-malformed-replay-new-access", client.ID, user.ID, &familyID)
+	newRefresh := refreshToken("rotate-malformed-replay-new-refresh", familyID, 999, client.ID, user.ID)
+	beforeReplay := time.Now().UTC()
+	err := tokenRepository.RotateRefreshToken(
+		context.Background(),
+		"rotate-malformed-replay-old-refresh",
+		newAccess,
+		newRefresh,
+		beforeReplay,
+	)
+	if !errors.Is(err, repository.ErrTokenReplay) {
+		t.Fatalf("RotateRefreshToken(replay) error = %v, want ErrTokenReplay", err)
+	}
+	assertTokenPairAbsent(t, database, newAccess.TokenID, newRefresh.TokenHash)
+	assertTokenRevokedBetween(
+		t,
+		database,
+		"rotate-malformed-replay-active-access",
+		"rotate-malformed-replay-active-refresh",
+		beforeReplay,
+		time.Now().UTC(),
+	)
 }
 
 func TestTokenRepositoryRotateRefreshTokenRejectsExpiredCurrent(t *testing.T) {
@@ -425,11 +495,16 @@ func TestTokenRepositoryRevokeFamily(t *testing.T) {
 	tokenRepository := repository.NewToken(database)
 	familyA := "family-a"
 	familyB := "family-b"
+	revokedAt := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	createTokenPair(t, tokenRepository, "a1", familyA, 0, client.ID, user.ID)
+	if err := database.Model(&model.OAuthRefreshToken{}).
+		Where("token_hash = ?", "a1-refresh").
+		Update("revoked_at", revokedAt).Error; err != nil {
+		t.Fatalf("revoke first family-A refresh token: %v", err)
+	}
 	createTokenPair(t, tokenRepository, "a2", familyA, 1, client.ID, user.ID)
 	createTokenPair(t, tokenRepository, "b1", familyB, 0, client.ID, user.ID)
 
-	revokedAt := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	if err := tokenRepository.RevokeFamily(context.Background(), familyA, revokedAt); err != nil {
 		t.Fatalf("RevokeFamily() error = %v", err)
 	}
