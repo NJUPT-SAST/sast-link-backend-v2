@@ -576,20 +576,22 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 模块 | 状态 |
 |------|------|
 | Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
-| 数据基础层 | 已完成 — V001 SQL migration、baseline guard、persistence entities、最小 repositories 与 PostgreSQL 16 integration tests |
-| 用户认证与资料 | 待实现 |
-| OAuth/OIDC | 待实现 |
-| 限流、审计业务接入与 pg_cron | 待实现 |
+| 数据基础层 | 已完成 — V001/V002 SQL migrations、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
+| 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI/token_version 与 fixed-window limiter |
+| 用户认证与资料业务 | 待实现 — 注册、登录、验证码、改密/重置、登出、资料与头像 endpoints |
+| OAuth/OIDC 业务 | 待实现 — OAuth 登录/绑定、authorize/token/revoke、discovery、UserInfo、ID Token 与客户端管理 endpoints |
+| 限流中间件、审计业务接入与 pg_cron | 待实现 — limiter primitive 已完成，仍需 HTTP middleware 与业务策略接入 |
 
 ## 11. 实现顺序
 
 - [x] Go 服务骨架（配置 / DB 与 Redis 连接 / Web 基础设施 / 健康检查）
-- [x] 数据基础层（V001 migration / baseline / entities / repositories / integration tests）
-- [ ] 用户认证（注册 / 登录 / JWT 签发验证 / 验证码 / 改密 / 重置密码 / 登出）
+- [x] 数据基础层（V001/V002 migrations / baseline / entities / repositories / integration tests）
+- [x] 认证基础设施（PBKDF2 / JWT + JWKS / Refresh Token / PKCE-S256 / scope / Redis auth state + limiter / token-family rotation）
+- [ ] 用户认证业务（注册 / 登录 / JWT middleware / 验证码 / 改密 / 重置密码 / 登出）
 - [ ] 用户资料管理（查看 / 编辑 / 头像上传）
 - [ ] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [ ] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
-- [ ] 限流与防刷中间件
+- [ ] 限流与防刷中间件（Redis fixed-window limiter primitive 已完成）
 - [ ] 审计日志业务接入（健康检查已完成）
 - [ ] 头像内容审核（腾讯云 COS）
 - [ ] OAuth 2.1 授权服务端（authorize / token / revoke + PKCE）

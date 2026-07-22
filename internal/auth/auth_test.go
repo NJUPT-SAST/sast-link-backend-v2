@@ -185,7 +185,7 @@ func TestJWTManagerRS256ActivePreviousAndJWKS(t *testing.T) {
 		Role:         "member",
 		State:        "on_sast",
 		TokenVersion: 7,
-		Scopes:       []string{"openid", "profile"},
+		Scopes:       []string{"email", "openid", "profile"},
 		TTL:          time.Hour,
 	})
 	if err != nil {
@@ -195,10 +195,10 @@ func TestJWTManagerRS256ActivePreviousAndJWKS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifyAccessToken returned error: %v", err)
 	}
-	if claims.Subject != "user-1" || claims.ID != "jti-1" || claims.Role != "member" || claims.State != "on_sast" || claims.TokenVersion != 7 || claims.Scope != "openid profile" {
+	if claims.Subject != "user-1" || claims.ID != "jti-1" || claims.Role != "member" || claims.State != "on_sast" || claims.TokenVersion != 7 || claims.Scope != "openid profile email" {
 		t.Fatalf("claims = %+v, want signed SAST Link claims", claims)
 	}
-	assertJWTUsesScopeClaim(t, token, "openid profile")
+	assertJWTUsesScopeClaim(t, token, "openid profile email")
 	previousManager := manager
 	previousManager.Active = JWTKeyPair{KID: "previous", Private: previousKey}
 	previousManager.Previous = nil
@@ -269,6 +269,8 @@ func TestJWTManagerRejectsIncompleteAccessTokenClaims(t *testing.T) {
 		{name: "missing scope", mutate: func(input *TokenInput) { input.Scopes = nil }},
 		{name: "empty scope", mutate: func(input *TokenInput) { input.Scopes = []string{"openid", ""} }},
 		{name: "duplicate scope", mutate: func(input *TokenInput) { input.Scopes = []string{"openid", "openid"} }},
+		{name: "unknown scope", mutate: func(input *TokenInput) { input.Scopes = []string{"openid", "unknown"} }},
+		{name: "missing openid", mutate: func(input *TokenInput) { input.Scopes = []string{"profile"} }},
 		{name: "negative token version", mutate: func(input *TokenInput) { input.TokenVersion = -1 }},
 	}
 	for _, test := range tests {
@@ -303,6 +305,13 @@ func TestJWTManagerRejectsIncompleteAccessTokenClaims(t *testing.T) {
 	delete(missingScope, "scope")
 	if _, err := manager.VerifyAccessToken(signRawJWT(t, manager, missingScope)); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("VerifyAccessToken(missing scope) error = %v, want ErrInvalidToken", err)
+	}
+	for _, invalidScope := range []string{"openid unknown", "profile", "openid  profile"} {
+		invalidClaims := cloneJWTPayload(claims)
+		invalidClaims["scope"] = invalidScope
+		if _, err := manager.VerifyAccessToken(signRawJWT(t, manager, invalidClaims)); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("VerifyAccessToken(scope=%q) error = %v, want ErrInvalidToken", invalidScope, err)
+		}
 	}
 }
 

@@ -2,7 +2,7 @@
 
 SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一身份认证中心与人员信息管理系统。
 
-当前仓库已完成 Go 服务骨架与数据基础层：HTTP API 入口、PostgreSQL/Redis 连接、健康检查、V001 SQL migration、持久化实体、最小 Auth repositories 以及 PostgreSQL 16 integration tests。认证、OAuth/OIDC、限流和 pg_cron 运维任务仍待实现。
+当前仓库已完成 Go 服务骨架、数据基础层与认证基础设施：HTTP API 入口、PostgreSQL/Redis 连接、健康检查、V001/V002 SQL migrations、持久化实体与 Auth repositories，以及密码哈希、RS256 JWT/JWKS、opaque Refresh Token、PKCE-S256、统一 OAuth/OIDC scope、Redis 一次性状态与 fixed-window limiter。完整测试覆盖 PostgreSQL 16 和 Redis Testcontainers。认证业务流程、OAuth/OIDC endpoints、限流中间件与 pg_cron 运维任务仍待接入。
 
 `cmd/api` 只负责运行 HTTP 服务，启动时不会执行 DDL 或 schema migration。数据库结构只能通过 `cmd/migrate` 显式管理。
 
@@ -48,8 +48,10 @@ golangci-lint run ./...
 - `cmd/api/`：HTTP API 服务，不执行 migration
 - `cmd/migrate/`：唯一 migration runner
 - `migrations/`：embedded versioned SQL migrations
+- `internal/auth/`：密码哈希、JWT/JWKS、opaque Refresh Token、PKCE-S256 与统一 scope primitives
+- `internal/redis/`：一次性认证状态、JTI blacklist、token version cache 与 fixed-window limiter
 - `internal/model/`：GORM persistence entities 与 PostgreSQL 类型
-- `internal/repository/`：最小 user/token/audit repositories
+- `internal/repository/`：user/token/audit repositories 与 token-family rotation/revocation
 - `internal/migration/`：migration runner 与 V001 baseline guard
 - `internal/testutil/`：PostgreSQL 16 Testcontainers 测试基础设施
 

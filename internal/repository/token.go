@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 const tokenFamilyAdvisoryLockNamespace int32 = 0x53415354
@@ -197,7 +198,15 @@ func validateRefreshRotation(
 	if newRefresh.Sequence != current.Sequence+1 {
 		return fmt.Errorf("%w: rotated refresh sequence = %d, want %d", ErrInvalidArgument, newRefresh.Sequence, current.Sequence+1)
 	}
-	if !sameScopes(newAccess.Scopes, current.Scopes) || !sameScopes(newRefresh.Scopes, current.Scopes) {
+	accessScopesMatch, err := equalScopes(newAccess.Scopes, current.Scopes)
+	if err != nil {
+		return fmt.Errorf("%w: rotated access token scopes are invalid", ErrInvalidArgument)
+	}
+	refreshScopesMatch, err := equalScopes(newRefresh.Scopes, current.Scopes)
+	if err != nil {
+		return fmt.Errorf("%w: rotated refresh token scopes are invalid", ErrInvalidArgument)
+	}
+	if !accessScopesMatch || !refreshScopesMatch {
 		return fmt.Errorf("%w: rotated token scopes do not match current refresh token", ErrInvalidArgument)
 	}
 	return nil
@@ -242,7 +251,11 @@ func validateTokenFamilyAppend(transaction *gorm.DB, refresh *model.OAuthRefresh
 			return fmt.Errorf("%w: token family already has an active refresh token", ErrInvalidArgument)
 		}
 	}
-	if refresh.ClientID != latest.ClientID || refresh.UserID != latest.UserID || !sameScopes(refresh.Scopes, latest.Scopes) {
+	scopesMatch, err := equalScopes(refresh.Scopes, latest.Scopes)
+	if err != nil {
+		return fmt.Errorf("%w: token pair scopes are invalid", ErrInvalidArgument)
+	}
+	if refresh.ClientID != latest.ClientID || refresh.UserID != latest.UserID || !scopesMatch {
 		return fmt.Errorf("%w: token pair does not match existing family", ErrInvalidArgument)
 	}
 	if refresh.Sequence != latest.Sequence+1 {
@@ -264,26 +277,18 @@ func validateTokenPair(access *model.OAuthAccessToken, refresh *model.OAuthRefre
 	if access.UserID != refresh.UserID {
 		return fmt.Errorf("%w: create token pair user IDs do not match", ErrInvalidArgument)
 	}
-	if !sameScopes(access.Scopes, refresh.Scopes) {
+	scopesMatch, err := equalScopes(access.Scopes, refresh.Scopes)
+	if err != nil {
+		return fmt.Errorf("%w: create token pair scopes are invalid", ErrInvalidArgument)
+	}
+	if !scopesMatch {
 		return fmt.Errorf("%w: create token pair scopes do not match", ErrInvalidArgument)
 	}
 	return nil
 }
 
-func sameScopes(left model.StringArray, right model.StringArray) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	seen := make(map[string]struct{}, len(left))
-	for _, scope := range left {
-		seen[scope] = struct{}{}
-	}
-	for _, scope := range right {
-		if _, ok := seen[scope]; !ok {
-			return false
-		}
-	}
-	return true
+func equalScopes(left, right model.StringArray) (bool, error) {
+	return scope.Equal([]string(left), []string(right))
 }
 
 // FindRefreshToken finds a refresh token by its opaque token hash.

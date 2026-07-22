@@ -266,6 +266,37 @@ func TestTokenRepositoryCreatePairRejectsMismatchedPair(t *testing.T) {
 	}
 }
 
+func TestTokenRepositoryCreatePairRejectsInvalidScopes(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "token-invalid-scopes@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	tokenRepository := repository.NewToken(database)
+
+	tests := []struct {
+		name   string
+		scopes model.StringArray
+	}{
+		{name: "unknown", scopes: model.StringArray{"openid", "unknown"}},
+		{name: "duplicate", scopes: model.StringArray{"openid", "openid"}},
+		{name: "missing openid", scopes: model.StringArray{"profile"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			familyID := "invalid-scopes-" + strings.ReplaceAll(test.name, " ", "-")
+			access := accessToken(familyID+"-access", client.ID, user.ID, &familyID)
+			refresh := refreshToken(familyID+"-refresh", familyID, 0, client.ID, user.ID)
+			access.Scopes = test.scopes
+			refresh.Scopes = test.scopes
+
+			err := tokenRepository.CreatePair(context.Background(), access, refresh)
+			if !errors.Is(err, repository.ErrInvalidArgument) {
+				t.Fatalf("CreatePair() error = %v, want ErrInvalidArgument", err)
+			}
+			assertTokenPairAbsent(t, database, access.TokenID, refresh.TokenHash)
+		})
+	}
+}
+
 func TestTokenRepositoryRotateRefreshToken(t *testing.T) {
 	database := setupDatabase(t)
 	user := createUserWithProfile(t, repository.NewUser(database), "rotate@njupt.edu.cn")

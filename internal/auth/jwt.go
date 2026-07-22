@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 const jwtAlgRS256 = "RS256"
@@ -72,9 +74,9 @@ type JWTManager struct {
 
 // SignAccessToken signs an RS256 JWT with the active private key and kid.
 func (m JWTManager) SignAccessToken(input TokenInput) (string, error) {
-	scope, err := scopeClaim(input.Scopes)
+	scopeClaim, err := scope.Claim(input.Scopes)
 	if err != nil {
-		return "", err
+		return "", ErrInvalidInput
 	}
 	if m.Issuer == "" || input.Subject == "" || input.JTI == "" || strings.TrimSpace(input.Role) == "" || strings.TrimSpace(input.State) == "" ||
 		input.TokenVersion < 0 || len(m.Audience) == 0 || input.TTL <= 0 || m.Active.KID == "" || m.Active.Private == nil {
@@ -89,7 +91,7 @@ func (m JWTManager) SignAccessToken(input TokenInput) (string, error) {
 		Role:         input.Role,
 		State:        input.State,
 		TokenVersion: input.TokenVersion,
-		Scope:        scope,
+		Scope:        scopeClaim,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    m.Issuer,
 			Subject:   input.Subject,
@@ -171,45 +173,10 @@ func validateTokenClaims(claims *TokenClaims) error {
 	if strings.TrimSpace(claims.Role) == "" || strings.TrimSpace(claims.State) == "" || claims.TokenVersion < 0 {
 		return ErrInvalidToken
 	}
-	if _, err := parseScopeClaim(claims.Scope); err != nil {
+	if _, err := scope.ParseClaim(claims.Scope); err != nil {
 		return ErrInvalidToken
 	}
 	return nil
-}
-
-func scopeClaim(scopes []string) (string, error) {
-	if len(scopes) == 0 {
-		return "", ErrInvalidInput
-	}
-	seen := make(map[string]struct{}, len(scopes))
-	for _, scope := range scopes {
-		if strings.TrimSpace(scope) != scope || scope == "" || strings.ContainsAny(scope, " \t\r\n") {
-			return "", ErrInvalidInput
-		}
-		if _, exists := seen[scope]; exists {
-			return "", ErrInvalidInput
-		}
-		seen[scope] = struct{}{}
-	}
-	return strings.Join(scopes, " "), nil
-}
-
-func parseScopeClaim(scope string) ([]string, error) {
-	if strings.TrimSpace(scope) != scope || scope == "" {
-		return nil, ErrInvalidToken
-	}
-	scopes := strings.Fields(scope)
-	if len(scopes) == 0 || strings.Join(scopes, " ") != scope {
-		return nil, ErrInvalidToken
-	}
-	seen := make(map[string]struct{}, len(scopes))
-	for _, item := range scopes {
-		if _, exists := seen[item]; exists {
-			return nil, ErrInvalidToken
-		}
-		seen[item] = struct{}{}
-	}
-	return scopes, nil
 }
 
 func (m JWTManager) keyfunc(token *jwt.Token) (any, error) {
