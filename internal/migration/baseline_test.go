@@ -17,8 +17,8 @@ func applyV1(t *testing.T, databaseURL string) {
 		t.Fatalf("New() error = %v", err)
 	}
 	t.Cleanup(func() { _, _ = instance.Close() })
-	if err := instance.Up(); err != nil {
-		t.Fatalf("Up() error = %v", err)
+	if err := instance.Steps(1); err != nil {
+		t.Fatalf("apply V001: %v", err)
 	}
 }
 
@@ -29,9 +29,9 @@ func applyUnversionedV1Schema(t *testing.T, databaseURL string) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if err := instance.Up(); err != nil {
+	if err := instance.Steps(1); err != nil {
 		_, _ = instance.Close()
-		t.Fatalf("Up() error = %v", err)
+		t.Fatalf("apply V001: %v", err)
 	}
 	if _, err := instance.Close(); err != nil {
 		t.Fatalf("close migration instance: %v", err)

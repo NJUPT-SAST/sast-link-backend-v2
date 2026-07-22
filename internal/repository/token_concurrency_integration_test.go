@@ -3,6 +3,8 @@ package repository_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,6 +86,142 @@ func TestTokenRepositoryFamilyOperationsWaitForSameAdvisoryLock(t *testing.T) {
 			return tokenRepository.RevokeFamily(ctx, familyID, time.Now())
 		})
 	})
+
+	t.Run("RotateRefreshToken", func(t *testing.T) {
+		familyID := "locked-rotate-family"
+		createTokenPair(t, tokenRepository, "locked-rotate", familyID, 0, client.ID, user.ID)
+		access := accessToken("locked-rotate-next-access", client.ID, user.ID, &familyID)
+		refresh := refreshToken("locked-rotate-next-refresh", familyID, 1, client.ID, user.ID)
+
+		assertWaitsForTokenFamilyLock(t, database, familyID, func(ctx context.Context) error {
+			return tokenRepository.RotateRefreshToken(ctx, "locked-rotate-refresh", access, refresh)
+		})
+	})
+}
+
+func TestTokenRepositoryRotateRefreshTokenConcurrentSingleSuccess(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "rotate-concurrent@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	tokenRepository := repository.NewToken(database)
+	familyID := "rotate-concurrent-family"
+	createTokenPair(t, tokenRepository, "rotate-concurrent-current", familyID, 0, client.ID, user.ID)
+
+	const contenders = 8
+	start := make(chan struct{})
+	results := make(chan error, contenders)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(contenders)
+	for index := range contenders {
+		go func(index int) {
+			defer waitGroup.Done()
+			<-start
+			indexSuffix := fmt.Sprintf("%02d", index)
+			access := accessToken("rotate-concurrent-access-"+indexSuffix, client.ID, user.ID, &familyID)
+			refresh := refreshToken("rotate-concurrent-refresh-"+indexSuffix, familyID, 1, client.ID, user.ID)
+			results <- tokenRepository.RotateRefreshToken(
+				context.Background(),
+				"rotate-concurrent-current-refresh",
+				access,
+				refresh,
+			)
+		}(index)
+	}
+	close(start)
+	waitGroup.Wait()
+	close(results)
+
+	successes := 0
+	replays := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, repository.ErrTokenReplay):
+			replays++
+		default:
+			t.Fatalf("RotateRefreshToken() concurrent error = %v, want nil or ErrTokenReplay", err)
+		}
+	}
+	if successes != 1 || replays != contenders-1 {
+		t.Fatalf("RotateRefreshToken() concurrent results = %d success, %d replay; want 1/%d", successes, replays, contenders-1)
+	}
+
+	var activeRefreshTokens int64
+	if err := database.Model(&model.OAuthRefreshToken{}).
+		Where("family_id = ? AND revoked_at IS NULL", familyID).
+		Count(&activeRefreshTokens).Error; err != nil {
+		t.Fatalf("count active refresh tokens: %v", err)
+	}
+	if activeRefreshTokens != 0 {
+		t.Fatalf("active refresh tokens after replay = %d, want family revoked", activeRefreshTokens)
+	}
+}
+
+func TestTokenRepositoryRotateRefreshTokenRejectsTokenExpiredWhileWaitingForFamilyLock(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "rotate-lock-expired@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	tokenRepository := repository.NewToken(database)
+	familyID := "rotate-lock-expired-family"
+	createTokenPair(t, tokenRepository, "rotate-lock-expired-current", familyID, 0, client.ID, user.ID)
+
+	if err := database.Exec(`
+		ALTER TABLE oauth_refresh_tokens
+		DROP CONSTRAINT ck_oauth_refresh_tokens_expiry
+	`).Error; err != nil {
+		t.Fatalf("drop refresh expiry constraint: %v", err)
+	}
+	if err := database.Model(&model.OAuthRefreshToken{}).
+		Where("token_hash = ?", "rotate-lock-expired-current-refresh").
+		Update("expires_at", time.Now().Add(200*time.Millisecond)).Error; err != nil {
+		t.Fatalf("shorten current refresh token expiry: %v", err)
+	}
+
+	lockTransaction := database.Begin()
+	if lockTransaction.Error != nil {
+		t.Fatalf("begin lock transaction: %v", lockTransaction.Error)
+	}
+	lockReleased := false
+	defer func() {
+		if !lockReleased {
+			_ = lockTransaction.Rollback().Error
+		}
+	}()
+	if err := lockTransaction.Exec(
+		"SELECT pg_advisory_xact_lock(?, hashtext(?))",
+		tokenFamilyAdvisoryLockNamespace,
+		familyID,
+	).Error; err != nil {
+		t.Fatalf("acquire external token-family lock: %v", err)
+	}
+
+	newAccess := accessToken("rotate-lock-expired-new-access", client.ID, user.ID, &familyID)
+	newRefresh := refreshToken("rotate-lock-expired-new-refresh", familyID, 1, client.ID, user.ID)
+	result := make(chan error, 1)
+	go func() {
+		result <- tokenRepository.RotateRefreshToken(
+			context.Background(),
+			"rotate-lock-expired-current-refresh",
+			newAccess,
+			newRefresh,
+		)
+	}()
+	time.Sleep(350 * time.Millisecond)
+	if err := lockTransaction.Rollback().Error; err != nil {
+		t.Fatalf("release external token-family lock: %v", err)
+	}
+	lockReleased = true
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, repository.ErrTokenExpired) {
+			t.Fatalf("RotateRefreshToken(expired while waiting) error = %v, want ErrTokenExpired", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RotateRefreshToken remained blocked after lock release")
+	}
+	assertTokenPairAbsent(t, database, newAccess.TokenID, newRefresh.TokenHash)
 }
 
 func assertWaitsForTokenFamilyLock(

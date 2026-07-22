@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Status
 
-SAST Link Backend V2 is the backend for SAST's unified identity/authentication center and personnel information system. The current implementation establishes the Go module, HTTP service skeleton, V001 PostgreSQL schema migration, persistence entities, minimal repositories, and PostgreSQL 16 integration tests. Authentication, OAuth/OIDC, rate limiting, and pg_cron operations remain to be implemented.
+SAST Link Backend V2 is the backend for SAST's unified identity/authentication center and personnel information system. The current implementation establishes the Go module, HTTP service skeleton, V001/V002 PostgreSQL schema migrations, persistence entities, Auth repositories, and authentication infrastructure: PBKDF2 password hashing, RS256 JWT/JWKS with key rotation, opaque refresh tokens, PKCE-S256, canonical OAuth/OIDC scopes, Redis one-time state/JTI/token-version helpers, and a fixed-window limiter. PostgreSQL 16 and Redis integration tests use Testcontainers. Authentication workflows, OAuth/OIDC endpoints, rate-limit middleware, and pg_cron operations remain to be implemented.
 
 `cmd/api` connects PostgreSQL and Redis and serves health checks only at this stage. It never performs DDL or schema migrations at startup. `cmd/migrate` is the only command that inspects or changes schema migration state.
 
@@ -43,7 +43,7 @@ For a production database that already has the V001 schema, follow `docs/runbook
 - `docs/openapi.yaml`: machine-readable OpenAPI 3.0.1 contract. Keep it aligned with `docs/API文档.md` when endpoints change.
 - `docs/psql-db-design.md`: PostgreSQL schema design, enum values, indexes, triggers, token-family cascade revocation flow, and planned pg_cron cleanup jobs.
 - `docs/runbooks/database-baseline.md`: V001 baseline procedure for the pre-existing production schema.
-- `migrations/`: embedded V001 PostgreSQL schema migration.
+- `migrations/`: embedded versioned SQL migrations, including V002's S256-only PKCE constraint.
 - `.env.example`: environment variable names and defaults expected by the service.
 - `docker-compose.yml`: runtime reference for an API container connected to external PostgreSQL and Redis Docker networks.
 - `.golangci.yml`: golangci-lint rule set.
@@ -68,7 +68,7 @@ Important design constraints:
 - Standard non-OAuth endpoints use `{ "code": 0, "message": "ok", "data": ... }` response envelopes.
 - OAuth `/oauth/authorize`, `/oauth/token`, and `/oauth/revoke` follow RFC 6749 formats instead of the standard envelope.
 - OIDC UserInfo errors follow RFC 6750-style `invalid_token` responses.
-- Access tokens are RS256 JWTs with `kid`, `jti`, `sub`, `role`, `state`, `token_version`, and scopes; JWKS exposes public keys.
+- Access tokens are RS256 JWTs with `kid`, `jti`, `sub`, `role`, `state`, `token_version`, and the canonical OAuth/OIDC `scope` claim; supported scopes are `openid`, `profile`, and `email`, with `openid` required and canonicalized before signing or persistence. JWKS exposes public keys.
 - Refresh tokens are opaque strings stored as HMAC-SHA256 hashes and rotated by `family_id` + `sequence`.
 - Authorization code replay or refresh-token replay should revoke the whole token family across access and refresh metadata.
 - Password hashing is specified as PBKDF2-SHA512 with 600,000 iterations and a 16-byte random salt.

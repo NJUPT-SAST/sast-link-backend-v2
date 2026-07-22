@@ -46,7 +46,7 @@ func TestNewRejectsMissingDatabaseName(t *testing.T) {
 	}
 }
 
-func TestUpCreatesV1Schema(t *testing.T) {
+func TestUpCreatesLatestSchema(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	instance := newMigration(t, databaseURL)
 
@@ -58,8 +58,8 @@ func TestUpCreatesV1Schema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Current() error = %v", err)
 	}
-	if version != 1 || dirty {
-		t.Fatalf("Current() = (%d, %t), want (1, false)", version, dirty)
+	if version != 2 || dirty {
+		t.Fatalf("Current() = (%d, %t), want (2, false)", version, dirty)
 	}
 
 	database := testutil.OpenSQL(t, databaseURL)
@@ -101,6 +101,101 @@ func TestUpCreatesV1Schema(t *testing.T) {
 	assertRejectsInvalidEmailDomain(t, database)
 	assertOtherMailLimit(t, database, userID)
 	assertRefreshTokenFamilySequenceUnique(t, database, userID)
+	assertRejectsPlainPKCEChallengeMethod(t, database, userID)
+}
+
+func TestV2DownRestoresV1PKCEChallengeMethodConstraint(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+
+	if err := instance.Up(); err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	if err := instance.Steps(-1); err != nil {
+		t.Fatalf("Steps(-1) error = %v", err)
+	}
+
+	version, dirty, err := migration.Current(databaseURL)
+	if err != nil {
+		t.Fatalf("Current() error = %v", err)
+	}
+	if version != 1 || dirty {
+		t.Fatalf("Current() = (%d, %t), want (1, false)", version, dirty)
+	}
+
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	userID := insertTestUser(t, database)
+	clientID := insertTestOAuthClient(t, database, "v2-down-client")
+	insertOAuthAuthorization(t, database, "v2-down-plain", clientID, userID, "plain")
+}
+
+func TestV2RejectsExistingPlainPKCEChallengeMethod(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+
+	if err := instance.Steps(1); err != nil {
+		t.Fatalf("apply V001: %v", err)
+	}
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	userID := insertTestUser(t, database)
+	clientID := insertTestOAuthClient(t, database, "v2-block-client")
+	insertOAuthAuthorization(t, database, "v2-block-plain", clientID, userID, "plain")
+
+	err := instance.Up()
+	if err == nil {
+		t.Fatal("Up() with existing plain PKCE challenge method error = nil")
+	}
+	if !strings.Contains(err.Error(), "non-S256 code_challenge_method") {
+		t.Fatalf("Up() error = %v, want non-S256 blocker", err)
+	}
+	var constraintDefinition string
+	if queryErr := database.QueryRowContext(context.Background(), `
+SELECT pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'oauth_authorizations'::regclass
+  AND conname = 'ck_oauth_authorizations_challenge_method'
+`).Scan(&constraintDefinition); queryErr != nil {
+		t.Fatalf("read challenge-method constraint after failed V002: %v", queryErr)
+	}
+	if !strings.Contains(constraintDefinition, "plain") {
+		t.Fatalf("constraint after failed V002 = %q, want original V001 plain allowance", constraintDefinition)
+	}
+}
+
+func TestBaselineV1CanMigrateToV2(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	applyUnversionedV1Schema(t, databaseURL)
+
+	if err := migration.BaselineV1(context.Background(), databaseURL); err != nil {
+		t.Fatalf("BaselineV1() error = %v", err)
+	}
+	version, dirty, err := migration.Current(databaseURL)
+	if err != nil {
+		t.Fatalf("Current() after baseline error = %v", err)
+	}
+	if version != 1 || dirty {
+		t.Fatalf("Current() after baseline = (%d, %t), want (1, false)", version, dirty)
+	}
+
+	instance := newMigration(t, databaseURL)
+	migrateErr := instance.Up()
+	if migrateErr != nil {
+		t.Fatalf("Up() after baseline error = %v", migrateErr)
+	}
+	version, dirty, err = migration.Current(databaseURL)
+	if err != nil {
+		t.Fatalf("Current() after V002 error = %v", err)
+	}
+	if version != 2 || dirty {
+		t.Fatalf("Current() after V002 = (%d, %t), want (2, false)", version, dirty)
+	}
+
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	userID := insertTestUser(t, database)
+	assertRejectsPlainPKCEChallengeMethod(t, database, userID)
 }
 
 func TestDownDropsV1Schema(t *testing.T) {
@@ -174,6 +269,58 @@ RETURNING id, email_type
 		t.Fatalf("email_type = %q, want %q", emailType, "njupt_email")
 	}
 	return userID
+}
+
+func insertTestOAuthClient(t *testing.T, database *sql.DB, clientIDValue string) int64 {
+	t.Helper()
+
+	var clientID int64
+	err := database.QueryRowContext(context.Background(), `
+	INSERT INTO oauth_clients (client_id, client_name, client_type, redirect_uris, grant_types)
+	VALUES ($1, 'Test Client', 'first_party', ARRAY['https://example.com/callback'], ARRAY['authorization_code'])
+	RETURNING id
+	`, clientIDValue).Scan(&clientID)
+	if err != nil {
+		t.Fatalf("insert OAuth client %q: %v", clientIDValue, err)
+	}
+	return clientID
+}
+
+func insertOAuthAuthorization(
+	t *testing.T,
+	database *sql.DB,
+	code string,
+	clientID int64,
+	userID int64,
+	challengeMethod string,
+) {
+	t.Helper()
+
+	_, err := database.ExecContext(context.Background(), `
+	INSERT INTO oauth_authorizations (
+	    code, client_id, user_id, scopes, code_challenge, code_challenge_method, expires_at
+	)
+	VALUES ($1, $2, $3, ARRAY['openid'], 'challenge', $4, NOW() + INTERVAL '10 minutes')
+	`, code, clientID, userID, challengeMethod)
+	if err != nil {
+		t.Fatalf("insert OAuth authorization %q with %q challenge method: %v", code, challengeMethod, err)
+	}
+}
+
+func assertRejectsPlainPKCEChallengeMethod(t *testing.T, database *sql.DB, userID int64) {
+	t.Helper()
+
+	clientID := insertTestOAuthClient(t, database, "pkce-s256-client")
+	insertOAuthAuthorization(t, database, "pkce-s256-code", clientID, userID, "S256")
+	_, err := database.ExecContext(context.Background(), `
+	INSERT INTO oauth_authorizations (
+	    code, client_id, user_id, scopes, code_challenge, code_challenge_method, expires_at
+	)
+	VALUES ('pkce-plain-code', $1, $2, ARRAY['openid'], 'challenge', 'plain', NOW() + INTERVAL '10 minutes')
+	`, clientID, userID)
+	if err == nil {
+		t.Fatal("insert OAuth authorization with plain PKCE challenge method succeeded")
+	}
 }
 
 func assertRejectsInvalidEmailDomain(t *testing.T, database *sql.DB) {

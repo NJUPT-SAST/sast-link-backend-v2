@@ -15,6 +15,13 @@ type UserRepository struct {
 	database *gorm.DB
 }
 
+// UserAuthState is the minimal user state needed for token authentication checks.
+type UserAuthState struct {
+	ID           int64
+	State        model.UserState
+	TokenVersion int
+}
+
 // NewUser constructs a UserRepository backed by database.
 func NewUser(database *gorm.DB) *UserRepository {
 	return &UserRepository{database: database}
@@ -91,4 +98,20 @@ func (r *UserRepository) FindByID(ctx context.Context, userID int64) (*model.Use
 		return nil, ErrNotFound
 	}
 	return nil, fmt.Errorf("find user by ID: %w", err)
+}
+
+// FindAuthStateByID finds the minimal user state required to authenticate tokens.
+func (r *UserRepository) FindAuthStateByID(ctx context.Context, userID int64) (*UserAuthState, error) {
+	var state UserAuthState
+	err := r.database.WithContext(ctx).
+		Model(&model.User{}).
+		Select("id", "state", "token_version").
+		First(&state, userID).Error
+	if err == nil {
+		return &state, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("find user auth state by ID: %w", err)
 }
