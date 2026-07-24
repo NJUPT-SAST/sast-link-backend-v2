@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
 
@@ -39,7 +40,7 @@ type TokenBlacklist struct {
 	BatchSize       int
 	MaxBackoff      time.Duration
 	CleanupInterval time.Duration
-	Now             func() time.Time
+	Clock           auth.Clock
 }
 
 // Run processes due deliveries until ctx is canceled.
@@ -150,10 +151,11 @@ func (w TokenBlacklist) validate() error {
 }
 
 func (w TokenBlacklist) now() time.Time {
-	if w.Now != nil {
-		return w.Now().UTC()
+	clock := w.Clock
+	if clock == nil {
+		clock = auth.SystemClock
 	}
-	return time.Now().UTC()
+	return clock.Now().UTC()
 }
 
 func (w TokenBlacklist) lease() time.Duration {

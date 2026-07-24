@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -184,12 +185,21 @@ func serve(ctx context.Context, address string, handler http.Handler, workers []
 	workerCtx, cancelWorkers := context.WithCancel(ctx)
 	defer cancelWorkers()
 	workerErrors := make(chan error, len(workers))
+	var workerGroup sync.WaitGroup
+	workerGroup.Add(len(workers))
 	for _, background := range workers {
 		background := background
 		go func() {
-			workerErrors <- background.Run(workerCtx)
+			defer workerGroup.Done()
+			if err := background.Run(workerCtx); err != nil {
+				workerErrors <- err
+			}
 		}()
 	}
+	go func() {
+		workerGroup.Wait()
+		close(workerErrors)
+	}()
 
 	server := newHTTPServer(address, handler)
 	serverErrors := make(chan error, 1)
@@ -198,19 +208,17 @@ func serve(ctx context.Context, address string, handler http.Handler, workers []
 	}()
 
 	var runErr error
-	completedWorkers := 0
 	select {
 	case <-ctx.Done():
 	case err := <-serverErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
 			runErr = fmt.Errorf("serve HTTP: %w", err)
 		}
-	case err := <-workerErrors:
-		completedWorkers++
-		if err != nil {
+	case err, ok := <-workerErrors:
+		if ok {
 			runErr = fmt.Errorf("run background worker: %w", err)
 		} else if ctx.Err() == nil {
-			runErr = fmt.Errorf("background worker stopped unexpectedly")
+			runErr = fmt.Errorf("background workers stopped unexpectedly")
 		}
 	}
 
@@ -220,13 +228,15 @@ func serve(ctx context.Context, address string, handler http.Handler, workers []
 	if err := server.Shutdown(shutdownCtx); err != nil && runErr == nil {
 		runErr = fmt.Errorf("shutdown HTTP server: %w", err)
 	}
-	for completedWorkers < len(workers) {
+	for {
 		select {
-		case err := <-workerErrors:
-			if err != nil && runErr == nil {
+		case err, ok := <-workerErrors:
+			if !ok {
+				return runErr
+			}
+			if runErr == nil {
 				runErr = fmt.Errorf("stop background worker: %w", err)
 			}
-			completedWorkers++
 		case <-shutdownCtx.Done():
 			if runErr == nil {
 				runErr = fmt.Errorf("stop background workers: %w", shutdownCtx.Err())
@@ -234,7 +244,6 @@ func serve(ctx context.Context, address string, handler http.Handler, workers []
 			return runErr
 		}
 	}
-	return runErr
 }
 
 func validateInternalClient(ctx context.Context, clients *repository.OAuthClientRepository, clientID string) error {

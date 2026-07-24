@@ -9,6 +9,10 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
 
+type fixedClock struct{ value time.Time }
+
+func (c fixedClock) Now() time.Time { return c.value }
+
 type fakeOutbox struct {
 	claimed    []model.TokenBlacklistOutbox
 	claimCalls int
@@ -80,7 +84,7 @@ func TestTokenBlacklistRunDeliversAndAcknowledges(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	outbox.ackCall = cancel
 	blacklist := &fakeBlacklist{}
-	worker := TokenBlacklist{Outbox: outbox, Blacklist: blacklist, Interval: time.Hour, CleanupInterval: time.Hour, Now: func() time.Time { return now }}
+	worker := TokenBlacklist{Outbox: outbox, Blacklist: blacklist, Interval: time.Hour, CleanupInterval: time.Hour, Clock: fixedClock{value: now}}
 
 	if err := worker.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -102,7 +106,7 @@ func TestTokenBlacklistRunSchedulesFailedDelivery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	outbox := &fakeOutbox{claimed: []model.TokenBlacklistOutbox{{ID: 2, TokenID: "jti", ExpiresAt: now.Add(time.Minute), AttemptCount: 2, ClaimToken: &claim}}, ackCall: cancel}
 	blacklist := &fakeBlacklist{err: errors.New("redis down")}
-	worker := TokenBlacklist{Outbox: outbox, Blacklist: blacklist, Interval: time.Hour, CleanupInterval: time.Hour, Now: func() time.Time { return now }}
+	worker := TokenBlacklist{Outbox: outbox, Blacklist: blacklist, Interval: time.Hour, CleanupInterval: time.Hour, Clock: fixedClock{value: now}}
 
 	if err := worker.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -121,7 +125,7 @@ func TestTokenBlacklistRunAcknowledgesNaturallyExpiredDelivery(t *testing.T) {
 	claim := "claim"
 	ctx, cancel := context.WithCancel(context.Background())
 	outbox := &fakeOutbox{claimed: []model.TokenBlacklistOutbox{{ID: 3, TokenID: "jti", ExpiresAt: now, ClaimToken: &claim}}, ackCall: cancel}
-	worker := TokenBlacklist{Outbox: outbox, Blacklist: &fakeBlacklist{}, Interval: time.Hour, CleanupInterval: time.Hour, Now: func() time.Time { return now }}
+	worker := TokenBlacklist{Outbox: outbox, Blacklist: &fakeBlacklist{}, Interval: time.Hour, CleanupInterval: time.Hour, Clock: fixedClock{value: now}}
 
 	if err := worker.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
