@@ -17,6 +17,8 @@ type Cmdable interface {
 	GetDel(context.Context, string) *goredis.StringCmd
 	Set(context.Context, string, any, time.Duration) *goredis.StatusCmd
 	Get(context.Context, string) *goredis.StringCmd
+	Del(context.Context, ...string) *goredis.IntCmd
+	PTTL(context.Context, string) *goredis.DurationCmd
 	Eval(context.Context, string, []string, ...any) *goredis.Cmd
 }
 
@@ -102,6 +104,11 @@ func (k Keys) TokenVersion(userID string) string {
 // RateLimit returns a fixed-window rate-limiter key.
 func (k Keys) RateLimit(scope, id string) string {
 	return k.join("ratelimit", dynamicKeySegment(id), dynamicKeySegment(scope))
+}
+
+// LoginFailure returns a password-login failure counter key.
+func (k Keys) LoginFailure(email string) string {
+	return k.join("auth", "login_failure", dynamicKeySegment(email))
 }
 
 // Store provides typed Redis auth helpers.
@@ -197,4 +204,82 @@ func (s Store) GetTokenVersion(ctx context.Context, userID string) (int, bool, e
 		return 0, false, fmt.Errorf("get token version: %w", err)
 	}
 	return version, true, nil
+}
+
+// LoginFailureState is a fixed-window password-login failure counter snapshot.
+type LoginFailureState struct {
+	Count int
+	TTL   time.Duration
+}
+
+const loginFailureCounterScript = `
+local current = redis.call("INCR", KEYS[1])
+if current == 1 then
+  redis.call("PEXPIRE", KEYS[1], ARGV[1])
+end
+return {current, redis.call("PTTL", KEYS[1])}
+`
+
+// GetLoginFailures reads the current password-login failure counter without mutating it.
+func (s Store) GetLoginFailures(ctx context.Context, email string) (LoginFailureState, error) {
+	if s.Client == nil || email == "" {
+		return LoginFailureState{}, fmt.Errorf("get login failures: %w", ErrInvalidArgument)
+	}
+	key := s.Keys.LoginFailure(email)
+	count, err := s.Client.Get(ctx, key).Int()
+	if errors.Is(err, goredis.Nil) {
+		return LoginFailureState{}, nil
+	}
+	if err != nil {
+		return LoginFailureState{}, fmt.Errorf("get login failures: %w", err)
+	}
+	ttl, err := s.Client.PTTL(ctx, key).Result()
+	if err != nil {
+		return LoginFailureState{}, fmt.Errorf("get login failures ttl: %w", err)
+	}
+	if ttl < 0 {
+		ttl = 0
+	}
+	return LoginFailureState{Count: count, TTL: ttl}, nil
+}
+
+// RecordLoginFailure increments the password-login failure counter in a fixed window.
+func (s Store) RecordLoginFailure(ctx context.Context, email string, window time.Duration) (LoginFailureState, error) {
+	if s.Client == nil || email == "" || window <= 0 {
+		return LoginFailureState{}, fmt.Errorf("record login failure: %w", ErrInvalidArgument)
+	}
+	windowMilliseconds := window.Milliseconds()
+	if windowMilliseconds <= 0 {
+		return LoginFailureState{}, fmt.Errorf("record login failure: %w", ErrInvalidArgument)
+	}
+	values, err := s.Client.Eval(ctx, loginFailureCounterScript, []string{s.Keys.LoginFailure(email)}, int(windowMilliseconds)).Slice()
+	if err != nil {
+		return LoginFailureState{}, fmt.Errorf("record login failure eval: %w", err)
+	}
+	if len(values) != 2 {
+		return LoginFailureState{}, fmt.Errorf("record login failure eval: unexpected result")
+	}
+	count, err := redisInt(values[0])
+	if err != nil {
+		return LoginFailureState{}, err
+	}
+	ttlMilliseconds, err := redisInt(values[1])
+	if err != nil {
+		return LoginFailureState{}, err
+	}
+	if ttlMilliseconds < 0 {
+		ttlMilliseconds = 0
+	}
+	return LoginFailureState{Count: count, TTL: time.Duration(ttlMilliseconds) * time.Millisecond}, nil
+}
+
+// ResetLoginFailures clears the password-login failure counter.
+func (s Store) ResetLoginFailures(ctx context.Context, email string) error {
+	if s.Client == nil || email == "" {
+		return fmt.Errorf("reset login failures: %w", ErrInvalidArgument)
+	}
+	if err := s.Client.Del(ctx, s.Keys.LoginFailure(email)).Err(); err != nil {
+		return fmt.Errorf("reset login failures: %w", err)
+	}
+	return nil
 }

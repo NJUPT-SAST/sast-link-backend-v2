@@ -45,6 +45,9 @@ func TestKeys(t *testing.T) {
 	if got, want := keys.TokenVersion("u1"), "sast-link:test:token:version:u1"; got != want {
 		t.Fatalf("TokenVersion key = %q, want %q", got, want)
 	}
+	if got, want := keys.LoginFailure("user:42"), "sast-link:test:auth:login_failure:user%3A42"; got != want {
+		t.Fatalf("LoginFailure key = %q, want %q", got, want)
+	}
 	if got, want := keys.RateLimit("login", "ip-1"), "sast-link:test:ratelimit:ip-1:login"; got != want {
 		t.Fatalf("RateLimit key = %q, want %q", got, want)
 	}
@@ -187,5 +190,31 @@ func TestFixedWindowLimiter(t *testing.T) {
 	}
 	if third.Allowed || third.Remaining != 0 || third.RetryAfter <= 0 {
 		t.Fatalf("third result = %+v, want denied with retry-after", third)
+	}
+}
+
+func TestLoginFailures(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+
+	state, err := store.GetLoginFailures(ctx, "user:42")
+	if err != nil || state.Count != 0 || state.TTL != 0 {
+		t.Fatalf("initial GetLoginFailures = %+v, %v", state, err)
+	}
+	first, err := store.RecordLoginFailure(ctx, "user:42", 1500*time.Millisecond)
+	if err != nil || first.Count != 1 || first.TTL <= time.Second {
+		t.Fatalf("first RecordLoginFailure = %+v, %v", first, err)
+	}
+	second, err := store.RecordLoginFailure(ctx, "user:42", 1500*time.Millisecond)
+	if err != nil || second.Count != 2 || second.TTL <= 0 || second.TTL > first.TTL {
+		t.Fatalf("second RecordLoginFailure = %+v, %v", second, err)
+	}
+	if resetErr := store.ResetLoginFailures(ctx, "user:42"); resetErr != nil {
+		t.Fatalf("ResetLoginFailures() error = %v", resetErr)
+	}
+	state, err = store.GetLoginFailures(ctx, "user:42")
+	if err != nil || state.Count != 0 || state.TTL != 0 {
+		t.Fatalf("GetLoginFailures after reset = %+v, %v", state, err)
 	}
 }
