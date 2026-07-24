@@ -484,6 +484,87 @@ CREATE INDEX idx_oauth_refresh_tokens_expires_at
 
 > 此表无 `updated_at`。Token 旋转 = INSERT 新行 + UPDATE `revoked_at`。
 
+## token_blacklist_outbox 令牌黑名单投递箱
+
+持久化投递箱（Outbox）模式，用于 JWT 撤销的可靠投递。当在 PostgreSQL 事务中调用 `RevokeFamily` 时，每一条仍在有效期内的 JWT `jti` 会被 UPSERT 到此表。后台 worker（或同步尽力投递）认领行，写入 Redis JTI 黑名单，成功后确认删除。失败的投递保留在表中，按指数退避重试。行在其 JWT 生存期过后自然过期。
+
+```sql
+CREATE TABLE token_blacklist_outbox (
+    id              BIGSERIAL        PRIMARY KEY,
+    token_id        VARCHAR(255)     NOT NULL UNIQUE,
+    expires_at      TIMESTAMPTZ      NOT NULL,
+    next_delivery_at TIMESTAMPTZ     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    attempt_count   INTEGER          NOT NULL DEFAULT 0,
+    last_attempt_at TIMESTAMPTZ,
+    last_error      TEXT,
+    claim_token     VARCHAR(64),
+    claimed_until   TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ      NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+| 字段名 | 说明 |
+|--------|------|
+| `id` | 主键 |
+| `token_id` | JWT `jti` 值，唯一约束，同一 JTI 重复 UPSERT 不产生重复行 |
+| `expires_at` | JWT 本身的过期时间。超过此时间后该行不再需要投递（JWT 已自然失效） |
+| `next_delivery_at` | 下次投递时间。首次插入为当前时间，重试时按指数退避递增 |
+| `attempt_count` | 已尝试投递次数，用于计算退避间隔 |
+| `last_attempt_at` | 最近一次投递尝试时间 |
+| `last_error` | 最近一次失败的错误信息，用于诊断 |
+| `claim_token` | Worker 认领令牌。NULL 表示未被认领，非 NULL 表示已被某 worker 持有 |
+| `claimed_until` | 认领租约过期时间。超过此时间后其他 worker 可重新认领 |
+| `created_at` | 行创建时间 |
+
+```sql
+-- 待发送记录按 next_delivery_at 顺序取，跳过已被其他 worker 认领的行
+CREATE INDEX idx_token_blacklist_outbox_due
+    ON token_blacklist_outbox (next_delivery_at, expires_at, id)
+    WHERE claim_token IS NULL;
+
+-- 已认领但租约到期的行可以被重新认领
+CREATE INDEX idx_token_blacklist_outbox_claimed_until
+    ON token_blacklist_outbox (claimed_until)
+    WHERE claim_token IS NOT NULL;
+
+-- 清理已自然过期的记录（每条 JTI 在其 JWT 过期后无需继续投递）
+CREATE INDEX idx_token_blacklist_outbox_expiry
+    ON token_blacklist_outbox (expires_at);
+```
+
+> 此表无 `updated_at`。生命周期为"UPSERT → 认领 → 投递成功 DELETE / 过期清理"。`claim_token` + `claimed_until` 实现分布式 worker 的乐观锁认领，避免重复投递。
+
+### Worker 认领与投递流程
+
+```text
+-- 1. Worker 认领到期行（原子操作，跳过已被认领且租约未到期的行）
+UPDATE token_blacklist_outbox
+SET claim_token   = $worker_token,
+    claimed_until = NOW() + INTERVAL '30 seconds'
+WHERE id IN (
+    SELECT id FROM token_blacklist_outbox
+    WHERE (claim_token IS NULL OR claimed_until < NOW())
+      AND next_delivery_at <= NOW()
+      AND expires_at > NOW()
+    ORDER BY next_delivery_at, id
+    LIMIT $batch_size
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING *;
+
+-- 2. 写入 Redis JTI 黑名单（TTL = expires_at - NOW()）
+
+-- 3. 成功 → DELETE FROM token_blacklist_outbox WHERE id = $id;
+--    失败 → UPDATE token_blacklist_outbox
+--           SET next_delivery_at = NOW() + (2 ^ LEAST(attempt_count, 10)) * INTERVAL '1 second',
+--               attempt_count   = attempt_count + 1,
+--               last_attempt_at = NOW(),
+--               last_error      = $error,
+--               claim_token     = NULL,
+--               claimed_until   = NULL
+--           WHERE id = $id;
+```
+
 ## 函数、触发器与运维
 
 ### 函数
@@ -579,7 +660,7 @@ CREATE TRIGGER trg_user_email_domain
     FOR EACH ROW EXECUTE FUNCTION auto_set_email_type();
 ```
 
-> `oauth_authorizations`、`oauth_access_tokens`、`oauth_refresh_tokens`、`audit_logs` 无 `updated_at`，不需要自动更新触发器。
+> `oauth_authorizations`、`oauth_access_tokens`、`oauth_refresh_tokens`、`token_blacklist_outbox`、`audit_logs` 无 `updated_at`，不需要自动更新触发器。
 
 > `check_other_mail_limit` 仅检查 INSERT（存在并发竞态，见函数注释）。UPDATE 改 provider 为 `other_mail` 的场景由应用层兜底。
 
@@ -647,6 +728,13 @@ SELECT cron.schedule(
     '0 4 * * *',
     $$DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL '90 days'$$
 );
+
+-- 每小时：清理已过期的 token_blacklist_outbox 记录（JWT 已自然失效，无需继续投递）
+SELECT cron.schedule(
+    'cleanup-expired-blacklist-outbox',
+    '0 * * * *',
+    $$DELETE FROM token_blacklist_outbox WHERE expires_at < NOW() - INTERVAL '1 hour'$$
+);
 ```
 
 #### 管理命令
@@ -671,6 +759,7 @@ SELECT cron.unschedule(<job_id>);
 | `oauth_access_tokens` | 已过期元数据 | 每小时 | `expires_at` + 1h |
 | `oauth_refresh_tokens` | 已撤销且已过期 | 每天 | `expires_at` + 1d（只清已撤销的，未撤销的 refresh_token 过期后仍可查审计） |
 | `audit_logs` | 超过保留期数据 | 每天 | `created_at` + 90d（90 天保留期） |
+| `token_blacklist_outbox` | 已过期的投递记录 | 每小时 | `expires_at` + 1h（JWT 过期后无需继续投递黑名单） |
 
 ---
 
@@ -694,11 +783,13 @@ SELECT cron.unschedule(<job_id>);
 
 9. `oauth_refresh_tokens` 表（FK → oauth_clients, user）
 
-10. `audit_logs` 表（FK → user）
+10. `token_blacklist_outbox` 表（无 FK，独立表）
 
-11. 所有索引
+11. `audit_logs` 表（FK → user）
 
-12. 所有触发器
+12. 所有索引
 
-13. pg_cron 扩展 + 定时清理任务调度
+13. 所有触发器
+
+14. pg_cron 扩展 + 定时清理任务调度
 

@@ -437,7 +437,7 @@ is_deleted ──(恢复)──► njupter
 | OAuth State | `sastlink:oauth:state:{state}` | 10min | String（GetDel 消费） | OAuth 授权标准 state 参数，发起时写入，回调时 GetDel 校验防 CSRF |
 | OAuth 注册暂存 | `sastlink:oauth:registration:{state}` | 15min | String（GetDel 消费，JSON 值） | OAuth 回调无绑定分支。暂存 `{provider, provider_id, identity_data, oauth_state}`，消费时校验双值匹配 |
 | 登录码 | `sastlink:auth:login_code:{code}` | 60s | String（GetDel 消费） | OAuth 回调已有绑定用户分支，暂存 user_id，前端交换 Token Pair |
-| 登录失败 | `sastlink:auth:login_fail:{email}` | 15min | String（INCR 计数器） | 连续失败 ≥ 10 次锁定，成功登录后 DEL 清零 |
+| 登录失败 | `sastlink:auth:login_failure:{email}` | 15min | String（INCR 计数器） | 连续失败 ≥ 10 次锁定，成功登录后 DEL 清零 |
 | token_version | `sastlink:token:version:{user_id}` | 1h | String（SET EX） | 缓存 `user.token_version`，登录态校验优先读缓存，未命中回源 DB 并回填。改密/重置密码后同步更新 |
 | Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GetDel 消费） | 注册两步间暂存已验证邮箱 |
 | Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GetDel 消费） | 绑定邮箱两步间暂存待绑定邮箱 + user_id |
@@ -576,23 +576,25 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 模块 | 状态 |
 |------|------|
 | Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
-| 数据基础层 | 已完成 — V001/V002 SQL migrations、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
-| 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI/token_version 与 fixed-window limiter |
-| 用户认证与资料业务 | 待实现 — 注册、登录、验证码、改密/重置、登出、资料与头像 endpoints |
+| 数据基础层 | 已完成 — V001–V003 SQL migrations、固定内置 `sast-link-web` first-party Client、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
+| 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI/token_version/登录失败计数与 fixed-window limiter |
+| 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流与登录/登出审计接入 |
+| 用户注册、密码与资料维护 | 待实现 — 注册、验证码、改密/重置、资料编辑与头像 endpoints |
 | OAuth/OIDC 业务 | 待实现 — OAuth 登录/绑定、authorize/token/revoke、discovery、UserInfo、ID Token 与客户端管理 endpoints |
-| 限流中间件、审计业务接入与 pg_cron | 待实现 — limiter primitive 已完成，仍需 HTTP middleware 与业务策略接入 |
+| 其余运维接入 | 待实现 — 设备管理、其他 endpoint 限流策略与 pg_cron |
 
 ## 11. 实现顺序
 
 - [x] Go 服务骨架（配置 / DB 与 Redis 连接 / Web 基础设施 / 健康检查）
-- [x] 数据基础层（V001/V002 migrations / baseline / entities / repositories / integration tests）
+- [x] 数据基础层（V001–V003 migrations / 内置 first-party Client / baseline / entities / repositories / integration tests）
 - [x] 认证基础设施（PBKDF2 / JWT + JWKS / Refresh Token / PKCE-S256 / scope / Redis auth state + limiter / token-family rotation）
-- [ ] 用户认证业务（注册 / 登录 / JWT middleware / 验证码 / 改密 / 重置密码 / 登出）
-- [ ] 用户资料管理（查看 / 编辑 / 头像上传）
+- [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
+- [ ] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码）
+- [ ] 用户资料管理（编辑 / 头像上传）
 - [ ] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [ ] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
-- [ ] 限流与防刷中间件（Redis fixed-window limiter primitive 已完成）
-- [ ] 审计日志业务接入（健康检查已完成）
+- [ ] 限流与防刷扩展（登录 endpoint 已接入；验证码、注册等策略待对应业务实现）
+- [ ] 审计日志扩展（登录/登出已接入；其余业务随 endpoint 实现）
 - [ ] 头像内容审核（腾讯云 COS）
 - [ ] OAuth 2.1 授权服务端（authorize / token / revoke + PKCE）
 - [ ] OIDC Provider（discovery / JWKS / UserInfo / ID Token）

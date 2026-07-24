@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Status
 
-SAST Link Backend V2 is the backend for SAST's unified identity/authentication center and personnel information system. The current implementation establishes the Go module, HTTP service skeleton, V001/V002 PostgreSQL schema migrations, persistence entities, Auth repositories, and authentication infrastructure: PBKDF2 password hashing, RS256 JWT/JWKS with key rotation, opaque refresh tokens, PKCE-S256, canonical OAuth/OIDC scopes, Redis one-time state/JTI/token-version helpers, and a fixed-window limiter. PostgreSQL 16 and Redis integration tests use Testcontainers. Authentication workflows, OAuth/OIDC endpoints, rate-limit middleware, and pg_cron operations remain to be implemented.
+SAST Link Backend V2 is the backend for SAST's unified identity/authentication center and personnel information system. The current implementation establishes the Go module, HTTP service skeleton, V001–V003 PostgreSQL schema migrations (including the built-in `sast-link-web` first-party client), persistence entities and Auth repositories, authentication primitives, and the first internal session flow: password login, refresh rotation/replay handling, logout, JWT middleware, and current-user profile retrieval. PostgreSQL 16 and Redis integration tests use Testcontainers. Registration/password management, profile mutation, third-party login, OAuth/OIDC provider endpoints, device management, and pg_cron operations remain to be implemented.
 
-`cmd/api` connects PostgreSQL and Redis and serves health checks only at this stage. It never performs DDL or schema migrations at startup. `cmd/migrate` is the only command that inspects or changes schema migration state.
+`cmd/api` connects PostgreSQL and Redis and serves health plus the internal session endpoints (`POST /user/login`, `POST /auth/refresh`, `POST /auth/logout`, and `GET /user/profile`). It never performs DDL or schema migrations at startup. `cmd/migrate` is the only command that inspects or changes schema migration state.
 
 ## Current Commands
 
@@ -16,8 +16,8 @@ The project targets Go `1.26.5`, Gin, GORM, PostgreSQL 16+, Redis 8+, and testco
 # Download modules
 go mod download
 
-# Run all tests with race detection and randomized execution order
-go test -race -shuffle=on ./...
+# Run all tests with race detection, randomized execution order, and coverage
+go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
 
 # Run lint
 golangci-lint run ./...

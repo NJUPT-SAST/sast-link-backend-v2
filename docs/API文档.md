@@ -31,7 +31,7 @@
 
 ```json
 {
-  "code": 40104,
+  "code": 40105,
   "message": "密码错误",
   "data": null
 }
@@ -936,7 +936,7 @@ GET /oauth/authorize
 
 **行为**: 检查用户登录状态 → 展示授权页 → 用户同意后重定向至 `redirect_uri`，携带 `code` 和 `state`。
 
-**PKCE 说明**：协议层 S256-only。V001 数据库迁移中 `oauth_authorizations.code_challenge_method` 历史约束允许 `plain`，仅为早期 schema 兼容；后续 V002 迁移会将数据库约束收紧为 `S256`。
+**PKCE 说明**：协议层与当前 V002 数据库约束均为 S256-only，不接受 `plain`；V001 曾允许 `plain` 仅作为早期 schema 历史。
 
 ---
 
