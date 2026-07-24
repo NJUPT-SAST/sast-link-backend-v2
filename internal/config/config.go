@@ -91,8 +91,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("INTERNAL_OAUTH_CLIENT_ID is required")
 	case c.RateLimitLoginRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_LOGIN_RPM must be positive")
-	case c.RateLimitLoginWindow <= 0:
-		return fmt.Errorf("RATE_LIMIT_LOGIN_WINDOW must be positive")
+	case c.RateLimitLoginWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_LOGIN_WINDOW must be at least 1s")
 	case c.LoginFailureLimit <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
 	case c.LoginFailureWindow <= 0:

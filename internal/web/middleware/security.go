@@ -17,10 +17,6 @@ func SecurityHeaders() gin.HandlerFunc {
 		header.Set("X-Frame-Options", "DENY")
 		header.Set("Content-Security-Policy", "default-src 'self'")
 		header.Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		if c.Request.Method == http.MethodOptions {
-			c.AbortWithStatus(http.StatusNoContent)
-			return
-		}
 		c.Next()
 	}
 }
@@ -30,7 +26,10 @@ func SecurityHeaders() gin.HandlerFunc {
 func CORS(allowedOrigins []string) gin.HandlerFunc {
 	allowMap := make(map[string]struct{}, len(allowedOrigins))
 	for _, origin := range allowedOrigins {
-		allowMap[strings.TrimSpace(origin)] = struct{}{}
+		origin = strings.TrimSpace(origin)
+		if origin != "" {
+			allowMap[origin] = struct{}{}
+		}
 	}
 	return func(c *gin.Context) {
 		if len(allowMap) == 0 {
@@ -39,6 +38,10 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 		}
 		origin := strings.TrimSpace(c.Request.Header.Get("Origin"))
 		if _, ok := allowMap[origin]; !ok {
+			if c.Request.Method == http.MethodOptions && origin != "" {
+				c.AbortWithStatus(http.StatusForbidden)
+				return
+			}
 			c.Next()
 			return
 		}

@@ -486,7 +486,7 @@ CREATE INDEX idx_oauth_refresh_tokens_expires_at
 
 ## token_blacklist_outbox 令牌黑名单投递箱
 
-持久化投递箱（Outbox）模式，用于 JWT 撤销的可靠投递。当在 PostgreSQL 事务中调用 `RevokeFamily` 时，每一条仍在有效期内的 JWT `jti` 会被 UPSERT 到此表。后台 worker（或同步尽力投递）认领行，写入 Redis JTI 黑名单，成功后确认删除。失败的投递保留在表中，按指数退避重试。行在其 JWT 生存期过后自然过期。
+持久化投递箱（Outbox）模式，用于 JWT 撤销的可靠投递。当在 PostgreSQL 事务中调用 `RevokeFamily` 时，每一条仍在有效期内的 JWT `jti` 会被 UPSERT 到此表。API 会同步尽力写入 Redis 以降低撤销延迟；后台 worker 仍会认领所有投递行，写入 Redis JTI 黑名单并在成功后确认删除，因此同步失败与并发 refresh replay 产生的撤销都会最终重试。失败的投递保留在表中，按指数退避重试。行在其 JWT 生存期过后自然过期。
 
 ```sql
 CREATE TABLE token_blacklist_outbox (

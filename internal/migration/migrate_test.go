@@ -74,6 +74,8 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 		"oauth_access_tokens",
 		"oauth_refresh_tokens",
 		"audit_logs",
+		"token_blacklist_outbox",
+		"v003_builtin_oauth_client_ownership",
 	} {
 		assertExists(t, database, tableExistsQuery, tableName)
 	}
@@ -105,7 +107,7 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	assertBuiltinOAuthClient(t, database)
 }
 
-func TestV3NormalizesCompatibleBuiltinOAuthClient(t *testing.T) {
+func TestV3KeepsExistingCanonicalBuiltinOAuthClientOnDown(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	instance := newMigration(t, databaseURL)
 
@@ -119,21 +121,30 @@ INSERT INTO oauth_clients (
     client_id, client_name, client_type, client_secret, redirect_uris, grant_types, scopes, is_active
 )
 VALUES (
-    'sast-link-web', 'Old Name', 'first_party', NULL,
-    ARRAY['http://old.example/callback'], ARRAY['authorization_code'], ARRAY['email', 'openid'], FALSE
+    'sast-link-web', 'SAST Link Web', 'first_party', NULL,
+    ARRAY['https://link.sast.fun/oauth/callback', 'http://localhost:3000/oauth/callback'],
+    ARRAY['authorization_code', 'refresh_token'], ARRAY['openid', 'profile', 'email'], TRUE
 )
 `)
 	if err != nil {
-		t.Fatalf("insert compatible existing built-in OAuth client: %v", err)
+		t.Fatalf("insert canonical existing built-in OAuth client: %v", err)
 	}
+	originalID := readOAuthClientID(t, database, "sast-link-web")
 
-	if err := instance.Up(); err != nil {
-		t.Fatalf("apply V003: %v", err)
+	if err := instance.Steps(2); err != nil {
+		t.Fatalf("apply V003-V004: %v", err)
 	}
 	assertBuiltinOAuthClient(t, database)
+	if err := instance.Steps(-2); err != nil {
+		t.Fatalf("revert V004-V003: %v", err)
+	}
+	assertOAuthClientExists(t, database, "sast-link-web")
+	if got := readOAuthClientID(t, database, "sast-link-web"); got != originalID {
+		t.Fatalf("client ID after up/down = %d, want original %d", got, originalID)
+	}
 }
 
-func TestV3RejectsIncompatibleBuiltinOAuthClient(t *testing.T) {
+func TestV3RejectsNonCanonicalBuiltinOAuthClient(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	instance := newMigration(t, databaseURL)
 
@@ -159,8 +170,8 @@ VALUES (
 	if err == nil {
 		t.Fatal("apply V003 with incompatible built-in OAuth client error = nil")
 	}
-	if !strings.Contains(err.Error(), "incompatible sast-link-web client") {
-		t.Fatalf("apply V003 error = %v, want incompatible client blocker", err)
+	if !strings.Contains(err.Error(), "non-canonical sast-link-web client") {
+		t.Fatalf("apply V003 error = %v, want non-canonical client blocker", err)
 	}
 	var clientType string
 	var secret sql.NullString

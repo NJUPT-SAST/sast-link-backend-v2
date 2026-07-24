@@ -39,21 +39,21 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
-func TestSecurityHeadersAbortsOPTIONS(t *testing.T) {
+func TestSecurityHeadersPassesOPTIONSDownstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(SecurityHeaders())
-	router.GET("/test", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+	router.OPTIONS("/test", func(c *gin.Context) { c.Status(http.StatusAccepted) })
 
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/test", nil)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusNoContent {
-		t.Fatalf("OPTIONS response = %d, want %d", recorder.Code, http.StatusNoContent)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("OPTIONS response = %d, want %d", recorder.Code, http.StatusAccepted)
 	}
 	if recorder.Header().Get("X-Content-Type-Options") != "nosniff" {
-		t.Fatalf("security headers missing on OPTIONS preflight")
+		t.Fatalf("security headers missing on OPTIONS request")
 	}
 }
 
@@ -70,6 +70,22 @@ func TestCORSRejectsDisallowedOrigin(t *testing.T) {
 
 	if recorder.Code != http.StatusOK || recorder.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("disallowed origin leaked CORS header: %q", recorder.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestCORSRejectsDisallowedPreflightOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(CORS([]string{"https://link.sast.fun"}))
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/test", nil)
+	request.Header.Set("Origin", "https://evil.example.com")
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden || recorder.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("disallowed preflight response=%d ACAO=%q", recorder.Code, recorder.Header().Get("Access-Control-Allow-Origin"))
 	}
 }
 

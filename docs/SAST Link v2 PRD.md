@@ -117,7 +117,7 @@ POST /user/login
 
 **流程**：
 1. 校验邮箱格式 — `@njupt.edu.cn` / `@sast.fun` 查 `user.login_email`；第三方邮箱查 `identities(provider='other_mail').provider_id` 反查 user
-2. 检查登录失败次数（Redis `sastlink:auth:login_fail:{email}`，15min 窗口 ≥ 10 次则锁定）
+2. 检查登录失败次数（Redis `sastlink:auth:login_failure:{email}`，15min 窗口 ≥ 10 次则锁定）
 3. 查用户是否存在：不存在返回 40106（邮箱不存在）；存在则执行 PBKDF2-SHA512 密码哈希校验
 4. 校验账号状态 — `is_deleted` 拒绝（40301）
 5. 检查设备数 — 该用户已有设备数 ≥ 5 时淘汰最旧设备
@@ -576,7 +576,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 模块 | 状态 |
 |------|------|
 | Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
-| 数据基础层 | 已完成 — V001–V003 SQL migrations、固定内置 `sast-link-web` first-party Client、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
+| 数据基础层 | 已完成 — V001–V004 SQL migrations、固定内置 `sast-link-web` first-party Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
 | 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI/token_version/登录失败计数与 fixed-window limiter |
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流与登录/登出审计接入 |
 | 用户注册、密码与资料维护 | 待实现 — 注册、验证码、改密/重置、资料编辑与头像 endpoints |
@@ -586,7 +586,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ## 11. 实现顺序
 
 - [x] Go 服务骨架（配置 / DB 与 Redis 连接 / Web 基础设施 / 健康检查）
-- [x] 数据基础层（V001–V003 migrations / 内置 first-party Client / baseline / entities / repositories / integration tests）
+- [x] 数据基础层（V001–V004 migrations / 内置 first-party Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
 - [x] 认证基础设施（PBKDF2 / JWT + JWKS / Refresh Token / PKCE-S256 / scope / Redis auth state + limiter / token-family rotation）
 - [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
 - [ ] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码）

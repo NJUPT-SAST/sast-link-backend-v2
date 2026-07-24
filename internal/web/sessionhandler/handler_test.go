@@ -301,6 +301,42 @@ func TestSessionRequestsUseStrictBoundedJSON(t *testing.T) {
 	}
 }
 
+func TestSessionRequestsRejectNonJSONContentType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, contentType := range []string{"", "text/plain", "application/x-www-form-urlencoded"} {
+		t.Run(contentType, func(t *testing.T) {
+			service := &fakeService{}
+			router := gin.New()
+			RegisterRoutes(router, Handler{Service: service}, allowAuth())
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"pt@sast.fun","password":"secret"}`))
+			if contentType != "" {
+				request.Header.Set("Content-Type", contentType)
+			}
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			body := decodeBody(t, recorder)
+			if recorder.Code != http.StatusBadRequest || body.Code != session.CodeInvalidInput || service.loginCalls != 0 {
+				t.Fatalf("response=%d %#v service calls=%d", recorder.Code, body, service.loginCalls)
+			}
+		})
+	}
+}
+
+func TestSessionRequestsAcceptJSONCharset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	service := &fakeService{loginResult: &session.LoginResult{AccessToken: "access", RefreshToken: "refresh", TokenType: "Bearer", AccessExpiresAt: now.Add(time.Minute)}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Now: func() time.Time { return now }}, allowAuth())
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"pt@sast.fun","password":"secret"}`))
+	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || service.loginCalls != 1 {
+		t.Fatalf("response=%d body=%s service calls=%d", recorder.Code, recorder.Body.String(), service.loginCalls)
+	}
+}
+
 func TestSessionRequestsRejectOversizedJSON(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{}

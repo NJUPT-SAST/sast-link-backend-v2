@@ -3,10 +3,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	goredis "github.com/redis/go-redis/v9"
@@ -25,9 +30,12 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionadapter"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/worker"
 )
 
 var internalSessionScopes = []string{scope.OpenID, scope.Profile, scope.Email}
+
+const serverShutdownTimeout = 10 * time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -62,7 +70,9 @@ func run() error {
 	}
 	defer func() { _ = internalredis.Close(rdb) }()
 
-	runtime, err := buildSessionRuntime(context.Background(), cfg, database, rdb)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	runtime, err := buildSessionRuntime(ctx, cfg, database, rdb)
 	if err != nil {
 		return err
 	}
@@ -78,12 +88,30 @@ func run() error {
 	sessionhandler.RegisterRoutes(router, runtime.Handler, runtime.Auth.RequireAuth())
 
 	slog.Info("server starting", slog.String("port", cfg.AppPort))
-	return router.Run(":" + cfg.AppPort)
+	return serve(ctx, ":"+cfg.AppPort, router, runtime.Workers)
+}
+
+type backgroundWorker interface {
+	Run(ctx context.Context) error
+}
+
+type httpServer interface {
+	ListenAndServe() error
+	Shutdown(ctx context.Context) error
+}
+
+var newHTTPServer = func(address string, handler http.Handler) httpServer {
+	return &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 }
 
 type sessionRuntime struct {
 	Handler sessionhandler.Handler
 	Auth    middleware.Authenticator
+	Workers []backgroundWorker
 }
 
 func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm.DB, rdb *goredis.Client) (*sessionRuntime, error) {
@@ -109,6 +137,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		return nil, err
 	}
 	tokens := repository.NewToken(database)
+	outbox := repository.NewTokenBlacklistOutbox(database)
 	audit := repository.NewAuditLog(database)
 
 	keys := internalredis.NewKeys(cfg.RedisKeyPrefix)
@@ -147,7 +176,65 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	return &sessionRuntime{
 		Handler: sessionhandler.Handler{Service: service},
 		Auth:    authenticator,
+		Workers: []backgroundWorker{worker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist}},
 	}, nil
+}
+
+func serve(ctx context.Context, address string, handler http.Handler, workers []backgroundWorker) error {
+	workerCtx, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
+	workerErrors := make(chan error, len(workers))
+	for _, background := range workers {
+		background := background
+		go func() {
+			workerErrors <- background.Run(workerCtx)
+		}()
+	}
+
+	server := newHTTPServer(address, handler)
+	serverErrors := make(chan error, 1)
+	go func() {
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	var runErr error
+	completedWorkers := 0
+	select {
+	case <-ctx.Done():
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			runErr = fmt.Errorf("serve HTTP: %w", err)
+		}
+	case err := <-workerErrors:
+		completedWorkers++
+		if err != nil {
+			runErr = fmt.Errorf("run background worker: %w", err)
+		} else if ctx.Err() == nil {
+			runErr = fmt.Errorf("background worker stopped unexpectedly")
+		}
+	}
+
+	cancelWorkers()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), serverShutdownTimeout)
+	defer cancelShutdown()
+	if err := server.Shutdown(shutdownCtx); err != nil && runErr == nil {
+		runErr = fmt.Errorf("shutdown HTTP server: %w", err)
+	}
+	for completedWorkers < len(workers) {
+		select {
+		case err := <-workerErrors:
+			if err != nil && runErr == nil {
+				runErr = fmt.Errorf("stop background worker: %w", err)
+			}
+			completedWorkers++
+		case <-shutdownCtx.Done():
+			if runErr == nil {
+				runErr = fmt.Errorf("stop background workers: %w", shutdownCtx.Err())
+			}
+			return runErr
+		}
+	}
+	return runErr
 }
 
 func validateInternalClient(ctx context.Context, clients *repository.OAuthClientRepository, clientID string) error {

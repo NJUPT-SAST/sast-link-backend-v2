@@ -201,7 +201,7 @@ func TestValidateAPIAuthRejectsNonPositiveRateSettings(t *testing.T) {
 		want    string
 	}{
 		{name: "login rpm", envName: "RATE_LIMIT_LOGIN_RPM", value: "0", want: "RATE_LIMIT_LOGIN_RPM must be positive"},
-		{name: "login window", envName: "RATE_LIMIT_LOGIN_WINDOW", value: "0", want: "RATE_LIMIT_LOGIN_WINDOW must be positive"},
+		{name: "login window", envName: "RATE_LIMIT_LOGIN_WINDOW", value: "500ms", want: "RATE_LIMIT_LOGIN_WINDOW must be at least 1s"},
 		{name: "failure limit", envName: "LOGIN_FAILURE_LIMIT", value: "0", want: "LOGIN_FAILURE_LIMIT must be positive"},
 		{name: "failure window", envName: "LOGIN_FAILURE_WINDOW", value: "0", want: "LOGIN_FAILURE_WINDOW must be positive"},
 	}
@@ -220,6 +220,19 @@ func TestValidateAPIAuthRejectsNonPositiveRateSettings(t *testing.T) {
 				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateAPIAuthAllowsOneSecondRateWindow(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("RATE_LIMIT_LOGIN_WINDOW", "1s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := cfg.ValidateAPIAuth(); err != nil {
+		t.Fatalf("ValidateAPIAuth() error = %v, want nil", err)
 	}
 }
 
