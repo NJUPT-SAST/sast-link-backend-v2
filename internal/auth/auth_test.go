@@ -272,6 +272,7 @@ func TestJWTManagerRejectsIncompleteAccessTokenClaims(t *testing.T) {
 		{name: "unknown scope", mutate: func(input *TokenInput) { input.Scopes = []string{"openid", "unknown"} }},
 		{name: "missing openid", mutate: func(input *TokenInput) { input.Scopes = []string{"profile"} }},
 		{name: "negative token version", mutate: func(input *TokenInput) { input.TokenVersion = -1 }},
+		{name: "blank jti", mutate: func(input *TokenInput) { input.JTI = " \t" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -305,6 +306,11 @@ func TestJWTManagerRejectsIncompleteAccessTokenClaims(t *testing.T) {
 	delete(missingScope, "scope")
 	if _, err := manager.VerifyAccessToken(signRawJWT(t, manager, missingScope)); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("VerifyAccessToken(missing scope) error = %v, want ErrInvalidToken", err)
+	}
+	blankJTI := cloneJWTPayload(claims)
+	blankJTI["jti"] = " \t"
+	if _, err := manager.VerifyAccessToken(signRawJWT(t, manager, blankJTI)); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("VerifyAccessToken(blank jti) error = %v, want ErrInvalidToken", err)
 	}
 	for _, invalidScope := range []string{"openid unknown", "profile", "openid  profile"} {
 		invalidClaims := cloneJWTPayload(claims)

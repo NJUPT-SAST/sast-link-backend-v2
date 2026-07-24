@@ -80,3 +80,29 @@ type OAuthRefreshToken struct {
 func (OAuthRefreshToken) TableName() string {
 	return "oauth_refresh_tokens"
 }
+
+// BlacklistEntry identifies a revoked JWT and the absolute time at which it expires.
+// It deliberately contains no token secret.
+type BlacklistEntry struct {
+	TokenID   string
+	ExpiresAt time.Time
+}
+
+// TokenBlacklistOutbox persists a revocation delivery until Redis acknowledges it.
+type TokenBlacklistOutbox struct {
+	ID             int64
+	TokenID        string
+	ExpiresAt      time.Time
+	NextDeliveryAt time.Time
+	AttemptCount   int
+	LastAttemptAt  *time.Time
+	LastError      *string
+	ClaimToken     *string
+	ClaimedUntil   *time.Time
+	CreatedAt      time.Time
+}
+
+// TableName returns the exact V004 table name for TokenBlacklistOutbox.
+func (TokenBlacklistOutbox) TableName() string {
+	return "token_blacklist_outbox"
+}
