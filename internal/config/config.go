@@ -9,6 +9,8 @@ import (
 	"github.com/caarlos0/env/v11"
 )
 
+const minimumRefreshHMACSecretLen = 32
+
 // Config holds all runtime configuration for the service.
 type Config struct {
 	AppEnv   string `env:"APP_ENV" envDefault:"development"`
@@ -37,6 +39,13 @@ type Config struct {
 	JWTAccessTokenExpiry   time.Duration `env:"JWT_ACCESS_TOKEN_EXPIRY" envDefault:"1h"`
 	JWTRefreshTokenExpiry  time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
 	RefreshTokenHMACSecret string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
+
+	InternalOAuthClientID string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
+	CORSAllowedOrigins    []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
+	RateLimitLoginRPM     int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"5"`
+	RateLimitLoginWindow  time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
+	LoginFailureLimit     int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
+	LoginFailureWindow    time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
 }
 
 // Load parses configuration from environment variables and validates required fields.
@@ -59,12 +68,35 @@ func (c *Config) validate() error {
 		return fmt.Errorf("DB_PASSWORD is required")
 	case c.DBName == "":
 		return fmt.Errorf("DB_NAME is required")
+	case (strings.TrimSpace(c.JWTSecretKeyPrev) == "") != (strings.TrimSpace(c.JWTPreviousKID) == ""):
+		return fmt.Errorf("JWT_SECRET_KEY_PREV and JWT_PREVIOUS_KID must be both set or both empty")
+	}
+	return nil
+}
+
+// ValidateAPIAuth validates auth settings required by cmd/api endpoints.
+func (c *Config) ValidateAPIAuth() error {
+	switch {
+	case strings.TrimSpace(c.JWTSecretKey) == "":
+		return fmt.Errorf("JWT_SECRET_KEY is required")
+	case strings.TrimSpace(c.JWTActiveKID) == "":
+		return fmt.Errorf("JWT_ACTIVE_KID is required")
+	case len(c.RefreshTokenHMACSecret) < minimumRefreshHMACSecretLen:
+		return fmt.Errorf("REFRESH_TOKEN_HMAC_SECRET must be at least %d bytes", minimumRefreshHMACSecretLen)
 	case c.JWTAccessTokenExpiry <= 0:
 		return fmt.Errorf("JWT_ACCESS_TOKEN_EXPIRY must be positive")
 	case c.JWTRefreshTokenExpiry <= 0:
 		return fmt.Errorf("JWT_REFRESH_TOKEN_EXPIRY must be positive")
-	case (strings.TrimSpace(c.JWTSecretKeyPrev) == "") != (strings.TrimSpace(c.JWTPreviousKID) == ""):
-		return fmt.Errorf("JWT_SECRET_KEY_PREV and JWT_PREVIOUS_KID must be both set or both empty")
+	case strings.TrimSpace(c.InternalOAuthClientID) == "":
+		return fmt.Errorf("INTERNAL_OAUTH_CLIENT_ID is required")
+	case c.RateLimitLoginRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_LOGIN_RPM must be positive")
+	case c.RateLimitLoginWindow <= 0:
+		return fmt.Errorf("RATE_LIMIT_LOGIN_WINDOW must be positive")
+	case c.LoginFailureLimit <= 0:
+		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
+	case c.LoginFailureWindow <= 0:
+		return fmt.Errorf("LOGIN_FAILURE_WINDOW must be positive")
 	}
 	return nil
 }

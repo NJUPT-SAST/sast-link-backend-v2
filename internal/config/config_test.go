@@ -29,7 +29,7 @@ func setConfigEnv(t *testing.T, dbUser, dbPassword, dbName string) {
 	t.Setenv("JWT_AUDIENCE", "test-audience")
 	t.Setenv("JWT_ACCESS_TOKEN_EXPIRY", "15m")
 	t.Setenv("JWT_REFRESH_TOKEN_EXPIRY", "720h")
-	t.Setenv("REFRESH_TOKEN_HMAC_SECRET", "refresh-hmac-secret")
+	t.Setenv("REFRESH_TOKEN_HMAC_SECRET", "0123456789abcdef0123456789abcdef")
 }
 
 func TestLoadMissingRequiredFields(t *testing.T) {
@@ -104,39 +104,122 @@ func TestLoadValidConfig(t *testing.T) {
 	if cfg.JWTRefreshTokenExpiry != 720*time.Hour {
 		t.Errorf("JWTRefreshTokenExpiry = %s, want 720h", cfg.JWTRefreshTokenExpiry)
 	}
-	if cfg.RefreshTokenHMACSecret != "refresh-hmac-secret" {
-		t.Errorf("RefreshTokenHMACSecret = %q, want refresh-hmac-secret", cfg.RefreshTokenHMACSecret)
+	if cfg.RefreshTokenHMACSecret != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("RefreshTokenHMACSecret = %q, want 0123456789abcdef0123456789abcdef", cfg.RefreshTokenHMACSecret)
+	}
+	if cfg.InternalOAuthClientID != "sast-link-web" {
+		t.Errorf("InternalOAuthClientID = %q, want sast-link-web", cfg.InternalOAuthClientID)
+	}
+	if cfg.RateLimitLoginRPM != 5 {
+		t.Errorf("RateLimitLoginRPM = %d, want 5", cfg.RateLimitLoginRPM)
+	}
+	if cfg.RateLimitLoginWindow != 15*time.Minute {
+		t.Errorf("RateLimitLoginWindow = %s, want 15m", cfg.RateLimitLoginWindow)
+	}
+	if cfg.LoginFailureLimit != 10 {
+		t.Errorf("LoginFailureLimit = %d, want 10", cfg.LoginFailureLimit)
+	}
+	if cfg.LoginFailureWindow != 15*time.Minute {
+		t.Errorf("LoginFailureWindow = %s, want 15m", cfg.LoginFailureWindow)
 	}
 }
 
-func TestLoadAllowsHealthOnlyWithoutCryptoMaterial(t *testing.T) {
+func TestLoadAllowsMigrateWithoutCryptoMaterial(t *testing.T) {
 	setConfigEnv(t, "user", "pass", "db")
 	t.Setenv("JWT_SECRET_KEY", "")
 	t.Setenv("JWT_ACTIVE_KID", "")
 	t.Setenv("REFRESH_TOKEN_HMAC_SECRET", "")
+	t.Setenv("JWT_ACCESS_TOKEN_EXPIRY", "0")
+	t.Setenv("JWT_REFRESH_TOKEN_EXPIRY", "0")
 
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load() error = %v, want nil", err)
 	}
 }
 
-func TestLoadRejectsNonPositiveAccessTokenExpiry(t *testing.T) {
+func TestValidateAPIAuthRejectsMissingCryptoMaterial(t *testing.T) {
 	setConfigEnv(t, "user", "pass", "db")
-	t.Setenv("JWT_ACCESS_TOKEN_EXPIRY", "0")
+	t.Setenv("JWT_SECRET_KEY", "")
 
-	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "JWT_ACCESS_TOKEN_EXPIRY must be positive") {
-		t.Fatalf("Load() error = %v, want JWT_ACCESS_TOKEN_EXPIRY positive validation", err)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	err = cfg.ValidateAPIAuth()
+	if err == nil || !strings.Contains(err.Error(), "JWT_SECRET_KEY is required") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want JWT_SECRET_KEY required validation", err)
 	}
 }
 
-func TestLoadRejectsNonPositiveRefreshTokenExpiry(t *testing.T) {
+func TestValidateAPIAuthRejectsShortRefreshHMACSecret(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("REFRESH_TOKEN_HMAC_SECRET", "too-short")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	err = cfg.ValidateAPIAuth()
+	if err == nil || !strings.Contains(err.Error(), "REFRESH_TOKEN_HMAC_SECRET must be at least 32 bytes") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want HMAC length validation", err)
+	}
+}
+
+func TestValidateAPIAuthRejectsNonPositiveAccessTokenExpiry(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("JWT_ACCESS_TOKEN_EXPIRY", "0")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	err = cfg.ValidateAPIAuth()
+	if err == nil || !strings.Contains(err.Error(), "JWT_ACCESS_TOKEN_EXPIRY must be positive") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want JWT_ACCESS_TOKEN_EXPIRY positive validation", err)
+	}
+}
+
+func TestValidateAPIAuthRejectsNonPositiveRefreshTokenExpiry(t *testing.T) {
 	setConfigEnv(t, "user", "pass", "db")
 	t.Setenv("JWT_REFRESH_TOKEN_EXPIRY", "-1h")
 
-	_, err := Load()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	err = cfg.ValidateAPIAuth()
 	if err == nil || !strings.Contains(err.Error(), "JWT_REFRESH_TOKEN_EXPIRY must be positive") {
-		t.Fatalf("Load() error = %v, want JWT_REFRESH_TOKEN_EXPIRY positive validation", err)
+		t.Fatalf("ValidateAPIAuth() error = %v, want JWT_REFRESH_TOKEN_EXPIRY positive validation", err)
+	}
+}
+
+func TestValidateAPIAuthRejectsNonPositiveRateSettings(t *testing.T) {
+	cases := []struct {
+		name    string
+		envName string
+		value   string
+		want    string
+	}{
+		{name: "login rpm", envName: "RATE_LIMIT_LOGIN_RPM", value: "0", want: "RATE_LIMIT_LOGIN_RPM must be positive"},
+		{name: "login window", envName: "RATE_LIMIT_LOGIN_WINDOW", value: "0", want: "RATE_LIMIT_LOGIN_WINDOW must be positive"},
+		{name: "failure limit", envName: "LOGIN_FAILURE_LIMIT", value: "0", want: "LOGIN_FAILURE_LIMIT must be positive"},
+		{name: "failure window", envName: "LOGIN_FAILURE_WINDOW", value: "0", want: "LOGIN_FAILURE_WINDOW must be positive"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(tc.envName, tc.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
