@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -28,6 +29,16 @@ var ErrTokenExpired = errors.New("repository: token expired")
 // TokenRepository persists and revokes OAuth token metadata.
 type TokenRepository struct {
 	database *gorm.DB
+}
+
+// AccessAuthState is the DB-authoritative state required to authenticate one access token.
+type AccessAuthState struct {
+	TokenID      string
+	UserID       int64
+	UserState    model.UserState
+	TokenVersion int
+	RevokedAt    *time.Time
+	ExpiresAt    time.Time
 }
 
 // NewToken constructs a TokenRepository backed by database.
@@ -106,7 +117,7 @@ func (r *TokenRepository) RotateRefreshToken(
 			return fmt.Errorf("%w: refresh token family changed during rotation", ErrInvalidArgument)
 		}
 		if current.RevokedAt != nil {
-			if revokeErr := revokeFamilyInTransaction(transaction, familyID, rotationTime); revokeErr != nil {
+			if _, revokeErr := revokeFamilyInTransaction(transaction, familyID, rotationTime); revokeErr != nil {
 				return revokeErr
 			}
 			replayDetected = true
@@ -124,7 +135,7 @@ func (r *TokenRepository) RotateRefreshToken(
 			return fmt.Errorf("check token family revocation: %w", familyErr)
 		}
 		if familyRevoked {
-			if revokeErr := revokeFamilyInTransaction(transaction, familyID, rotationTime); revokeErr != nil {
+			if _, revokeErr := revokeFamilyInTransaction(transaction, familyID, rotationTime); revokeErr != nil {
 				return revokeErr
 			}
 			replayDetected = true
@@ -307,6 +318,28 @@ func (r *TokenRepository) FindRefreshToken(
 	return nil, fmt.Errorf("find refresh token: %w", err)
 }
 
+// FindAccessAuthStateByJTI reads the DB-authoritative state for one access JTI,
+// including the token record and its associated user state in a single query.
+func (r *TokenRepository) FindAccessAuthStateByJTI(ctx context.Context, jti string) (*AccessAuthState, error) {
+	if strings.TrimSpace(jti) == "" {
+		return nil, fmt.Errorf("find access auth state by JTI: %w", ErrInvalidArgument)
+	}
+	var state AccessAuthState
+	err := r.database.WithContext(ctx).
+		Table("oauth_access_tokens AS access").
+		Select("access.token_id, access.user_id, \"user\".state AS user_state, \"user\".token_version, access.revoked_at, access.expires_at").
+		Joins("JOIN \"user\" ON \"user\".id = access.user_id").
+		Where("access.token_id = ?", jti).
+		Take(&state).Error
+	if err == nil {
+		return &state, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("find access auth state by JTI: %w", err)
+}
+
 // FindAccessTokenByJTI finds access-token metadata by its JWT ID.
 func (r *TokenRepository) FindAccessTokenByJTI(
 	ctx context.Context,
@@ -323,31 +356,62 @@ func (r *TokenRepository) FindAccessTokenByJTI(
 	return nil, fmt.Errorf("find access token by JTI: %w", err)
 }
 
-// RevokeFamily revokes unrevoked access and refresh tokens in one token family.
-// Revoking a family without existing rows is a no-op; it does not create a tombstone.
+// RevokeFamily revokes a family and durably enqueues every still-live JWT JTI.
+// It returns the entries so callers can synchronously attempt Redis delivery.
 func (r *TokenRepository) RevokeFamily(
 	ctx context.Context,
 	familyID string,
 	revokedAt time.Time,
-) error {
-	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+) ([]model.BlacklistEntry, error) {
+	var entries []model.BlacklistEntry
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		if err := lockTokenFamily(transaction, familyID); err != nil {
 			return fmt.Errorf("lock token family: %w", err)
 		}
-		return revokeFamilyInTransaction(transaction, familyID, revokedAt)
+		var revokeErr error
+		entries, revokeErr = revokeFamilyInTransaction(transaction, familyID, revokedAt)
+		return revokeErr
 	})
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
-func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt time.Time) error {
+func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error) {
+	var entries []model.BlacklistEntry
+	if err := transaction.Model(&model.OAuthAccessToken{}).
+		Select("token_id", "expires_at").
+		Where("family_id = ? AND expires_at > ?", familyID, revokedAt).
+		Find(&entries).Error; err != nil {
+		return nil, fmt.Errorf("select live access token family: %w", err)
+	}
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Where("family_id = ? AND revoked_at IS NULL", familyID).
 		Update("revoked_at", revokedAt).Error; err != nil {
-		return fmt.Errorf("revoke access token family: %w", err)
+		return nil, fmt.Errorf("revoke access token family: %w", err)
 	}
 	if err := transaction.Model(&model.OAuthRefreshToken{}).
 		Where("family_id = ? AND revoked_at IS NULL", familyID).
 		Update("revoked_at", revokedAt).Error; err != nil {
-		return fmt.Errorf("revoke refresh token family: %w", err)
+		return nil, fmt.Errorf("revoke refresh token family: %w", err)
 	}
-	return nil
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	rows := make([]model.TokenBlacklistOutbox, 0, len(entries))
+	for _, entry := range entries {
+		rows = append(rows, model.TokenBlacklistOutbox{
+			TokenID:        entry.TokenID,
+			ExpiresAt:      entry.ExpiresAt,
+			NextDeliveryAt: revokedAt,
+		})
+	}
+	if err := transaction.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "token_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"expires_at", "next_delivery_at"}),
+	}).Create(&rows).Error; err != nil {
+		return nil, fmt.Errorf("enqueue access token blacklist: %w", err)
+	}
+	return entries, nil
 }

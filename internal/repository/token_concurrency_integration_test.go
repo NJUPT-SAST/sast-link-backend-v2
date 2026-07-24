@@ -48,7 +48,7 @@ func TestTokenRepositoryCreatePairRejectsRevokedFamily(t *testing.T) {
 	familyID := "revoked-family"
 
 	createTokenPair(t, tokenRepository, "revoked-existing", familyID, 0, client.ID, user.ID)
-	if err := tokenRepository.RevokeFamily(context.Background(), familyID, time.Now()); err != nil {
+	if _, err := tokenRepository.RevokeFamily(context.Background(), familyID, time.Now()); err != nil {
 		t.Fatalf("RevokeFamily() error = %v", err)
 	}
 
@@ -83,7 +83,8 @@ func TestTokenRepositoryFamilyOperationsWaitForSameAdvisoryLock(t *testing.T) {
 		createTokenPair(t, tokenRepository, "locked-revoke", familyID, 0, client.ID, user.ID)
 
 		assertWaitsForTokenFamilyLock(t, database, familyID, func(ctx context.Context) error {
-			return tokenRepository.RevokeFamily(ctx, familyID, time.Now())
+			_, err := tokenRepository.RevokeFamily(ctx, familyID, time.Now())
+			return err
 		})
 	})
 

@@ -58,8 +58,8 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Current() error = %v", err)
 	}
-	if version != 2 || dirty {
-		t.Fatalf("Current() = (%d, %t), want (2, false)", version, dirty)
+	if version != 4 || dirty {
+		t.Fatalf("Current() = (%d, %t), want (4, false)", version, dirty)
 	}
 
 	database := testutil.OpenSQL(t, databaseURL)
@@ -102,14 +102,158 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	assertOtherMailLimit(t, database, userID)
 	assertRefreshTokenFamilySequenceUnique(t, database, userID)
 	assertRejectsPlainPKCEChallengeMethod(t, database, userID)
+	assertBuiltinOAuthClient(t, database)
+}
+
+func TestV3NormalizesCompatibleBuiltinOAuthClient(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+
+	if err := instance.Steps(2); err != nil {
+		t.Fatalf("apply V001-V002: %v", err)
+	}
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	_, err := database.ExecContext(context.Background(), `
+INSERT INTO oauth_clients (
+    client_id, client_name, client_type, client_secret, redirect_uris, grant_types, scopes, is_active
+)
+VALUES (
+    'sast-link-web', 'Old Name', 'first_party', NULL,
+    ARRAY['http://old.example/callback'], ARRAY['authorization_code'], ARRAY['email', 'openid'], FALSE
+)
+`)
+	if err != nil {
+		t.Fatalf("insert compatible existing built-in OAuth client: %v", err)
+	}
+
+	if err := instance.Up(); err != nil {
+		t.Fatalf("apply V003: %v", err)
+	}
+	assertBuiltinOAuthClient(t, database)
+}
+
+func TestV3RejectsIncompatibleBuiltinOAuthClient(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+
+	if err := instance.Steps(2); err != nil {
+		t.Fatalf("apply V001-V002: %v", err)
+	}
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	_, err := database.ExecContext(context.Background(), `
+INSERT INTO oauth_clients (
+    client_id, client_name, client_type, client_secret, redirect_uris, grant_types, scopes, is_active
+)
+VALUES (
+    'sast-link-web', 'Third-party Client', 'third_party', 'secret-hash',
+    ARRAY['https://third.example/callback'], ARRAY['authorization_code'], ARRAY['openid'], TRUE
+)
+`)
+	if err != nil {
+		t.Fatalf("insert incompatible existing built-in OAuth client: %v", err)
+	}
+
+	err = instance.Up()
+	if err == nil {
+		t.Fatal("apply V003 with incompatible built-in OAuth client error = nil")
+	}
+	if !strings.Contains(err.Error(), "incompatible sast-link-web client") {
+		t.Fatalf("apply V003 error = %v, want incompatible client blocker", err)
+	}
+	var clientType string
+	var secret sql.NullString
+	if queryErr := database.QueryRowContext(context.Background(), `
+SELECT client_type::text, client_secret
+FROM oauth_clients
+WHERE client_id = 'sast-link-web'
+`).Scan(&clientType, &secret); queryErr != nil {
+		t.Fatalf("read incompatible OAuth client after failed V003: %v", queryErr)
+	}
+	if clientType != "third_party" || !secret.Valid || secret.String != "secret-hash" {
+		t.Fatalf("client after failed V003 = (%q, %v), want original incompatible record", clientType, secret)
+	}
+}
+
+func TestV3DownKeepsReferencedBuiltinOAuthClient(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+
+	if err := instance.Up(); err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	userID := insertTestUser(t, database)
+	builtinClientID := readOAuthClientID(t, database, "sast-link-web")
+	insertOAuthAuthorization(t, database, "v3-down-referenced-code", builtinClientID, userID, "S256")
+
+	if err := instance.Steps(-2); err != nil {
+		t.Fatalf("Steps(-2) error = %v", err)
+	}
+	version, dirty, err := migration.Current(databaseURL)
+	if err != nil {
+		t.Fatalf("Current() error = %v", err)
+	}
+	if version != 2 || dirty {
+		t.Fatalf("Current() = (%d, %t), want (2, false)", version, dirty)
+	}
+	assertOAuthClientExists(t, database, "sast-link-web")
+}
+
+func TestV3DownKeepsMutatedBuiltinOAuthClient(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+
+	if err := instance.Up(); err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	_, err := database.ExecContext(context.Background(), `
+UPDATE oauth_clients
+SET client_name = 'Hijacked Client',
+    client_type = 'third_party',
+    client_secret = 'secret-hash',
+    redirect_uris = ARRAY['https://evil.example/callback'],
+    grant_types = ARRAY['authorization_code'],
+    scopes = ARRAY['email', 'openid'],
+    is_active = FALSE
+WHERE client_id = 'sast-link-web'
+`)
+	if err != nil {
+		t.Fatalf("mutate built-in OAuth client before V003 down: %v", err)
+	}
+
+	if err := instance.Steps(-2); err != nil {
+		t.Fatalf("Steps(-2) error = %v", err)
+	}
+	assertOAuthClientExists(t, database, "sast-link-web")
+}
+
+func TestV3DownDeletesUnreferencedBuiltinOAuthClient(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+
+	if err := instance.Up(); err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+
+	if err := instance.Steps(-2); err != nil {
+		t.Fatalf("Steps(-2) error = %v", err)
+	}
+	assertOAuthClientMissing(t, database, "sast-link-web")
 }
 
 func TestV2DownRestoresV1PKCEChallengeMethodConstraint(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	instance := newMigration(t, databaseURL)
 
-	if err := instance.Up(); err != nil {
-		t.Fatalf("Up() error = %v", err)
+	if err := instance.Steps(2); err != nil {
+		t.Fatalf("apply V001-V002: %v", err)
 	}
 	if err := instance.Steps(-1); err != nil {
 		t.Fatalf("Steps(-1) error = %v", err)
@@ -164,7 +308,7 @@ WHERE conrelid = 'oauth_authorizations'::regclass
 	}
 }
 
-func TestBaselineV1CanMigrateToV2(t *testing.T) {
+func TestBaselineV1CanMigrateToLatest(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	applyUnversionedV1Schema(t, databaseURL)
 
@@ -186,16 +330,17 @@ func TestBaselineV1CanMigrateToV2(t *testing.T) {
 	}
 	version, dirty, err = migration.Current(databaseURL)
 	if err != nil {
-		t.Fatalf("Current() after V002 error = %v", err)
+		t.Fatalf("Current() after latest migrations error = %v", err)
 	}
-	if version != 2 || dirty {
-		t.Fatalf("Current() after V002 = (%d, %t), want (2, false)", version, dirty)
+	if version != 4 || dirty {
+		t.Fatalf("Current() after latest migrations = (%d, %t), want (4, false)", version, dirty)
 	}
 
 	database := testutil.OpenSQL(t, databaseURL)
 	t.Cleanup(func() { _ = database.Close() })
 	userID := insertTestUser(t, database)
 	assertRejectsPlainPKCEChallengeMethod(t, database, userID)
+	assertBuiltinOAuthClient(t, database)
 }
 
 func TestDownDropsV1Schema(t *testing.T) {
@@ -249,6 +394,82 @@ func assertExists(t *testing.T, database *sql.DB, query string, name string) {
 	}
 	if !exists {
 		t.Fatalf("required object %q is missing", name)
+	}
+}
+
+func assertBuiltinOAuthClient(t *testing.T, database *sql.DB) {
+	t.Helper()
+
+	var name, clientType string
+	var secretIsNull, active bool
+	var redirectURIs, grantTypes, scopes string
+	err := database.QueryRowContext(context.Background(), `
+SELECT client_name,
+       client_type::text,
+       client_secret IS NULL,
+       array_to_string(redirect_uris, E'\n'),
+       array_to_string(grant_types, E'\n'),
+       array_to_string(scopes, E'\n'),
+       is_active
+FROM oauth_clients
+WHERE client_id = 'sast-link-web'
+`).Scan(&name, &clientType, &secretIsNull, &redirectURIs, &grantTypes, &scopes, &active)
+	if err != nil {
+		t.Fatalf("read built-in OAuth client: %v", err)
+	}
+	if name != "SAST Link Web" || clientType != "first_party" || !secretIsNull ||
+		redirectURIs != "https://link.sast.fun/oauth/callback\nhttp://localhost:3000/oauth/callback" ||
+		grantTypes != "authorization_code\nrefresh_token" || scopes != "openid\nprofile\nemail" || !active {
+		t.Fatalf(
+			"built-in OAuth client = (%q, %q, secret null %t, %q, %q, %q, active %t), want canonical sast-link-web",
+			name,
+			clientType,
+			secretIsNull,
+			redirectURIs,
+			grantTypes,
+			scopes,
+			active,
+		)
+	}
+}
+
+func readOAuthClientID(t *testing.T, database *sql.DB, clientIDValue string) int64 {
+	t.Helper()
+
+	var clientID int64
+	if err := database.QueryRowContext(context.Background(), `
+SELECT id FROM oauth_clients WHERE client_id = $1
+`, clientIDValue).Scan(&clientID); err != nil {
+		t.Fatalf("read OAuth client %q ID: %v", clientIDValue, err)
+	}
+	return clientID
+}
+
+func assertOAuthClientExists(t *testing.T, database *sql.DB, clientIDValue string) {
+	t.Helper()
+
+	var exists bool
+	if err := database.QueryRowContext(context.Background(), `
+SELECT EXISTS (SELECT 1 FROM oauth_clients WHERE client_id = $1)
+`, clientIDValue).Scan(&exists); err != nil {
+		t.Fatalf("query OAuth client %q existence: %v", clientIDValue, err)
+	}
+	if !exists {
+		t.Fatalf("OAuth client %q is missing", clientIDValue)
+	}
+}
+
+func assertOAuthClientMissing(t *testing.T, database *sql.DB, clientIDValue string) {
+	t.Helper()
+
+	var exists bool
+	if err := database.QueryRowContext(context.Background(), `
+SELECT EXISTS (SELECT 1 FROM oauth_clients WHERE client_id = $1)
+`, clientIDValue).Scan(&exists); err != nil {
+		t.Fatalf("query OAuth client %q absence: %v", clientIDValue, err)
+	}
+	if exists {
+		t.Fatalf("OAuth client %q remains", clientIDValue)
 	}
 }
 

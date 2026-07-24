@@ -124,6 +124,51 @@ func TestUserRepositoryFindByLoginIdentifier(t *testing.T) {
 	}
 }
 
+func TestOAuthClientRepositoryFindActiveByClientID(t *testing.T) {
+	database := setupDatabase(t)
+	oauthClientRepository := repository.NewOAuthClient(database)
+
+	client, err := oauthClientRepository.FindActiveByClientID(context.Background(), "sast-link-web")
+	if err != nil {
+		t.Fatalf("FindActiveByClientID(built-in) error = %v", err)
+	}
+	if client.ClientID != "sast-link-web" || client.ClientName != "SAST Link Web" ||
+		client.ClientType != model.ClientTypeFirstParty || client.ClientSecretHash != nil ||
+		!reflect.DeepEqual(client.RedirectURIs, model.StringArray{
+			"https://link.sast.fun/oauth/callback",
+			"http://localhost:3000/oauth/callback",
+		}) ||
+		!reflect.DeepEqual(client.GrantTypes, model.StringArray{"authorization_code", "refresh_token"}) ||
+		!reflect.DeepEqual(client.Scopes, model.StringArray{"openid", "profile", "email"}) ||
+		client.IsActive == nil || !*client.IsActive {
+		t.Fatalf("FindActiveByClientID(built-in) = %#v, want seeded active first-party public client", client)
+	}
+
+	inactive := &model.OAuthClient{
+		ClientID:     "inactive-client",
+		ClientName:   "Inactive Client",
+		ClientType:   model.ClientTypeFirstParty,
+		RedirectURIs: model.StringArray{"https://example.test/callback"},
+		GrantTypes:   model.StringArray{"authorization_code"},
+		Scopes:       model.StringArray{"openid"},
+		IsActive:     boolPtr(false),
+	}
+	createErr := database.Create(inactive).Error
+	if createErr != nil {
+		t.Fatalf("create inactive OAuth client: %v", createErr)
+	}
+	for _, clientID := range []string{"inactive-client", "missing-client"} {
+		_, findErr := oauthClientRepository.FindActiveByClientID(context.Background(), clientID)
+		if !errors.Is(findErr, repository.ErrNotFound) {
+			t.Fatalf("FindActiveByClientID(%q) error = %v, want ErrNotFound", clientID, findErr)
+		}
+	}
+	_, emptyErr := oauthClientRepository.FindActiveByClientID(context.Background(), "")
+	if !errors.Is(emptyErr, repository.ErrInvalidArgument) {
+		t.Fatalf("FindActiveByClientID(empty) error = %v, want ErrInvalidArgument", emptyErr)
+	}
+}
+
 func TestTokenRepositoryCreatePairAndFindRefreshToken(t *testing.T) {
 	database := setupDatabase(t)
 	user := createUserWithProfile(t, repository.NewUser(database), "tokens@njupt.edu.cn")
@@ -524,7 +569,7 @@ func TestTokenRepositoryRevokeFamily(t *testing.T) {
 	createTokenPair(t, tokenRepository, "a2", familyA, 1, client.ID, user.ID)
 	createTokenPair(t, tokenRepository, "b1", familyB, 0, client.ID, user.ID)
 
-	if err := tokenRepository.RevokeFamily(context.Background(), familyA, revokedAt); err != nil {
+	if _, err := tokenRepository.RevokeFamily(context.Background(), familyA, revokedAt); err != nil {
 		t.Fatalf("RevokeFamily() error = %v", err)
 	}
 	assertFamilyRevokedAt(t, database, familyA, revokedAt)
@@ -537,7 +582,7 @@ func TestTokenRepositoryRevokeFamily(t *testing.T) {
 	if err := database.Model(&model.OAuthRefreshToken{}).Where("token_hash = ?", "a1-refresh").Update("revoked_at", preservedAt).Error; err != nil {
 		t.Fatalf("pre-revoke refresh token: %v", err)
 	}
-	if err := tokenRepository.RevokeFamily(context.Background(), familyA, revokedAt.Add(time.Hour)); err != nil {
+	if _, err := tokenRepository.RevokeFamily(context.Background(), familyA, revokedAt.Add(time.Hour)); err != nil {
 		t.Fatalf("second RevokeFamily() error = %v", err)
 	}
 	assertTokenRevokedAt(t, database, "a1-access", "a1-refresh", preservedAt)
@@ -594,7 +639,7 @@ func setupDatabase(t *testing.T) *gorm.DB {
 	}
 	t.Cleanup(func() { _, _ = instance.Close() })
 	if err := instance.Up(); err != nil {
-		t.Fatalf("apply V001: %v", err)
+		t.Fatalf("apply migrations: %v", err)
 	}
 	return testutil.OpenGORM(t, databaseURL)
 }
@@ -640,6 +685,10 @@ func createOAuthClient(t *testing.T, database *gorm.DB) *model.OAuthClient {
 		t.Fatalf("OAuth client IsActive = %v, want default true", client.IsActive)
 	}
 	return client
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func accessToken(tokenID string, clientID int64, userID int64, familyID *string) *model.OAuthAccessToken {
