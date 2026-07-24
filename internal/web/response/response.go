@@ -50,7 +50,7 @@ func Error(c *gin.Context, err error) {
 
 	c.JSON(http.StatusInternalServerError, Response{
 		Code:    50000,
-		Message: "internal server error",
+		Message: "服务器内部错误",
 		Data:    nil,
 	})
 }
