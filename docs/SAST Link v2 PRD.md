@@ -357,6 +357,8 @@ Payload: {
 | 管理 OAuth 客户端 | — | — | — | ✓ |
 | 查看审计日志 | — | — | — | ✓ |
 
+**角色变更**：`PUT /admin/users/:id` 实际修改 `role` 时，必须在同一事务内递增 `user.token_version` 并撤销该用户的全部 token family。`role` 未变化或仅修改普通资料时，不递增 `token_version`。旧 Access Token 继续携带签发时的 `role`，但会因版本不匹配在认证阶段失效。
+
 ### 4.13 审计日志
 
 所有认证相关操作写入 `audit_logs`：
