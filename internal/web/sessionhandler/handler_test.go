@@ -12,11 +12,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 )
+
+type fixedClock struct{ value time.Time }
+
+func (c fixedClock) Now() time.Time { return c.value }
 
 type fakeService struct {
 	loginResult   *session.LoginResult
@@ -77,7 +82,7 @@ func TestLoginReturnsEnvelopeDTOAndInput(t *testing.T) {
 		},
 	}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Now: func() time.Time { return now }}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, allowAuth())
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"pt@sast.fun","password":"secret"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -118,7 +123,7 @@ func TestRefreshReturnsTokenEnvelope(t *testing.T) {
 		AccessExpiresAt: now.Add(time.Minute),
 	}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Now: func() time.Time { return now }}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, allowAuth())
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{"refresh_token":"rt_x"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -154,7 +159,7 @@ func TestProtectedLogoutUsesPrincipalOnlyFields(t *testing.T) {
 	if _, exists := data["family_id"]; exists {
 		t.Fatalf("logout response leaked family: %#v", data)
 	}
-	if service.logoutInput.PrincipalJTI != "jti" || service.logoutInput.PrincipalUserID != 42 || !service.logoutInput.PrincipalExpiresAt.Equal(expires) || service.logoutInput.RefreshToken != "rt_x" {
+	if service.logoutInput.PrincipalJTI != "jti" || service.logoutInput.PrincipalUserID != 42 || service.logoutInput.RefreshToken != "rt_x" {
 		t.Fatalf("logout input = %+v", service.logoutInput)
 	}
 }
@@ -175,7 +180,7 @@ func TestProtectedProfileUsesPrincipalUserID(t *testing.T) {
 
 func TestServiceErrorMappingDoesNotLeakCause(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	service := &fakeService{loginErr: &session.Error{Kind: session.KindInternal, Code: session.CodeInternal, Message: "db password leaked", Err: errors.New("secret DSN")}}
+	service := &fakeService{loginErr: &session.Error{Kind: session.KindInternal, Code: errcode.CodeInternal, Message: "db password leaked", Err: errors.New("secret DSN")}}
 	router := gin.New()
 	RegisterRoutes(router, Handler{Service: service}, allowAuth())
 	recorder := httptest.NewRecorder()
@@ -183,7 +188,7 @@ func TestServiceErrorMappingDoesNotLeakCause(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 	body := decodeBody(t, recorder)
-	if recorder.Code != http.StatusInternalServerError || body.Code != session.CodeInternal || body.Message != "服务器内部错误" || strings.Contains(recorder.Body.String(), "secret DSN") || strings.Contains(recorder.Body.String(), "db password leaked") {
+	if recorder.Code != http.StatusInternalServerError || body.Code != errcode.CodeInternal || body.Message != "服务器内部错误" || strings.Contains(recorder.Body.String(), "secret DSN") || strings.Contains(recorder.Body.String(), "db password leaked") {
 		t.Fatalf("response = %d %#v", recorder.Code, body)
 	}
 }
@@ -195,12 +200,13 @@ func TestServiceErrorMappingStatusAndCode(t *testing.T) {
 		wantStatus int
 		wantCode   int
 	}{
-		{name: "invalid input", err: &session.Error{Kind: session.KindInvalidInput, Code: session.CodeInvalidInput, Message: "bad"}, wantStatus: http.StatusBadRequest, wantCode: session.CodeInvalidInput},
-		{name: "unknown identifier", err: &session.Error{Kind: session.KindUnknownIdentifier, Code: session.CodeUnknownIdentifier, Message: "unknown"}, wantStatus: http.StatusUnauthorized, wantCode: session.CodeUnknownIdentifier},
-		{name: "bad password", err: &session.Error{Kind: session.KindPasswordInvalid, Code: session.CodePasswordInvalid, Message: "bad password"}, wantStatus: http.StatusUnauthorized, wantCode: session.CodePasswordInvalid},
-		{name: "deleted", err: &session.Error{Kind: session.KindUserDeleted, Code: session.CodeUserDeleted, Message: "deleted"}, wantStatus: http.StatusForbidden, wantCode: session.CodeUserDeleted},
-		{name: "rate", err: &session.Error{Kind: session.KindRateLimited, Code: session.CodeRateLimited, Message: "rate"}, wantStatus: http.StatusTooManyRequests, wantCode: session.CodeRateLimited},
-		{name: "invalid token", err: &session.Error{Kind: session.KindInvalidToken, Code: session.CodeInvalidToken, Message: "invalid token"}, wantStatus: http.StatusUnauthorized, wantCode: session.CodeInvalidToken},
+		{name: "invalid input", err: &session.Error{Kind: session.KindInvalidInput, Code: errcode.CodeBadRequest, Message: "bad"}, wantStatus: http.StatusBadRequest, wantCode: errcode.CodeBadRequest},
+		{name: "unknown identifier", err: &session.Error{Kind: session.KindUnknownIdentifier, Code: errcode.CodeUnknownIdentifier, Message: "unknown"}, wantStatus: http.StatusUnauthorized, wantCode: errcode.CodeUnknownIdentifier},
+		{name: "bad password", err: &session.Error{Kind: session.KindPasswordInvalid, Code: errcode.CodePasswordInvalid, Message: "bad password"}, wantStatus: http.StatusUnauthorized, wantCode: errcode.CodePasswordInvalid},
+		{name: "deleted", err: &session.Error{Kind: session.KindUserDeleted, Code: errcode.CodeAccountDeleted, Message: "deleted"}, wantStatus: http.StatusForbidden, wantCode: errcode.CodeAccountDeleted},
+		{name: "rate", err: &session.Error{Kind: session.KindRateLimited, Code: errcode.CodeRateLimited, Message: "rate"}, wantStatus: http.StatusTooManyRequests, wantCode: errcode.CodeRateLimited},
+		{name: "rate with retry", err: &session.Error{Kind: session.KindRateLimited, Code: errcode.CodeRateLimited, Message: "rate", RetryAfter: time.Minute}, wantStatus: http.StatusTooManyRequests, wantCode: errcode.CodeRateLimited},
+		{name: "invalid token", err: &session.Error{Kind: session.KindInvalidToken, Code: errcode.CodeAccessTokenInvalid, Message: "invalid token"}, wantStatus: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -210,6 +216,9 @@ func TestServiceErrorMappingStatusAndCode(t *testing.T) {
 			}
 			if strings.Contains(mapped.Message, test.err.Error()) {
 				t.Fatalf("mapped message leaked service error: %+v", mapped)
+			}
+			if se, ok := test.err.(*session.Error); ok && se.RetryAfter > 0 && mapped.RetryAfter != se.RetryAfter {
+				t.Fatalf("RetryAfter = %v, want %v", mapped.RetryAfter, se.RetryAfter)
 			}
 		})
 	}
@@ -225,7 +234,7 @@ func TestInvalidJSONRequestsReturnBadRequest(t *testing.T) {
 		request.Header.Set("Content-Type", "application/json")
 		router.ServeHTTP(recorder, request)
 		body := decodeBody(t, recorder)
-		if recorder.Code != http.StatusBadRequest || body.Code != session.CodeInvalidInput {
+		if recorder.Code != http.StatusBadRequest || body.Code != errcode.CodeBadRequest {
 			t.Fatalf("%s response = %d %#v", route, recorder.Code, body)
 		}
 	}
@@ -235,7 +244,7 @@ func TestProtectedRoutesRequireMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	RegisterRoutes(router, Handler{Service: &fakeService{}}, func(c *gin.Context) {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusUnauthorized, Code: 40100, Message: "missing or invalid authorization header"})
+		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusUnauthorized, Code: errcode.CodeUnauthenticated, Message: "missing or invalid authorization header"})
 		c.Abort()
 	})
 	for _, test := range []struct{ method, path string }{{http.MethodPost, "/auth/logout"}, {http.MethodGet, "/user/profile"}} {
@@ -244,7 +253,7 @@ func TestProtectedRoutesRequireMiddleware(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		router.ServeHTTP(recorder, req)
 		body := decodeBody(t, recorder)
-		if recorder.Code != http.StatusUnauthorized || body.Code != 40100 {
+		if recorder.Code != http.StatusUnauthorized || body.Code != errcode.CodeUnauthenticated {
 			t.Fatalf("%s response = %d %#v", test.path, recorder.Code, body)
 		}
 	}
@@ -253,7 +262,7 @@ func TestProtectedRoutesRequireMiddleware(t *testing.T) {
 func TestLoginClientIPDoesNotTrustXForwardedFor(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{loginResult: &session.LoginResult{AccessToken: "a", RefreshToken: "r", TokenType: "Bearer", AccessExpiresAt: time.Now().Add(time.Hour)}}
-	router, err := web.NewRouter(nil)
+	router, err := web.NewRouter(nil, []string{"127.0.0.1", "::1"}, 31536000)
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v", err)
 	}
@@ -294,7 +303,7 @@ func TestSessionRequestsUseStrictBoundedJSON(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			router.ServeHTTP(recorder, request)
 			body := decodeBody(t, recorder)
-			if recorder.Code != http.StatusBadRequest || body.Code != session.CodeInvalidInput || test.wantCalls(service) != 0 {
+			if recorder.Code != http.StatusBadRequest || body.Code != errcode.CodeBadRequest || test.wantCalls(service) != 0 {
 				t.Fatalf("response=%d %#v service calls=%d", recorder.Code, body, test.wantCalls(service))
 			}
 		})
@@ -315,7 +324,7 @@ func TestSessionRequestsRejectNonJSONContentType(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			router.ServeHTTP(recorder, request)
 			body := decodeBody(t, recorder)
-			if recorder.Code != http.StatusBadRequest || body.Code != session.CodeInvalidInput || service.loginCalls != 0 {
+			if recorder.Code != http.StatusBadRequest || body.Code != errcode.CodeBadRequest || service.loginCalls != 0 {
 				t.Fatalf("response=%d %#v service calls=%d", recorder.Code, body, service.loginCalls)
 			}
 		})
@@ -327,7 +336,7 @@ func TestSessionRequestsAcceptJSONCharset(t *testing.T) {
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	service := &fakeService{loginResult: &session.LoginResult{AccessToken: "access", RefreshToken: "refresh", TokenType: "Bearer", AccessExpiresAt: now.Add(time.Minute)}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Now: func() time.Time { return now }}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, allowAuth())
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"pt@sast.fun","password":"secret"}`))
 	request.Header.Set("Content-Type", "application/json; charset=utf-8")
 	recorder := httptest.NewRecorder()
@@ -348,7 +357,7 @@ func TestSessionRequestsRejectOversizedJSON(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	responseBody := decodeBody(t, recorder)
-	if recorder.Code != http.StatusBadRequest || responseBody.Code != session.CodeInvalidInput || service.loginCalls != 0 {
+	if recorder.Code != http.StatusBadRequest || responseBody.Code != errcode.CodeBadRequest || service.loginCalls != 0 {
 		t.Fatalf("response=%d %#v service calls=%d", recorder.Code, responseBody, service.loginCalls)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 )
@@ -24,7 +25,7 @@ func mapServiceError(err error) error {
 		status = http.StatusUnauthorized
 	case session.KindUserDeleted:
 		status = http.StatusForbidden
-	case session.KindInvalidClient, session.KindInternal:
+	case session.KindInternal:
 		message = "服务器内部错误"
 		status = http.StatusInternalServerError
 	default:
@@ -35,25 +36,25 @@ func mapServiceError(err error) error {
 	if code == 0 {
 		code = defaultCode(serviceErr.Kind)
 	}
-	return &response.BusinessError{HTTPStatus: status, Code: code, Message: message}
+	return &response.BusinessError{HTTPStatus: status, Code: code, Message: message, RetryAfter: serviceErr.RetryAfter}
 }
 
 func defaultCode(kind session.Kind) int {
 	switch kind {
 	case session.KindInvalidInput:
-		return session.CodeInvalidInput
+		return errcode.CodeBadRequest
 	case session.KindUnknownIdentifier:
-		return session.CodeUnknownIdentifier
+		return errcode.CodeUnknownIdentifier
 	case session.KindPasswordInvalid:
-		return session.CodePasswordInvalid
+		return errcode.CodePasswordInvalid
 	case session.KindInvalidToken:
-		return session.CodeInvalidToken
+		return errcode.CodeAccessTokenInvalid
 	case session.KindUserDeleted:
-		return session.CodeUserDeleted
+		return errcode.CodeAccountDeleted
 	case session.KindRateLimited, session.KindLocked:
-		return session.CodeRateLimited
+		return errcode.CodeRateLimited
 	default:
-		return session.CodeInternal
+		return errcode.CodeInternal
 	}
 }
 

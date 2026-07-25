@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
@@ -71,15 +72,17 @@ func (f *fakeClients) FindActiveByClientID(_ context.Context, clientID string) (
 }
 
 type fakeTokens struct {
-	accessByJTI     map[string]*model.OAuthAccessToken
-	refreshByHash   map[string]*model.OAuthRefreshToken
-	createdAccess   *model.OAuthAccessToken
-	createdRefresh  *model.OAuthRefreshToken
-	rotatedAccess   *model.OAuthAccessToken
-	rotatedRefresh  *model.OAuthRefreshToken
-	revokedFamilies []string
-	rotateErr       error
-	revokeErr       error
+	accessByJTI         map[string]*model.OAuthAccessToken
+	refreshByHash       map[string]*model.OAuthRefreshToken
+	createdAccess       *model.OAuthAccessToken
+	createdRefresh      *model.OAuthRefreshToken
+	rotatedAccess       *model.OAuthAccessToken
+	rotatedRefresh      *model.OAuthRefreshToken
+	revokedFamilies     []string
+	revokeContextErr    error
+	revokeContextHasTTL bool
+	rotateErr           error
+	revokeErr           error
 }
 
 func newFakeTokens() *fakeTokens {
@@ -132,7 +135,9 @@ func (f *fakeTokens) FindAccessTokenByJTI(_ context.Context, jti string) (*model
 	return access, nil
 }
 
-func (f *fakeTokens) RevokeFamily(_ context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error) {
+func (f *fakeTokens) RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error) {
+	f.revokeContextErr = ctx.Err()
+	_, f.revokeContextHasTTL = ctx.Deadline()
 	if f.revokeErr != nil {
 		return nil, f.revokeErr
 	}
@@ -192,6 +197,7 @@ type fakeFailures struct {
 	resets   []string
 	counts   map[string]int
 	err      error
+	resetErr error
 }
 
 func (f *fakeFailures) IsLocked(_ context.Context, key string) (bool, time.Duration, error) {
@@ -217,6 +223,9 @@ func (f *fakeFailures) RecordFailure(_ context.Context, key string) (LoginFailur
 }
 
 func (f *fakeFailures) Reset(_ context.Context, key string) error {
+	if f.resetErr != nil {
+		return f.resetErr
+	}
 	if f.err != nil {
 		return f.err
 	}
@@ -282,21 +291,58 @@ func TestLoginNormalizesIssuesTokensAndAudits(t *testing.T) {
 func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 	service, _, _, _, audit, failures := newTestService(t)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	assertKind(t, err, KindUnknownIdentifier, CodeUnknownIdentifier)
+	assertKind(t, err, KindUnknownIdentifier, errcode.CodeUnknownIdentifier)
 	if len(failures.failures) != 1 || failures.failures[0] != "identifier:missing@sast.fun" {
 		t.Fatalf("failures = %#v, want unknown bucket counted", failures.failures)
 	}
-	if got := lastErrCode(audit); got != CodeUnknownIdentifier {
-		t.Fatalf("audit err code = %d, want %d", got, CodeUnknownIdentifier)
+	if got := lastErrCode(audit); got != errcode.CodeUnknownIdentifier {
+		t.Fatalf("audit err code = %d, want %d", got, errcode.CodeUnknownIdentifier)
 	}
 
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
-	assertKind(t, err, KindPasswordInvalid, CodePasswordInvalid)
+	assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
 	if len(failures.failures) != 2 || failures.failures[1] != "user:42" {
 		t.Fatalf("failures = %#v, want known user bucket", failures.failures)
 	}
-	if got := lastErrCode(audit); got != CodePasswordInvalid {
-		t.Fatalf("audit err code = %d, want %d", got, CodePasswordInvalid)
+	if got := lastErrCode(audit); got != errcode.CodePasswordInvalid {
+		t.Fatalf("audit err code = %d, want %d", got, errcode.CodePasswordInvalid)
+	}
+}
+
+func TestServiceErrorsMatchSentinels(t *testing.T) {
+	service, _, _, tokens, _, _ := newTestService(t)
+
+	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
+	if !errors.Is(err, ErrUnknownIdentifier) {
+		t.Fatalf("unknown identifier: errors.Is(err, ErrUnknownIdentifier) = false, err=%v", err)
+	}
+
+	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
+	if !errors.Is(err, ErrPasswordInvalid) {
+		t.Fatalf("password invalid: errors.Is(err, ErrPasswordInvalid) = false, err=%v", err)
+	}
+
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: ""})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid input: errors.Is(err, ErrInvalidInput) = false, err=%v", err)
+	}
+
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: "unknown"})
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("invalid token: errors.Is(err, ErrInvalidToken) = false, err=%v", err)
+	}
+
+	tokens.revokeErr = nil
+	_, err = service.Profile(context.Background(), ProfileInput{UserID: 999})
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("profile invalid token: errors.Is(err, ErrInvalidToken) = false, err=%v", err)
+	}
+
+	// A contextual error must still match its sentinel via the Is override,
+	// even when it wraps an underlying cause.
+	wrapped := newError(ErrInvalidToken, "custom context", errors.New("db down"))
+	if !errors.Is(wrapped, ErrInvalidToken) {
+		t.Fatalf("wrapped error did not match sentinel, err=%v", wrapped)
 	}
 }
 
@@ -304,7 +350,7 @@ func TestLoginLockAndLimiterShortCircuit(t *testing.T) {
 	service, users, _, _, _, failures := newTestService(t)
 	failures.locked = true
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
-	assertKind(t, err, KindLocked, CodeRateLimited)
+	assertKind(t, err, KindLocked, errcode.CodeRateLimited)
 	if len(users.lookups) != 1 {
 		t.Fatalf("user lookups = %#v, want known-user lookup before user-key lockout", users.lookups)
 	}
@@ -312,7 +358,7 @@ func TestLoginLockAndLimiterShortCircuit(t *testing.T) {
 	limitedService, limitedUsers, _, _, _, _ := newTestService(t)
 	limitedService.Limiter = &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: time.Minute}}
 	_, err = limitedService.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
-	assertKind(t, err, KindRateLimited, CodeRateLimited)
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
 	if len(limitedUsers.lookups) != 0 {
 		t.Fatalf("user lookups = %#v, want endpoint limiter before repository", limitedUsers.lookups)
 	}
@@ -322,7 +368,7 @@ func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
 	service, _, clients, _, _, failures := newTestService(t)
 	service.Users.(*fakeUsers).byLogin["deleted@sast.fun"] = testUser(t, 99, "deleted@sast.fun", model.UserStateDeleted)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "deleted@sast.fun", Password: "secret"})
-	assertKind(t, err, KindUserDeleted, CodeUserDeleted)
+	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
 	if len(failures.failures) != 0 {
 		t.Fatalf("deleted login failures = %#v, want no credential failure count", failures.failures)
 	}
@@ -331,7 +377,7 @@ func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
 	secret := "hash"
 	clients.byClientID["bad"] = &model.OAuthClient{ID: 2, ClientID: "bad", ClientType: model.ClientTypeFirstParty, ClientSecretHash: &secret, IsActive: boolPtr(true), Scopes: model.StringArray(sessionScopes)}
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
-	assertKind(t, err, KindInternal, CodeInternal)
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
 }
 
 func TestLoginOtherMailAuditsMethodWithoutIdentifier(t *testing.T) {
@@ -347,12 +393,47 @@ func TestLoginOtherMailAuditsMethodWithoutIdentifier(t *testing.T) {
 }
 
 func TestLoginAuditFailureCompensatesCreatedFamily(t *testing.T) {
-	service, _, _, tokens, audit, _ := newTestService(t)
+	service, _, _, tokens, audit, failures := newTestService(t)
 	audit.err = errors.New("audit down")
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
-	assertKind(t, err, KindInternal, CodeInternal)
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
 	if tokens.createdAccess == nil || len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != tokens.createdRefresh.FamilyID {
 		t.Fatalf("created=%+v revoked=%#v, want revoke compensation after post-issue audit failure", tokens.createdAccess, tokens.revokedFamilies)
+	}
+	if len(failures.resets) != 1 || failures.resets[0] != "user:42" {
+		t.Fatalf("failure resets = %#v, want reset before success audit", failures.resets)
+	}
+}
+
+func TestLoginResetFailureCompensatesCreatedFamily(t *testing.T) {
+	service, _, _, tokens, audit, failures := newTestService(t)
+	failures.resetErr = errors.New("redis down")
+	_, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+	if tokens.createdAccess == nil || len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != tokens.createdRefresh.FamilyID {
+		t.Fatalf("created=%+v revoked=%#v, want revoke compensation when failure reset fails", tokens.createdAccess, tokens.revokedFamilies)
+	}
+	if len(audit.entries) != 0 {
+		t.Fatalf("audit entries = %#v, want no success audit after reset failure", audit.entries)
+	}
+}
+
+func TestLoginCompensationDetachesRequestCancellation(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	audit.err = errors.New("audit down")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.Login(ctx, LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+	if len(tokens.revokedFamilies) != 1 {
+		t.Fatalf("revoked families = %#v, want compensation after canceled request", tokens.revokedFamilies)
+	}
+	if tokens.revokeContextErr != nil {
+		t.Fatalf("compensation context error = %v, want live context", tokens.revokeContextErr)
+	}
+	if !tokens.revokeContextHasTTL {
+		t.Fatal("compensation context has no deadline")
 	}
 }
 
@@ -385,16 +466,16 @@ func TestRefreshRejectsDeletedExpiredAndReplay(t *testing.T) {
 	}
 	users.byID[42].State = model.UserStateDeleted
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindUserDeleted, CodeUserDeleted)
+	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
 
 	users.byID[42].State = model.UserStateOnSAST
 	tokens.createdRefresh.ClientID = 2
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, CodeInvalidToken)
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 	tokens.createdRefresh.ClientID = 1
 	tokens.rotateErr = repository.ErrTokenReplay
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, CodeInvalidToken)
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 	if len(tokens.revokedFamilies) == 0 {
 		t.Fatalf("expected fake repository to record family revoke on replay")
 	}
@@ -415,7 +496,7 @@ func TestRefreshRevokedTokenRevokesFamilyBeforeOtherPrechecks(t *testing.T) {
 	users.byID[42].State = model.UserStateDeleted
 
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, CodeInvalidToken)
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 	if len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != tokens.createdRefresh.FamilyID {
 		t.Fatalf("revoked families = %#v, want revoked refresh family", tokens.revokedFamilies)
 	}
@@ -433,7 +514,7 @@ func TestRefreshExpiredActiveTokenDoesNotRevokeFamily(t *testing.T) {
 	tokens.createdRefresh.ExpiresAt = service.now().Add(-time.Second)
 
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, CodeInvalidToken)
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 	if len(tokens.revokedFamilies) != 0 {
 		t.Fatalf("revoked families = %#v, want no revoke for active expired token", tokens.revokedFamilies)
 	}
@@ -445,20 +526,20 @@ func TestLoginLockoutBoundaryAndAliasReset(t *testing.T) {
 
 	for attempt := 1; attempt <= 9; attempt++ {
 		_, err := service.Login(context.Background(), LoginInput{Identifier: "alias@sast.fun", Password: "wrong"})
-		assertKind(t, err, KindPasswordInvalid, CodePasswordInvalid)
+		assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
 	}
 	if failures.counts["user:42"] != 9 {
 		t.Fatalf("failure count = %d, want 9", failures.counts["user:42"])
 	}
 
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
-	assertKind(t, err, KindLocked, CodeRateLimited)
+	assertKind(t, err, KindLocked, errcode.CodeRateLimited)
 	if failures.counts["user:42"] != 10 {
 		t.Fatalf("failure count = %d, want 10", failures.counts["user:42"])
 	}
 
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "alias@sast.fun", Password: "wrong"})
-	assertKind(t, err, KindLocked, CodeRateLimited)
+	assertKind(t, err, KindLocked, errcode.CodeRateLimited)
 	if failures.counts["user:42"] != 10 {
 		t.Fatalf("failure count after locked attempt = %d, want 10", failures.counts["user:42"])
 	}
@@ -486,7 +567,7 @@ func TestLogoutStrictOwnershipRevokesAndBlacklists(t *testing.T) {
 		t.Fatalf("VerifyAccessToken returned error: %v", err)
 	}
 	familyID := tokens.createdRefresh.FamilyID
-	result, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, PrincipalExpiresAt: login.AccessExpiresAt, RefreshToken: login.RefreshToken})
+	result, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
 	if err != nil {
 		t.Fatalf("Logout returned error: %v", err)
 	}
@@ -498,8 +579,8 @@ func TestLogoutStrictOwnershipRevokesAndBlacklists(t *testing.T) {
 	}
 
 	tokens.createdRefresh.ClientID = 2
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, PrincipalExpiresAt: login.AccessExpiresAt, RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, CodeInvalidToken)
+	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 }
 
 func TestLogoutRevokeFamilyBeforeBlacklistAndRetry(t *testing.T) {
@@ -507,7 +588,7 @@ func TestLogoutRevokeFamilyBeforeBlacklistAndRetry(t *testing.T) {
 	blacklist := &fakeBlacklist{err: errors.New("redis down")}
 	service.Blacklist = blacklist
 	login, claims := loginForLogout(t, &service)
-	_, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, PrincipalExpiresAt: login.AccessExpiresAt, RefreshToken: login.RefreshToken})
+	_, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
 	if err != nil {
 		t.Fatalf("Logout returned error after Redis failure: %v", err)
 	}
@@ -516,21 +597,16 @@ func TestLogoutRevokeFamilyBeforeBlacklistAndRetry(t *testing.T) {
 	}
 
 	blacklist.err = nil
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, PrincipalExpiresAt: login.AccessExpiresAt, RefreshToken: login.RefreshToken})
-	if err != nil {
-		t.Fatalf("retry Logout returned error: %v", err)
-	}
-	if blacklist.jti != claims.ID {
-		t.Fatalf("blacklist jti = %q, want retry to blacklist revoked-family logout", blacklist.jti)
-	}
+	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 
 	service, _, _, tokens, _, _ = newTestService(t)
 	blacklist = &fakeBlacklist{}
 	service.Blacklist = blacklist
 	tokens.revokeErr = errors.New("db down")
 	login, claims = loginForLogout(t, &service)
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, PrincipalExpiresAt: login.AccessExpiresAt, RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInternal, CodeInternal)
+	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
 	if blacklist.jti != "" {
 		t.Fatalf("blacklist jti = %q, want no blacklist when DB revoke fails", blacklist.jti)
 	}
@@ -542,10 +618,10 @@ func TestLogoutAuditFailureIsFailOpen(t *testing.T) {
 	audit.err = errors.New("audit down")
 
 	result, err := service.Logout(context.Background(), LogoutInput{
-		PrincipalJTI:       claims.ID,
-		PrincipalUserID:    42,
-		PrincipalExpiresAt: login.AccessExpiresAt,
-		RefreshToken:       login.RefreshToken,
+		PrincipalJTI:    claims.ID,
+		PrincipalUserID: 42,
+
+		RefreshToken: login.RefreshToken,
 	})
 	if err != nil {
 		t.Fatalf("Logout returned error after audit failure: %v", err)
@@ -555,33 +631,29 @@ func TestLogoutAuditFailureIsFailOpen(t *testing.T) {
 	}
 }
 
-func TestLogoutAllowsRevokedMetadataButRejectsExpiredMetadata(t *testing.T) {
+func TestLogoutRejectsRevokedMetadataAndExpiredMetadata(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
 	login, claims := loginForLogout(t, &service)
 	now := service.now()
 
 	tokens.createdAccess.RevokedAt = &now
-	_, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, PrincipalExpiresAt: login.AccessExpiresAt, RefreshToken: login.RefreshToken})
-	if err != nil {
-		t.Fatalf("Logout with revoked access metadata returned error: %v", err)
-	}
+	_, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 	tokens.createdAccess.RevokedAt = nil
 
 	tokens.createdAccess.ExpiresAt = now.Add(-time.Second)
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, PrincipalExpiresAt: login.AccessExpiresAt, RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, CodeInvalidToken)
+	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 	tokens.createdAccess.ExpiresAt = login.AccessExpiresAt
 	tokens.createdAccess.RevokedAt = nil
 	tokens.createdRefresh.RevokedAt = &now
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, PrincipalExpiresAt: login.AccessExpiresAt, RefreshToken: login.RefreshToken})
-	if err != nil {
-		t.Fatalf("Logout with revoked refresh metadata returned error: %v", err)
-	}
+	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 	tokens.createdRefresh.RevokedAt = nil
 
 	tokens.createdRefresh.ExpiresAt = now.Add(-time.Second)
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, PrincipalExpiresAt: login.AccessExpiresAt, RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, CodeInvalidToken)
+	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 }
 
 func TestProfileDTOExcludesSecrets(t *testing.T) {

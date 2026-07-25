@@ -15,6 +15,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -84,18 +85,18 @@ func TestAuthenticatorRequireAuth(t *testing.T) {
 		wantHTTP  int
 		wantCode  int
 	}{
-		{name: "missing header", manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: 40100},
-		{name: "not strict bearer", header: "bearer " + validToken, manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: 40100},
-		{name: "expired token", header: "Bearer " + expiredToken, manager: expiredManager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: 40101},
-		{name: "invalid token", header: "Bearer not-a-jwt", manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: 40102},
-		{name: "invalid subject", header: "Bearer " + badSubjectToken, manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: 40102},
-		{name: "blacklisted jti", header: "Bearer " + validToken, manager: manager, blacklist: &fakeBlacklist{blacklisted: true}, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: 40102},
-		{name: "access record absent", header: "Bearer " + validToken, manager: manager, states: &fakeAccessStates{err: repository.ErrNotFound}, wantHTTP: http.StatusUnauthorized, wantCode: 40102},
-		{name: "access record revoked", header: "Bearer " + validToken, manager: manager, states: revokedStates(now), wantHTTP: http.StatusUnauthorized, wantCode: 40102},
-		{name: "access record expired", header: "Bearer " + validToken, manager: manager, states: expiredStates(now), wantHTTP: http.StatusUnauthorized, wantCode: 40102},
-		{name: "user deleted", header: "Bearer " + validToken, manager: manager, states: deletedStates(now), wantHTTP: http.StatusForbidden, wantCode: 40301},
-		{name: "version changed", header: "Bearer " + validToken, manager: manager, states: versionChangedStates(now), wantHTTP: http.StatusUnauthorized, wantCode: 40102},
-		{name: "database error", header: "Bearer " + validToken, manager: manager, states: &fakeAccessStates{err: errors.New("db unavailable")}, wantHTTP: http.StatusInternalServerError, wantCode: 50000},
+		{name: "missing header", manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeUnauthenticated},
+		{name: "not strict bearer", header: "bearer " + validToken, manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeUnauthenticated},
+		{name: "expired token", header: "Bearer " + expiredToken, manager: expiredManager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenExpired},
+		{name: "invalid token", header: "Bearer not-a-jwt", manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
+		{name: "invalid subject", header: "Bearer " + badSubjectToken, manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
+		{name: "blacklisted jti", header: "Bearer " + validToken, manager: manager, blacklist: &fakeBlacklist{blacklisted: true}, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
+		{name: "access record absent", header: "Bearer " + validToken, manager: manager, states: &fakeAccessStates{err: repository.ErrNotFound}, wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
+		{name: "access record revoked", header: "Bearer " + validToken, manager: manager, states: revokedStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
+		{name: "access record expired", header: "Bearer " + validToken, manager: manager, states: expiredStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
+		{name: "user deleted", header: "Bearer " + validToken, manager: manager, states: deletedStates(now), wantHTTP: http.StatusForbidden, wantCode: errcode.CodeAccountDeleted},
+		{name: "version changed", header: "Bearer " + validToken, manager: manager, states: versionChangedStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
+		{name: "database error", header: "Bearer " + validToken, manager: manager, states: &fakeAccessStates{err: errors.New("db unavailable")}, wantHTTP: http.StatusInternalServerError, wantCode: errcode.CodeInternal},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -105,6 +106,28 @@ func TestAuthenticatorRequireAuth(t *testing.T) {
 			}
 		})
 	}
+}
+
+func performAuthRequest(manager *auth.JWTManager, blacklist *fakeBlacklist, states *fakeAccessStates, now time.Time, header string) (*httptest.ResponseRecorder, envelope) {
+	router := gin.New()
+	var blacklistStore JTIBlacklist
+	if blacklist != nil {
+		blacklistStore = blacklist
+	}
+	authenticator := Authenticator{JWT: manager, Blacklist: blacklistStore, Tokens: states, Clock: testClock{value: now}}
+	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) {
+		principal, _ := PrincipalFrom(c)
+		c.JSON(http.StatusOK, envelope{Code: 0, Message: "ok", Data: map[string]any{"user_id": principal.UserID, "jti": principal.JTI}})
+	})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/protected", nil)
+	if header != "" {
+		request.Header.Set("Authorization", header)
+	}
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	var body envelope
+	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+	return recorder, body
 }
 
 func TestAuthenticatorUsesSingleDBAuthStateQuery(t *testing.T) {
@@ -133,7 +156,7 @@ func TestAuthenticatorRejectsBlankJTIWithoutBlacklistLookup(t *testing.T) {
 		}}},
 		Blacklist: blacklist,
 		Tokens:    states,
-		Now:       func() time.Time { return now },
+		Clock:     testClock{value: now},
 	}
 	router := gin.New()
 	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
@@ -144,28 +167,6 @@ func TestAuthenticatorRejectsBlankJTIWithoutBlacklistLookup(t *testing.T) {
 	if recorder.Code != http.StatusUnauthorized || blacklist.calls != 0 || states.calls != 0 {
 		t.Fatalf("status=%d blacklist calls=%d DB calls=%d", recorder.Code, blacklist.calls, states.calls)
 	}
-}
-
-func performAuthRequest(manager *auth.JWTManager, blacklist *fakeBlacklist, states *fakeAccessStates, now time.Time, header string) (*httptest.ResponseRecorder, envelope) {
-	router := gin.New()
-	var blacklistStore JTIBlacklist
-	if blacklist != nil {
-		blacklistStore = blacklist
-	}
-	authenticator := Authenticator{JWT: manager, Blacklist: blacklistStore, Tokens: states, Now: func() time.Time { return now }}
-	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) {
-		principal, _ := PrincipalFrom(c)
-		c.JSON(http.StatusOK, envelope{Code: 0, Message: "ok", Data: map[string]any{"user_id": principal.UserID, "jti": principal.JTI}})
-	})
-	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/protected", nil)
-	if header != "" {
-		request.Header.Set("Authorization", header)
-	}
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
-	var body envelope
-	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
-	return recorder, body
 }
 
 type envelope struct {

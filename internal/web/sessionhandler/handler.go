@@ -7,6 +7,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
@@ -21,7 +23,7 @@ type Service interface {
 
 type Handler struct {
 	Service Service
-	Now     func() time.Time
+	Clock   auth.Clock
 }
 
 type loginRequest struct {
@@ -45,11 +47,8 @@ type tokenResponse struct {
 }
 
 type loginResponse struct {
-	AccessToken  string      `json:"access_token"`
-	RefreshToken string      `json:"refresh_token"`
-	TokenType    string      `json:"token_type"`
-	ExpiresIn    int64       `json:"expires_in"`
-	User         authUserDTO `json:"user"`
+	tokenResponse
+	User authUserDTO `json:"user"`
 }
 
 type logoutResponse struct {
@@ -132,11 +131,13 @@ func (h Handler) Login(c *gin.Context) {
 		return
 	}
 	response.Ok(c, loginResponse{
-		AccessToken:  result.AccessToken,
-		RefreshToken: result.RefreshToken,
-		TokenType:    result.TokenType,
-		ExpiresIn:    expiresIn(h.now(), result.AccessExpiresAt),
-		User:         mapAuthUser(result.Profile),
+		tokenResponse: tokenResponse{
+			AccessToken:  result.AccessToken,
+			RefreshToken: result.RefreshToken,
+			TokenType:    result.TokenType,
+			ExpiresIn:    expiresIn(h.now(), result.AccessExpiresAt),
+		},
+		User: mapAuthUser(result.Profile),
 	})
 }
 
@@ -162,7 +163,7 @@ func (h Handler) Refresh(c *gin.Context) {
 func (h Handler) Logout(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: 50000, Message: "服务器内部错误"})
+		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
 		return
 	}
 	var req logoutRequest
@@ -171,12 +172,11 @@ func (h Handler) Logout(c *gin.Context) {
 		return
 	}
 	if _, err := h.Service.Logout(c.Request.Context(), session.LogoutInput{
-		PrincipalJTI:       principal.JTI,
-		PrincipalUserID:    principal.UserID,
-		PrincipalExpiresAt: principal.ExpiresAt,
-		RefreshToken:       req.RefreshToken,
-		ClientIP:           c.ClientIP(),
-		UserAgent:          c.Request.UserAgent(),
+		PrincipalJTI:    principal.JTI,
+		PrincipalUserID: principal.UserID,
+		RefreshToken:    req.RefreshToken,
+		ClientIP:        c.ClientIP(),
+		UserAgent:       c.Request.UserAgent(),
 	}); err != nil {
 		response.Error(c, mapServiceError(err))
 		return
@@ -187,7 +187,7 @@ func (h Handler) Logout(c *gin.Context) {
 func (h Handler) Profile(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: 50000, Message: "服务器内部错误"})
+		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
 		return
 	}
 	result, err := h.Service.Profile(c.Request.Context(), session.ProfileInput{UserID: principal.UserID})
@@ -199,8 +199,8 @@ func (h Handler) Profile(c *gin.Context) {
 }
 
 func (h Handler) now() time.Time {
-	if h.Now != nil {
-		return h.Now().UTC()
+	if h.Clock != nil {
+		return h.Clock.Now().UTC()
 	}
 	return time.Now().UTC()
 }
@@ -214,5 +214,5 @@ func expiresIn(now, expiry time.Time) int64 {
 }
 
 func badRequest() error {
-	return &response.BusinessError{HTTPStatus: http.StatusBadRequest, Code: session.CodeInvalidInput, Message: "请求参数错误"}
+	return &response.BusinessError{HTTPStatus: http.StatusBadRequest, Code: errcode.CodeBadRequest, Message: "请求参数错误"}
 }

@@ -4,18 +4,14 @@ import (
 	"context"
 	"time"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
 
 const BearerTokenType = "Bearer"
 
-type Clock interface {
-	Now() time.Time
-}
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now() }
+// Clock is an alias for auth.Clock to keep the session package's API stable.
+type Clock = auth.Clock
 
 type LimitResult struct {
 	Allowed    bool
@@ -94,12 +90,11 @@ type RefreshResult struct {
 }
 
 type LogoutInput struct {
-	PrincipalJTI       string
-	PrincipalUserID    int64
-	PrincipalExpiresAt time.Time
-	RefreshToken       string
-	ClientIP           string
-	UserAgent          string
+	PrincipalJTI    string
+	PrincipalUserID int64
+	RefreshToken    string
+	ClientIP        string
+	UserAgent       string
 }
 
 type LogoutResult struct {

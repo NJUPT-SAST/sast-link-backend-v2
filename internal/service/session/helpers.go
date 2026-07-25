@@ -26,7 +26,7 @@ type issuedPair struct {
 
 func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence int, familyID string, requestedScopes []string) (*issuedPair, error) {
 	if user == nil || client == nil || s.JWT == nil || s.RefreshTokens == nil || s.Tokens == nil {
-		return nil, serviceError(KindInternal, CodeInternal, "session dependencies are not configured", nil)
+		return nil, newError(ErrInternal, "session dependencies are not configured", nil)
 	}
 	now := s.now()
 	accessTTL := s.AccessTTL
@@ -39,11 +39,11 @@ func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence
 	}
 	scopes, err := scope.Normalize(requestedScopes)
 	if err != nil {
-		return nil, serviceError(KindInternal, CodeInternal, "normalize token scopes", err)
+		return nil, newError(ErrInternal, "normalize token scopes", err)
 	}
 	scopeClaim, err := scope.Claim(scopes)
 	if err != nil {
-		return nil, serviceError(KindInternal, CodeInternal, "encode session scopes", err)
+		return nil, newError(ErrInternal, "encode session scopes", err)
 	}
 	if familyID == "" {
 		familyID = uuid.NewString()
@@ -60,15 +60,15 @@ func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence
 		NotBefore:    now,
 	})
 	if err != nil {
-		return nil, serviceError(KindInternal, CodeInternal, "sign access token", err)
+		return nil, newError(ErrInternal, "sign access token", err)
 	}
 	refreshToken, err := s.RefreshTokens.NewRefreshToken()
 	if err != nil {
-		return nil, serviceError(KindInternal, CodeInternal, "create refresh token", err)
+		return nil, newError(ErrInternal, "create refresh token", err)
 	}
 	refreshHash, err := s.RefreshTokens.HashRefreshToken(refreshToken)
 	if err != nil {
-		return nil, serviceError(KindInternal, CodeInternal, "hash refresh token", err)
+		return nil, newError(ErrInternal, "hash refresh token", err)
 	}
 	access := &model.OAuthAccessToken{
 		TokenID:   jti,
@@ -102,7 +102,7 @@ func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence
 func (s Service) now() time.Time {
 	clock := s.Clock
 	if clock == nil {
-		clock = systemClock{}
+		clock = auth.SystemClock
 	}
 	return clock.Now().UTC()
 }
@@ -123,6 +123,14 @@ func loginFailureKey(user *model.User, identifier string) string {
 		return "identifier:" + normalizeIdentifier(identifier)
 	}
 	return "user:" + strconv.FormatInt(user.ID, 10)
+}
+
+func loginUserID(user *model.User) *int64 {
+	if user == nil {
+		return nil
+	}
+	id := user.ID
+	return &id
 }
 
 func loginMethod(user *model.User, identifier string) string {

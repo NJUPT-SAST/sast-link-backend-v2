@@ -15,6 +15,11 @@ const (
 	Email = "email"
 )
 
+// InternalSessionScopes is the canonical scope set issued by the internal
+// authentication session (login/refresh). It is the single source of truth
+// shared by cmd/api startup validation and the session service.
+var InternalSessionScopes = []string{OpenID, Profile, Email}
+
 var (
 	// ErrInvalid reports an unsupported, malformed, duplicated, or incomplete scope set.
 	ErrInvalid = errors.New("scope: invalid scope set")
