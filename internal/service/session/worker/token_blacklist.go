@@ -1,5 +1,5 @@
-// Package worker runs background delivery and cleanup tasks.
-package worker
+// Package sessionworker runs background delivery and cleanup tasks for session token revocation.
+package sessionworker
 
 import (
 	"context"

@@ -45,20 +45,22 @@ golangci-lint run ./...
 
 主要目录：
 
-- `cmd/api/`：HTTP API 服务，不执行 migration
+- `cmd/api/`：HTTP API 的 Composition Root，按入口、依赖装配和 server 生命周期拆分，不执行 migration
 - `cmd/migrate/`：唯一 migration runner
 - `migrations/`：embedded versioned SQL migrations
 - `internal/auth/`：密码哈希、JWT/JWKS、opaque Refresh Token、PKCE-S256
 - `internal/scope/`：OAuth/OIDC scope 常量、归一化与校验
+- `internal/errcode/`：跨层共享的业务错误码常量
 - `internal/config/`：环境变量配置加载与校验
 - `internal/db/`：GORM PostgreSQL 连接管理
 - `internal/health/`：健康检查 handler
 - `internal/service/session/`：内部登录、Refresh rotation、登出撤销与资料查询用例
+- `internal/service/session/worker/`：token blacklist Outbox 的 Redis 投递与重试 worker
+- `internal/adapter/redis/session/`：将 Redis 限流、登录失败计数和 JTI blacklist 适配到 Session ports
 - `internal/web/`：Gin router、JWT middleware、认证 handlers 与基础响应设施
 - `internal/redis/`：一次性认证状态、JTI blacklist、登录失败计数与 fixed-window limiter
 - `internal/model/`：GORM persistence entities 与 PostgreSQL 类型
 - `internal/repository/`：user/token/audit repositories 与 token-family rotation/revocation
-- `internal/worker/`：token blacklist Outbox 的 Redis 投递与重试 worker
 - `internal/migration/`：migration runner 与 V001 baseline guard
 - `internal/testutil/`：PostgreSQL 16 与 Redis 8 Testcontainers 测试基础设施
 
