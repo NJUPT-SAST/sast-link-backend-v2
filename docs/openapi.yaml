@@ -3162,6 +3162,15 @@ components:
 
     TooManyRequests:
       description: 频率限制（429xx）
+      headers:
+        Retry-After:
+          description: >-
+            建议等待的整数秒，由剩余限流窗口或账号锁定剩余时间向上取整（最小 1）。剩余时间无法确定时不返回该头。
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            example: 900
       content:
         application/json:
           schema:
