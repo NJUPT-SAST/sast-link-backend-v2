@@ -16,7 +16,7 @@ func TestSecurityHeaders(t *testing.T) {
 		header string
 		want   string
 	}{
-		{"Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"},
+		{"Strict-Transport-Security", "max-age=31536000; includeSubDomains"},
 		{"X-Content-Type-Options", "nosniff"},
 		{"X-Frame-Options", "DENY"},
 		{"Content-Security-Policy", "default-src 'self'"},
@@ -25,7 +25,7 @@ func TestSecurityHeaders(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.header, func(t *testing.T) {
 			router := gin.New()
-			router.Use(SecurityHeaders())
+			router.Use(SecurityHeaders(31536000))
 			router.GET("/test", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 
 			request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/test", nil)
@@ -42,7 +42,7 @@ func TestSecurityHeaders(t *testing.T) {
 func TestSecurityHeadersPassesOPTIONSDownstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(SecurityHeaders())
+	router.Use(SecurityHeaders(31536000))
 	router.OPTIONS("/test", func(c *gin.Context) { c.Status(http.StatusAccepted) })
 
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/test", nil)

@@ -34,8 +34,6 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/worker"
 )
 
-var internalSessionScopes = []string{scope.OpenID, scope.Profile, scope.Email}
-
 const serverShutdownTimeout = 10 * time.Second
 
 func main() {
@@ -78,7 +76,7 @@ func run() error {
 		return err
 	}
 
-	router, err := web.NewRouter(cfg.CORSAllowedOrigins)
+	router, err := web.NewRouter(cfg.CORSAllowedOrigins, cfg.TrustedProxies, cfg.HSTSMaxAge)
 	if err != nil {
 		return fmt.Errorf("create router: %w", err)
 	}
@@ -261,8 +259,8 @@ func validateInternalClientModel(client *model.OAuthClient) error {
 	if client.ClientType != model.ClientTypeFirstParty || client.ClientSecretHash != nil {
 		return fmt.Errorf("validate internal OAuth client: client must be first-party public")
 	}
-	if ok, err := scope.Equal([]string(client.Scopes), internalSessionScopes); err != nil || !ok {
-		return fmt.Errorf("validate internal OAuth client: scopes must be canonical %q", internalSessionScopes)
+	if ok, err := scope.Equal([]string(client.Scopes), scope.InternalSessionScopes); err != nil || !ok {
+		return fmt.Errorf("validate internal OAuth client: scopes must be canonical %q", scope.InternalSessionScopes)
 	}
 	return nil
 }

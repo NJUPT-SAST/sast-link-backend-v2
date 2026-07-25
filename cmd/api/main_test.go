@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 func TestValidateInternalClientModel(t *testing.T) {
@@ -111,7 +112,7 @@ func TestAssembleSessionRuntimeWiresServiceAndMiddleware(t *testing.T) {
 		t.Fatalf("generate RSA key: %v", err)
 	}
 	_ = key
-	if len(internalSessionScopes) != 3 {
-		t.Fatalf("internalSessionScopes = %v, want 3 scopes", internalSessionScopes)
+	if len(scope.InternalSessionScopes) != 3 {
+		t.Fatalf("InternalSessionScopes = %v, want 3 scopes", scope.InternalSessionScopes)
 	}
 }

@@ -236,6 +236,57 @@ func TestValidateAPIAuthAllowsOneSecondRateWindow(t *testing.T) {
 	}
 }
 
+func TestValidateAPIAuthAcceptsValidTrustedProxies(t *testing.T) {
+	cases := []struct {
+		name   string
+		values string
+	}{
+		{name: "loopback IPs", values: "127.0.0.1,::1"},
+		{name: "CIDR ranges", values: "10.0.0.0/8,172.16.0.0/12,::1/128"},
+		{name: "mixed IP and CIDR", values: "127.0.0.1,10.0.0.0/8"},
+		{name: "single IPv4", values: "203.0.113.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("TRUSTED_PROXIES", tc.values)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err != nil {
+				t.Fatalf("ValidateAPIAuth() error = %v, want nil for %q", err, tc.values)
+			}
+		})
+	}
+}
+
+func TestValidateAPIAuthRejectsInvalidTrustedProxies(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{name: "not an IP or CIDR", value: "not-a-proxy"},
+		{name: "hostname", value: "proxy.example.com"},
+		{name: "garbled CIDR", value: "10.0.0.0/33"},
+		{name: "port suffix", value: "127.0.0.1:8080"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("TRUSTED_PROXIES", "127.0.0.1,"+tc.value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), "TRUSTED_PROXIES") {
+				t.Fatalf("ValidateAPIAuth() error = %v, want TRUSTED_PROXIES validation for %q", err, tc.value)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsPreviousKeyWithoutPreviousKID(t *testing.T) {
 	setConfigEnv(t, "user", "pass", "db")
 	t.Setenv("JWT_PREVIOUS_KID", "")

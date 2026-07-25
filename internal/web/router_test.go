@@ -11,7 +11,7 @@ import (
 
 func TestNewRouterHandlesCORSPreflightAfterSecurityHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	router, err := NewRouter([]string{"https://link.sast.fun"})
+	router, err := NewRouter([]string{"https://link.sast.fun"}, []string{"127.0.0.1", "::1"}, 31536000)
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v", err)
 	}
@@ -38,7 +38,7 @@ func TestNewRouterHandlesCORSPreflightAfterSecurityHeaders(t *testing.T) {
 
 func TestNewRouterDoesNotAllowDisallowedPreflightOrigin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	router, err := NewRouter([]string{"https://link.sast.fun"})
+	router, err := NewRouter([]string{"https://link.sast.fun"}, []string{"127.0.0.1", "::1"}, 31536000)
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v", err)
 	}
@@ -59,7 +59,7 @@ func TestNewRouterDoesNotAllowDisallowedPreflightOrigin(t *testing.T) {
 
 func TestNewRouterTrustsOnlyLoopbackProxies(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	router, err := NewRouter(nil)
+	router, err := NewRouter(nil, []string{"127.0.0.1", "::1"}, 31536000)
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v", err)
 	}

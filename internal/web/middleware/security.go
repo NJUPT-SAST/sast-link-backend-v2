@@ -2,6 +2,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -9,10 +10,11 @@ import (
 )
 
 // SecurityHeaders applies standard security headers per PRD §7.2.
-func SecurityHeaders() gin.HandlerFunc {
+func SecurityHeaders(hstsMaxAge int) gin.HandlerFunc {
+	hstsValue := fmt.Sprintf("max-age=%d; includeSubDomains", hstsMaxAge)
 	return func(c *gin.Context) {
 		header := c.Writer.Header()
-		header.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+		header.Set("Strict-Transport-Security", hstsValue)
 		header.Set("X-Content-Type-Options", "nosniff")
 		header.Set("X-Frame-Options", "DENY")
 		header.Set("Content-Security-Policy", "default-src 'self'")
@@ -37,6 +39,7 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 			return
 		}
 		origin := strings.TrimSpace(c.Request.Header.Get("Origin"))
+		c.Header("Vary", "Origin")
 		if _, ok := allowMap[origin]; !ok {
 			if c.Request.Method == http.MethodOptions && origin != "" {
 				c.AbortWithStatus(http.StatusForbidden)
@@ -50,7 +53,6 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key")
 		c.Header("Access-Control-Expose-Headers", "Authorization")
 		c.Header("Access-Control-Max-Age", "86400")
-		c.Header("Vary", "Origin")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return

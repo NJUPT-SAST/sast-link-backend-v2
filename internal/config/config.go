@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -42,6 +43,8 @@ type Config struct {
 
 	InternalOAuthClientID string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
 	CORSAllowedOrigins    []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
+	TrustedProxies        []string      `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
+	HSTSMaxAge            int           `env:"HSTS_MAX_AGE" envDefault:"31536000"`
 	RateLimitLoginRPM     int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"5"`
 	RateLimitLoginWindow  time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
 	LoginFailureLimit     int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
@@ -89,6 +92,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("JWT_REFRESH_TOKEN_EXPIRY must be positive")
 	case strings.TrimSpace(c.InternalOAuthClientID) == "":
 		return fmt.Errorf("INTERNAL_OAUTH_CLIENT_ID is required")
+	case c.HSTSMaxAge <= 0:
+		return fmt.Errorf("HSTS_MAX_AGE must be positive")
 	case c.RateLimitLoginRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_LOGIN_RPM must be positive")
 	case c.RateLimitLoginWindow < time.Second:
@@ -97,6 +102,29 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
 	case c.LoginFailureWindow <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_WINDOW must be positive")
+	}
+	if err := validateTrustedProxies(c.TrustedProxies); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateTrustedProxies ensures every entry is a valid IP or CIDR. Gin's
+// SetTrustedProxies would reject these at startup too, but failing early in
+// config validation gives a clearer error and keeps startup fail-fast.
+func validateTrustedProxies(proxies []string) error {
+	for _, raw := range proxies {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		if net.ParseIP(entry) != nil {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(entry); err == nil {
+			continue
+		}
+		return fmt.Errorf("TRUSTED_PROXIES entry %q is not a valid IP or CIDR", entry)
 	}
 	return nil
 }
