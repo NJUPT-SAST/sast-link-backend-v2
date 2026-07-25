@@ -55,7 +55,7 @@ golangci-lint run ./...
 - `internal/health/`：健康检查 handler
 - `internal/service/session/`：内部登录、Refresh rotation、登出撤销与资料查询用例
 - `internal/web/`：Gin router、JWT middleware、认证 handlers 与基础响应设施
-- `internal/redis/`：一次性认证状态、JTI blacklist、token version cache、登录失败计数与 fixed-window limiter
+- `internal/redis/`：一次性认证状态、JTI blacklist、登录失败计数与 fixed-window limiter
 - `internal/model/`：GORM persistence entities 与 PostgreSQL 类型
 - `internal/repository/`：user/token/audit repositories 与 token-family rotation/revocation
 - `internal/worker/`：token blacklist Outbox 的 Redis 投递与重试 worker

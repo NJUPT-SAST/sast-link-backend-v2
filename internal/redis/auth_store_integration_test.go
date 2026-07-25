@@ -42,9 +42,6 @@ func TestKeys(t *testing.T) {
 	if got, want := keys.JTIBlacklist("jti"), "sast-link:test:token:blacklist:jti"; got != want {
 		t.Fatalf("JTIBlacklist key = %q, want %q", got, want)
 	}
-	if got, want := keys.TokenVersion("u1"), "sast-link:test:token:version:u1"; got != want {
-		t.Fatalf("TokenVersion key = %q, want %q", got, want)
-	}
 	if got, want := keys.LoginFailure("user:42"), "sast-link:test:auth:login_failure:user%3A42"; got != want {
 		t.Fatalf("LoginFailure key = %q, want %q", got, want)
 	}
@@ -129,7 +126,7 @@ func TestStoreOneTimeConcurrentGetDel(t *testing.T) {
 	}
 }
 
-func TestJTIAndTokenVersion(t *testing.T) {
+func TestJTIBlacklist(t *testing.T) {
 	client := testutil.StartRedis(t)
 	ctx := context.Background()
 	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
@@ -147,14 +144,6 @@ func TestJTIAndTokenVersion(t *testing.T) {
 	blacklisted, err = store.IsJTIBlacklisted(ctx, "jti-1")
 	if err != nil || !blacklisted {
 		t.Fatalf("IsJTIBlacklisted = %v, %v; want true, nil", blacklisted, err)
-	}
-	versionErr := store.SetTokenVersion(ctx, "user-1", 9, time.Minute)
-	if versionErr != nil {
-		t.Fatalf("SetTokenVersion returned error: %v", versionErr)
-	}
-	version, ok, err := store.GetTokenVersion(ctx, "user-1")
-	if err != nil || !ok || version != 9 {
-		t.Fatalf("GetTokenVersion = %d, %v, %v; want 9, true, nil", version, ok, err)
 	}
 }
 

@@ -96,11 +96,6 @@ func (k Keys) JTIBlacklist(jti string) string {
 	return k.join("token", "blacklist", dynamicKeySegment(jti))
 }
 
-// TokenVersion returns a token-version cache key.
-func (k Keys) TokenVersion(userID string) string {
-	return k.join("token", "version", dynamicKeySegment(userID))
-}
-
 // RateLimit returns a fixed-window rate-limiter key.
 func (k Keys) RateLimit(scope, id string) string {
 	return k.join("ratelimit", dynamicKeySegment(id), dynamicKeySegment(scope))
@@ -178,32 +173,6 @@ func (s Store) IsJTIBlacklisted(ctx context.Context, jti string) (bool, error) {
 		return false, fmt.Errorf("get jti blacklist: %w", err)
 	}
 	return true, nil
-}
-
-// SetTokenVersion caches a user's token_version.
-func (s Store) SetTokenVersion(ctx context.Context, userID string, version int, ttl time.Duration) error {
-	if s.Client == nil || userID == "" || version < 0 || ttl <= 0 {
-		return fmt.Errorf("set token version: %w", ErrInvalidArgument)
-	}
-	if err := s.Client.Set(ctx, s.Keys.TokenVersion(userID), version, ttl).Err(); err != nil {
-		return fmt.Errorf("set token version: %w", err)
-	}
-	return nil
-}
-
-// GetTokenVersion reads a cached token_version.
-func (s Store) GetTokenVersion(ctx context.Context, userID string) (int, bool, error) {
-	if s.Client == nil || userID == "" {
-		return 0, false, fmt.Errorf("get token version: %w", ErrInvalidArgument)
-	}
-	version, err := s.Client.Get(ctx, s.Keys.TokenVersion(userID)).Int()
-	if errors.Is(err, goredis.Nil) {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, fmt.Errorf("get token version: %w", err)
-	}
-	return version, true, nil
 }
 
 // LoginFailureState is a fixed-window password-login failure counter snapshot.
