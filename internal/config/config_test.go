@@ -1,9 +1,12 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 )
 
 func setConfigEnv(t *testing.T, dbUser, dbPassword, dbName string) {
@@ -258,6 +261,68 @@ func TestValidateAPIAuthAcceptsValidTrustedProxies(t *testing.T) {
 				t.Fatalf("ValidateAPIAuth() error = %v, want nil for %q", err, tc.values)
 			}
 		})
+	}
+}
+
+func TestValidateAPIAuthNormalizesTrustedProxies(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{name: "spaces after separator", value: "127.0.0.1, ::1", want: []string{"127.0.0.1", "::1"}},
+		{name: "empty entries", value: "127.0.0.1,,::1", want: []string{"127.0.0.1", "::1"}},
+		{name: "trailing separator", value: "127.0.0.1,", want: []string{"127.0.0.1"}},
+		{name: "padded CIDR", value: " 10.0.0.0/8 ", want: []string{"10.0.0.0/8"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("TRUSTED_PROXIES", tc.value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if validateErr := cfg.ValidateAPIAuth(); validateErr != nil {
+				t.Fatalf("ValidateAPIAuth() error = %v, want nil for %q", validateErr, tc.value)
+			}
+			if !slices.Equal(cfg.TrustedProxies, tc.want) {
+				t.Fatalf("TrustedProxies = %#v, want %#v", cfg.TrustedProxies, tc.want)
+			}
+			// Gin must accept exactly what validation approved.
+			if _, routerErr := web.NewRouter(nil, cfg.TrustedProxies, cfg.HSTSMaxAge); routerErr != nil {
+				t.Fatalf("NewRouter() error = %v, want nil for normalized %#v", routerErr, cfg.TrustedProxies)
+			}
+		})
+	}
+}
+
+func TestValidateAPIAuthRejectsWeakHSTSMaxAge(t *testing.T) {
+	for _, value := range []string{"0", "-1", "1", "86400", "31535999"} {
+		t.Run(value, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("HSTS_MAX_AGE", value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), "HSTS_MAX_AGE") {
+				t.Fatalf("ValidateAPIAuth() error = %v, want HSTS_MAX_AGE validation for %q", err, value)
+			}
+		})
+	}
+}
+
+func TestValidateAPIAuthAcceptsHSTSMaxAgeAtMinimum(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("HSTS_MAX_AGE", "31536000")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if validateErr := cfg.ValidateAPIAuth(); validateErr != nil {
+		t.Fatalf("ValidateAPIAuth() error = %v, want nil", validateErr)
 	}
 }
 

@@ -10,7 +10,12 @@ import (
 	"github.com/caarlos0/env/v11"
 )
 
-const minimumRefreshHMACSecretLen = 32
+const (
+	minimumRefreshHMACSecretLen = 32
+	// minimumHSTSMaxAge is one year in seconds, matching the PRD §7.2 default.
+	// Smaller values leave the header present but effectively unenforced.
+	minimumHSTSMaxAge = 31536000
+)
 
 // Config holds all runtime configuration for the service.
 type Config struct {
@@ -92,8 +97,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("JWT_REFRESH_TOKEN_EXPIRY must be positive")
 	case strings.TrimSpace(c.InternalOAuthClientID) == "":
 		return fmt.Errorf("INTERNAL_OAUTH_CLIENT_ID is required")
-	case c.HSTSMaxAge <= 0:
-		return fmt.Errorf("HSTS_MAX_AGE must be positive")
+	case c.HSTSMaxAge < minimumHSTSMaxAge:
+		return fmt.Errorf("HSTS_MAX_AGE must be at least %d seconds", minimumHSTSMaxAge)
 	case c.RateLimitLoginRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_LOGIN_RPM must be positive")
 	case c.RateLimitLoginWindow < time.Second:
@@ -103,30 +108,34 @@ func (c *Config) ValidateAPIAuth() error {
 	case c.LoginFailureWindow <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_WINDOW must be positive")
 	}
-	if err := validateTrustedProxies(c.TrustedProxies); err != nil {
+	normalizedProxies, err := normalizeTrustedProxies(c.TrustedProxies)
+	if err != nil {
 		return err
 	}
+	c.TrustedProxies = normalizedProxies
 	return nil
 }
 
-// validateTrustedProxies ensures every entry is a valid IP or CIDR. Gin's
-// SetTrustedProxies would reject these at startup too, but failing early in
-// config validation gives a clearer error and keeps startup fail-fast.
-func validateTrustedProxies(proxies []string) error {
+// normalizeTrustedProxies trims surrounding whitespace, drops empty entries and
+// ensures every remaining entry is a valid IP or CIDR. The normalized slice must
+// replace Config.TrustedProxies: envSeparator splitting keeps whitespace, so
+// "127.0.0.1, ::1" yields " ::1", which Gin's SetTrustedProxies rejects. Failing
+// (or normalizing) here keeps startup fail-fast with a clearer error.
+func normalizeTrustedProxies(proxies []string) ([]string, error) {
+	normalized := make([]string, 0, len(proxies))
 	for _, raw := range proxies {
 		entry := strings.TrimSpace(raw)
 		if entry == "" {
 			continue
 		}
-		if net.ParseIP(entry) != nil {
-			continue
+		if net.ParseIP(entry) == nil {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return nil, fmt.Errorf("TRUSTED_PROXIES entry %q is not a valid IP or CIDR", entry)
+			}
 		}
-		if _, _, err := net.ParseCIDR(entry); err == nil {
-			continue
-		}
-		return fmt.Errorf("TRUSTED_PROXIES entry %q is not a valid IP or CIDR", entry)
+		normalized = append(normalized, entry)
 	}
-	return nil
+	return normalized, nil
 }
 
 // PostgresDSN returns the PostgreSQL connection string used by GORM.
