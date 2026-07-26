@@ -508,20 +508,16 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	if err != nil {
 		return nil, newError(ErrInternal, "hash password", err)
 	}
-	if err := s.Users.UpdatePasswordAndBumpTokenVersion(ctx, user.ID, passwordHash); err != nil {
-		return nil, newError(ErrInternal, "update password", err)
-	}
 	now := s.now()
-	entries, revokeErr := s.Tokens.RevokeAllByUser(ctx, user.ID, now)
-	if revokeErr != nil {
-		slog.Error("revoke tokens after password reset", "user_id", user.ID, "error", revokeErr)
+	// The password rewrite and the session revocation share one transaction:
+	// reporting success while live refresh tokens survive would contradict the
+	// "请重新登录" contract, so a revocation failure must fail the whole call.
+	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now)
+	if err != nil {
+		return nil, newError(ErrInternal, "reset password and revoke sessions", err)
 	}
 	s.deliverBlacklist(ctx, entries, now)
-	if s.Failures != nil {
-		if resetErr := s.Failures.Reset(ctx, "identifier:"+email); resetErr != nil {
-			slog.Error("reset login failures after password reset", "email", email, "error", resetErr)
-		}
-	}
+	s.clearLoginFailures(ctx, user, email)
 	if auditErr := s.audit(ctx, &user.ID, "reset_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit reset password", "user_id", user.ID, "error", auditErr)
 	}
@@ -561,15 +557,13 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	if err != nil {
 		return nil, newError(ErrInternal, "hash password", err)
 	}
-	if err := s.Users.UpdatePasswordAndBumpTokenVersion(ctx, user.ID, passwordHash); err != nil {
-		return nil, newError(ErrInternal, "update password", err)
-	}
 	now := s.now()
-	entries, revokeErr := s.Tokens.RevokeAllByUser(ctx, user.ID, now)
-	if revokeErr != nil {
-		slog.Error("revoke tokens after password change", "user_id", user.ID, "error", revokeErr)
+	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now)
+	if err != nil {
+		return nil, newError(ErrInternal, "change password and revoke sessions", err)
 	}
 	s.deliverBlacklist(ctx, entries, now)
+	s.clearLoginFailures(ctx, user, user.LoginEmail)
 	if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, nil); auditErr != nil {
 		slog.Error("audit change password", "user_id", user.ID, "error", auditErr)
 	}
@@ -755,6 +749,27 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 			// The same-transaction outbox row guarantees a worker retry, so a
 			// failed synchronous delivery is expected degradation, not an error.
 			slog.WarnContext(ctx, "deliver token blacklist entry, outbox worker will retry", "token_id", entry.TokenID, "error", err)
+		}
+	}
+}
+
+// clearLoginFailures releases the lockout after a successful password reset or
+// change. Login records failures under "user:<id>" once the account is known and
+// under "identifier:<email>" before that, so both keys must be cleared or a
+// locked-out user stays locked for the rest of the window — defeating the very
+// recovery path they just completed. Failures are logged, not returned: the
+// password is already changed, and a stale counter expires on its own.
+func (s Service) clearLoginFailures(ctx context.Context, user *model.User, email string) {
+	if s.Failures == nil || user == nil {
+		return
+	}
+	keys := []string{loginFailureKey(user, email)}
+	if identifier := normalizeIdentifier(email); identifier != "" {
+		keys = append(keys, "identifier:"+identifier)
+	}
+	for _, key := range keys {
+		if err := s.Failures.Reset(ctx, key); err != nil {
+			slog.WarnContext(ctx, "reset login failures after password update", "key", key, "error", err)
 		}
 	}
 }

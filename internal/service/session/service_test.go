@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,11 @@ type fakeUsers struct {
 	byID    map[int64]*model.User
 	err     error
 	lookups []string
+	// tokens lets the fake mirror the repository's atomic
+	// password-update-plus-revocation transaction.
+	tokens            *fakeTokens
+	updatePasswordErr error
+	passwordUpdates   []int64
 }
 
 func (f *fakeUsers) FindByLoginIdentifier(_ context.Context, identifier string) (*model.User, error) {
@@ -110,14 +116,28 @@ func (f *fakeUsers) CreateWithProfile(_ context.Context, user *model.User, _ *mo
 	return nil
 }
 
-func (f *fakeUsers) UpdatePasswordAndBumpTokenVersion(_ context.Context, userID int64, passwordHash string) error {
+func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
+	ctx context.Context,
+	userID int64,
+	passwordHash string,
+	revokedAt time.Time,
+) ([]model.BlacklistEntry, error) {
+	if f.updatePasswordErr != nil {
+		return nil, f.updatePasswordErr
+	}
 	user, ok := f.byID[userID]
 	if !ok {
-		return repository.ErrNotFound
+		return nil, repository.ErrNotFound
 	}
 	user.PasswordHash = passwordHash
 	user.TokenVersion++
-	return nil
+	f.passwordUpdates = append(f.passwordUpdates, userID)
+	if f.tokens == nil {
+		return nil, nil
+	}
+	// Mirror the repository: the real implementation revokes sessions in the
+	// same transaction that rewrites the password.
+	return f.tokens.RevokeAllByUser(ctx, userID, revokedAt)
 }
 
 type fakeClients struct {
@@ -1355,6 +1375,74 @@ func TestResetPasswordShortPasswordDoesNotConsumeCode(t *testing.T) {
 	}
 }
 
+// Login counts failures under "user:<id>" once the account is known, so a reset
+// that only cleared "identifier:<email>" left a locked-out user locked for the
+// rest of the window — defeating the recovery path they just completed.
+func TestResetPasswordClearsUserScopedLockout(t *testing.T) {
+	service := newRegisterService(t)
+	failures := &fakeFailures{counts: map[string]int{}, retry: time.Minute}
+	service.Failures = failures
+	for range 10 {
+		if _, err := failures.RecordFailure(context.Background(), "user:42"); err != nil {
+			t.Fatalf("RecordFailure returned error: %v", err)
+		}
+	}
+	if locked, _, _ := failures.IsLocked(context.Background(), "user:42"); !locked {
+		t.Fatal("precondition: account should be locked after 10 failures")
+	}
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeResetPassword), "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+
+	if _, err := service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "brand-new-password"}); err != nil {
+		t.Fatalf("ResetPassword returned error: %v", err)
+	}
+	if locked, _, _ := failures.IsLocked(context.Background(), "user:42"); locked {
+		t.Fatalf("account still locked after reset; cleared keys = %#v", failures.resets)
+	}
+	if !slices.Contains(failures.resets, "identifier:user@njupt.edu.cn") {
+		t.Errorf("reset keys = %#v, want the identifier-scoped counter cleared too", failures.resets)
+	}
+}
+
+func TestChangePasswordClearsUserScopedLockout(t *testing.T) {
+	service := newRegisterService(t)
+	failures := &fakeFailures{counts: map[string]int{}, retry: time.Minute}
+	service.Failures = failures
+	for range 10 {
+		if _, err := failures.RecordFailure(context.Background(), "user:42"); err != nil {
+			t.Fatalf("RecordFailure returned error: %v", err)
+		}
+	}
+
+	if _, err := service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "secret", NewPassword: "brand-new-password"}); err != nil {
+		t.Fatalf("ChangePassword returned error: %v", err)
+	}
+	if locked, _, _ := failures.IsLocked(context.Background(), "user:42"); locked {
+		t.Fatalf("account still locked after change; cleared keys = %#v", failures.resets)
+	}
+}
+
+// A swallowed revocation failure reported success while live refresh tokens
+// survived: token_version alone does not stop them, because the refresh flow
+// never compares it.
+func TestPasswordUpdateFailsWhenSessionRevocationFails(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	users.updatePasswordErr = errors.New("revoke sessions failed")
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeResetPassword), "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+
+	_, err := service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "secret", NewPassword: "brand-new-password"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+
+	_, err = service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "brand-new-password"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+}
+
 func newRegisterService(t *testing.T) Service {
 	t.Helper()
 	clock := fixedClock{value: time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)}
@@ -1368,13 +1456,18 @@ func newRegisterService(t *testing.T) Service {
 		t.Fatalf("hash test password: %v", err)
 	}
 	user := testUserWithHash(42, "user@njupt.edu.cn", model.UserStateOnSAST, hash)
-	users := &fakeUsers{byLogin: map[string]*model.User{user.LoginEmail: user}, byID: map[int64]*model.User{user.ID: user}}
+	tokens := newFakeTokens()
+	users := &fakeUsers{
+		byLogin: map[string]*model.User{user.LoginEmail: user},
+		byID:    map[int64]*model.User{user.ID: user},
+		tokens:  tokens,
+	}
 	client := &model.OAuthClient{ID: 1, ClientID: "builtin", ClientType: model.ClientTypeFirstParty, IsActive: boolPtr(true), Scopes: model.StringArray(sessionScopes)}
 	clients := &fakeClients{byClientID: map[string]*model.OAuthClient{client.ClientID: client}}
 	return Service{
 		Users:            users,
 		Clients:          clients,
-		Tokens:           newFakeTokens(),
+		Tokens:           tokens,
 		Audit:            &fakeAudit{},
 		Identities:       &fakeIdentities{},
 		Limiter:          &fakeLimiter{},
@@ -1405,10 +1498,14 @@ func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeToken
 		t.Fatalf("hash test password: %v", err)
 	}
 	user := testUserWithHash(42, "user@njupt.edu.cn", model.UserStateOnSAST, hash)
-	users := &fakeUsers{byLogin: map[string]*model.User{user.LoginEmail: user, "alias@sast.fun": user}, byID: map[int64]*model.User{user.ID: user}}
 	client := &model.OAuthClient{ID: 1, ClientID: "builtin", ClientType: model.ClientTypeFirstParty, IsActive: boolPtr(true), Scopes: model.StringArray(sessionScopes)}
 	clients := &fakeClients{byClientID: map[string]*model.OAuthClient{client.ClientID: client}}
 	tokens := newFakeTokens()
+	users := &fakeUsers{
+		byLogin: map[string]*model.User{user.LoginEmail: user, "alias@sast.fun": user},
+		byID:    map[int64]*model.User{user.ID: user},
+		tokens:  tokens,
+	}
 	audit := &fakeAudit{}
 	failures := &fakeFailures{}
 	return Service{

@@ -46,7 +46,10 @@ type UserRepository interface {
 	ExistsByLoginEmail(ctx context.Context, email string) (bool, error)
 	ExistsByStudentID(ctx context.Context, studentID string) (bool, error)
 	CreateWithProfile(ctx context.Context, user *model.User, profile *model.Profile) error
-	UpdatePasswordAndBumpTokenVersion(ctx context.Context, userID int64, passwordHash string) error
+	// UpdatePasswordAndRevokeSessions rewrites the password, bumps token_version
+	// and revokes every live token of the user atomically, returning the
+	// access-token entries still pending blacklist delivery.
+	UpdatePasswordAndRevokeSessions(ctx context.Context, userID int64, passwordHash string, revokedAt time.Time) ([]model.BlacklistEntry, error)
 }
 
 type ClientRepository interface {
@@ -59,7 +62,6 @@ type TokenRepository interface {
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
-	RevokeAllByUser(ctx context.Context, userID int64, revokedAt time.Time) ([]model.BlacklistEntry, error)
 }
 
 type AuditRepository interface {

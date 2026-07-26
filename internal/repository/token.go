@@ -418,7 +418,8 @@ func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt 
 
 // RevokeAllByUser revokes every non-revoked access and refresh token owned by
 // userID and enqueues the still-live access-token JTIs for blacklist delivery.
-// Used by password change/reset and role change to invalidate all sessions.
+// Password change/reset must instead use UserRepository.UpdatePasswordAndRevokeSessions,
+// which performs the same revocation in the transaction that rewrites the password.
 func (r *TokenRepository) RevokeAllByUser(
 	ctx context.Context,
 	userID int64,
@@ -426,43 +427,61 @@ func (r *TokenRepository) RevokeAllByUser(
 ) ([]model.BlacklistEntry, error) {
 	var entries []model.BlacklistEntry
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		if err := transaction.Model(&model.OAuthAccessToken{}).
-			Select("token_id", "expires_at").
-			Where("user_id = ? AND expires_at > ? AND revoked_at IS NULL", userID, revokedAt).
-			Find(&entries).Error; err != nil {
-			return fmt.Errorf("select live access tokens by user: %w", err)
+		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
+		if revokeErr != nil {
+			return revokeErr
 		}
-		if err := transaction.Model(&model.OAuthAccessToken{}).
-			Where("user_id = ? AND revoked_at IS NULL", userID).
-			Update("revoked_at", revokedAt).Error; err != nil {
-			return fmt.Errorf("revoke access tokens by user: %w", err)
-		}
-		if err := transaction.Model(&model.OAuthRefreshToken{}).
-			Where("user_id = ? AND revoked_at IS NULL", userID).
-			Update("revoked_at", revokedAt).Error; err != nil {
-			return fmt.Errorf("revoke refresh tokens by user: %w", err)
-		}
-		if len(entries) == 0 {
-			return nil
-		}
-		rows := make([]model.TokenBlacklistOutbox, 0, len(entries))
-		for _, entry := range entries {
-			rows = append(rows, model.TokenBlacklistOutbox{
-				TokenID:        entry.TokenID,
-				ExpiresAt:      entry.ExpiresAt,
-				NextDeliveryAt: revokedAt,
-			})
-		}
-		if err := transaction.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "token_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"expires_at", "next_delivery_at"}),
-		}).Create(&rows).Error; err != nil {
-			return fmt.Errorf("enqueue access token blacklist: %w", err)
-		}
+		entries = revoked
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	return entries, nil
+}
+
+// revokeAllByUserInTransaction revokes every live token of userID inside an
+// existing transaction and returns the access-token entries that still need
+// blacklist delivery. Callers own the transaction so the revocation can be made
+// atomic with whatever change triggered it.
+func revokeAllByUserInTransaction(
+	transaction *gorm.DB,
+	userID int64,
+	revokedAt time.Time,
+) ([]model.BlacklistEntry, error) {
+	var entries []model.BlacklistEntry
+	if err := transaction.Model(&model.OAuthAccessToken{}).
+		Select("token_id", "expires_at").
+		Where("user_id = ? AND expires_at > ? AND revoked_at IS NULL", userID, revokedAt).
+		Find(&entries).Error; err != nil {
+		return nil, fmt.Errorf("select live access tokens by user: %w", err)
+	}
+	if err := transaction.Model(&model.OAuthAccessToken{}).
+		Where("user_id = ? AND revoked_at IS NULL", userID).
+		Update("revoked_at", revokedAt).Error; err != nil {
+		return nil, fmt.Errorf("revoke access tokens by user: %w", err)
+	}
+	if err := transaction.Model(&model.OAuthRefreshToken{}).
+		Where("user_id = ? AND revoked_at IS NULL", userID).
+		Update("revoked_at", revokedAt).Error; err != nil {
+		return nil, fmt.Errorf("revoke refresh tokens by user: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	rows := make([]model.TokenBlacklistOutbox, 0, len(entries))
+	for _, entry := range entries {
+		rows = append(rows, model.TokenBlacklistOutbox{
+			TokenID:        entry.TokenID,
+			ExpiresAt:      entry.ExpiresAt,
+			NextDeliveryAt: revokedAt,
+		})
+	}
+	if err := transaction.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "token_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"expires_at", "next_delivery_at"}),
+	}).Create(&rows).Error; err != nil {
+		return nil, fmt.Errorf("enqueue access token blacklist: %w", err)
 	}
 	return entries, nil
 }

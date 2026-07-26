@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -114,4 +115,147 @@ func TestUserRepositoryFindByLoginIdentifier(t *testing.T) {
 	if !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("FindAuthStateByID(absent) error = %v, want ErrNotFound", err)
 	}
+}
+
+func TestUserRepositoryFindByLoginEmailAndExistenceChecks(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	user := createUserWithProfile(t, userRepository, "lookup@njupt.edu.cn")
+
+	found, err := userRepository.FindByLoginEmail(context.Background(), "lookup@njupt.edu.cn")
+	if err != nil {
+		t.Fatalf("FindByLoginEmail() error = %v", err)
+	}
+	if found.ID != user.ID || found.Profile == nil {
+		t.Fatalf("FindByLoginEmail() = %#v, want user %d with profile", found, user.ID)
+	}
+
+	// FindByLoginEmail must not resolve other-mail identities, unlike
+	// FindByLoginIdentifier: password reset targets the login email only.
+	identityRepository := repository.NewIdentity(database)
+	if err := identityRepository.CreateWithinLimit(context.Background(), &model.Identity{
+		UserID:     user.ID,
+		Provider:   model.LoginMethodOtherMail,
+		ProviderID: "alias@qq.com",
+	}, 2); err != nil {
+		t.Fatalf("CreateWithinLimit() error = %v", err)
+	}
+	if _, err := userRepository.FindByLoginEmail(context.Background(), "alias@qq.com"); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("FindByLoginEmail(other mail) error = %v, want ErrNotFound", err)
+	}
+
+	for _, test := range []struct {
+		name  string
+		check func() (bool, error)
+		want  bool
+	}{
+		{"login email present", func() (bool, error) {
+			return userRepository.ExistsByLoginEmail(context.Background(), "lookup@njupt.edu.cn")
+		}, true},
+		{"login email absent", func() (bool, error) {
+			return userRepository.ExistsByLoginEmail(context.Background(), "nobody@njupt.edu.cn")
+		}, false},
+		{"student id present", func() (bool, error) {
+			return userRepository.ExistsByStudentID(context.Background(), user.StudentID)
+		}, true},
+		{"student id absent", func() (bool, error) {
+			return userRepository.ExistsByStudentID(context.Background(), "B0000000000")
+		}, false},
+	} {
+		got, err := test.check()
+		if err != nil {
+			t.Fatalf("%s: error = %v", test.name, err)
+		}
+		if got != test.want {
+			t.Fatalf("%s = %t, want %t", test.name, got, test.want)
+		}
+	}
+}
+
+// The password rewrite, the token_version bump and the session revocation must
+// commit together: token_version alone does not stop refresh tokens, because the
+// refresh flow never compares it.
+func TestUserRepositoryUpdatePasswordAndRevokeSessions(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	tokenRepository := repository.NewToken(database)
+	user := createUserWithProfile(t, userRepository, "rotate@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	createTokenPair(t, tokenRepository, "rotate-live", "family-rotate", 0, client.ID, user.ID)
+
+	revokedAt := time.Now().UTC().Truncate(time.Millisecond)
+	entries, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), user.ID, "new-hash", revokedAt)
+	if err != nil {
+		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].TokenID != "rotate-live-access" {
+		t.Fatalf("entries = %#v, want the live access token", entries)
+	}
+
+	var stored model.User
+	if err := database.First(&stored, user.ID).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if stored.PasswordHash != "new-hash" {
+		t.Fatalf("password = %q, want new-hash", stored.PasswordHash)
+	}
+	if stored.TokenVersion != user.TokenVersion+1 {
+		t.Fatalf("token_version = %d, want %d", stored.TokenVersion, user.TokenVersion+1)
+	}
+	assertTokenRevokedAt(t, database, "rotate-live-access", "rotate-live-refresh", revokedAt)
+
+	var outboxCount int64
+	if err := database.Model(&model.TokenBlacklistOutbox{}).
+		Where("token_id = ?", "rotate-live-access").
+		Count(&outboxCount).Error; err != nil {
+		t.Fatalf("count outbox: %v", err)
+	}
+	if outboxCount != 1 {
+		t.Fatalf("outbox rows = %d, want 1", outboxCount)
+	}
+}
+
+// Only live tokens need blacklist delivery; already-expired ones fall out of the
+// entry set even though the row is still revoked.
+func TestUserRepositoryUpdatePasswordSkipsExpiredTokens(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	tokenRepository := repository.NewToken(database)
+	user := createUserWithProfile(t, userRepository, "expired@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	createTokenPair(t, tokenRepository, "expired", "family-expired", 0, client.ID, user.ID)
+
+	// Move the revocation clock past the token's one-hour expiry. Truncate to
+	// milliseconds so the value survives PostgreSQL's microsecond precision.
+	revokedAt := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Millisecond)
+	entries, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), user.ID, "another-hash", revokedAt)
+	if err != nil {
+		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %#v, want none for expired tokens", entries)
+	}
+	assertTokenRevokedAt(t, database, "expired-access", "expired-refresh", revokedAt)
+}
+
+func TestTokenRepositoryRevokeAllByUserLeavesOtherUsersAlone(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	tokenRepository := repository.NewToken(database)
+	target := createUserWithProfile(t, userRepository, "target@njupt.edu.cn")
+	bystander := createUserWithProfile(t, userRepository, "bystander@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	createTokenPair(t, tokenRepository, "target", "family-target", 0, client.ID, target.ID)
+	createTokenPair(t, tokenRepository, "bystander", "family-bystander", 0, client.ID, bystander.ID)
+
+	revokedAt := time.Now().UTC().Truncate(time.Millisecond)
+	entries, err := tokenRepository.RevokeAllByUser(context.Background(), target.ID, revokedAt)
+	if err != nil {
+		t.Fatalf("RevokeAllByUser() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].TokenID != "target-access" {
+		t.Fatalf("entries = %#v, want only the target's access token", entries)
+	}
+	assertTokenRevokedAt(t, database, "target-access", "target-refresh", revokedAt)
+	assertTokenUnrevoked(t, database, "bystander-access", "bystander-refresh")
 }
