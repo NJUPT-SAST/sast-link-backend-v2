@@ -65,7 +65,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 ### 3.3 部署架构
 
 - **容器化**：Docker 多阶段构建（golang:alpine → alpine），复用服务器上已有的 PostgreSQL 与 Redis 实例
-- **高可用**：API 服务无状态（JWT 自包含），可水平扩展；Redis 黑名单 / 设备记录在扩缩容时短暂不一致可接受（最多 1h Access Token 有效期窗口）
+- **高可用**：API 服务无状态（JWT 自包含），可水平扩展；Redis 黑名单 / 设备记录在扩缩容时短暂不一致可接受（最多 1h Access Token 有效期窗口）。PostgreSQL 是唯一必需依赖，Redis 故障时服务降级但仍可提供认证能力（见 §6.0）
 - **定时任务**：pg_cron 在 PG 内部调度清理过期数据，无多实例重复执行问题
 - **Base URL**：`https://link.sast.fun/v2`
 
@@ -445,6 +445,19 @@ is_deleted ──(恢复)──► njupter
 | Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GetDel 消费） | 注册两步间暂存已验证邮箱 |
 | Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GetDel 消费） | 绑定邮箱两步间暂存待绑定邮箱 + user_id |
 
+### 6.0 Redis 不可用时的降级策略
+
+每个 Redis 读写点必须明确声明故障行为，只有两类：
+
+| 类别 | 判据 | 场景 | 故障行为 |
+|------|------|------|----------|
+| **Fail-closed** | Redis 是唯一存储，取不到值不等于校验通过 | 验证码、OAuth State、registration_state、login_code、Register-Ticket、Bind-Ticket、幂等性 key | 拒绝请求，用户重走流程。所有 key 均带 TTL，冷启动自愈 |
+| **Fail-open** | PostgreSQL 持有权威副本，或丢失仅放宽速率窗口 | Token 黑名单、登录失败计数与锁定、限流 | WARN 日志后继续，不返回 5xx |
+
+Token 黑名单可以跳过的依据：JTI 写入黑名单与 `oauth_access_tokens.revoked_at` 在**同一事务**内完成，而登录态校验始终执行那条 DB 查询（§4.1），因此 DB 拒绝的集合是黑名单的严格超集。黑名单是快速拒绝路径与纵深防御，不是权威。
+
+**禁止**把 fail-open 依赖的错误转成 `ErrInternal`——那会让一个可选缓存变成认证链路的单点故障。
+
 ### 6.1 设备管理
 
 数据结构：Sorted Set + Hash 组合。
@@ -499,7 +512,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 维度 | 方案 |
 |------|------|
 | 日志 | JSON 结构化日志（slog），含 trace_id / user_id / client_ip / method / path / status / latency |
-| 健康检查 | `GET /health` → `{ "status": "ok", "db": "ok", "redis": "ok" }` |
+| 健康检查 | `GET /health` → `{ "status": "ok", "db": "ok", "redis": "ok" }`；Redis 故障时返回 200 且 `redis` 为 `degraded`（见 §6.2），仅 `db` 故障返回 500 |
 | 审计追踪 | `audit_logs` 表记录所有认证操作 |
 | 错误码 | 统一 5 位业务码（`{HTTP状态}{序号}`），详见附录 A |
 

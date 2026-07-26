@@ -1336,6 +1336,24 @@ GET /health
 }
 ```
 
+只有 PostgreSQL 是必需依赖。Redis 不可用时服务仍可依赖 PostgreSQL 提供认证能力，因此返回 `200` 且标记为降级：
+
+```json
+{
+  "status": "ok",
+  "db": "ok",
+  "redis": "degraded"
+}
+```
+
+`db` 检查失败时返回 `500`，`status` 与 `db` 均为 `error`。
+
+| 字段 | 取值 | 说明 |
+|------|------|------|
+| `status` | `ok` / `error` | 仅由必需依赖决定；`error` 时 HTTP 500 |
+| `db` | `ok` / `error` | PostgreSQL，必需依赖 |
+| `redis` | `ok` / `degraded` | Redis，可选依赖，故障不影响 `status` |
+
 ---
 
 ## 8. OIDC Provider

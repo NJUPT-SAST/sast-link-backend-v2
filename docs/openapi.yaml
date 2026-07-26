@@ -2623,19 +2623,30 @@ components:
           example: openid profile
     HealthResponse:
       type: object
-      description: 健康检查响应（不使用标准信封）
+      description: |
+        健康检查响应（不使用标准信封）。
+        只有 PostgreSQL 是必需依赖：Redis 不可用时返回 200 且 redis 为 degraded。
       properties:
         status:
           type: string
-          description: 服务状态
+          description: 服务状态，仅由必需依赖（db）决定
+          enum:
+            - ok
+            - error
           example: ok
         db:
           type: string
-          description: 数据库状态
+          description: 数据库状态（必需依赖，error 时 HTTP 500）
+          enum:
+            - ok
+            - error
           example: ok
         redis:
           type: string
-          description: Redis 状态
+          description: Redis 状态（可选依赖，故障时为 degraded，不影响 status）
+          enum:
+            - ok
+            - degraded
           example: ok
     CardResponse:
       type: object

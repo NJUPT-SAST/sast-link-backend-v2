@@ -606,6 +606,40 @@ func TestLoginLockAndLimiterShortCircuit(t *testing.T) {
 	}
 }
 
+// Redis-backed throttling has no durable fallback, so an outage must degrade to
+// "allow" rather than take login down entirely.
+func TestLoginAllowsWhenLimiterUnavailable(t *testing.T) {
+	service, users, _, tokens, _, _ := newTestService(t)
+	service.Limiter = &fakeLimiter{err: errors.New("redis unavailable")}
+	result, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	if result.AccessToken == "" || tokens.createdAccess == nil || len(users.lookups) != 1 {
+		t.Fatalf("result=%+v created=%+v lookups=%#v, want issued pair", result, tokens.createdAccess, users.lookups)
+	}
+}
+
+func TestLoginAllowsWhenLockoutStateUnavailable(t *testing.T) {
+	service, _, _, tokens, _, failures := newTestService(t)
+	failures.err = errors.New("redis unavailable")
+	result, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	if result.AccessToken == "" || tokens.createdAccess == nil {
+		t.Fatalf("result=%+v created=%+v, want issued pair despite lockout outage", result, tokens.createdAccess)
+	}
+}
+
+// A failed counter increment must not mask the real rejection reason with a 500.
+func TestLoginReportsCredentialErrorWhenFailureCounterUnavailable(t *testing.T) {
+	service, _, _, _, _, failures := newTestService(t)
+	failures.err = errors.New("redis unavailable")
+	_, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
+	assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
+}
+
 func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
 	service, _, clients, _, _, failures := newTestService(t)
 	service.Users.(*fakeUsers).byLogin["deleted@sast.fun"] = testUser(t, 99, "deleted@sast.fun", model.UserStateDeleted)
@@ -647,16 +681,21 @@ func TestLoginAuditFailureCompensatesCreatedFamily(t *testing.T) {
 	}
 }
 
-func TestLoginResetFailureCompensatesCreatedFamily(t *testing.T) {
+// A lost counter reset leaves a stale count that expires with its own 15min
+// window. Revoking the pair instead would make every login fail for the whole
+// duration of a Redis outage, so the session is kept and the audit still runs.
+func TestLoginKeepsSessionWhenFailureResetUnavailable(t *testing.T) {
 	service, _, _, tokens, audit, failures := newTestService(t)
 	failures.resetErr = errors.New("redis down")
-	_, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
-	assertKind(t, err, KindInternal, errcode.CodeInternal)
-	if tokens.createdAccess == nil || len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != tokens.createdRefresh.FamilyID {
-		t.Fatalf("created=%+v revoked=%#v, want revoke compensation when failure reset fails", tokens.createdAccess, tokens.revokedFamilies)
+	result, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
 	}
-	if len(audit.entries) != 0 {
-		t.Fatalf("audit entries = %#v, want no success audit after reset failure", audit.entries)
+	if result.AccessToken == "" || len(tokens.revokedFamilies) != 0 {
+		t.Fatalf("result=%+v revoked=%#v, want issued pair with no compensation", result, tokens.revokedFamilies)
+	}
+	if len(audit.entries) != 1 || audit.entries[0].Success == nil || !*audit.entries[0].Success {
+		t.Fatalf("audit entries = %#v, want successful login audit", audit.entries)
 	}
 }
 
