@@ -488,6 +488,51 @@ func TestResetPasswordReturnsMessage(t *testing.T) {
 	}
 }
 
+// A binding min=8 tag used to reject short passwords during decode, collapsing
+// the documented 42201 into a generic 40000 and hiding the service's mapping.
+// The service must own the length rule for every password entry point.
+func TestShortPasswordReachesServiceForDocumentedCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tooShort := &session.Error{Kind: session.KindValidationFailed, Code: errcode.CodePasswordTooShort}
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "reset-password",
+			path: "/auth/reset-password",
+			body: `{"login_email":"pt@sast.fun","code":"123456","new_password":"short"}`,
+		},
+		{
+			name: "change-password",
+			path: "/auth/change-password",
+			body: `{"old_password":"oldpassword","new_password":"short"}`,
+		},
+		{
+			name: "register",
+			path: "/auth/register",
+			body: `{"register_ticket":"reg_x","password":"short","name":"pt","student_id":"B24","phone_number":"13800138000","qq_number":"10000","college":"其他","major":"CS"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeService{resetPasswordErr: tooShort, changePasswordErr: tooShort, registerErr: tooShort}
+			router := gin.New()
+			RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, test.path, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+
+			body := decodeBody(t, recorder)
+			if recorder.Code != http.StatusUnprocessableEntity || body.Code != errcode.CodePasswordTooShort {
+				t.Fatalf("response = %d %#v, want 422 with code %d", recorder.Code, body, errcode.CodePasswordTooShort)
+			}
+		})
+	}
+}
+
 func TestSessionRequestsUseStrictBoundedJSON(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {

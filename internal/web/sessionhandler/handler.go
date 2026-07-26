@@ -48,9 +48,13 @@ type verifyRegisterCodeRequest struct {
 	Code       string `json:"code" binding:"required"`
 }
 
+// Password length is deliberately not enforced by a binding tag here: the
+// documented contract returns 42201 (密码长度不足) for a short password, and a
+// binding failure would collapse that into a generic 40000. The session service
+// owns the rule for every password entry point.
 type registerRequest struct {
 	RegisterTicket    string `json:"register_ticket" binding:"required"`
-	Password          string `json:"password" binding:"required,min=8"`
+	Password          string `json:"password" binding:"required"`
 	Name              string `json:"name" binding:"required"`
 	StudentID         string `json:"student_id" binding:"required"`
 	PhoneNumber       string `json:"phone_number" binding:"required"`
@@ -68,12 +72,12 @@ type forgotPasswordRequest struct {
 type resetPasswordRequest struct {
 	LoginEmail  string `json:"login_email" binding:"required,email"`
 	Code        string `json:"code" binding:"required"`
-	NewPassword string `json:"new_password" binding:"required,min=8"`
+	NewPassword string `json:"new_password" binding:"required"`
 }
 
 type changePasswordRequest struct {
 	OldPassword string `json:"old_password" binding:"required"`
-	NewPassword string `json:"new_password" binding:"required,min=8"`
+	NewPassword string `json:"new_password" binding:"required"`
 }
 
 type bindEmailRequest struct {
