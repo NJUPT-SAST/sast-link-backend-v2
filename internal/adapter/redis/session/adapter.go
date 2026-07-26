@@ -1,4 +1,5 @@
-package sessionadapter
+// Package sessionredis adapts Redis primitives to the session service ports.
+package sessionredis
 
 import (
 	"context"

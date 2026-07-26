@@ -1,0 +1,22 @@
+# Normalize line endings on commit and always check out LF.
+# Keeps gofmt/golangci-lint results identical on Windows and Linux CI.
+* text=auto eol=lf
+
+*.go text eol=lf
+*.sql text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+.env.example text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.exe binary
