@@ -113,7 +113,7 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 		return fmt.Errorf("mailer: invalid From address: %w", err)
 	}
 
-	msg, boundary, err := buildMessage(from, recipients, subject, textBody, htmlBody)
+	msg, err := buildMessage(from, recipients, subject, textBody, htmlBody)
 	if err != nil {
 		return err
 	}
@@ -121,9 +121,9 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 	auth := smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
 
 	if m.cfg.UseTLS {
-		return sendTLS(ctx, addr, m.cfg.Host, auth, from, recipients, msg, boundary)
+		return sendTLS(ctx, addr, m.cfg.Host, auth, from, recipients, msg)
 	}
-	return sendSTARTTLS(ctx, addr, m.cfg.Host, auth, from, recipients, msg, boundary)
+	return sendSTARTTLS(ctx, addr, auth, from, recipients, msg)
 }
 
 // sanitizeRecipients validates every recipient and returns the canonical
@@ -161,10 +161,10 @@ func sanitizeAddress(value string) (string, error) {
 	return parsed.Address, nil
 }
 
-func buildMessage(from string, to []string, subject, textBody, htmlBody string) ([]byte, string, error) {
+func buildMessage(from string, to []string, subject, textBody, htmlBody string) ([]byte, error) {
 	boundary, err := generateBoundary()
 	if err != nil {
-		return nil, "", fmt.Errorf("generate mime boundary: %w", err)
+		return nil, fmt.Errorf("generate mime boundary: %w", err)
 	}
 
 	var b bytes.Buffer
@@ -178,16 +178,16 @@ func buildMessage(from string, to []string, subject, textBody, htmlBody string) 
 		fmt.Fprint(&b, "\r\n")
 		writer := multipart.NewWriter(&b)
 		if err := writer.SetBoundary(boundary); err != nil {
-			return nil, "", fmt.Errorf("set MIME boundary: %w", err)
+			return nil, fmt.Errorf("set MIME boundary: %w", err)
 		}
 		if err := writePart(writer, "text/plain; charset=utf-8", textBody); err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		if err := writePart(writer, "text/html; charset=utf-8", htmlBody); err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		if err := writer.Close(); err != nil {
-			return nil, "", fmt.Errorf("close MIME writer: %w", err)
+			return nil, fmt.Errorf("close MIME writer: %w", err)
 		}
 	} else {
 		fmt.Fprint(&b, "Content-Type: text/plain; charset=utf-8\r\n")
@@ -195,13 +195,13 @@ func buildMessage(from string, to []string, subject, textBody, htmlBody string) 
 		fmt.Fprint(&b, "\r\n")
 		encoded := quotedprintable.NewWriter(&b)
 		if _, err := encoded.Write([]byte(textBody)); err != nil {
-			return nil, "", fmt.Errorf("encode text body: %w", err)
+			return nil, fmt.Errorf("encode text body: %w", err)
 		}
 		if err := encoded.Close(); err != nil {
-			return nil, "", fmt.Errorf("close text encoder: %w", err)
+			return nil, fmt.Errorf("close text encoder: %w", err)
 		}
 	}
-	return b.Bytes(), boundary, nil
+	return b.Bytes(), nil
 }
 
 func writePart(writer *multipart.Writer, contentType, body string) error {
@@ -230,7 +230,7 @@ func generateBoundary() (string, error) {
 	return "sastlink_" + hex.EncodeToString(buf[:]), nil
 }
 
-func sendSTARTTLS(ctx context.Context, addr, host string, auth smtp.Auth, from string, to []string, msg []byte, _ string) error {
+func sendSTARTTLS(ctx context.Context, addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
 	type result struct{ err error }
 	ch := make(chan result, 1)
 	go func() {
@@ -248,7 +248,7 @@ func sendSTARTTLS(ctx context.Context, addr, host string, auth smtp.Auth, from s
 	}
 }
 
-func sendTLS(ctx context.Context, addr, host string, auth smtp.Auth, from string, to []string, msg []byte, _ string) error {
+func sendTLS(ctx context.Context, addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
 	type result struct{ err error }
 	ch := make(chan result, 1)
 	go func() {

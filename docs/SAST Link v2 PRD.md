@@ -98,7 +98,7 @@ SAST Link 同时作为 OAuth 2.1 授权服务器和 OIDC Provider：
 
 **两步注册**：
 
-1. `POST /auth/register/send-code` → 校验邮箱域名 → 生成 6 位数字验证码 → SMTP 发送 → 验证码写 Redis（key: `sastlink:verify:{email}`，TTL 5min）
+1. `POST /auth/register/send-code` → 校验邮箱域名 → 生成 6 位数字验证码 → SMTP 发送 → 验证码写 Redis（key: `sastlink:verify:register:{email}`，TTL 5min）
 2. `POST /auth/register/verify-code` → 校验验证码（成功后删除）→ 返回 Register-Ticket（`reg_` + 32 位 hex，Redis 5min，一次性，GetDel 消费）
 3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱 → 校验所有 user 字段已填且密码 ≥ 8 位 → PBKDF2-SHA512 哈希 → 创建 user + profile → 签发 Token Pair
 
@@ -432,7 +432,7 @@ is_deleted ──(恢复)──► njupter
 
 | 场景 | Key | TTL | 数据结构 | 说明 |
 |------|-----|-----|----------|------|
-| 验证码 | `sastlink:verify:{email}` | 5min | String（GetDel 消费） | 注册/重置密码/绑定邮箱 |
+| 验证码 | `sastlink:verify:{purpose}:{email}` | 5min | String（GetDel 消费） | `purpose` ∈ `register` / `reset_password` / `bind_email`。按用途分键，使某一流程签发的验证码无法用于另一流程 |
 | 限流 | `sastlink:ratelimit:{ip}:{endpoint}` | 30s~15min | String（INCR 计数器 + EXPIRE） | 固定窗口计数器，按端点差异化配置（登录 15min/发验证码 60s 等） |
 | 设备管理 | `sastlink:devices:{user_id}` | 30d | Sorted Set（score=login_ts, member=device_id） | 最多 5 台同时登录，详情另存 Hash。淘汰/登出见 §6.1 |
 | 解绑冷却 | `sastlink:unbind:cooldown:{email}` | 60s | String（SET NX EX） | 防快速重复解绑 |

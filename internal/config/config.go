@@ -15,6 +15,7 @@ const (
 	// minimumHSTSMaxAge is one year in seconds, matching the PRD §7.2 default.
 	// Smaller values leave the header present but effectively unenforced.
 	minimumHSTSMaxAge = 31536000
+	maximumTCPPort    = 65535
 )
 
 // Config holds all runtime configuration for the service.
@@ -58,7 +59,9 @@ type Config struct {
 	LoginFailureLimit        int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
 	LoginFailureWindow       time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
 
-	SMTPHost   string `env:"SMTP_HOST" envDefault:"localhost"`
+	// SMTPHost has no default: a "localhost" fallback would let a deployment
+	// that forgot SMTP_HOST start cleanly and only fail when a user registers.
+	SMTPHost   string `env:"SMTP_HOST"`
 	SMTPPort   int    `env:"SMTP_PORT" envDefault:"587"`
 	SMTPUser   string `env:"SMTP_USERNAME"`
 	SMTPPass   string `env:"SMTP_PASSWORD"`
@@ -123,6 +126,15 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
 	case c.LoginFailureWindow <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_WINDOW must be positive")
+	// SMTP backs registration, password reset and email binding. Validating it
+	// at boot turns a missing value into a startup failure instead of a runtime
+	// "邮件发送失败" on the first user who tries to register.
+	case strings.TrimSpace(c.SMTPHost) == "":
+		return fmt.Errorf("SMTP_HOST is required")
+	case c.SMTPPort <= 0 || c.SMTPPort > maximumTCPPort:
+		return fmt.Errorf("SMTP_PORT must be between 1 and %d", maximumTCPPort)
+	case strings.TrimSpace(c.SMTPFrom) == "":
+		return fmt.Errorf("SMTP_FROM is required")
 	}
 	normalizedProxies, err := normalizeTrustedProxies(c.TrustedProxies)
 	if err != nil {
