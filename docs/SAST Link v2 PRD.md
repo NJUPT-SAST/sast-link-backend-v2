@@ -65,7 +65,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 ### 3.3 部署架构
 
 - **容器化**：Docker 多阶段构建（golang:alpine → alpine），复用服务器上已有的 PostgreSQL 与 Redis 实例
-- **高可用**：API 服务无状态（JWT 自包含），可水平扩展；Redis 黑名单 / 设备记录在扩缩容时短暂不一致可接受（最多 1h Access Token 有效期窗口）。PostgreSQL 是唯一必需依赖，Redis 故障时服务降级但仍可提供认证能力（见 §6.0）
+- **高可用**：API 服务无状态（JWT 自包含），可水平扩展；黑名单仅是快速拒绝路径，`oauth_access_tokens.revoked_at` 每请求经 DB 校验，Redis 黑名单不一致不影响吊销正确性；设备记录在扩缩容时短暂不一致可接受。PostgreSQL 是唯一必需依赖，Redis 故障时服务降级但仍可提供认证能力（见 §6.0）
 - **定时任务**：pg_cron 在 PG 内部调度清理过期数据，无多实例重复执行问题
 - **Base URL**：`https://link.sast.fun/v2`
 
@@ -512,7 +512,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 维度 | 方案 |
 |------|------|
 | 日志 | JSON 结构化日志（slog），含 trace_id / user_id / client_ip / method / path / status / latency |
-| 健康检查 | `GET /health` → `{ "status": "ok", "db": "ok", "redis": "ok" }`；Redis 故障时返回 200 且 `redis` 为 `degraded`（见 §6.2），仅 `db` 故障返回 500 |
+| 健康检查 | `GET /health` → `{ "status": "ok", "db": "ok", "redis": "ok" }`；Redis 故障时返回 200 且 `redis` 为 `degraded`（见 §6.0），仅 `db` 故障返回 500 |
 | 审计追踪 | `audit_logs` 表记录所有认证操作 |
 | 错误码 | 统一 5 位业务码（`{HTTP状态}{序号}`），详见附录 A |
 
