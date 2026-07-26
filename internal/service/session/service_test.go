@@ -998,6 +998,34 @@ func TestVerifyRegisterCodeRejectsCrossPurposeCode(t *testing.T) {
 
 // Per the Redis degradation policy (PRD §6.0) limiter outages fail open; the
 // verification-code store is the fail-closed guard when Redis is fully down.
+func TestSendRegisterCodeRejectsHeaderInjectionPayload(t *testing.T) {
+	// The go-playground "email" validator lets CR/LF through, so the service
+	// layer must reject header-injection payloads before they reach the mailer
+	// or Redis keys. Each entry point is covered.
+	injection := "victim@gmail.com\r\nBcc: attacker@sast.fun"
+	service := newRegisterService(t)
+
+	_, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: injection})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	_, err = service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: injection, Code: "123456"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	_, err = service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: injection})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	_, err = service.ResetPassword(context.Background(), ResetPasswordInput{Email: injection, Code: "123456", Password: "longpassword"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	_, err = service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: injection})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	// No mail must have been sent for any of the rejected payloads.
+	if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
+		t.Fatalf("mailer sent=%d, want 0 (injection payload reached the mailer)", sent)
+	}
+}
+
 func TestSendRegisterCodeAllowsWhenEmailLimiterUnavailable(t *testing.T) {
 	service := newRegisterService(t)
 	service.EmailLimiter = &fakeLimiter{err: errors.New("redis unavailable")}

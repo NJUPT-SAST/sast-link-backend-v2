@@ -268,6 +268,9 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 	if email == "" {
 		return nil, newError(ErrInvalidInput, "email is required", nil)
 	}
+	if !validEmailFormat(email) {
+		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
+	}
 	if !isAllowedEmailDomain(email) {
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
 	}
@@ -295,6 +298,9 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 	email := normalizeIdentifier(input.Email)
 	if email == "" || input.Code == "" {
 		return nil, newError(ErrInvalidInput, "email and code are required", nil)
+	}
+	if !validEmailFormat(email) {
+		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
 	if !isAllowedEmailDomain(email) {
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
@@ -435,6 +441,9 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 	if email == "" {
 		return nil, newError(ErrInvalidInput, "email is required", nil)
 	}
+	if !validEmailFormat(email) {
+		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
+	}
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
 	}
@@ -466,6 +475,9 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	email := normalizeIdentifier(input.Email)
 	if email == "" || input.Code == "" || input.Password == "" {
 		return nil, newError(ErrInvalidInput, "email, code and password are required", nil)
+	}
+	if !validEmailFormat(email) {
+		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
 	// Validate everything possible before consuming the one-time code, so a
 	// rejected request does not force the user to request a fresh code.
@@ -568,6 +580,9 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	email := normalizeIdentifier(input.Email)
 	if email == "" {
 		return nil, newError(ErrInvalidInput, "email is required", nil)
+	}
+	if !validEmailFormat(email) {
+		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "invalid principal", nil)

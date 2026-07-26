@@ -121,6 +121,27 @@ func isAllowedEmailDomain(email string) bool {
 	return strings.HasSuffix(email, "@njupt.edu.cn") || strings.HasSuffix(email, "@sast.fun")
 }
 
+// validEmailFormat is the input-layer guard against SMTP header injection and
+// key/audit corruption. It rejects control characters (notably CR/LF, which
+// the go-playground "email" validator lets through), address separators and
+// display-name brackets, and requires exactly one @. This is defense in depth
+// ahead of the mailer's own mail.ParseAddress check; it also keeps Redis keys
+// and audit detail free of unprintable bytes.
+func validEmailFormat(email string) bool {
+	if email == "" || strings.Count(email, "@") != 1 {
+		return false
+	}
+	if strings.ContainsAny(email, ",<>") {
+		return false
+	}
+	for _, r := range email {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func generateVerificationCode() (string, error) {
 	// Six-digit numeric code.
 	const max = 1_000_000
