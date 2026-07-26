@@ -3,10 +3,18 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+)
+
+const (
+	minimumRefreshHMACSecretLen = 32
+	// minimumHSTSMaxAge is one year in seconds, matching the PRD §7.2 default.
+	// Smaller values leave the header present but effectively unenforced.
+	minimumHSTSMaxAge = 31536000
 )
 
 // Config holds all runtime configuration for the service.
@@ -37,6 +45,15 @@ type Config struct {
 	JWTAccessTokenExpiry   time.Duration `env:"JWT_ACCESS_TOKEN_EXPIRY" envDefault:"1h"`
 	JWTRefreshTokenExpiry  time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
 	RefreshTokenHMACSecret string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
+
+	InternalOAuthClientID string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
+	CORSAllowedOrigins    []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
+	TrustedProxies        []string      `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
+	HSTSMaxAge            int           `env:"HSTS_MAX_AGE" envDefault:"31536000"`
+	RateLimitLoginRPM     int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"5"`
+	RateLimitLoginWindow  time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
+	LoginFailureLimit     int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
+	LoginFailureWindow    time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
 }
 
 // Load parses configuration from environment variables and validates required fields.
@@ -59,14 +76,66 @@ func (c *Config) validate() error {
 		return fmt.Errorf("DB_PASSWORD is required")
 	case c.DBName == "":
 		return fmt.Errorf("DB_NAME is required")
-	case c.JWTAccessTokenExpiry <= 0:
-		return fmt.Errorf("JWT_ACCESS_TOKEN_EXPIRY must be positive")
-	case c.JWTRefreshTokenExpiry <= 0:
-		return fmt.Errorf("JWT_REFRESH_TOKEN_EXPIRY must be positive")
 	case (strings.TrimSpace(c.JWTSecretKeyPrev) == "") != (strings.TrimSpace(c.JWTPreviousKID) == ""):
 		return fmt.Errorf("JWT_SECRET_KEY_PREV and JWT_PREVIOUS_KID must be both set or both empty")
 	}
 	return nil
+}
+
+// ValidateAPIAuth validates auth settings required by cmd/api endpoints.
+func (c *Config) ValidateAPIAuth() error {
+	switch {
+	case strings.TrimSpace(c.JWTSecretKey) == "":
+		return fmt.Errorf("JWT_SECRET_KEY is required")
+	case strings.TrimSpace(c.JWTActiveKID) == "":
+		return fmt.Errorf("JWT_ACTIVE_KID is required")
+	case len(c.RefreshTokenHMACSecret) < minimumRefreshHMACSecretLen:
+		return fmt.Errorf("REFRESH_TOKEN_HMAC_SECRET must be at least %d bytes", minimumRefreshHMACSecretLen)
+	case c.JWTAccessTokenExpiry <= 0:
+		return fmt.Errorf("JWT_ACCESS_TOKEN_EXPIRY must be positive")
+	case c.JWTRefreshTokenExpiry <= 0:
+		return fmt.Errorf("JWT_REFRESH_TOKEN_EXPIRY must be positive")
+	case strings.TrimSpace(c.InternalOAuthClientID) == "":
+		return fmt.Errorf("INTERNAL_OAUTH_CLIENT_ID is required")
+	case c.HSTSMaxAge < minimumHSTSMaxAge:
+		return fmt.Errorf("HSTS_MAX_AGE must be at least %d seconds", minimumHSTSMaxAge)
+	case c.RateLimitLoginRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_LOGIN_RPM must be positive")
+	case c.RateLimitLoginWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_LOGIN_WINDOW must be at least 1s")
+	case c.LoginFailureLimit <= 0:
+		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
+	case c.LoginFailureWindow <= 0:
+		return fmt.Errorf("LOGIN_FAILURE_WINDOW must be positive")
+	}
+	normalizedProxies, err := normalizeTrustedProxies(c.TrustedProxies)
+	if err != nil {
+		return err
+	}
+	c.TrustedProxies = normalizedProxies
+	return nil
+}
+
+// normalizeTrustedProxies trims surrounding whitespace, drops empty entries and
+// ensures every remaining entry is a valid IP or CIDR. The normalized slice must
+// replace Config.TrustedProxies: envSeparator splitting keeps whitespace, so
+// "127.0.0.1, ::1" yields " ::1", which Gin's SetTrustedProxies rejects. Failing
+// (or normalizing) here keeps startup fail-fast with a clearer error.
+func normalizeTrustedProxies(proxies []string) ([]string, error) {
+	normalized := make([]string, 0, len(proxies))
+	for _, raw := range proxies {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		if net.ParseIP(entry) == nil {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return nil, fmt.Errorf("TRUSTED_PROXIES entry %q is not a valid IP or CIDR", entry)
+			}
+		}
+		normalized = append(normalized, entry)
+	}
+	return normalized, nil
 }
 
 // PostgresDSN returns the PostgreSQL connection string used by GORM.

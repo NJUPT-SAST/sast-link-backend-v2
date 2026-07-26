@@ -211,6 +211,7 @@ paths:
                 password:
                   type: string
                   description: 登录密码
+              additionalProperties: false
             examples: {}
         required: true
       responses:
@@ -227,6 +228,15 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 账号已注销（40301）
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: 登录限流或失败锁定（42900）
+        '500':
+          $ref: '#/components/responses/InternalError'
+          description: 服务端错误（50000）
       security: []
   /auth/refresh:
     post:
@@ -251,6 +261,7 @@ paths:
                   type: string
                   description: 刷新令牌
                   example: rt_abc123...
+              additionalProperties: false
             examples: {}
         required: true
       responses:
@@ -261,9 +272,18 @@ paths:
               schema:
                 $ref: '#/components/schemas/TokenRefreshResponse'
           headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
         '401':
           $ref: '#/components/responses/Unauthorized'
-          description: 未认证（401xx）
+          description: Refresh Token 无效、过期或被撤销（40102）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 账号已注销（40301）
+        '500':
+          $ref: '#/components/responses/InternalError'
+          description: 服务端错误（50000）
       security: []
   /auth/logout:
     post:
@@ -285,6 +305,7 @@ paths:
                 refresh_token:
                   type: string
                   description: 刷新令牌
+              additionalProperties: false
         required: true
       responses:
         '200':
@@ -294,6 +315,18 @@ paths:
               schema:
                 $ref: '#/components/schemas/MessageResponse'
           headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数错误（400xx）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Access/Refresh Token 无效（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 账号已注销（40301）
+        '500':
+          $ref: '#/components/responses/InternalError'
+          description: 服务端错误（50000）
       security:
         - bearerAuth: []
   /auth/change-password:
@@ -578,6 +611,12 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 账号已注销（40301）
+        '500':
+          $ref: '#/components/responses/InternalError'
+          description: 服务端错误（50000）
       security:
         - bearerAuth: []
     put:
@@ -1848,27 +1887,34 @@ components:
         nickname:
           type: string
           description: 昵称
+          nullable: true
         department:
           $ref: '#/components/schemas/Department'
+          nullable: true
         intro:
           type: string
           description: 自我介绍
+          nullable: true
         email:
           type: string
           format: email
           description: 对外展示邮箱
+          nullable: true
         avatar:
           type: string
           format: uri
           description: 头像 URL
+          nullable: true
         blog_url:
           type: string
           format: uri
           description: 个人博客链接
+          nullable: true
         github_url:
           type: string
           format: uri
           description: GitHub 主页链接
+          nullable: true
         created_at:
           type: string
           format: date-time
@@ -2981,6 +3027,18 @@ components:
                 code: 40106
                 message: 登录邮箱不存在
                 data: null
+            token_expired:
+              summary: token_expired
+              value:
+                code: 40101
+                message: Access Token 已过期
+                data: null
+            invalid_token:
+              summary: invalid_token
+              value:
+                code: 40102
+                message: Access Token 无效或已被撤销
+                data: null
     Forbidden:
       description: 无权限（403xx）
       content:
@@ -3104,6 +3162,15 @@ components:
 
     TooManyRequests:
       description: 频率限制（429xx）
+      headers:
+        Retry-After:
+          description: >-
+            建议等待的整数秒，由剩余限流窗口或账号锁定剩余时间向上取整（最小 1）。剩余时间无法确定时不返回该头。
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            example: 900
       content:
         application/json:
           schema:

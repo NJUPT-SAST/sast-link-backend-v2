@@ -4,8 +4,12 @@ package response
 import (
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 )
 
 // Response is the standard API response envelope.
@@ -20,9 +24,10 @@ type BusinessError struct {
 	HTTPStatus int
 	Code       int
 	Message    string
+	RetryAfter time.Duration
 }
 
-// Error implements the error interface.
+// Error returns the error message.
 func (e *BusinessError) Error() string {
 	return e.Message
 }
@@ -36,10 +41,17 @@ func Ok(c *gin.Context, data any) {
 	})
 }
 
-// Error writes an error response. Unknown errors are mapped to 50000.
+// Error writes an error response. Unknown errors are mapped to CodeInternal.
 func Error(c *gin.Context, err error) {
 	var be *BusinessError
 	if errors.As(err, &be) {
+		if be.RetryAfter > 0 {
+			seconds := be.RetryAfter / time.Second
+			if be.RetryAfter%time.Second != 0 {
+				seconds++
+			}
+			c.Header("Retry-After", strconv.FormatInt(int64(seconds), 10))
+		}
 		c.JSON(be.HTTPStatus, Response{
 			Code:    be.Code,
 			Message: be.Message,
@@ -49,8 +61,8 @@ func Error(c *gin.Context, err error) {
 	}
 
 	c.JSON(http.StatusInternalServerError, Response{
-		Code:    50000,
-		Message: "internal server error",
+		Code:    errcode.CodeInternal,
+		Message: "服务器内部错误",
 		Data:    nil,
 	})
 }

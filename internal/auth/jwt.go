@@ -78,7 +78,7 @@ func (m JWTManager) SignAccessToken(input TokenInput) (string, error) {
 	if err != nil {
 		return "", ErrInvalidInput
 	}
-	if m.Issuer == "" || input.Subject == "" || input.JTI == "" || strings.TrimSpace(input.Role) == "" || strings.TrimSpace(input.State) == "" ||
+	if m.Issuer == "" || input.Subject == "" || strings.TrimSpace(input.JTI) == "" || strings.TrimSpace(input.Role) == "" || strings.TrimSpace(input.State) == "" ||
 		input.TokenVersion < 0 || len(m.Audience) == 0 || input.TTL <= 0 || m.Active.KID == "" || m.Active.Private == nil {
 		return "", ErrInvalidInput
 	}
@@ -167,7 +167,7 @@ func (m JWTManager) JWKS() map[string]any {
 }
 
 func validateTokenClaims(claims *TokenClaims) error {
-	if claims.Subject == "" || claims.ID == "" || claims.ExpiresAt == nil || claims.IssuedAt == nil || claims.NotBefore == nil {
+	if strings.TrimSpace(claims.Subject) == "" || strings.TrimSpace(claims.ID) == "" || claims.ExpiresAt == nil || claims.IssuedAt == nil || claims.NotBefore == nil {
 		return ErrInvalidToken
 	}
 	if strings.TrimSpace(claims.Role) == "" || strings.TrimSpace(claims.State) == "" || claims.TokenVersion < 0 {

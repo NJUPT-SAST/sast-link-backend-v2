@@ -7,7 +7,8 @@ import (
 	"time"
 )
 
-const fixedWindowLimiterScript = `
+const (
+	fixedWindowLimiterScript = `
 local current = redis.call("INCR", KEYS[1])
 if current == 1 then
   redis.call("PEXPIRE", KEYS[1], ARGV[2])
@@ -15,6 +16,7 @@ end
 local ttl = redis.call("PTTL", KEYS[1])
 return {current, tonumber(ARGV[1]), ttl}
 `
+)
 
 // RateLimitResult describes a fixed-window rate-limit decision.
 type RateLimitResult struct {

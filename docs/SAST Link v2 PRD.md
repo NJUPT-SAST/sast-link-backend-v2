@@ -79,9 +79,9 @@ SAST Link 内部使用 JWT RS256 签名 Access Token + opaque Refresh Token：
 
 - **Access Token**：RS256 签名 JWT，有效期 1 小时，含 `jti`（撤销）、`sub`（user.id）、`role`、`state`、`token_version`、`scope` 等 claims。自包含，业务服务可离线验签
 - **Refresh Token**：opaque 随机字符串，有效期 30 天，HMAC-SHA256 hash 后存 DB。采用 **rotation + family 链** 机制（见 4.6）
-- **登录态校验**：每次请求校验 Access Token 签名 → 检查 jti 是否在黑名单（Redis）→ 检查 `token_version`（Redis 缓存，未命中回源 DB）→ 检查账号状态（非 is_deleted）
+- **登录态校验**：每次请求校验 Access Token 签名 → 检查 jti 是否在黑名单（Redis）→ 单条 SQL join `oauth_access_tokens` 与 `user`，一次取回 `revoked_at`/`expires_at`/`state`/`token_version`，校验 token 未撤销未过期、账号非 is_deleted、`token_version` 与 claims 一致
 - **登出**：Access Token 的 jti 写入 Redis 黑名单（TTL = 剩余有效期）；Refresh Token family 链全部撤销（`revoked_at` = NOW）
-- **改密**：`user.token_version` 自增，同时更新 Redis 缓存，拦截所有旧 token
+- **改密**：`user.token_version` 自增，拦截所有旧 token
 
 ### 4.2 对外认证（OAuth 2.1 + OIDC Provider）
 
@@ -117,14 +117,16 @@ POST /user/login
 
 **流程**：
 1. 校验邮箱格式 — `@njupt.edu.cn` / `@sast.fun` 查 `user.login_email`；第三方邮箱查 `identities(provider='other_mail').provider_id` 反查 user
-2. 检查登录失败次数（Redis `sastlink:auth:login_fail:{email}`，15min 窗口 ≥ 10 次则锁定）
+2. 检查登录失败次数（Redis `sastlink:auth:login_failure:{email}`，15min 窗口 ≥ 10 次则锁定）
 3. 查用户是否存在：不存在返回 40106（邮箱不存在）；存在则执行 PBKDF2-SHA512 密码哈希校验
 4. 校验账号状态 — `is_deleted` 拒绝（40301）
 5. 检查设备数 — 该用户已有设备数 ≥ 5 时淘汰最旧设备
 6. 生成 Token Pair，Redis 记录设备信息
 7. DB 写入 `oauth_refresh_tokens`、`oauth_access_tokens` 元数据、`audit_logs`
 
-**token_version 机制**：`token_version` 存储在 `user` 表，改密/重置密码后递增，同步更新 Redis 缓存（key: `sastlink:token:version:{user_id}`，TTL 与 Access Token 一致，1h）。JWT Access Token 的 claims 中包含 `token_version`，验证时优先查 Redis 缓存，缓存未命中回源 DB 并回填。此机制确保改密后所有旧 Token（无论是否在黑名单中）立即失效，且高频请求不反复查 DB。
+**token_version 机制**：`token_version` 存储在 `user` 表，改密/重置密码后递增。JWT Access Token 的 claims 中包含 `token_version`，登录态校验时与 DB 当前值比对，不一致即拒绝。此机制确保改密后所有旧 Token（无论是否在黑名单中）立即失效。
+
+`token_version` 以 DB 为唯一权威，不单独走 Redis 缓存：中间件每请求本就需要查 `oauth_access_tokens` 拿 `revoked_at`/`expires_at`，`token_version` 由同一条 join `user` 的查询顺带返回，额外缓存只会在 DB 查询之外多一次网络往返而省不掉任何 DB 调用。若后续要削减这次 DB 查询，应缓存整个 auth state（`revoked_at` + `expires_at` + `state` + `token_version`）而非单个字段，并同步设计登出、family 级联撤销、改密与账号注销四条路径的缓存失效。
 
 ### 4.5 第三方 OAuth 登录
 
@@ -355,6 +357,8 @@ Payload: {
 | 管理 OAuth 客户端 | — | — | — | ✓ |
 | 查看审计日志 | — | — | — | ✓ |
 
+**角色变更**：`PUT /admin/users/:id` 实际修改 `role` 时，必须在同一事务内递增 `user.token_version` 并撤销该用户的全部 token family。`role` 未变化或仅修改普通资料时，不递增 `token_version`。旧 Access Token 继续携带签发时的 `role`，但会因版本不匹配在认证阶段失效。
+
 ### 4.13 审计日志
 
 所有认证相关操作写入 `audit_logs`：
@@ -437,8 +441,7 @@ is_deleted ──(恢复)──► njupter
 | OAuth State | `sastlink:oauth:state:{state}` | 10min | String（GetDel 消费） | OAuth 授权标准 state 参数，发起时写入，回调时 GetDel 校验防 CSRF |
 | OAuth 注册暂存 | `sastlink:oauth:registration:{state}` | 15min | String（GetDel 消费，JSON 值） | OAuth 回调无绑定分支。暂存 `{provider, provider_id, identity_data, oauth_state}`，消费时校验双值匹配 |
 | 登录码 | `sastlink:auth:login_code:{code}` | 60s | String（GetDel 消费） | OAuth 回调已有绑定用户分支，暂存 user_id，前端交换 Token Pair |
-| 登录失败 | `sastlink:auth:login_fail:{email}` | 15min | String（INCR 计数器） | 连续失败 ≥ 10 次锁定，成功登录后 DEL 清零 |
-| token_version | `sastlink:token:version:{user_id}` | 1h | String（SET EX） | 缓存 `user.token_version`，登录态校验优先读缓存，未命中回源 DB 并回填。改密/重置密码后同步更新 |
+| 登录失败 | `sastlink:auth:login_failure:{email}` | 15min | String（INCR 计数器） | 连续失败 ≥ 10 次锁定，成功登录后 DEL 清零 |
 | Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GetDel 消费） | 注册两步间暂存已验证邮箱 |
 | Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GetDel 消费） | 绑定邮箱两步间暂存待绑定邮箱 + user_id |
 
@@ -576,23 +579,25 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 模块 | 状态 |
 |------|------|
 | Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
-| 数据基础层 | 已完成 — V001/V002 SQL migrations、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
-| 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI/token_version 与 fixed-window limiter |
-| 用户认证与资料业务 | 待实现 — 注册、登录、验证码、改密/重置、登出、资料与头像 endpoints |
+| 数据基础层 | 已完成 — V001–V004 SQL migrations、固定内置 `sast-link-web` first-party Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
+| 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI 黑名单/登录失败计数与 fixed-window limiter |
+| 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流与登录/登出审计接入 |
+| 用户注册、密码与资料维护 | 待实现 — 注册、验证码、改密/重置、资料编辑与头像 endpoints |
 | OAuth/OIDC 业务 | 待实现 — OAuth 登录/绑定、authorize/token/revoke、discovery、UserInfo、ID Token 与客户端管理 endpoints |
-| 限流中间件、审计业务接入与 pg_cron | 待实现 — limiter primitive 已完成，仍需 HTTP middleware 与业务策略接入 |
+| 其余运维接入 | 待实现 — 设备管理、其他 endpoint 限流策略与 pg_cron |
 
 ## 11. 实现顺序
 
 - [x] Go 服务骨架（配置 / DB 与 Redis 连接 / Web 基础设施 / 健康检查）
-- [x] 数据基础层（V001/V002 migrations / baseline / entities / repositories / integration tests）
+- [x] 数据基础层（V001–V004 migrations / 内置 first-party Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
 - [x] 认证基础设施（PBKDF2 / JWT + JWKS / Refresh Token / PKCE-S256 / scope / Redis auth state + limiter / token-family rotation）
-- [ ] 用户认证业务（注册 / 登录 / JWT middleware / 验证码 / 改密 / 重置密码 / 登出）
-- [ ] 用户资料管理（查看 / 编辑 / 头像上传）
+- [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
+- [ ] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码）
+- [ ] 用户资料管理（编辑 / 头像上传）
 - [ ] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [ ] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
-- [ ] 限流与防刷中间件（Redis fixed-window limiter primitive 已完成）
-- [ ] 审计日志业务接入（健康检查已完成）
+- [ ] 限流与防刷扩展（登录 endpoint 已接入；验证码、注册等策略待对应业务实现）
+- [ ] 审计日志扩展（登录/登出已接入；其余业务随 endpoint 实现）
 - [ ] 头像内容审核（腾讯云 COS）
 - [ ] OAuth 2.1 授权服务端（authorize / token / revoke + PKCE）
 - [ ] OIDC Provider（discovery / JWKS / UserInfo / ID Token）
