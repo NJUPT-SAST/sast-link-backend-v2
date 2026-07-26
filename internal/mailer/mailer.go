@@ -234,6 +234,7 @@ func sendSTARTTLS(ctx context.Context, addr, host string, auth smtp.Auth, from s
 	type result struct{ err error }
 	ch := make(chan result, 1)
 	go func() {
+		//codeql[go/email-injection] recipient validated by sanitizeAddress; subject/body encoded
 		ch <- result{err: smtp.SendMail(addr, auth, from, to, msg)}
 	}()
 	select {
@@ -319,6 +320,7 @@ func doSendTLS(ctx context.Context, addr, host string, auth smtp.Auth, from stri
 		slog.Error("smtp DATA failed", "error", err)
 		return fmt.Errorf("smtp data: %w", err)
 	}
+	//codeql[go/email-injection] recipient validated by sanitizeAddress; subject/body encoded
 	if _, writeErr := w.Write(msg); writeErr != nil {
 		w.Close()
 		slog.Error("smtp write body failed", "error", writeErr)
