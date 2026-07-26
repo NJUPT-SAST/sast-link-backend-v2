@@ -204,7 +204,7 @@ migration up in production requires --confirm-production
 
 完成 migration 后，执行约定的 smoke checks：
 
-- API `/health` 返回 `db=ok` 和 `redis=ok`。
+- API `/health` 返回 `db=ok` 和 `redis=ok`。`redis=degraded` 表示 Redis 不可达，服务仍在降级提供认证能力，需单独排查而非重启容器。
 - 本次 migration 影响的登录、认证、OAuth 或其他关键流程在目标环境通过验证。
 - 用只读 SQL spot-check 关键约束、索引或字段状态。
 - 应用日志中没有 migration 相关启动错误或数据库错误。

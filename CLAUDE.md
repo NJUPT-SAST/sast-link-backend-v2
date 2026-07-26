@@ -94,6 +94,13 @@ The user state machine is `njupter -> on_sast -> retired_sast`; any non-deleted 
 
 Redis is used for short-lived and operational state, not durable source-of-truth data. The PRD defines keys for verification codes, rate limits, devices, token blacklist, OAuth state, registration state, login codes, login failures, Register-Tickets, and Bind-Tickets. Most flows require one-time consumption via GetDel semantics. `token_version` is deliberately not cached in Redis: the auth middleware already reads it from the same DB query that fetches access-token revocation state.
 
+Every Redis-backed check must declare its behavior when Redis is unavailable, following one of two classes:
+
+- **Fail-closed (Redis is the only store)**: verification codes, OAuth `state`, `registration_state`, `login_code`, Register/Bind-Tickets, and idempotency keys. A missing value cannot be treated as valid, so the flow must be rejected and restarted by the user.
+- **Fail-open (PostgreSQL is authoritative, or loss only widens a rate window)**: the JTI blacklist, login-failure counters/lockout, and endpoint rate limits. These log at WARN and continue. The JTI blacklist is safe to skip because every blacklisted JTI is written in the same transaction that sets `oauth_access_tokens.revoked_at`, and the auth middleware always performs that DB check.
+
+Do not make a fail-open dependency return `ErrInternal`; that turns an optional cache into a single point of failure for authentication.
+
 When rebuilding flows, preserve the double binding between `registration_state` and the original OAuth `state`; `registration_state` is only for new-user registration and must not be accepted as an authenticated account-binding mechanism.
 
 ## Deployment Notes
@@ -103,6 +110,8 @@ When rebuilding flows, preserve the double binding between `registration_state` 
 ```text
 GET /health -> { "status": "ok", "db": "ok", "redis": "ok" }
 ```
+
+Only PostgreSQL is a required dependency. When Redis is unreachable the endpoint still returns `200` with `{ "status": "ok", "db": "ok", "redis": "degraded" }`, because the service can serve authenticated traffic from PostgreSQL alone and restarting the container would not restore Redis. A `db` failure returns `500` with `"status": "error"`.
 
 ## CI And Security
 
