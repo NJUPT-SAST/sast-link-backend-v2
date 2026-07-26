@@ -96,9 +96,10 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	}
 	if s.Failures != nil {
 		if resetErr := s.Failures.Reset(ctx, failureKey); resetErr != nil {
-			// A stale failure counter could lock the user on the next login.
-			// Fail closed by revoking the issued pair.
-			return nil, compensate("reset login failures", resetErr)
+			// A stale counter can lock this identifier until its 15min window
+			// expires, which is strictly better than revoking a valid session
+			// and refusing every login for as long as Redis is unavailable.
+			slog.WarnContext(ctx, "reset login failures unavailable", "error", resetErr)
 		}
 	}
 	if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)}); auditErr != nil {
@@ -254,7 +255,11 @@ func (s Service) checkEndpointLimit(ctx context.Context, endpoint, subject strin
 	}
 	result, err := s.Limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
-		return newError(ErrInternal, "check endpoint limit", err)
+		// Redis-backed throttling has no durable fallback. Rejecting every
+		// request would take the endpoint down entirely, so allow the call and
+		// rely on PBKDF2 cost plus alerting during the outage.
+		slog.WarnContext(ctx, "endpoint limiter unavailable, allowing request", "endpoint", endpoint, "error", err)
+		return nil
 	}
 	if !result.Allowed {
 		return withRetryAfter(newError(ErrRateLimited, "rate limited", nil), result.RetryAfter)
@@ -272,7 +277,9 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 			continue
 		}
 		if err := s.Blacklist.BlacklistJTI(ctx, entry.TokenID, ttl); err != nil {
-			slog.Error("deliver token blacklist entry", "token_id", entry.TokenID, "error", err)
+			// The same-transaction outbox row guarantees a worker retry, so a
+			// failed synchronous delivery is expected degradation, not an error.
+			slog.WarnContext(ctx, "deliver token blacklist entry, outbox worker will retry", "token_id", entry.TokenID, "error", err)
 		}
 	}
 }
@@ -283,7 +290,8 @@ func (s Service) checkLoginLock(ctx context.Context, key string) error {
 	}
 	locked, retryAfter, err := s.Failures.IsLocked(ctx, key)
 	if err != nil {
-		return newError(ErrInternal, "check login lockout", err)
+		slog.WarnContext(ctx, "login lockout state unavailable, allowing attempt", "error", err)
+		return nil
 	}
 	if locked {
 		return withRetryAfter(newError(ErrLocked, "login locked", nil), retryAfter)
@@ -297,10 +305,13 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 	if s.Failures != nil {
 		result, err := s.Failures.RecordFailure(ctx, failureKey)
 		if err != nil {
-			return newError(ErrInternal, "record login failure", err)
+			// Losing a counter increment must not mask the real rejection
+			// reason with a 500; report the original failure instead.
+			slog.WarnContext(ctx, "record login failure unavailable", "error", err)
+		} else {
+			locked = result.Locked
+			lockTTL = result.TTL
 		}
-		locked = result.Locked
-		lockTTL = result.TTL
 	}
 	if err := s.audit(ctx, loginUserID(user), "login", "session", nil, false, sentinel.Code, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, input.Identifier)}); err != nil {
 		slog.Error("audit login failure", "error", err)
