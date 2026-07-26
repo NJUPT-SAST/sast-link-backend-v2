@@ -996,6 +996,33 @@ func TestVerifyRegisterCodeRejectsCrossPurposeCode(t *testing.T) {
 	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeExpired)
 }
 
+// Per the Redis degradation policy (PRD §6.0) limiter outages fail open; the
+// verification-code store is the fail-closed guard when Redis is fully down.
+func TestSendRegisterCodeAllowsWhenEmailLimiterUnavailable(t *testing.T) {
+	service := newRegisterService(t)
+	service.EmailLimiter = &fakeLimiter{err: errors.New("redis unavailable")}
+	service.EmailIPLimiter = &fakeLimiter{err: errors.New("redis unavailable")}
+	result, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "new@sast.fun", ClientIP: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("SendRegisterCode returned error: %v", err)
+	}
+	if result.Email != "new@sast.fun" || len(service.Mailer.(*fakeMailer).sent) != 1 {
+		t.Fatalf("result=%+v sent=%d, want code delivered despite limiter outage", result, len(service.Mailer.(*fakeMailer).sent))
+	}
+}
+
+func TestSendRegisterCodeRejectsWhenEmailLimitExceeded(t *testing.T) {
+	service := newRegisterService(t)
+	service.EmailLimiter = &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: time.Minute}}
+	_, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "new@sast.fun", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+
+	service = newRegisterService(t)
+	service.EmailIPLimiter = &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: time.Minute}}
+	_, err = service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "new@sast.fun", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+}
+
 func TestRegisterCreatesUserAndIssuesTokens(t *testing.T) {
 	service := newRegisterService(t)
 	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)

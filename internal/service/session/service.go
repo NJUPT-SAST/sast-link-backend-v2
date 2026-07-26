@@ -702,23 +702,25 @@ func (s Service) checkEndpointLimit(ctx context.Context, endpoint, subject strin
 // checkEmailLimit throttles verification-code sending on two independent
 // dimensions: the target email (stops repeated mail to one inbox) and the
 // caller IP (stops one attacker fanning out across many addresses to drain
-// SMTP quota).
+// SMTP quota). Limiter outages fail open per the Redis degradation policy
+// (PRD §6.0): the flow still fails closed at the Redis code store when Redis
+// is fully down, so degradation only matters for transient limiter errors.
 func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) error {
 	if s.EmailLimiter != nil {
 		result, err := s.EmailLimiter.Allow(ctx, "send_email", "email:"+email)
-		if err != nil {
-			return newError(ErrInternal, "check email limit", err)
-		}
-		if !result.Allowed {
+		switch {
+		case err != nil:
+			slog.WarnContext(ctx, "email limiter unavailable, allowing request", "error", err)
+		case !result.Allowed:
 			return withRetryAfter(newError(ErrRateLimited, "rate limited", nil), result.RetryAfter)
 		}
 	}
 	if s.EmailIPLimiter != nil && strings.TrimSpace(clientIP) != "" {
 		result, err := s.EmailIPLimiter.Allow(ctx, "send_email", "ip:"+strings.TrimSpace(clientIP))
-		if err != nil {
-			return newError(ErrInternal, "check email ip limit", err)
-		}
-		if !result.Allowed {
+		switch {
+		case err != nil:
+			slog.WarnContext(ctx, "email ip limiter unavailable, allowing request", "error", err)
+		case !result.Allowed:
 			return withRetryAfter(newError(ErrRateLimited, "rate limited", nil), result.RetryAfter)
 		}
 	}
