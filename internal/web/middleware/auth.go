@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -95,12 +96,16 @@ func (a Authenticator) authenticate(ctx context.Context, header string) (Princip
 	if err != nil {
 		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
 	}
+	// The Redis blacklist is a fast reject path, not the authority. Every JTI it
+	// holds was written in the same transaction that set oauth_access_tokens
+	// .revoked_at, so the DB check below rejects a strict superset. Degrade to
+	// that check when Redis is unavailable instead of failing the request.
 	if a.Blacklist != nil {
 		blacklisted, blacklistErr := a.Blacklist.IsJTIBlacklisted(ctx, claims.ID)
-		if blacklistErr != nil {
-			return Principal{}, backendError()
-		}
-		if blacklisted {
+		switch {
+		case blacklistErr != nil:
+			slog.WarnContext(ctx, "jti blacklist unavailable, falling back to database", "error", blacklistErr)
+		case blacklisted:
 			return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
 		}
 	}
