@@ -100,6 +100,64 @@ func (r *UserRepository) FindByID(ctx context.Context, userID int64) (*model.Use
 	return nil, fmt.Errorf("find user by ID: %w", err)
 }
 
+// FindByLoginEmail finds a user by login email only (excludes other-mail identities).
+func (r *UserRepository) FindByLoginEmail(ctx context.Context, email string) (*model.User, error) {
+	var user model.User
+	err := r.database.WithContext(ctx).
+		Preload("Profile").
+		Preload("Identities").
+		Where("login_email = ?", email).
+		First(&user).Error
+	if err == nil {
+		return &user, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("find user by login email: %w", err)
+}
+
+// UpdatePasswordAndBumpTokenVersion atomically replaces the password hash and
+// increments token_version, so every previously issued access token is rejected
+// by the version mismatch even before family revocation is delivered.
+func (r *UserRepository) UpdatePasswordAndBumpTokenVersion(ctx context.Context, userID int64, passwordHash string) error {
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Model(&model.User{}).
+			Where("id = ?", userID).
+			Update("password", passwordHash).Error; err != nil {
+			return fmt.Errorf("update password: %w", err)
+		}
+		if err := transaction.Model(&model.User{}).
+			Where("id = ?", userID).
+			UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error; err != nil {
+			return fmt.Errorf("increment token version: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("update password and bump token version: %w", err)
+	}
+	return nil
+}
+
+// ExistsByLoginEmail reports whether a user with the given login email exists.
+func (r *UserRepository) ExistsByLoginEmail(ctx context.Context, email string) (bool, error) {
+	var count int64
+	if err := r.database.WithContext(ctx).Model(&model.User{}).Where("login_email = ?", email).Count(&count).Error; err != nil {
+		return false, fmt.Errorf("count user by login email: %w", err)
+	}
+	return count > 0, nil
+}
+
+// ExistsByStudentID reports whether a user with the given student ID exists.
+func (r *UserRepository) ExistsByStudentID(ctx context.Context, studentID string) (bool, error) {
+	var count int64
+	if err := r.database.WithContext(ctx).Model(&model.User{}).Where("student_id = ?", studentID).Count(&count).Error; err != nil {
+		return false, fmt.Errorf("count user by student id: %w", err)
+	}
+	return count > 0, nil
+}
+
 // FindAuthStateByID finds the minimal user state required to authenticate tokens.
 func (r *UserRepository) FindAuthStateByID(ctx context.Context, userID int64) (*UserAuthState, error) {
 	var state UserAuthState

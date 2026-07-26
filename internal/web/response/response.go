@@ -41,6 +41,15 @@ func Ok(c *gin.Context, data any) {
 	})
 }
 
+// Created writes a successful resource-creation response (HTTP 201).
+func Created(c *gin.Context, data any) {
+	c.JSON(http.StatusCreated, Response{
+		Code:    0,
+		Message: "ok",
+		Data:    data,
+	})
+}
+
 // Error writes an error response. Unknown errors are mapped to CodeInternal.
 func Error(c *gin.Context, err error) {
 	var be *BusinessError

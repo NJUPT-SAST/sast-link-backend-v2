@@ -2,13 +2,19 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
@@ -109,6 +115,43 @@ func (s Service) now() time.Time {
 
 func normalizeIdentifier(identifier string) string {
 	return strings.ToLower(strings.TrimSpace(identifier))
+}
+
+func isAllowedEmailDomain(email string) bool {
+	return strings.HasSuffix(email, "@njupt.edu.cn") || strings.HasSuffix(email, "@sast.fun")
+}
+
+func generateVerificationCode() (string, error) {
+	// Six-digit numeric code.
+	const max = 1_000_000
+	n, err := rand.Int(rand.Reader, big.NewInt(max))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", n.Int64()), nil
+}
+
+func generateRegisterTicket() (string, error) {
+	const prefix = "reg_"
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(bytes[:]), nil
+}
+
+func generateBindTicket() (string, error) {
+	const prefix = "be_"
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(bytes[:]), nil
+}
+
+func isDuplicateError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation
 }
 
 func loginLimitSubject(input LoginInput, identifier string) string {

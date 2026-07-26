@@ -415,3 +415,54 @@ func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt 
 	}
 	return entries, nil
 }
+
+// RevokeAllByUser revokes every non-revoked access and refresh token owned by
+// userID and enqueues the still-live access-token JTIs for blacklist delivery.
+// Used by password change/reset and role change to invalidate all sessions.
+func (r *TokenRepository) RevokeAllByUser(
+	ctx context.Context,
+	userID int64,
+	revokedAt time.Time,
+) ([]model.BlacklistEntry, error) {
+	var entries []model.BlacklistEntry
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Model(&model.OAuthAccessToken{}).
+			Select("token_id", "expires_at").
+			Where("user_id = ? AND expires_at > ? AND revoked_at IS NULL", userID, revokedAt).
+			Find(&entries).Error; err != nil {
+			return fmt.Errorf("select live access tokens by user: %w", err)
+		}
+		if err := transaction.Model(&model.OAuthAccessToken{}).
+			Where("user_id = ? AND revoked_at IS NULL", userID).
+			Update("revoked_at", revokedAt).Error; err != nil {
+			return fmt.Errorf("revoke access tokens by user: %w", err)
+		}
+		if err := transaction.Model(&model.OAuthRefreshToken{}).
+			Where("user_id = ? AND revoked_at IS NULL", userID).
+			Update("revoked_at", revokedAt).Error; err != nil {
+			return fmt.Errorf("revoke refresh tokens by user: %w", err)
+		}
+		if len(entries) == 0 {
+			return nil
+		}
+		rows := make([]model.TokenBlacklistOutbox, 0, len(entries))
+		for _, entry := range entries {
+			rows = append(rows, model.TokenBlacklistOutbox{
+				TokenID:        entry.TokenID,
+				ExpiresAt:      entry.ExpiresAt,
+				NextDeliveryAt: revokedAt,
+			})
+		}
+		if err := transaction.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "token_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"expires_at", "next_delivery_at"}),
+		}).Create(&rows).Error; err != nil {
+			return fmt.Errorf("enqueue access token blacklist: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}

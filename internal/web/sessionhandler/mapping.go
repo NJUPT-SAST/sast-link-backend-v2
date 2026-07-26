@@ -15,6 +15,32 @@ func mapServiceError(err error) error {
 		return err
 	}
 	message := defaultMessage(serviceErr.Kind)
+	switch serviceErr.Code {
+	case errcode.CodeRegisterTicketInvalid:
+		message = "Register-Ticket 无效或已过期"
+	case errcode.CodeBindTicketInvalid:
+		message = "Bind-Ticket 无效或已过期"
+	case errcode.CodeVerificationCodeWrong:
+		message = "验证码错误"
+	case errcode.CodeVerificationCodeExpired:
+		message = "验证码已过期"
+	case errcode.CodeEmailDomainNotAllowed:
+		message = "邮箱域名不允许"
+	case errcode.CodeEmailAlreadyRegistered:
+		message = "邮箱已被注册"
+	case errcode.CodeStudentIDOccupied:
+		message = "学号已被占用"
+	case errcode.CodeIdentityOccupied:
+		message = "第三方账号已被其他用户绑定"
+	case errcode.CodeIdentityAlreadyBound:
+		message = "该类型账号已绑定"
+	case errcode.CodeIdentityLimitReached:
+		message = "第三方邮箱绑定数量已达上限"
+	case errcode.CodePasswordTooShort:
+		message = "密码长度不足"
+	case errcode.CodePasswordUnchanged:
+		message = "新旧密码相同"
+	}
 	var status int
 	switch serviceErr.Kind {
 	case session.KindInvalidInput:
@@ -25,6 +51,13 @@ func mapServiceError(err error) error {
 		status = http.StatusUnauthorized
 	case session.KindUserDeleted:
 		status = http.StatusForbidden
+	case session.KindEmailFailed:
+		message = "邮件发送失败，请稍后重试"
+		status = http.StatusInternalServerError
+	case session.KindConflict:
+		status = http.StatusConflict
+	case session.KindValidationFailed:
+		status = http.StatusUnprocessableEntity
 	case session.KindInternal:
 		message = "服务器内部错误"
 		status = http.StatusInternalServerError
@@ -53,6 +86,10 @@ func defaultCode(kind session.Kind) int {
 		return errcode.CodeAccountDeleted
 	case session.KindRateLimited, session.KindLocked:
 		return errcode.CodeRateLimited
+	case session.KindConflict:
+		return errcode.CodeConflict
+	case session.KindValidationFailed:
+		return errcode.CodeValidationFailed
 	default:
 		return errcode.CodeInternal
 	}
@@ -74,6 +111,10 @@ func defaultMessage(kind session.Kind) string {
 		return "账号已注销"
 	case session.KindInvalidToken:
 		return "Access Token 无效或已被撤销"
+	case session.KindConflict:
+		return "资源已存在"
+	case session.KindValidationFailed:
+		return "业务校验失败"
 	default:
 		return "服务器内部错误"
 	}
@@ -122,15 +163,19 @@ func mapProfile(input session.UserProfileDTO) profileDTO {
 		}
 	}
 	for _, identity := range input.Identities {
-		output.Identities = append(output.Identities, identityDTO{
-			ID:             identity.ID,
-			Provider:       identity.Provider,
-			ProviderID:     identity.ProviderID,
-			IdentityData:   identity.IdentityData,
-			TokenExpiresAt: identity.TokenExpiresAt,
-			CreatedAt:      identity.CreatedAt,
-			UpdatedAt:      identity.UpdatedAt,
-		})
+		output.Identities = append(output.Identities, mapIdentity(identity))
 	}
 	return output
+}
+
+func mapIdentity(input session.IdentityDTO) identityDTO {
+	return identityDTO{
+		ID:             input.ID,
+		Provider:       input.Provider,
+		ProviderID:     input.ProviderID,
+		IdentityData:   input.IdentityData,
+		TokenExpiresAt: input.TokenExpiresAt,
+		CreatedAt:      input.CreatedAt,
+		UpdatedAt:      input.UpdatedAt,
+	}
 }

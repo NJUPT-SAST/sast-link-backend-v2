@@ -87,6 +87,25 @@ const (
 	CollegeOther                                  College = "其他"
 )
 
+// Valid reports whether c is a defined college_enum value; invalid values would
+// otherwise surface as opaque PostgreSQL enum errors on insert.
+func (c College) Valid() bool {
+	switch c {
+	case CollegeBellHonors, CollegeCommunicationAndInformationEngineering,
+		CollegeOptoelectronicEngineering, CollegeIntegratedCircuitScienceAndEngineering,
+		CollegeComputerSoftwareCybersecurity, CollegeAutomation,
+		CollegeArtificialIntelligence, CollegeMaterialsScienceAndEngineering,
+		CollegeChemistryAndLifeScience, CollegeInternetOfThings, CollegeScience,
+		CollegeModernPostAndIntelligentTransportation, CollegeDigitalMediaAndDesignArt,
+		CollegeManagement, CollegeEconomics, CollegeSociologyPopulationAndSocialWork,
+		CollegeForeignLanguages, CollegeEducationScienceAndTechnology,
+		CollegePortland, CollegeOther:
+		return true
+	default:
+		return false
+	}
+}
+
 // StringArray is a one-dimensional PostgreSQL text[] value. A nil slice maps
 // to SQL NULL; a non-nil empty slice maps to the empty PostgreSQL array ({}).
 type StringArray []string

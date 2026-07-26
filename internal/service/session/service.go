@@ -9,6 +9,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
@@ -18,6 +19,12 @@ const (
 	defaultAccessTTL         = time.Hour
 	defaultRefreshTTL        = 30 * 24 * time.Hour
 	loginCompensationTimeout = 5 * time.Second
+	// verificationTTL bounds email verification codes and the tickets derived
+	// from them (Register-Ticket / Bind-Ticket), per the API contract's 5-minute
+	// one-time semantics.
+	verificationTTL = 5 * time.Minute
+	// maxOtherMailBindings is the per-user cap on other_mail identities.
+	maxOtherMailBindings = 2
 )
 
 var sessionScopes = scope.InternalSessionScopes
@@ -27,9 +34,16 @@ type Service struct {
 	Clients          ClientRepository
 	Tokens           TokenRepository
 	Audit            AuditRepository
+	Identities       IdentityRepository
 	Limiter          EndpointLimiter
+	EmailLimiter     EndpointLimiter
+	EmailIPLimiter   EndpointLimiter
 	Failures         LoginFailureStore
 	Blacklist        TokenBlacklist
+	Mailer           Mailer
+	VerificationCode VerificationCodeStore
+	RegisterTicket   RegisterTicketStore
+	BindTicket       BindTicketStore
 	InternalClientID string
 	JWT              *auth.JWTManager
 	RefreshTokens    *auth.RefreshTokenManager
@@ -248,6 +262,424 @@ func (s Service) Profile(ctx context.Context, input ProfileInput) (*ProfileResul
 	return &ProfileResult{Profile: profileDTO(user)}, nil
 }
 
+func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInput) (*SendRegisterCodeResult, error) {
+	email := normalizeIdentifier(input.Email)
+	if email == "" {
+		return nil, newError(ErrInvalidInput, "email is required", nil)
+	}
+	if !isAllowedEmailDomain(email) {
+		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
+	}
+	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
+		return nil, err
+	}
+	code, err := generateVerificationCode()
+	if err != nil {
+		return nil, newError(ErrInternal, "generate verification code", err)
+	}
+	if err := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeRegister), email, code, verificationTTL); err != nil {
+		return nil, newError(ErrInternal, "save verification code", err)
+	}
+	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeRegister); err != nil {
+		slog.Error("send register verification email", "email", email, "error", err)
+		return nil, newError(ErrEmailFailed, "邮件发送失败，请稍后重试", err)
+	}
+	if auditErr := s.audit(ctx, nil, "register_send_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+		slog.Error("audit register send code", "email", email, "error", auditErr)
+	}
+	return &SendRegisterCodeResult{Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
+}
+
+func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCodeInput) (*VerifyRegisterCodeResult, error) {
+	email := normalizeIdentifier(input.Email)
+	if email == "" || input.Code == "" {
+		return nil, newError(ErrInvalidInput, "email and code are required", nil)
+	}
+	if !isAllowedEmailDomain(email) {
+		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
+	}
+	stored, found, err := s.VerificationCode.ConsumeVerificationCode(ctx, string(mailer.VerificationPurposeRegister), email)
+	if err != nil {
+		return nil, newError(ErrInternal, "consume verification code", err)
+	}
+	if !found {
+		return nil, newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
+	}
+	if stored != input.Code {
+		return nil, newError(ErrVerificationCodeWrong, "验证码错误", nil)
+	}
+	ticket, err := generateRegisterTicket()
+	if err != nil {
+		return nil, newError(ErrInternal, "generate register ticket", err)
+	}
+	if err := s.RegisterTicket.SaveRegisterTicket(ctx, ticket, email, verificationTTL); err != nil {
+		return nil, newError(ErrInternal, "save register ticket", err)
+	}
+	if auditErr := s.audit(ctx, nil, "register_verify_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+		slog.Error("audit register verify code", "email", email, "error", auditErr)
+	}
+	return &VerifyRegisterCodeResult{RegisterTicket: ticket, Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
+}
+
+func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterResult, error) {
+	ticket := strings.TrimSpace(input.RegisterTicket)
+	if ticket == "" {
+		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket is required", nil)
+	}
+	// The contract accepts registration_state + oauth_state for the third-party
+	// OAuth no-binding branch; reject them until OAuth login issues such states,
+	// so nothing silently pretends to bind an identity. Validate before the
+	// ticket so a rejected request does not burn the one-time ticket.
+	if strings.TrimSpace(input.RegistrationState) != "" || strings.TrimSpace(input.OAuthState) != "" {
+		return nil, newError(ErrInvalidInput, "registration_state 无效：第三方 OAuth 注册尚未开放", nil)
+	}
+
+	name := strings.TrimSpace(input.Name)
+	studentID := strings.TrimSpace(input.StudentID)
+	phone := strings.TrimSpace(input.PhoneNumber)
+	qq := strings.TrimSpace(input.QQNumber)
+	college := model.College(strings.TrimSpace(input.College))
+	major := strings.TrimSpace(input.Major)
+	password := input.Password
+	if name == "" || studentID == "" || phone == "" || qq == "" || college == "" || major == "" || password == "" {
+		return nil, newError(ErrInvalidInput, "注册信息不完整", nil)
+	}
+	if !college.Valid() {
+		return nil, newError(ErrInvalidInput, "学院不在枚举范围内", nil)
+	}
+	if len(password) < 8 {
+		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
+	}
+
+	email, found, err := s.RegisterTicket.ConsumeRegisterTicket(ctx, ticket)
+	if err != nil {
+		return nil, newError(ErrInternal, "consume register ticket", err)
+	}
+	if !found {
+		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 无效或已过期", nil)
+	}
+	if !isAllowedEmailDomain(email) {
+		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
+	}
+
+	exists, err := s.Users.ExistsByLoginEmail(ctx, email)
+	if err != nil {
+		return nil, newError(ErrInternal, "check email existence", err)
+	}
+	if exists {
+		return nil, newError(ErrEmailAlreadyRegistered, "邮箱已被注册", nil)
+	}
+	exists, err = s.Users.ExistsByStudentID(ctx, studentID)
+	if err != nil {
+		return nil, newError(ErrInternal, "check student id existence", err)
+	}
+	if exists {
+		return nil, newError(ErrStudentIDOccupied, "学号已被占用", nil)
+	}
+
+	passwordHash, err := s.Passwords.HashPassword(password)
+	if err != nil {
+		return nil, newError(ErrInternal, "hash password", err)
+	}
+
+	user := &model.User{
+		Role:         model.UserRoleFreshman,
+		State:        model.UserStateNJUPTer,
+		College:      college,
+		Name:         name,
+		PhoneNumber:  phone,
+		QQNumber:     qq,
+		PasswordHash: passwordHash,
+		StudentID:    studentID,
+		LoginEmail:   email,
+		Major:        major,
+	}
+	profile := &model.Profile{}
+
+	if createErr := s.Users.CreateWithProfile(ctx, user, profile); createErr != nil {
+		if isDuplicateError(createErr) {
+			return nil, newError(ErrEmailAlreadyRegistered, "邮箱已被注册", createErr)
+		}
+		return nil, newError(ErrInternal, "create user", createErr)
+	}
+
+	client, err := s.findInternalClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pair, err := s.issuePair(user, client, 0, "", sessionScopes)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.Tokens.CreatePair(ctx, pair.access, pair.refresh); err != nil {
+		return nil, newError(ErrInternal, "create token pair", err)
+	}
+
+	if auditErr := s.audit(ctx, &user.ID, "register", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+		slog.Error("audit register", "user_id", user.ID, "error", auditErr)
+	}
+	return &RegisterResult{
+		AccessToken:      pair.accessToken,
+		RefreshToken:     pair.refreshToken,
+		TokenType:        BearerTokenType,
+		Scope:            pair.scopeClaim,
+		AccessExpiresAt:  pair.access.ExpiresAt,
+		RefreshExpiresAt: pair.refresh.ExpiresAt,
+		Profile:          profileDTO(user),
+	}, nil
+}
+
+func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswordInput) (*ForgotPasswordResult, error) {
+	email := normalizeIdentifier(input.Email)
+	if email == "" {
+		return nil, newError(ErrInvalidInput, "email is required", nil)
+	}
+	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
+		return nil, err
+	}
+	user, err := s.Users.FindByLoginEmail(ctx, email)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, newError(ErrUnknownIdentifier, "登录邮箱不存在", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "find login email", err)
+	}
+	code, err := generateVerificationCode()
+	if err != nil {
+		return nil, newError(ErrInternal, "generate verification code", err)
+	}
+	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeResetPassword), email, code, verificationTTL); saveErr != nil {
+		return nil, newError(ErrInternal, "save verification code", saveErr)
+	}
+	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeResetPassword); err != nil {
+		slog.Error("send forgot password email", "email", email, "error", err)
+		return nil, newError(ErrEmailFailed, "邮件发送失败，请稍后重试", err)
+	}
+	if auditErr := s.audit(ctx, &user.ID, "forgot_password_send_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+		slog.Error("audit forgot password send code", "email", email, "error", auditErr)
+	}
+	return &ForgotPasswordResult{Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
+}
+
+func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*ResetPasswordResult, error) {
+	email := normalizeIdentifier(input.Email)
+	if email == "" || input.Code == "" || input.Password == "" {
+		return nil, newError(ErrInvalidInput, "email, code and password are required", nil)
+	}
+	// Validate everything possible before consuming the one-time code, so a
+	// rejected request does not force the user to request a fresh code.
+	if len(input.Password) < 8 {
+		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
+	}
+	stored, found, err := s.VerificationCode.ConsumeVerificationCode(ctx, string(mailer.VerificationPurposeResetPassword), email)
+	if err != nil {
+		return nil, newError(ErrInternal, "consume verification code", err)
+	}
+	if !found {
+		return nil, newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
+	}
+	if stored != input.Code {
+		return nil, newError(ErrVerificationCodeWrong, "验证码错误", nil)
+	}
+	user, err := s.Users.FindByLoginEmail(ctx, email)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, newError(ErrUnknownIdentifier, "登录邮箱不存在", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "find login email", err)
+	}
+	if s.Passwords.VerifyPassword(input.Password, user.PasswordHash) == nil {
+		return nil, newError(ErrPasswordUnchanged, "新密码不能与旧密码相同", nil)
+	}
+	passwordHash, err := s.Passwords.HashPassword(input.Password)
+	if err != nil {
+		return nil, newError(ErrInternal, "hash password", err)
+	}
+	if err := s.Users.UpdatePasswordAndBumpTokenVersion(ctx, user.ID, passwordHash); err != nil {
+		return nil, newError(ErrInternal, "update password", err)
+	}
+	now := s.now()
+	entries, revokeErr := s.Tokens.RevokeAllByUser(ctx, user.ID, now)
+	if revokeErr != nil {
+		slog.Error("revoke tokens after password reset", "user_id", user.ID, "error", revokeErr)
+	}
+	s.deliverBlacklist(ctx, entries, now)
+	if s.Failures != nil {
+		if resetErr := s.Failures.Reset(ctx, "identifier:"+email); resetErr != nil {
+			slog.Error("reset login failures after password reset", "email", email, "error", resetErr)
+		}
+	}
+	if auditErr := s.audit(ctx, &user.ID, "reset_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+		slog.Error("audit reset password", "user_id", user.ID, "error", auditErr)
+	}
+	return &ResetPasswordResult{Email: email}, nil
+}
+
+func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) (*ChangePasswordResult, error) {
+	if input.UserID <= 0 {
+		return nil, newError(ErrInvalidToken, "invalid principal", nil)
+	}
+	if input.OldPassword == "" || input.NewPassword == "" {
+		return nil, newError(ErrInvalidInput, "old_password and new_password are required", nil)
+	}
+	if len(input.NewPassword) < 8 {
+		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
+	}
+	if input.NewPassword == input.OldPassword {
+		return nil, newError(ErrPasswordUnchanged, "新密码不能与旧密码相同", nil)
+	}
+	user, err := s.Users.FindByID(ctx, input.UserID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, newError(ErrInvalidToken, "invalid principal", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "find change password user", err)
+	}
+	if user.State == model.UserStateDeleted {
+		return nil, newError(ErrUserDeleted, "user is deleted", nil)
+	}
+	if verifyErr := s.Passwords.VerifyPassword(input.OldPassword, user.PasswordHash); verifyErr != nil {
+		if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, nil); auditErr != nil {
+			slog.Error("audit change password failure", "user_id", user.ID, "error", auditErr)
+		}
+		return nil, newError(ErrPasswordInvalid, "旧密码错误", verifyErr)
+	}
+	passwordHash, err := s.Passwords.HashPassword(input.NewPassword)
+	if err != nil {
+		return nil, newError(ErrInternal, "hash password", err)
+	}
+	if err := s.Users.UpdatePasswordAndBumpTokenVersion(ctx, user.ID, passwordHash); err != nil {
+		return nil, newError(ErrInternal, "update password", err)
+	}
+	now := s.now()
+	entries, revokeErr := s.Tokens.RevokeAllByUser(ctx, user.ID, now)
+	if revokeErr != nil {
+		slog.Error("revoke tokens after password change", "user_id", user.ID, "error", revokeErr)
+	}
+	s.deliverBlacklist(ctx, entries, now)
+	if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, nil); auditErr != nil {
+		slog.Error("audit change password", "user_id", user.ID, "error", auditErr)
+	}
+	return &ChangePasswordResult{UserID: user.ID}, nil
+}
+
+func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeInput) (*BindEmailSendCodeResult, error) {
+	email := normalizeIdentifier(input.Email)
+	if email == "" {
+		return nil, newError(ErrInvalidInput, "email is required", nil)
+	}
+	if input.UserID <= 0 {
+		return nil, newError(ErrInvalidToken, "invalid principal", nil)
+	}
+	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
+		return nil, err
+	}
+	if existing, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, email); findErr == nil {
+		if existing.UserID == input.UserID {
+			return nil, newError(ErrIdentityAlreadyBound, "该邮箱已绑定", nil)
+		}
+		return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", nil)
+	} else if !errors.Is(findErr, repository.ErrNotFound) {
+		return nil, newError(ErrInternal, "find identity", findErr)
+	}
+	count, err := s.Identities.CountByUserAndProvider(ctx, input.UserID, model.LoginMethodOtherMail)
+	if err != nil {
+		return nil, newError(ErrInternal, "count identities", err)
+	}
+	if count >= maxOtherMailBindings {
+		return nil, newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
+	}
+	code, err := generateVerificationCode()
+	if err != nil {
+		return nil, newError(ErrInternal, "generate verification code", err)
+	}
+	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeBindEmail), email, code, verificationTTL); saveErr != nil {
+		return nil, newError(ErrInternal, "save verification code", saveErr)
+	}
+	ticket, err := generateBindTicket()
+	if err != nil {
+		return nil, newError(ErrInternal, "generate bind ticket", err)
+	}
+	if err := s.BindTicket.SaveBindTicket(ctx, ticket, BindTicketPayload{Email: email, UserID: input.UserID}, verificationTTL); err != nil {
+		return nil, newError(ErrInternal, "save bind ticket", err)
+	}
+	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeBindEmail); err != nil {
+		slog.Error("send bind email verification", "email", email, "error", err)
+		return nil, newError(ErrEmailFailed, "邮件发送失败，请稍后重试", err)
+	}
+	if auditErr := s.audit(ctx, &input.UserID, "bind_email_send_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"email": email}); auditErr != nil {
+		slog.Error("audit bind email send code", "email", email, "error", auditErr)
+	}
+	return &BindEmailSendCodeResult{BindTicket: ticket, ExpiresIn: int(verificationTTL.Seconds())}, nil
+}
+
+func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput) (*BindEmailVerifyResult, error) {
+	if input.UserID <= 0 {
+		return nil, newError(ErrInvalidToken, "invalid principal", nil)
+	}
+	ticket := strings.TrimSpace(input.BindTicket)
+	if ticket == "" || input.Code == "" {
+		return nil, newError(ErrInvalidInput, "bind_ticket and code are required", nil)
+	}
+	payload, found, err := s.BindTicket.ConsumeBindTicket(ctx, ticket)
+	if err != nil {
+		return nil, newError(ErrInternal, "consume bind ticket", err)
+	}
+	if !found {
+		return nil, newError(ErrBindTicketInvalid, "Bind-Ticket 无效或已过期", nil)
+	}
+	if payload.UserID != input.UserID {
+		return nil, newError(ErrBindTicketInvalid, "Bind-Ticket 不属于当前用户", nil)
+	}
+	stored, codeFound, err := s.VerificationCode.ConsumeVerificationCode(ctx, string(mailer.VerificationPurposeBindEmail), payload.Email)
+	if err != nil {
+		return nil, newError(ErrInternal, "consume verification code", err)
+	}
+	if !codeFound {
+		return nil, newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
+	}
+	if stored != input.Code {
+		return nil, newError(ErrVerificationCodeWrong, "验证码错误", nil)
+	}
+	if existing, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, payload.Email); findErr == nil {
+		if existing.UserID == input.UserID {
+			return nil, newError(ErrIdentityAlreadyBound, "该邮箱已绑定", nil)
+		}
+		return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", nil)
+	} else if !errors.Is(findErr, repository.ErrNotFound) {
+		return nil, newError(ErrInternal, "find identity", findErr)
+	}
+	identity := &model.Identity{
+		UserID:     input.UserID,
+		Provider:   model.LoginMethodOtherMail,
+		ProviderID: payload.Email,
+	}
+	if err := s.Identities.CreateWithinLimit(ctx, identity, maxOtherMailBindings); err != nil {
+		if errors.Is(err, repository.ErrLimitExceeded) {
+			return nil, newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
+		}
+		if isDuplicateError(err) {
+			return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", err)
+		}
+		return nil, newError(ErrInternal, "create identity", err)
+	}
+	if auditErr := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"provider": string(model.LoginMethodOtherMail), "provider_id": payload.Email}); auditErr != nil {
+		slog.Error("audit bind email", "user_id", input.UserID, "error", auditErr)
+	}
+	return &BindEmailVerifyResult{
+		Email: payload.Email,
+		Identity: IdentityDTO{
+			ID:             identity.ID,
+			Provider:       string(identity.Provider),
+			ProviderID:     identity.ProviderID,
+			IdentityData:   identity.IdentityData,
+			TokenExpiresAt: identity.TokenExpiresAt,
+			CreatedAt:      identity.CreatedAt,
+			UpdatedAt:      identity.UpdatedAt,
+		},
+	}, nil
+}
+
 func (s Service) checkEndpointLimit(ctx context.Context, endpoint, subject string) error {
 	if s.Limiter == nil {
 		return nil
@@ -258,6 +690,32 @@ func (s Service) checkEndpointLimit(ctx context.Context, endpoint, subject strin
 	}
 	if !result.Allowed {
 		return withRetryAfter(newError(ErrRateLimited, "rate limited", nil), result.RetryAfter)
+	}
+	return nil
+}
+
+// checkEmailLimit throttles verification-code sending on two independent
+// dimensions: the target email (stops repeated mail to one inbox) and the
+// caller IP (stops one attacker fanning out across many addresses to drain
+// SMTP quota).
+func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) error {
+	if s.EmailLimiter != nil {
+		result, err := s.EmailLimiter.Allow(ctx, "send_email", "email:"+email)
+		if err != nil {
+			return newError(ErrInternal, "check email limit", err)
+		}
+		if !result.Allowed {
+			return withRetryAfter(newError(ErrRateLimited, "rate limited", nil), result.RetryAfter)
+		}
+	}
+	if s.EmailIPLimiter != nil && strings.TrimSpace(clientIP) != "" {
+		result, err := s.EmailIPLimiter.Allow(ctx, "send_email", "ip:"+strings.TrimSpace(clientIP))
+		if err != nil {
+			return newError(ErrInternal, "check email ip limit", err)
+		}
+		if !result.Allowed {
+			return withRetryAfter(newError(ErrRateLimited, "rate limited", nil), result.RetryAfter)
+		}
 	}
 	return nil
 }

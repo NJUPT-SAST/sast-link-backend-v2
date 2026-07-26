@@ -20,6 +20,9 @@ const (
 	KindPasswordInvalid   Kind = "password_invalid"
 	KindUserDeleted       Kind = "user_deleted"
 	KindInvalidToken      Kind = "invalid_token"
+	KindEmailFailed       Kind = "email_failed"
+	KindConflict          Kind = "conflict"
+	KindValidationFailed  Kind = "validation_failed"
 	KindInternal          Kind = "internal"
 )
 
@@ -61,14 +64,26 @@ func (e *Error) Is(target error) bool {
 
 // Sentinels for each business outcome.
 var (
-	ErrInvalidInput      = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
-	ErrRateLimited       = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
-	ErrLocked            = &Error{Kind: KindLocked, Code: errcode.CodeRateLimited}
-	ErrUnknownIdentifier = &Error{Kind: KindUnknownIdentifier, Code: errcode.CodeUnknownIdentifier}
-	ErrPasswordInvalid   = &Error{Kind: KindPasswordInvalid, Code: errcode.CodePasswordInvalid}
-	ErrUserDeleted       = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
-	ErrInvalidToken      = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}
-	ErrInternal          = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	ErrInvalidInput            = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
+	ErrRateLimited             = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
+	ErrLocked                  = &Error{Kind: KindLocked, Code: errcode.CodeRateLimited}
+	ErrUnknownIdentifier       = &Error{Kind: KindUnknownIdentifier, Code: errcode.CodeUnknownIdentifier}
+	ErrPasswordInvalid         = &Error{Kind: KindPasswordInvalid, Code: errcode.CodePasswordInvalid}
+	ErrUserDeleted             = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
+	ErrInvalidToken            = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}
+	ErrEmailFailed             = &Error{Kind: KindEmailFailed, Code: errcode.CodeEmailDeliveryFailed}
+	ErrVerificationCodeWrong   = &Error{Kind: KindInvalidInput, Code: errcode.CodeVerificationCodeWrong}
+	ErrVerificationCodeExpired = &Error{Kind: KindInvalidInput, Code: errcode.CodeVerificationCodeExpired}
+	ErrRegisterTicketInvalid   = &Error{Kind: KindInvalidToken, Code: errcode.CodeRegisterTicketInvalid}
+	ErrBindTicketInvalid       = &Error{Kind: KindInvalidToken, Code: errcode.CodeBindTicketInvalid}
+	ErrEmailAlreadyRegistered  = &Error{Kind: KindConflict, Code: errcode.CodeEmailAlreadyRegistered}
+	ErrStudentIDOccupied       = &Error{Kind: KindConflict, Code: errcode.CodeStudentIDOccupied}
+	ErrIdentityOccupied        = &Error{Kind: KindConflict, Code: errcode.CodeIdentityOccupied}
+	ErrIdentityAlreadyBound    = &Error{Kind: KindConflict, Code: errcode.CodeIdentityAlreadyBound}
+	ErrIdentityLimitReached    = &Error{Kind: KindConflict, Code: errcode.CodeIdentityLimitReached}
+	ErrPasswordTooShort        = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordTooShort}
+	ErrPasswordUnchanged       = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordUnchanged}
+	ErrInternal                = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 )
 
 // newError returns a contextual error that matches its sentinel via Kind.

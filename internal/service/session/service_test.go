@@ -11,6 +11,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
@@ -48,6 +49,17 @@ func (f *fakeUsers) FindByLoginIdentifier(_ context.Context, identifier string) 
 	return user, nil
 }
 
+func (f *fakeUsers) FindByLoginEmail(_ context.Context, email string) (*model.User, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	user, ok := f.byLogin[email]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	return user, nil
+}
+
 func (f *fakeUsers) FindByID(_ context.Context, userID int64) (*model.User, error) {
 	if f.err != nil {
 		return nil, f.err
@@ -57,6 +69,55 @@ func (f *fakeUsers) FindByID(_ context.Context, userID int64) (*model.User, erro
 		return nil, repository.ErrNotFound
 	}
 	return user, nil
+}
+
+func (f *fakeUsers) ExistsByLoginEmail(_ context.Context, email string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	_, ok := f.byLogin[email]
+	return ok, nil
+}
+
+func (f *fakeUsers) ExistsByStudentID(_ context.Context, studentID string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	for _, user := range f.byLogin {
+		if user.StudentID == studentID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeUsers) CreateWithProfile(_ context.Context, user *model.User, _ *model.Profile) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.byLogin == nil {
+		f.byLogin = map[string]*model.User{}
+	}
+	if _, ok := f.byLogin[user.LoginEmail]; ok {
+		return errors.New("duplicate login_email")
+	}
+	if f.byID == nil {
+		f.byID = map[int64]*model.User{}
+	}
+	user.ID = int64(len(f.byID) + 1)
+	f.byLogin[user.LoginEmail] = user
+	f.byID[user.ID] = user
+	return nil
+}
+
+func (f *fakeUsers) UpdatePasswordAndBumpTokenVersion(_ context.Context, userID int64, passwordHash string) error {
+	user, ok := f.byID[userID]
+	if !ok {
+		return repository.ErrNotFound
+	}
+	user.PasswordHash = passwordHash
+	user.TokenVersion++
+	return nil
 }
 
 type fakeClients struct {
@@ -79,6 +140,7 @@ type fakeTokens struct {
 	rotatedAccess       *model.OAuthAccessToken
 	rotatedRefresh      *model.OAuthRefreshToken
 	revokedFamilies     []string
+	revokedUsers        []int64
 	revokeContextErr    error
 	revokeContextHasTTL bool
 	rotateErr           error
@@ -154,6 +216,29 @@ func (f *fakeTokens) RevokeFamily(ctx context.Context, familyID string, revokedA
 	}
 	for _, refresh := range f.refreshByHash {
 		if refresh.FamilyID == familyID {
+			refresh.RevokedAt = &revokedAt
+		}
+	}
+	return entries, nil
+}
+
+func (f *fakeTokens) RevokeAllByUser(_ context.Context, userID int64, revokedAt time.Time) ([]model.BlacklistEntry, error) {
+	if f.revokeErr != nil {
+		return nil, f.revokeErr
+	}
+	f.revokedUsers = append(f.revokedUsers, userID)
+	entries := make([]model.BlacklistEntry, 0)
+	for _, access := range f.accessByJTI {
+		if access.UserID != userID {
+			continue
+		}
+		if access.RevokedAt == nil && access.ExpiresAt.After(revokedAt) {
+			entries = append(entries, model.BlacklistEntry{TokenID: access.TokenID, ExpiresAt: access.ExpiresAt})
+		}
+		access.RevokedAt = &revokedAt
+	}
+	for _, refresh := range f.refreshByHash {
+		if refresh.UserID == userID {
 			refresh.RevokedAt = &revokedAt
 		}
 	}
@@ -249,6 +334,163 @@ func (f *fakeBlacklist) BlacklistJTI(_ context.Context, jti string, ttl time.Dur
 	f.jti = jti
 	f.ttl = ttl
 	return nil
+}
+
+type fakeMailer struct {
+	sent []fakeMail
+	err  error
+}
+
+type fakeMail struct {
+	to   string
+	code string
+}
+
+func (f *fakeMailer) SendVerificationCode(_ context.Context, to, code string, _ mailer.VerificationPurpose) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.sent = append(f.sent, fakeMail{to: to, code: code})
+	return nil
+}
+
+type fakeVerificationCodeStore struct {
+	codes map[string]string
+	err   error
+}
+
+func codeKey(purpose, email string) string { return purpose + "|" + email }
+
+func (f *fakeVerificationCodeStore) SaveVerificationCode(_ context.Context, purpose, email, code string, _ time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.codes == nil {
+		f.codes = map[string]string{}
+	}
+	f.codes[codeKey(purpose, email)] = code
+	return nil
+}
+
+func (f *fakeVerificationCodeStore) ConsumeVerificationCode(_ context.Context, purpose, email string) (string, bool, error) {
+	if f.err != nil {
+		return "", false, f.err
+	}
+	code, ok := f.codes[codeKey(purpose, email)]
+	if !ok {
+		return "", false, nil
+	}
+	delete(f.codes, codeKey(purpose, email))
+	return code, true, nil
+}
+
+type fakeRegisterTicketStore struct {
+	tickets map[string]string
+	err     error
+}
+
+func (f *fakeRegisterTicketStore) SaveRegisterTicket(_ context.Context, ticket, email string, _ time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.tickets == nil {
+		f.tickets = map[string]string{}
+	}
+	f.tickets[ticket] = email
+	return nil
+}
+
+func (f *fakeRegisterTicketStore) ConsumeRegisterTicket(_ context.Context, ticket string) (string, bool, error) {
+	if f.err != nil {
+		return "", false, f.err
+	}
+	email, ok := f.tickets[ticket]
+	if !ok {
+		return "", false, nil
+	}
+	delete(f.tickets, ticket)
+	return email, true, nil
+}
+
+type fakeIdentities struct {
+	byProviderID map[string]*model.Identity
+	err          error
+	createErr    error
+}
+
+func (f *fakeIdentities) CountByUserAndProvider(_ context.Context, userID int64, _ model.LoginMethod) (int64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	var count int64
+	for _, identity := range f.byProviderID {
+		if identity.UserID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (f *fakeIdentities) FindByProviderID(_ context.Context, _ model.LoginMethod, providerID string) (*model.Identity, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	identity, ok := f.byProviderID[providerID]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	return identity, nil
+}
+
+func (f *fakeIdentities) CreateWithinLimit(_ context.Context, identity *model.Identity, limit int64) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
+	if f.byProviderID == nil {
+		f.byProviderID = map[string]*model.Identity{}
+	}
+	if _, ok := f.byProviderID[identity.ProviderID]; ok {
+		return errors.New("duplicate identity")
+	}
+	var count int64
+	for _, existing := range f.byProviderID {
+		if existing.UserID == identity.UserID && existing.Provider == identity.Provider {
+			count++
+		}
+	}
+	if count >= limit {
+		return repository.ErrLimitExceeded
+	}
+	f.byProviderID[identity.ProviderID] = identity
+	return nil
+}
+
+type fakeBindTicketStore struct {
+	tickets map[string]BindTicketPayload
+	err     error
+}
+
+func (f *fakeBindTicketStore) SaveBindTicket(_ context.Context, ticket string, payload BindTicketPayload, _ time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.tickets == nil {
+		f.tickets = map[string]BindTicketPayload{}
+	}
+	f.tickets[ticket] = payload
+	return nil
+}
+
+func (f *fakeBindTicketStore) ConsumeBindTicket(_ context.Context, ticket string) (BindTicketPayload, bool, error) {
+	if f.err != nil {
+		return BindTicketPayload{}, false, f.err
+	}
+	payload, ok := f.tickets[ticket]
+	if !ok {
+		return BindTicketPayload{}, false, nil
+	}
+	delete(f.tickets, ticket)
+	return payload, true, nil
 }
 
 func TestLoginNormalizesIssuesTokensAndAudits(t *testing.T) {
@@ -667,6 +909,392 @@ func TestProfileDTOExcludesSecrets(t *testing.T) {
 	}
 	if profile.Profile.Identities[0].Provider != string(model.LoginMethodGitHub) || profile.Profile.Identities[0].ProviderID == "" {
 		t.Fatalf("identities = %#v, want safe identity DTO", profile.Profile.Identities)
+	}
+}
+
+func TestVerifyRegisterCodeIssuesTicket(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	registerPurpose := string(mailer.VerificationPurposeRegister)
+	if err := codes.SaveVerificationCode(context.Background(), registerPurpose, "new@sast.fun", "123456", time.Minute); err != nil {
+		t.Fatalf("save verification code: %v", err)
+	}
+
+	result, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+	if err != nil {
+		t.Fatalf("VerifyRegisterCode returned error: %v", err)
+	}
+	if result.RegisterTicket == "" || result.Email != "new@sast.fun" || result.ExpiresIn != 300 {
+		t.Fatalf("result = %+v, want ticket, email and 300s expiry", result)
+	}
+	if _, ok := codes.codes[codeKey(registerPurpose, "new@sast.fun")]; ok {
+		t.Fatal("verification code was not consumed")
+	}
+}
+
+func TestVerifyRegisterCodeRejectsWrongOrExpiredCode(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeRegister), "new@sast.fun", "123456", time.Minute); err != nil {
+		t.Fatalf("save verification code: %v", err)
+	}
+
+	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+
+	_, err = service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "missing@sast.fun", Code: "123456"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeExpired)
+}
+
+func TestVerifyRegisterCodeRejectsCrossPurposeCode(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	// A code issued for password reset must not satisfy register verification.
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeResetPassword), "new@sast.fun", "123456", time.Minute); err != nil {
+		t.Fatalf("save verification code: %v", err)
+	}
+	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeExpired)
+}
+
+func TestRegisterCreatesUserAndIssuesTokens(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	result, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "New User",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if result.AccessToken == "" || result.RefreshToken == "" || result.Profile.ID == 0 {
+		t.Fatalf("result = %+v, want tokens and profile", result)
+	}
+	if result.Profile.LoginEmail != "new@sast.fun" {
+		t.Fatalf("profile email = %q, want new@sast.fun", result.Profile.LoginEmail)
+	}
+}
+
+func TestRegisterRejectsUsedTicket(t *testing.T) {
+	service := newRegisterService(t)
+	_, err := service.Register(context.Background(), RegisterInput{RegisterTicket: "reg_missing", Password: "newpassword", Name: "x", StudentID: "B1", PhoneNumber: "1", QQNumber: "1", College: string(model.CollegeOther), Major: "CS"})
+	assertKind(t, err, KindInvalidToken, errcode.CodeRegisterTicketInvalid)
+}
+
+func TestRegisterRejectsInvalidCollege(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "New",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        "不存在的学院",
+		Major:          "CS",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	// The rejected request must not consume the one-time ticket.
+	if _, ok := tickets.tickets["reg_xxx"]; !ok {
+		t.Fatal("register ticket was consumed by invalid college input")
+	}
+}
+
+func TestRegisterRejectsUnsupportedRegistrationState(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket:    "reg_xxx",
+		Password:          "newpassword",
+		Name:              "New",
+		StudentID:         "B24040099",
+		PhoneNumber:       "13800138000",
+		QQNumber:          "10000",
+		College:           string(model.CollegeOther),
+		Major:             "CS",
+		RegistrationState: "rs_abc",
+		OAuthState:        "os_abc",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if _, ok := tickets.tickets["reg_xxx"]; !ok {
+		t.Fatal("register ticket was consumed by rejected registration_state input")
+	}
+}
+
+func TestRegisterRejectsExistingEmail(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "user@njupt.edu.cn", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "Dup",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	assertKind(t, err, KindConflict, errcode.CodeEmailAlreadyRegistered)
+}
+
+func TestRegisterRejectsShortPassword(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "short",
+		Name:           "New",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
+}
+
+func TestBindEmailSendCodeIssuesTicket(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	result, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+	if err != nil {
+		t.Fatalf("BindEmailSendCode returned error: %v", err)
+	}
+	if result.BindTicket == "" || result.ExpiresIn != 300 {
+		t.Fatalf("result = %+v, want bind ticket and 300s expiry", result)
+	}
+	if _, ok := codes.codes[codeKey(string(mailer.VerificationPurposeBindEmail), "extra@gmail.com")]; !ok {
+		t.Fatal("verification code not saved under bind_email purpose")
+	}
+}
+
+func TestBindEmailSendCodeRejectsOccupiedEmail(t *testing.T) {
+	service := newRegisterService(t)
+	identities := service.Identities.(*fakeIdentities)
+	identities.byProviderID = map[string]*model.Identity{
+		"extra@gmail.com": {UserID: 99, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
+	}
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
+}
+
+func TestBindEmailVerifyCreatesIdentity(t *testing.T) {
+	service := newRegisterService(t)
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "extra@gmail.com", UserID: 42}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "extra@gmail.com", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	result, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+	if err != nil {
+		t.Fatalf("BindEmailVerify returned error: %v", err)
+	}
+	if result.Email != "extra@gmail.com" || result.Identity.Provider != string(model.LoginMethodOtherMail) || result.Identity.ProviderID != "extra@gmail.com" {
+		t.Fatalf("result = %+v, want bound other_mail identity", result)
+	}
+	identities := service.Identities.(*fakeIdentities)
+	if identities.byProviderID["extra@gmail.com"] == nil {
+		t.Fatal("identity not created")
+	}
+}
+
+func TestBindEmailVerifyEnforcesLimitAtomically(t *testing.T) {
+	service := newRegisterService(t)
+	identities := service.Identities.(*fakeIdentities)
+	identities.byProviderID = map[string]*model.Identity{
+		"a@gmail.com": {UserID: 42, Provider: model.LoginMethodOtherMail, ProviderID: "a@gmail.com"},
+		"b@gmail.com": {UserID: 42, Provider: model.LoginMethodOtherMail, ProviderID: "b@gmail.com"},
+	}
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "c@gmail.com", UserID: 42}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "c@gmail.com", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+	assertKind(t, err, KindConflict, errcode.CodeIdentityLimitReached)
+}
+
+func TestBindEmailVerifyRejectsWrongCode(t *testing.T) {
+	service := newRegisterService(t)
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "extra@gmail.com", UserID: 42}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "extra@gmail.com", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+}
+
+func TestBindEmailVerifyRejectsForeignTicket(t *testing.T) {
+	service := newRegisterService(t)
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "extra@gmail.com", UserID: 99}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+	assertKind(t, err, KindInvalidToken, errcode.CodeBindTicketInvalid)
+}
+
+func TestChangePasswordRotatesCredentialAndRevokesSessions(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tokens := service.Tokens.(*fakeTokens)
+	previousVersion := users.byID[42].TokenVersion
+
+	result, err := service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "secret", NewPassword: "brand-new-password"})
+	if err != nil {
+		t.Fatalf("ChangePassword returned error: %v", err)
+	}
+	if result.UserID != 42 {
+		t.Fatalf("result = %+v, want user 42", result)
+	}
+	if users.byID[42].TokenVersion != previousVersion+1 {
+		t.Fatalf("token version = %d, want %d", users.byID[42].TokenVersion, previousVersion+1)
+	}
+	if service.Passwords.VerifyPassword("brand-new-password", users.byID[42].PasswordHash) != nil {
+		t.Fatal("new password does not verify against stored hash")
+	}
+	if len(tokens.revokedUsers) != 1 || tokens.revokedUsers[0] != 42 {
+		t.Fatalf("revoked users = %#v, want all sessions of user 42 revoked", tokens.revokedUsers)
+	}
+}
+
+func TestChangePasswordRejectsWrongOldSameNewAndShortNew(t *testing.T) {
+	service := newRegisterService(t)
+
+	_, err := service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "wrong", NewPassword: "brand-new-password"})
+	assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
+
+	_, err = service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "longpassword", NewPassword: "longpassword"})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordUnchanged)
+
+	_, err = service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "secret", NewPassword: "short"})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
+}
+
+func TestResetPasswordConsumesCodeAndRevokesSessions(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tokens := service.Tokens.(*fakeTokens)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	resetPurpose := string(mailer.VerificationPurposeResetPassword)
+	if err := codes.SaveVerificationCode(context.Background(), resetPurpose, "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+
+	_, err := service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "brand-new-password"})
+	if err != nil {
+		t.Fatalf("ResetPassword returned error: %v", err)
+	}
+	if service.Passwords.VerifyPassword("brand-new-password", users.byID[42].PasswordHash) != nil {
+		t.Fatal("new password does not verify against stored hash")
+	}
+	if len(tokens.revokedUsers) != 1 || tokens.revokedUsers[0] != 42 {
+		t.Fatalf("revoked users = %#v, want all sessions of user 42 revoked", tokens.revokedUsers)
+	}
+	if _, ok := codes.codes[codeKey(resetPurpose, "user@njupt.edu.cn")]; ok {
+		t.Fatal("verification code was not consumed")
+	}
+}
+
+func TestResetPasswordRejectsUnchangedPassword(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	hash, err := service.Passwords.HashPassword("longpassword")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	users.byID[42].PasswordHash = hash
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if saveErr := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeResetPassword), "user@njupt.edu.cn", "123456", time.Minute); saveErr != nil {
+		t.Fatalf("save code: %v", saveErr)
+	}
+	_, err = service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "longpassword"})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordUnchanged)
+}
+
+func TestResetPasswordShortPasswordDoesNotConsumeCode(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	resetPurpose := string(mailer.VerificationPurposeResetPassword)
+	if err := codes.SaveVerificationCode(context.Background(), resetPurpose, "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	_, err := service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "short"})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
+	if _, ok := codes.codes[codeKey(resetPurpose, "user@njupt.edu.cn")]; !ok {
+		t.Fatal("verification code was consumed by rejected short password")
+	}
+}
+
+func newRegisterService(t *testing.T) Service {
+	t.Helper()
+	clock := fixedClock{value: time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
+	hash, err := passwords.HashPassword("secret")
+	if err != nil {
+		t.Fatalf("hash test password: %v", err)
+	}
+	user := testUserWithHash(42, "user@njupt.edu.cn", model.UserStateOnSAST, hash)
+	users := &fakeUsers{byLogin: map[string]*model.User{user.LoginEmail: user}, byID: map[int64]*model.User{user.ID: user}}
+	client := &model.OAuthClient{ID: 1, ClientID: "builtin", ClientType: model.ClientTypeFirstParty, IsActive: boolPtr(true), Scopes: model.StringArray(sessionScopes)}
+	clients := &fakeClients{byClientID: map[string]*model.OAuthClient{client.ClientID: client}}
+	return Service{
+		Users:            users,
+		Clients:          clients,
+		Tokens:           newFakeTokens(),
+		Audit:            &fakeAudit{},
+		Identities:       &fakeIdentities{},
+		Limiter:          &fakeLimiter{},
+		Mailer:           &fakeMailer{},
+		VerificationCode: &fakeVerificationCodeStore{},
+		RegisterTicket:   &fakeRegisterTicketStore{},
+		BindTicket:       &fakeBindTicketStore{},
+		InternalClientID: "builtin",
+		JWT:              &auth.JWTManager{Issuer: "issuer", Audience: []string{"audience"}, Active: auth.JWTKeyPair{KID: "active", Private: key}, Clock: clock},
+		RefreshTokens:    &auth.RefreshTokenManager{Random: rand.Reader, Secret: []byte("0123456789abcdef0123456789abcdef")},
+		Passwords:        passwords,
+		Clock:            clock,
+		AccessTTL:        time.Hour,
+		RefreshTTL:       24 * time.Hour,
 	}
 }
 

@@ -3,6 +3,7 @@ package sessionredis
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
@@ -61,4 +62,23 @@ func (s BlacklistStore) BlacklistJTI(ctx context.Context, jti string, ttl time.D
 
 func (s BlacklistStore) IsJTIBlacklisted(ctx context.Context, jti string) (bool, error) {
 	return s.Store.IsJTIBlacklisted(ctx, jti)
+}
+
+type BindTicketStore struct {
+	Store internalredis.Store
+}
+
+func (s BindTicketStore) SaveBindTicket(ctx context.Context, ticket string, payload session.BindTicketPayload, ttl time.Duration) error {
+	return s.Store.SetOneTime(ctx, s.Store.Keys.BindTicket(ticket), payload, ttl)
+}
+
+func (s BindTicketStore) ConsumeBindTicket(ctx context.Context, ticket string) (session.BindTicketPayload, bool, error) {
+	var payload session.BindTicketPayload
+	if err := s.Store.GetDelOneTime(ctx, s.Store.Keys.BindTicket(ticket), &payload); err != nil {
+		if errors.Is(err, internalredis.ErrMiss) {
+			return session.BindTicketPayload{}, false, nil
+		}
+		return session.BindTicketPayload{}, false, err
+	}
+	return payload, true, nil
 }

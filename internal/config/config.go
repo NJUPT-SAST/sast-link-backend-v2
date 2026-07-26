@@ -46,14 +46,24 @@ type Config struct {
 	JWTRefreshTokenExpiry  time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
 	RefreshTokenHMACSecret string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
 
-	InternalOAuthClientID string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
-	CORSAllowedOrigins    []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
-	TrustedProxies        []string      `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
-	HSTSMaxAge            int           `env:"HSTS_MAX_AGE" envDefault:"31536000"`
-	RateLimitLoginRPM     int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"5"`
-	RateLimitLoginWindow  time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
-	LoginFailureLimit     int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
-	LoginFailureWindow    time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
+	InternalOAuthClientID    string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
+	CORSAllowedOrigins       []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
+	TrustedProxies           []string      `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
+	HSTSMaxAge               int           `env:"HSTS_MAX_AGE" envDefault:"31536000"`
+	RateLimitLoginRPM        int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"5"`
+	RateLimitLoginWindow     time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
+	RateLimitSendEmailRPM    int           `env:"RATE_LIMIT_SEND_EMAIL_RPM" envDefault:"3"`
+	RateLimitSendEmailIPRPM  int           `env:"RATE_LIMIT_SEND_EMAIL_IP_RPM" envDefault:"10"`
+	RateLimitSendEmailWindow time.Duration `env:"RATE_LIMIT_SEND_EMAIL_WINDOW" envDefault:"60s"`
+	LoginFailureLimit        int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
+	LoginFailureWindow       time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
+
+	SMTPHost   string `env:"SMTP_HOST" envDefault:"localhost"`
+	SMTPPort   int    `env:"SMTP_PORT" envDefault:"587"`
+	SMTPUser   string `env:"SMTP_USERNAME"`
+	SMTPPass   string `env:"SMTP_PASSWORD"`
+	SMTPFrom   string `env:"SMTP_FROM"`
+	SMTPUseTLS bool   `env:"SMTP_USE_TLS" envDefault:"false"`
 }
 
 // Load parses configuration from environment variables and validates required fields.
@@ -103,6 +113,12 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_LOGIN_RPM must be positive")
 	case c.RateLimitLoginWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_LOGIN_WINDOW must be at least 1s")
+	case c.RateLimitSendEmailRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_SEND_EMAIL_RPM must be positive")
+	case c.RateLimitSendEmailIPRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_SEND_EMAIL_IP_RPM must be positive")
+	case c.RateLimitSendEmailWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_SEND_EMAIL_WINDOW must be at least 1s")
 	case c.LoginFailureLimit <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
 	case c.LoginFailureWindow <= 0:

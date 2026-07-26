@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
 
@@ -41,6 +42,11 @@ type TokenBlacklist interface {
 type UserRepository interface {
 	FindByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error)
 	FindByID(ctx context.Context, userID int64) (*model.User, error)
+	FindByLoginEmail(ctx context.Context, email string) (*model.User, error)
+	ExistsByLoginEmail(ctx context.Context, email string) (bool, error)
+	ExistsByStudentID(ctx context.Context, studentID string) (bool, error)
+	CreateWithProfile(ctx context.Context, user *model.User, profile *model.Profile) error
+	UpdatePasswordAndBumpTokenVersion(ctx context.Context, userID int64, passwordHash string) error
 }
 
 type ClientRepository interface {
@@ -53,10 +59,46 @@ type TokenRepository interface {
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
+	RevokeAllByUser(ctx context.Context, userID int64, revokedAt time.Time) ([]model.BlacklistEntry, error)
 }
 
 type AuditRepository interface {
 	Create(ctx context.Context, entry *model.AuditLog) error
+}
+
+// VerificationCodeStore persists one-time email codes keyed by purpose and
+// email, so a code issued for one flow cannot be replayed against another.
+type VerificationCodeStore interface {
+	SaveVerificationCode(ctx context.Context, purpose, email, code string, ttl time.Duration) error
+	ConsumeVerificationCode(ctx context.Context, purpose, email string) (code string, found bool, err error)
+}
+
+type RegisterTicketStore interface {
+	SaveRegisterTicket(ctx context.Context, ticket, email string, ttl time.Duration) error
+	ConsumeRegisterTicket(ctx context.Context, ticket string) (email string, found bool, err error)
+}
+
+type BindTicketPayload struct {
+	Email  string
+	UserID int64
+}
+
+type BindTicketStore interface {
+	SaveBindTicket(ctx context.Context, ticket string, payload BindTicketPayload, ttl time.Duration) error
+	ConsumeBindTicket(ctx context.Context, ticket string) (payload BindTicketPayload, found bool, err error)
+}
+
+type IdentityRepository interface {
+	CountByUserAndProvider(ctx context.Context, userID int64, provider model.LoginMethod) (int64, error)
+	FindByProviderID(ctx context.Context, provider model.LoginMethod, providerID string) (*model.Identity, error)
+	// CreateWithinLimit inserts the identity only while the user owns fewer than
+	// limit identities of the same provider, checked under a row lock so
+	// concurrent binds cannot exceed the limit.
+	CreateWithinLimit(ctx context.Context, identity *model.Identity, limit int64) error
+}
+
+type Mailer interface {
+	SendVerificationCode(ctx context.Context, to, code string, purpose mailer.VerificationPurpose) error
 }
 
 type LoginInput struct {
@@ -108,6 +150,118 @@ type ProfileInput struct {
 
 type ProfileResult struct {
 	Profile UserProfileDTO
+}
+
+type SendRegisterCodeInput struct {
+	Email     string
+	ClientIP  string
+	UserAgent string
+}
+
+type SendRegisterCodeResult struct {
+	Email     string
+	ExpiresIn int
+}
+
+type VerifyRegisterCodeInput struct {
+	Email     string
+	Code      string
+	ClientIP  string
+	UserAgent string
+}
+
+type VerifyRegisterCodeResult struct {
+	RegisterTicket string
+	Email          string
+	ExpiresIn      int
+}
+
+type RegisterInput struct {
+	RegisterTicket string
+	Password       string
+	Name           string
+	StudentID      string
+	PhoneNumber    string
+	QQNumber       string
+	College        string
+	Major          string
+	// RegistrationState and OAuthState are the optional third-party OAuth
+	// no-binding registration pair. They are accepted at the contract level but
+	// rejected until the OAuth login flows are implemented.
+	RegistrationState string
+	OAuthState        string
+	ClientIP          string
+	UserAgent         string
+}
+
+type RegisterResult struct {
+	AccessToken      string
+	RefreshToken     string
+	TokenType        string
+	Scope            string
+	AccessExpiresAt  time.Time
+	RefreshExpiresAt time.Time
+	Profile          UserProfileDTO
+}
+
+type ForgotPasswordInput struct {
+	Email     string
+	ClientIP  string
+	UserAgent string
+}
+
+type ForgotPasswordResult struct {
+	Email     string
+	ExpiresIn int
+}
+
+type ResetPasswordInput struct {
+	Email     string
+	Code      string
+	Password  string
+	ClientIP  string
+	UserAgent string
+}
+
+type ResetPasswordResult struct {
+	Email string
+}
+
+type ChangePasswordInput struct {
+	UserID      int64
+	OldPassword string
+	NewPassword string
+	ClientIP    string
+	UserAgent   string
+}
+
+type ChangePasswordResult struct {
+	UserID int64
+}
+
+type BindEmailSendCodeInput struct {
+	UserID    int64
+	Email     string
+	ClientIP  string
+	UserAgent string
+}
+
+type BindEmailSendCodeResult struct {
+	BindTicket string
+	ExpiresIn  int
+}
+
+type BindEmailVerifyInput struct {
+	UserID     int64
+	BindTicket string
+	Code       string
+	ClientIP   string
+	UserAgent  string
+}
+
+type BindEmailVerifyResult struct {
+	Email    string
+	Identity IdentityDTO
 }
 
 type UserProfileDTO struct {

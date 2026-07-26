@@ -21,7 +21,7 @@ func TestKeys(t *testing.T) {
 	if got, want := keys.OneTime("oauth:state", "abc"), "sast-link:test:oauth%3Astate:abc"; got != want {
 		t.Fatalf("OneTime key = %q, want %q", got, want)
 	}
-	if got, want := keys.VerifyCode("a@example.com"), "sast-link:test:verify:a@example.com"; got != want {
+	if got, want := keys.VerifyCode("register", "a@example.com"), "sast-link:test:verify:register:a@example.com"; got != want {
 		t.Fatalf("VerifyCode key = %q, want %q", got, want)
 	}
 	if got, want := keys.RegisterTicket("reg_abc"), "sast-link:test:auth:register_ticket:reg_abc"; got != want {

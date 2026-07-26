@@ -63,8 +63,11 @@ func (k Keys) OneTime(kind, id string) string {
 	return k.join(dynamicKeySegment(kind), dynamicKeySegment(id))
 }
 
-// VerifyCode returns a verification-code key.
-func (k Keys) VerifyCode(email string) string { return k.join("verify", dynamicKeySegment(email)) }
+// VerifyCode returns a verification-code key scoped by purpose so codes issued
+// for one flow (register / reset_password / bind_email) cannot be consumed by another.
+func (k Keys) VerifyCode(purpose, email string) string {
+	return k.join("verify", dynamicKeySegment(purpose), dynamicKeySegment(email))
+}
 
 // OAuthState returns an OAuth state key.
 func (k Keys) OAuthState(state string) string {
@@ -147,6 +150,55 @@ func (s Store) GetDelOneTime(ctx context.Context, key string, target any) error 
 		return fmt.Errorf("unmarshal one-time payload: %w", err)
 	}
 	return nil
+}
+
+// SaveVerificationCode stores a numeric verification code for the given purpose and email.
+func (s Store) SaveVerificationCode(ctx context.Context, purpose, email, code string, ttl time.Duration) error {
+	if s.Client == nil || purpose == "" || email == "" || code == "" || ttl <= 0 {
+		return fmt.Errorf("save verification code: %w", ErrInvalidArgument)
+	}
+	if err := s.Client.Set(ctx, s.Keys.VerifyCode(purpose, email), code, ttl).Err(); err != nil {
+		return fmt.Errorf("save verification code: %w", err)
+	}
+	return nil
+}
+
+// ConsumeVerificationCode atomically reads and deletes a verification code.
+func (s Store) ConsumeVerificationCode(ctx context.Context, purpose, email string) (string, bool, error) {
+	if s.Client == nil || purpose == "" || email == "" {
+		return "", false, fmt.Errorf("consume verification code: %w", ErrInvalidArgument)
+	}
+	code, err := s.Client.GetDel(ctx, s.Keys.VerifyCode(purpose, email)).Result()
+	if errors.Is(err, goredis.Nil) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("consume verification code: %w", err)
+	}
+	return code, true, nil
+}
+
+// SaveRegisterTicket stores a one-time ticket bound to the verified email.
+func (s Store) SaveRegisterTicket(ctx context.Context, ticket, email string, ttl time.Duration) error {
+	if s.Client == nil || ticket == "" || email == "" || ttl <= 0 {
+		return fmt.Errorf("save register ticket: %w", ErrInvalidArgument)
+	}
+	return s.SetOneTime(ctx, s.Keys.RegisterTicket(ticket), email, ttl)
+}
+
+// ConsumeRegisterTicket atomically reads and deletes a ticket, returning the stored email.
+func (s Store) ConsumeRegisterTicket(ctx context.Context, ticket string) (string, bool, error) {
+	if s.Client == nil || ticket == "" {
+		return "", false, fmt.Errorf("consume register ticket: %w", ErrInvalidArgument)
+	}
+	var email string
+	if err := s.GetDelOneTime(ctx, s.Keys.RegisterTicket(ticket), &email); err != nil {
+		if errors.Is(err, ErrMiss) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return email, true, nil
 }
 
 // BlacklistJTI blacklists a JWT ID until its token expiry.
