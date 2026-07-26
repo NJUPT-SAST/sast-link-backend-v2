@@ -13,8 +13,10 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"net/textproto"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -102,8 +104,16 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 	if len(to) == 0 {
 		return fmt.Errorf("mailer: no recipients")
 	}
+	recipients, err := sanitizeRecipients(to)
+	if err != nil {
+		return err
+	}
+	from, err := sanitizeAddress(m.cfg.From)
+	if err != nil {
+		return fmt.Errorf("mailer: invalid From address: %w", err)
+	}
 
-	msg, boundary, err := buildMessage(m.cfg.From, to, subject, textBody, htmlBody)
+	msg, boundary, err := buildMessage(from, recipients, subject, textBody, htmlBody)
 	if err != nil {
 		return err
 	}
@@ -111,9 +121,44 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 	auth := smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
 
 	if m.cfg.UseTLS {
-		return sendTLS(ctx, addr, m.cfg.Host, auth, m.cfg.From, to, msg, boundary)
+		return sendTLS(ctx, addr, m.cfg.Host, auth, from, recipients, msg, boundary)
 	}
-	return sendSTARTTLS(ctx, addr, m.cfg.Host, auth, m.cfg.From, to, msg, boundary)
+	return sendSTARTTLS(ctx, addr, m.cfg.Host, auth, from, recipients, msg, boundary)
+}
+
+// sanitizeRecipients validates every recipient and returns the canonical
+// addr-spec forms. Message headers are assembled by string concatenation, so
+// recipients must be proven free of header-breaking characters here rather
+// than trusted to be pre-validated by callers.
+func sanitizeRecipients(to []string) ([]string, error) {
+	sanitized := make([]string, 0, len(to))
+	for _, recipient := range to {
+		address, err := sanitizeAddress(recipient)
+		if err != nil {
+			return nil, fmt.Errorf("mailer: invalid recipient: %w", err)
+		}
+		sanitized = append(sanitized, address)
+	}
+	return sanitized, nil
+}
+
+// addressPattern accepts a conservative addr-spec: printable ASCII atext
+// without whitespace, control characters, angle brackets or commas, one @,
+// and a dotted domain.
+var addressPattern = regexp.MustCompile(`^[A-Za-z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
+
+// sanitizeAddress parses value as a single RFC 5322 address and re-validates
+// the extracted addr-spec against a conservative pattern, so the returned
+// string is safe to embed in raw message headers.
+func sanitizeAddress(value string) (string, error) {
+	parsed, err := mail.ParseAddress(strings.TrimSpace(value))
+	if err != nil {
+		return "", fmt.Errorf("parse address: %w", err)
+	}
+	if !addressPattern.MatchString(parsed.Address) {
+		return "", fmt.Errorf("address %q contains unsupported characters", parsed.Address)
+	}
+	return parsed.Address, nil
 }
 
 func buildMessage(from string, to []string, subject, textBody, htmlBody string) ([]byte, string, error) {
