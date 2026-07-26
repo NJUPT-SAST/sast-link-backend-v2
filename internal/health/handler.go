@@ -7,6 +7,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Dependency status values reported per check.
+const (
+	statusOK       = "ok"
+	statusError    = "error"
+	statusDegraded = "degraded"
+)
+
+// optionalChecks names dependencies the service can serve without. Redis only
+// backs caches, counters and short-lived state that every flow can rebuild or
+// degrade around, so losing it must not mark the instance unhealthy and trigger
+// an orchestrator restart loop that cannot fix the outage anyway.
+var optionalChecks = map[string]bool{"redis": true}
+
 // Handler exposes health checks over HTTP.
 type Handler struct {
 	checks []check
@@ -39,20 +52,26 @@ type healthResponse struct {
 }
 
 // Handle responds with the aggregated status of all registered checks.
+// Only required dependencies affect the overall status and HTTP code; an
+// optional dependency reports "degraded" while the service stays healthy.
 func (h *Handler) Handle(c *gin.Context) {
 	resp := healthResponse{
-		Status: "ok",
-		DB:     "ok",
-		Redis:  "ok",
+		Status: statusOK,
+		DB:     statusOK,
+		Redis:  statusOK,
 	}
 	code := http.StatusOK
 
 	for _, check := range h.checks {
-		status := "ok"
+		status := statusOK
 		if err := check.fn(); err != nil {
-			status = "error"
-			resp.Status = "error"
-			code = http.StatusInternalServerError
+			if optionalChecks[check.name] {
+				status = statusDegraded
+			} else {
+				status = statusError
+				resp.Status = statusError
+				code = http.StatusInternalServerError
+			}
 		}
 
 		switch check.name {

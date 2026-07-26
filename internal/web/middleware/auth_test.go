@@ -169,6 +169,43 @@ func TestAuthenticatorRejectsBlankJTIWithoutBlacklistLookup(t *testing.T) {
 	}
 }
 
+// A Redis outage must not reject otherwise valid tokens: the DB check that
+// follows covers every JTI the blacklist could hold.
+func TestAuthenticatorFallsBackToDatabaseWhenBlacklistUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid"}, TTL: time.Hour,
+	})
+	blacklist := &fakeBlacklist{err: errors.New("redis unavailable")}
+	states := validStates(now)
+	recorder, body := performAuthRequest(manager, blacklist, states, now, "Bearer "+token)
+	if recorder.Code != http.StatusOK || body.Data["user_id"] != float64(42) {
+		t.Fatalf("response = %d %#v, want 200 and user 42", recorder.Code, body)
+	}
+	if blacklist.calls != 1 || states.calls != 1 {
+		t.Fatalf("blacklist calls=%d DB calls=%d, want 1 and 1", blacklist.calls, states.calls)
+	}
+}
+
+// The DB stays authoritative during a Redis outage.
+func TestAuthenticatorStillRejectsRevokedTokenWhenBlacklistUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid"}, TTL: time.Hour,
+	})
+	blacklist := &fakeBlacklist{err: errors.New("redis unavailable")}
+	recorder, body := performAuthRequest(manager, blacklist, revokedStates(now), now, "Bearer "+token)
+	if recorder.Code != http.StatusUnauthorized || body.Code != errcode.CodeAccessTokenInvalid {
+		t.Fatalf("response = %d %#v, want 401/%d", recorder.Code, body, errcode.CodeAccessTokenInvalid)
+	}
+}
+
 type envelope struct {
 	Code    int            `json:"code"`
 	Message string         `json:"message"`
