@@ -175,6 +175,42 @@ func TestUserRepositoryFindByLoginEmailAndExistenceChecks(t *testing.T) {
 	}
 }
 
+// ExistsAsEmailAnywhere is the cross-table uniqueness guard: an address that
+// lives in either "user".login_email or identities.provider_id (other_mail)
+// must be reported, otherwise Register could capture an address someone else
+// already uses for login and silently hijack their identifier.
+func TestUserRepositoryExistsAsEmailAnywhere(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	user := createUserWithProfile(t, userRepository, "anywhere@njupt.edu.cn")
+
+	identityRepository := repository.NewIdentity(database)
+	if err := identityRepository.CreateWithinLimit(context.Background(), &model.Identity{
+		UserID:     user.ID,
+		Provider:   model.LoginMethodOtherMail,
+		ProviderID: "anywhere-bound@qq.com",
+	}, 2); err != nil {
+		t.Fatalf("CreateWithinLimit() error = %v", err)
+	}
+
+	for _, test := range []struct {
+		email string
+		want  bool
+	}{
+		{"anywhere@njupt.edu.cn", true},
+		{"anywhere-bound@qq.com", true},
+		{"free@sast.fun", false},
+	} {
+		got, err := userRepository.ExistsAsEmailAnywhere(context.Background(), test.email)
+		if err != nil {
+			t.Fatalf("ExistsAsEmailAnywhere(%q) error = %v", test.email, err)
+		}
+		if got != test.want {
+			t.Fatalf("ExistsAsEmailAnywhere(%q) = %t, want %t", test.email, got, test.want)
+		}
+	}
+}
+
 // The password rewrite, the token_version bump and the session revocation must
 // commit together: token_version alone does not stop refresh tokens, because the
 // refresh flow never compares it.

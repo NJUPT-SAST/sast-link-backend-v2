@@ -369,7 +369,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
 	}
 
-	exists, err := s.Users.ExistsByLoginEmail(ctx, email)
+	exists, err := s.Users.ExistsAsEmailAnywhere(ctx, email)
 	if err != nil {
 		return nil, newError(ErrInternal, "check email existence", err)
 	}
@@ -609,6 +609,11 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	} else if !errors.Is(findErr, repository.ErrNotFound) {
 		return nil, newError(ErrInternal, "find identity", findErr)
 	}
+	if emailExists, err := s.Users.ExistsAsEmailAnywhere(ctx, email); err != nil {
+		return nil, newError(ErrInternal, "check email existence", err)
+	} else if emailExists {
+		return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", nil)
+	}
 	count, err := s.Identities.CountByUserAndProvider(ctx, input.UserID, model.LoginMethodOtherMail)
 	if err != nil {
 		return nil, newError(ErrInternal, "count identities", err)
@@ -684,6 +689,11 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 		return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", nil)
 	} else if !errors.Is(findErr, repository.ErrNotFound) {
 		return nil, newError(ErrInternal, "find identity", findErr)
+	}
+	if emailExists, err := s.Users.ExistsAsEmailAnywhere(ctx, payload.Email); err != nil {
+		return nil, newError(ErrInternal, "check email existence", err)
+	} else if emailExists {
+		return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", nil)
 	}
 	identity := &model.Identity{
 		UserID:     input.UserID,

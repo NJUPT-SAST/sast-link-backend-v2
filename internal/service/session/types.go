@@ -45,6 +45,10 @@ type UserRepository interface {
 	FindByLoginEmail(ctx context.Context, email string) (*model.User, error)
 	ExistsByLoginEmail(ctx context.Context, email string) (bool, error)
 	ExistsByStudentID(ctx context.Context, studentID string) (bool, error)
+	// ExistsAsEmailAnywhere reports whether the email is used as either a login
+	// email or an other_mail identity provider_id, so Register and BindEmail can
+	// treat the address as a single global namespace.
+	ExistsAsEmailAnywhere(ctx context.Context, email string) (bool, error)
 	CreateWithProfile(ctx context.Context, user *model.User, profile *model.Profile) error
 	// UpdatePasswordAndRevokeSessions rewrites the password, bumps token_version
 	// and revokes every live token of the user atomically, returning the

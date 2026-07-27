@@ -47,6 +47,9 @@ type fakeUsers struct {
 	// createErr forces CreateWithProfile to fail, for racing-insert scenarios the
 	// in-memory maps cannot reproduce.
 	createErr error
+	// otherMailIdentities holds provider_id -> user_id for other_mail identities,
+	// so ExistsAsEmailAnywhere can mirror the cross-table uniqueness check.
+	otherMailIdentities map[string]int64
 }
 
 func (f *fakeUsers) FindByLoginIdentifier(_ context.Context, identifier string) (*model.User, error) {
@@ -97,6 +100,21 @@ func (f *fakeUsers) ExistsByStudentID(_ context.Context, studentID string) (bool
 	}
 	for _, user := range f.byLogin {
 		if user.StudentID == studentID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeUsers) ExistsAsEmailAnywhere(_ context.Context, email string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	if _, ok := f.byLogin[email]; ok {
+		return true, nil
+	}
+	if f.otherMailIdentities != nil {
+		if _, ok := f.otherMailIdentities[email]; ok {
 			return true, nil
 		}
 	}
@@ -1254,6 +1272,30 @@ func TestRegisterRejectsExistingEmail(t *testing.T) {
 	assertKind(t, err, KindConflict, errcode.CodeEmailAlreadyRegistered)
 }
 
+func TestRegisterRejectsEmailBoundAsOtherMailIdentity(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	users.otherMailIdentities = map[string]int64{
+		"taken@sast.fun": 99,
+	}
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "taken@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "Dup",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	assertKind(t, err, KindConflict, errcode.CodeEmailAlreadyRegistered)
+}
+
 func TestRegisterRejectsShortPassword(t *testing.T) {
 	service := newRegisterService(t)
 	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
@@ -1296,6 +1338,12 @@ func TestBindEmailSendCodeRejectsOccupiedEmail(t *testing.T) {
 		"extra@gmail.com": {UserID: 99, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
 	}
 	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
+}
+
+func TestBindEmailSendCodeRejectsLoginEmail(t *testing.T) {
+	service := newRegisterService(t)
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "user@njupt.edu.cn"})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
 
@@ -1353,6 +1401,20 @@ func TestBindEmailVerifyRejectsWrongCode(t *testing.T) {
 	}
 	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "000000"})
 	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+}
+
+func TestBindEmailVerifyRejectsLoginEmail(t *testing.T) {
+	service := newRegisterService(t)
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "user@njupt.edu.cn", UserID: 42}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
 
 func TestBindEmailVerifyRejectsForeignTicket(t *testing.T) {

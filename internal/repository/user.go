@@ -175,6 +175,24 @@ func (r *UserRepository) ExistsByStudentID(ctx context.Context, studentID string
 	return count > 0, nil
 }
 
+// ExistsAsEmailAnywhere reports whether the email is already used as a login
+// email or as an other_mail identity provider_id. Both columns are unique, so
+// this is the single pre-flight guard against the same address living in both
+// tables.
+func (r *UserRepository) ExistsAsEmailAnywhere(ctx context.Context, email string) (bool, error) {
+	var exists bool
+	err := r.database.WithContext(ctx).Raw(`
+		SELECT EXISTS (
+			SELECT 1 FROM "user" WHERE login_email = ?
+			UNION
+			SELECT 1 FROM identities WHERE provider = ? AND provider_id = ?
+		)`, email, model.LoginMethodOtherMail, email).Scan(&exists).Error
+	if err != nil {
+		return false, fmt.Errorf("check email anywhere: %w", err)
+	}
+	return exists, nil
+}
+
 // FindAuthStateByID finds the minimal user state required to authenticate tokens.
 func (r *UserRepository) FindAuthStateByID(ctx context.Context, userID int64) (*UserAuthState, error) {
 	var state UserAuthState
