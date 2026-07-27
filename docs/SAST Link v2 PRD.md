@@ -211,7 +211,7 @@ POST /auth/forgot-password/send-code  →  发送验证码到注册邮箱
 POST /auth/reset-password             →  校验验证码 + 新密码
 ```
 
-- `POST /auth/forgot-password/send-code`：查邮箱对应账号是否存在，不存在返回 40106（邮箱不存在）；存在则发送验证码
+- `POST /auth/forgot-password/send-code`：对格式合法且未触发限流的邮箱统一返回“已受理”。请求进入有界内存队列，worker 再查账号并只向已注册邮箱发送验证码。响应不暴露账号是否存在，也不保证邮件已经送达；队列满或进程重启时任务可能丢失，用户可在限流窗口后重试
 - `POST /auth/reset-password`：校验验证码 + 新密码；账号不存在同样返回 40106
 - 验证码正确后 `user.token_version` 递增，撤销所有 Token，设备记录清除
 - 登录失败计数器清零

@@ -380,7 +380,7 @@ paths:
     post:
       summary: 发送重置密码验证码
       deprecated: false
-      description: ''
+      description: 对格式合法且未触发限流的邮箱统一受理。响应不表示账号存在，也不保证邮件已经送达；服务端通过有界内存队列异步处理。
       operationId: authSendForgotPasswordCode
       tags:
         - Auth
@@ -401,7 +401,7 @@ paths:
         required: true
       responses:
         '200':
-          description: 验证码已发送
+          description: 请求已受理；不表示账号存在或邮件已送达
           content:
             application/json:
               schema:
@@ -410,9 +410,6 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
           description: 参数错误（400xx）
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-          description: 邮箱不存在（401xx）
         '429':
           $ref: '#/components/responses/TooManyRequests'
           description: 频率限制（429xx）

@@ -159,6 +159,37 @@ func (f *fakeUsers) CreateWithProfile(_ context.Context, user *model.User, _ *mo
 	return nil
 }
 
+func (f *fakeUsers) CreateRegistration(
+	ctx context.Context,
+	user *model.User,
+	profile *model.Profile,
+	pairFactory repository.TokenPairFactory,
+) error {
+	if err := f.CreateWithProfile(ctx, user, profile); err != nil {
+		return err
+	}
+	access, refresh, err := pairFactory(user)
+	if err != nil {
+		delete(f.byLogin, user.LoginEmail)
+		delete(f.byID, user.ID)
+		user.ID = 0
+		return err
+	}
+	if f.tokens == nil {
+		delete(f.byLogin, user.LoginEmail)
+		delete(f.byID, user.ID)
+		user.ID = 0
+		return errors.New("token repository unavailable")
+	}
+	if err := f.tokens.CreatePair(ctx, access, refresh); err != nil {
+		delete(f.byLogin, user.LoginEmail)
+		delete(f.byID, user.ID)
+		user.ID = 0
+		return err
+	}
+	return nil
+}
+
 func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
 	ctx context.Context,
 	userID int64,
@@ -207,6 +238,7 @@ type fakeTokens struct {
 	revokeContextErr    error
 	revokeContextHasTTL bool
 	rotateErr           error
+	createErr           error
 	revokeErr           error
 }
 
@@ -215,6 +247,9 @@ func newFakeTokens() *fakeTokens {
 }
 
 func (f *fakeTokens) CreatePair(_ context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
 	f.createdAccess = access
 	f.createdRefresh = refresh
 	f.accessByJTI[access.TokenID] = access
@@ -410,6 +445,16 @@ func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]
 		f.ttl = ttl
 	}
 	return nil
+}
+
+type fakeForgotPasswordDispatcher struct {
+	jobs     []ForgotPasswordJob
+	accepted bool
+}
+
+func (f *fakeForgotPasswordDispatcher) EnqueueForgotPassword(job ForgotPasswordJob) bool {
+	f.jobs = append(f.jobs, job)
+	return f.accepted
 }
 
 type fakeMailer struct {
@@ -1192,38 +1237,37 @@ func TestSendRegisterCodeRejectsHeaderInjectionPayload(t *testing.T) {
 	}
 }
 
-// The send-code response must not reveal whether the address owns an account:
-// a "邮箱不存在" error tells unauthenticated callers exactly which inboxes are
-// worth phishing. Known and unknown emails get the identical success shape;
-// only the known one actually receives a code.
+// The anonymous request path must be identical for known and unknown accounts:
+// both enqueue the same normalized job and neither performs SMTP or Redis work.
 func TestForgotPasswordSendCodeHidesAccountExistence(t *testing.T) {
-	t.Run("unknown email returns success without sending", func(t *testing.T) {
-		service := newRegisterService(t)
-		result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "nobody@njupt.edu.cn"})
-		if err != nil {
-			t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
-		}
-		if result.Email != "nobody@njupt.edu.cn" || result.ExpiresIn != 300 {
-			t.Fatalf("result = %+v, want the same success shape as a known email", result)
-		}
-		if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
-			t.Fatalf("mailer sent=%d, want 0 for unknown email", sent)
-		}
-	})
+	for _, email := range []string{"nobody@njupt.edu.cn", "user@njupt.edu.cn"} {
+		t.Run(email, func(t *testing.T) {
+			service := newRegisterService(t)
+			dispatcher := service.ForgotPasswords.(*fakeForgotPasswordDispatcher)
+			result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: email, ClientIP: "127.0.0.1"})
+			if err != nil {
+				t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
+			}
+			if result.Email != email || result.ExpiresIn != 300 {
+				t.Fatalf("result = %+v, want uniform accepted shape", result)
+			}
+			if len(dispatcher.jobs) != 1 || dispatcher.jobs[0].Email != email {
+				t.Fatalf("jobs = %+v, want one normalized job", dispatcher.jobs)
+			}
+			if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
+				t.Fatalf("mailer sent=%d in request path, want 0", sent)
+			}
+		})
+	}
+}
 
-	t.Run("known email returns success and sends", func(t *testing.T) {
-		service := newRegisterService(t)
-		result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn"})
-		if err != nil {
-			t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
-		}
-		if result.Email != "user@njupt.edu.cn" || result.ExpiresIn != 300 {
-			t.Fatalf("result = %+v, want success shape", result)
-		}
-		if sent := len(service.Mailer.(*fakeMailer).sent); sent != 1 {
-			t.Fatalf("mailer sent=%d, want 1 for known email", sent)
-		}
-	})
+func TestForgotPasswordSendCodeReturnsAcceptedWhenQueueIsFull(t *testing.T) {
+	service := newRegisterService(t)
+	service.ForgotPasswords = &fakeForgotPasswordDispatcher{accepted: false}
+	result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn"})
+	if err != nil || result.Email != "user@njupt.edu.cn" || result.ExpiresIn != 300 {
+		t.Fatalf("result/error = %+v/%v, want uniform accepted response", result, err)
+	}
 }
 
 func TestSendRegisterCodeAllowsWhenEmailLimiterUnavailable(t *testing.T) {
@@ -1262,13 +1306,6 @@ func TestFailClosedStoresReturnDependencyUnavailable(t *testing.T) {
 		service := newRegisterService(t)
 		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
 		_, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "new@sast.fun"})
-		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
-	})
-
-	t.Run("forgot password send code", func(t *testing.T) {
-		service := newRegisterService(t)
-		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
-		_, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn"})
 		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
 	})
 
@@ -1816,6 +1853,7 @@ func newRegisterService(t *testing.T) Service {
 		VerificationCode: &fakeVerificationCodeStore{},
 		RegisterTicket:   &fakeRegisterTicketStore{},
 		BindTicket:       &fakeBindTicketStore{},
+		ForgotPasswords:  &fakeForgotPasswordDispatcher{accepted: true},
 		InternalClientID: "builtin",
 		JWT:              &auth.JWTManager{Issuer: "issuer", Audience: []string{"audience"}, Active: auth.JWTKeyPair{KID: "active", Private: key}, Clock: clock},
 		RefreshTokens:    &auth.RefreshTokenManager{Random: rand.Reader, Secret: []byte("0123456789abcdef0123456789abcdef")},
@@ -1856,6 +1894,7 @@ func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeToken
 		Audit:            audit,
 		Limiter:          &fakeLimiter{},
 		Failures:         failures,
+		ForgotPasswords:  &fakeForgotPasswordDispatcher{accepted: true},
 		InternalClientID: "builtin",
 		JWT:              &auth.JWTManager{Issuer: "issuer", Audience: []string{"audience"}, Active: auth.JWTKeyPair{KID: "active", Private: key}, Clock: clock},
 		RefreshTokens:    &auth.RefreshTokenManager{Random: rand.Reader, Secret: []byte("0123456789abcdef0123456789abcdef")},
@@ -2171,6 +2210,25 @@ func TestRegisterReportsNonUniqueInsertFailureAsInternal(t *testing.T) {
 
 	_, err := service.Register(context.Background(), validRegisterInput("reg_x", "B24040111"))
 	assertKind(t, err, KindInternal, errcode.CodeInternal)
+}
+
+func TestRegisterRollsBackAccountAndKeepsTicketWhenInitialSessionFails(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_atomic", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+	users.tokens.createErr = errors.New("token insert failed")
+
+	_, err := service.Register(context.Background(), validRegisterInput("reg_atomic", "B24040999"))
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+	if _, ok := users.byLogin["new@sast.fun"]; ok {
+		t.Fatal("account survived failed initial session transaction")
+	}
+	if _, ok := tickets.tickets["reg_atomic"]; !ok {
+		t.Fatal("Register-Ticket was consumed after transaction rollback")
+	}
 }
 
 func validRegisterInput(ticket, studentID string) RegisterInput {

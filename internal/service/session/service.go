@@ -44,6 +44,7 @@ type Service struct {
 	VerificationCode VerificationCodeStore
 	RegisterTicket   RegisterTicketStore
 	BindTicket       BindTicketStore
+	ForgotPasswords  ForgotPasswordDispatcher
 	InternalClientID string
 	JWT              *auth.JWTManager
 	RefreshTokens    *auth.RefreshTokenManager
@@ -287,7 +288,7 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
 	}
-	code, err := generateVerificationCode()
+	code, err := GenerateVerificationCode()
 	if err != nil {
 		return nil, newError(ErrInternal, "生成验证码失败", err)
 	}
@@ -412,12 +413,23 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		Major:        major,
 	}
 	profile := &model.Profile{}
+	client, err := s.findInternalClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var pair *issuedPair
 
-	// The ticket is still live at this point. login_email carries a UNIQUE
-	// constraint, so the INSERT itself is the serialization point for concurrent
-	// registrations of the same email — the ticket does not need to elect a winner,
-	// and keeping it until the account exists means a losing racer can retry.
-	if createErr := s.Users.CreateWithProfile(ctx, user, profile); createErr != nil {
+	// Account, profile and initial session share one PostgreSQL transaction. The
+	// pair is built after INSERT assigns user.ID; any signing or token persistence
+	// failure rolls the account back and leaves the Register-Ticket retryable.
+	if createErr := s.Users.CreateRegistration(ctx, user, profile, func(created *model.User) (*model.OAuthAccessToken, *model.OAuthRefreshToken, error) {
+		issued, issueErr := s.issuePair(created, client, 0, "", sessionScopes)
+		if issueErr != nil {
+			return nil, nil, issueErr
+		}
+		pair = issued
+		return issued.access, issued.refresh, nil
+	}); createErr != nil {
 		// A unique violation here means the pre-flight checks raced a concurrent
 		// registration. The table has two unique constraints, so dispatch on the
 		// constraint name: reporting "邮箱已被注册" for a student-ID clash points the
@@ -448,18 +460,6 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		slog.WarnContext(ctx, "consume register ticket after account creation", "user_id", user.ID, "error", consumeErr)
 	}
 
-	client, err := s.findInternalClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	pair, err := s.issuePair(user, client, 0, "", sessionScopes)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.Tokens.CreatePair(ctx, pair.access, pair.refresh); err != nil {
-		return nil, newError(ErrInternal, "创建 Token Pair 失败", err)
-	}
-
 	if auditErr := s.audit(ctx, &user.ID, "register", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit register", "user_id", user.ID, "error", auditErr)
 	}
@@ -485,33 +485,14 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
 	}
-	// Always report success regardless of account existence: revealing that an
-	// address is or is not registered lets unauthenticated callers enumerate
-	// valid accounts for targeted phishing or credential stuffing. The email is
-	// only actually generated and sent when the account exists.
-	user, err := s.Users.FindByLoginEmail(ctx, email)
-	if errors.Is(err, repository.ErrNotFound) {
-		if auditErr := s.audit(ctx, nil, "forgot_password_send_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
-			slog.Error("audit forgot password send code", "email", email, "error", auditErr)
-		}
-		return &ForgotPasswordResult{Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
+	if s.ForgotPasswords == nil {
+		return nil, newError(ErrInternal, "忘记密码任务队列未配置", nil)
 	}
-	if err != nil {
-		return nil, newError(ErrInternal, "查询登录邮箱失败", err)
-	}
-	code, err := generateVerificationCode()
-	if err != nil {
-		return nil, newError(ErrInternal, "生成验证码失败", err)
-	}
-	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeResetPassword), email, code, verificationTTL); saveErr != nil {
-		return nil, newError(ErrDependencyUnavailable, "保存验证码失败", saveErr)
-	}
-	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeResetPassword); err != nil {
-		slog.Error("send forgot password email", "email", email, "error", err)
-		return nil, newError(ErrEmailFailed, "邮件发送失败，请稍后重试", err)
-	}
-	if auditErr := s.audit(ctx, &user.ID, "forgot_password_send_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
-		slog.Error("audit forgot password send code", "email", email, "error", auditErr)
+	accepted := s.ForgotPasswords.EnqueueForgotPassword(ForgotPasswordJob{
+		Email: email, ClientIP: input.ClientIP, UserAgent: input.UserAgent,
+	})
+	if !accepted {
+		slog.WarnContext(ctx, "forgot password request dropped", "operation", "forgot_password_send_code", "stage", "enqueue")
 	}
 	return &ForgotPasswordResult{Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
 }
@@ -654,7 +635,7 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	if count >= maxOtherMailBindings {
 		return nil, newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
 	}
-	code, err := generateVerificationCode()
+	code, err := GenerateVerificationCode()
 	if err != nil {
 		return nil, newError(ErrInternal, "生成验证码失败", err)
 	}

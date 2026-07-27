@@ -7,6 +7,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
 const BearerTokenType = "Bearer"
@@ -53,6 +54,7 @@ type UserRepository interface {
 	// treat the address as a single global namespace.
 	ExistsAsEmailAnywhere(ctx context.Context, email string) (bool, error)
 	CreateWithProfile(ctx context.Context, user *model.User, profile *model.Profile) error
+	CreateRegistration(ctx context.Context, user *model.User, profile *model.Profile, pairFactory repository.TokenPairFactory) error
 	// UpdatePasswordAndRevokeSessions rewrites the password, bumps token_version
 	// and revokes every live token of the user atomically, returning the
 	// access-token entries still pending blacklist delivery.
@@ -128,6 +130,16 @@ type IdentityRepository interface {
 
 type Mailer interface {
 	SendVerificationCode(ctx context.Context, to, code string, purpose mailer.VerificationPurpose) error
+}
+
+type ForgotPasswordJob struct {
+	Email     string
+	ClientIP  string
+	UserAgent string
+}
+
+type ForgotPasswordDispatcher interface {
+	EnqueueForgotPassword(job ForgotPasswordJob) bool
 }
 
 type LoginInput struct {

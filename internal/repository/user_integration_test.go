@@ -41,6 +41,30 @@ func TestUserRepositoryCreateWithProfileIsAtomic(t *testing.T) {
 	}
 }
 
+func TestUserRepositoryCreateRegistrationRollsBackWhenPairFactoryFails(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	user := testUser("registration-rollback@njupt.edu.cn")
+	profile := &model.Profile{}
+
+	err := userRepository.CreateRegistration(context.Background(), user, profile, func(*model.User) (*model.OAuthAccessToken, *model.OAuthRefreshToken, error) {
+		return nil, nil, errors.New("signing failed")
+	})
+	if err == nil {
+		t.Fatal("CreateRegistration() error = nil")
+	}
+	var userCount, profileCount int64
+	if queryErr := database.Model(&model.User{}).Where("login_email = ?", "registration-rollback@njupt.edu.cn").Count(&userCount).Error; queryErr != nil {
+		t.Fatalf("count users: %v", queryErr)
+	}
+	if queryErr := database.Model(&model.Profile{}).Count(&profileCount).Error; queryErr != nil {
+		t.Fatalf("count profiles: %v", queryErr)
+	}
+	if userCount != 0 || profileCount != 0 {
+		t.Fatalf("rollback counts = user %d profile %d, want 0/0", userCount, profileCount)
+	}
+}
+
 func TestUserRepositoryCreateWithProfileRejectsNilInputs(t *testing.T) {
 	database := setupDatabase(t)
 	userRepository := repository.NewUser(database)

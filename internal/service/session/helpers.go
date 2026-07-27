@@ -171,7 +171,7 @@ func validEmailFormat(email string) bool {
 	return true
 }
 
-func generateVerificationCode() (string, error) {
+func GenerateVerificationCode() (string, error) {
 	// Six-digit numeric code.
 	const max = 1_000_000
 	n, err := rand.Int(rand.Reader, big.NewInt(max))

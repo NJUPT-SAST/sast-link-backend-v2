@@ -52,35 +52,45 @@ func (r *TokenRepository) CreatePair(
 	access *model.OAuthAccessToken,
 	refresh *model.OAuthRefreshToken,
 ) error {
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		return createTokenPairInTransaction(transaction, access, refresh)
+	})
+}
+
+// createTokenPairInTransaction appends one validated token pair using the
+// caller's transaction. Registration reuses this so the account, profile and
+// initial session either all commit or all roll back.
+func createTokenPairInTransaction(
+	transaction *gorm.DB,
+	access *model.OAuthAccessToken,
+	refresh *model.OAuthRefreshToken,
+) error {
 	if err := validateTokenPair(access, refresh); err != nil {
 		return err
 	}
+	familyID := *access.FamilyID
+	if err := lockTokenFamily(transaction, familyID); err != nil {
+		return fmt.Errorf("lock token family: %w", err)
+	}
 
-	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		familyID := *access.FamilyID
-		if err := lockTokenFamily(transaction, familyID); err != nil {
-			return fmt.Errorf("lock token family: %w", err)
-		}
+	familyRevoked, err := tokenFamilyHasRevokedAccess(transaction, familyID)
+	if err != nil {
+		return fmt.Errorf("check token family revocation: %w", err)
+	}
+	if familyRevoked {
+		return ErrTokenFamilyRevoked
+	}
+	if err := validateTokenFamilyAppend(transaction, refresh); err != nil {
+		return err
+	}
 
-		familyRevoked, err := tokenFamilyHasRevokedAccess(transaction, familyID)
-		if err != nil {
-			return fmt.Errorf("check token family revocation: %w", err)
-		}
-		if familyRevoked {
-			return ErrTokenFamilyRevoked
-		}
-		if err := validateTokenFamilyAppend(transaction, refresh); err != nil {
-			return err
-		}
-
-		if err := transaction.Create(access).Error; err != nil {
-			return fmt.Errorf("create access token: %w", err)
-		}
-		if err := transaction.Create(refresh).Error; err != nil {
-			return fmt.Errorf("create refresh token: %w", err)
-		}
-		return nil
-	})
+	if err := transaction.Create(access).Error; err != nil {
+		return fmt.Errorf("create access token: %w", err)
+	}
+	if err := transaction.Create(refresh).Error; err != nil {
+		return fmt.Errorf("create refresh token: %w", err)
+	}
+	return nil
 }
 
 // RotateRefreshToken atomically rotates currentRefreshTokenHash to a new access/refresh pair.

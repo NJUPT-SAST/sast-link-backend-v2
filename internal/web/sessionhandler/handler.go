@@ -384,7 +384,7 @@ func (h Handler) ForgotPasswordSendCode(c *gin.Context) {
 		response.Error(c, mapServiceError(err))
 		return
 	}
-	response.Ok(c, sendCodeResponse{Message: "验证码已发送至邮箱", ExpiresIn: result.ExpiresIn})
+	response.Ok(c, sendCodeResponse{Message: "重置密码请求已受理", ExpiresIn: result.ExpiresIn})
 }
 
 func (h Handler) ResetPassword(c *gin.Context) {

@@ -250,70 +250,88 @@ func generateBoundary() (string, error) {
 }
 
 func sendSTARTTLS(ctx context.Context, addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
-	type result struct{ err error }
-	ch := make(chan result, 1)
-	go func() {
-		//codeql[go/email-injection] recipient validated by sanitizeAddress; subject/body encoded
-		ch <- result{err: smtp.SendMail(addr, auth, from, to, msg)}
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case r := <-ch:
-		if r.err != nil {
-			return fmt.Errorf("send STARTTLS mail: %w", r.err)
-		}
-		return nil
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("parse SMTP address: %w", err)
 	}
+	conn, cleanup, err := dialSMTP(ctx, addr)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return smtpContextError(ctx, "create SMTP client", err)
+	}
+	defer client.Close()
+	if ok, _ := client.Extension("STARTTLS"); !ok {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("SMTP server does not advertise STARTTLS")
+	}
+	if err := client.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
+		return smtpContextError(ctx, "start TLS", err)
+	}
+	return sendSMTPTransaction(ctx, client, auth, from, to, msg)
 }
 
 func sendTLS(ctx context.Context, addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
-	type result struct{ err error }
-	ch := make(chan result, 1)
-	go func() {
-		ch <- result{err: doSendTLS(ctx, addr, host, auth, from, to, msg)}
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case r := <-ch:
-		if r.err != nil {
-			return fmt.Errorf("send TLS mail: %w", r.err)
-		}
-		return nil
-	}
-}
-
-func doSendTLS(ctx context.Context, addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
-	plainConn, err := dialer.DialContext(ctx, "tcp", addr)
+	conn, cleanup, err := dialSMTP(ctx, addr)
 	if err != nil {
-		slog.Error("smtp dial failed", "addr", addr, "error", err)
-		return fmt.Errorf("dial: %w", err)
+		return err
 	}
-	slog.Debug("smtp dialed", "remote", plainConn.RemoteAddr().String(), "local", plainConn.LocalAddr().String())
-	defer plainConn.Close()
+	defer cleanup()
 
-	tlsConn := tls.Client(plainConn, &tls.Config{ServerName: host})
-	if hsErr := tlsConn.HandshakeContext(ctx); hsErr != nil {
-		slog.Error("smtp TLS handshake failed", "host", host, "error", hsErr)
-		return fmt.Errorf("TLS handshake: %w", hsErr)
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+	if handshakeErr := tlsConn.HandshakeContext(ctx); handshakeErr != nil {
+		return smtpContextError(ctx, "TLS handshake", handshakeErr)
 	}
-	slog.Debug("smtp TLS ok", "peer", tlsConn.RemoteAddr().String())
-	defer tlsConn.Close()
-
 	client, err := smtp.NewClient(tlsConn, host)
 	if err != nil {
-		slog.Error("smtp NewClient failed", "error", err)
-		return fmt.Errorf("smtp client: %w", err)
+		return smtpContextError(ctx, "create SMTP client", err)
 	}
 	defer client.Close()
+	return sendSMTPTransaction(ctx, client, auth, from, to, msg)
+}
 
+const smtpIOTimeout = 30 * time.Second
+
+func dialSMTP(ctx context.Context, addr string) (net.Conn, func(), error) {
+	dialer := &net.Dialer{Timeout: smtpIOTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, nil, smtpContextError(ctx, "dial SMTP", err)
+	}
+	deadline := time.Now().Add(smtpIOTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("set SMTP deadline: %w", err)
+	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	cleanup := func() {
+		stopCancel()
+		_ = conn.Close()
+	}
+	return conn, cleanup, nil
+}
+
+func smtpContextError(ctx context.Context, stage string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return fmt.Errorf("%s: %w", stage, err)
+}
+
+func sendSMTPTransaction(ctx context.Context, client *smtp.Client, auth smtp.Auth, from string, to []string, msg []byte) error {
 	if auth != nil {
 		if ok, _ := client.Extension("AUTH"); ok {
 			if authErr := client.Auth(auth); authErr != nil {
-				slog.Error("smtp AUTH failed", "user", from, "error", authErr)
-				return fmt.Errorf("smtp auth: %w", authErr)
+				return smtpContextError(ctx, "SMTP auth", authErr)
 			}
 			slog.Debug("smtp AUTH ok", "user", from)
 		} else {
@@ -322,8 +340,7 @@ func doSendTLS(ctx context.Context, addr, host string, auth smtp.Auth, from stri
 	}
 
 	if mailErr := client.Mail(from); mailErr != nil {
-		slog.Error("smtp MAIL FROM failed", "from", from, "error", mailErr)
-		return fmt.Errorf("smtp mail from: %w", mailErr)
+		return smtpContextError(ctx, "SMTP MAIL FROM", mailErr)
 	}
 	slog.Debug("smtp MAIL FROM ok", "from", from)
 	for _, rcpt := range to {

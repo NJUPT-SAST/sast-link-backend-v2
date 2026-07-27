@@ -17,6 +17,19 @@
 -- because the migration runner splits statements on semicolons, matching the
 -- convention established in V001.
 
+DO U&'BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM "user" u
+        JOIN identities i
+          ON i.provider = ''other_mail''
+         AND i.provider_id = u.login_email
+    ) THEN
+        RAISE EXCEPTION ''cannot install cross-table email invariant: existing conflicts found''
+            USING ERRCODE = ''check_violation''\003B
+    END IF\003B
+END';
+
 CREATE FUNCTION forbid_login_email_as_identity() RETURNS trigger
 LANGUAGE plpgsql AS U&'BEGIN
     IF NEW.provider <> ''other_mail'' THEN

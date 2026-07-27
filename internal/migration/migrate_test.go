@@ -125,6 +125,8 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	for _, triggerName := range []string{
 		"trg_user_email_domain",
 		"trg_identities_other_mail_limit",
+		"trg_identities_provider_id_not_login_email",
+		"trg_user_login_email_not_identity",
 	} {
 		assertExists(t, database, triggerExistsQuery, triggerName)
 	}
@@ -135,6 +137,41 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	assertRefreshTokenFamilySequenceUnique(t, database, userID)
 	assertRejectsPlainPKCEChallengeMethod(t, database, userID)
 	assertBuiltinOAuthClient(t, database)
+}
+
+func TestV5RejectsExistingCrossTableEmailConflict(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+	if err := instance.Steps(4); err != nil {
+		t.Fatalf("apply V001-V004: %v", err)
+	}
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	userID := insertTestUser(t, database)
+	if _, err := database.ExecContext(context.Background(), `
+INSERT INTO identities (user_id, provider, provider_id)
+VALUES ($1, 'other_mail', 'user@njupt.edu.cn')`, userID); err != nil {
+		t.Fatalf("insert existing cross-table conflict: %v", err)
+	}
+
+	err := instance.Up()
+	if err == nil || !strings.Contains(err.Error(), "existing conflicts found") {
+		t.Fatalf("apply V005 error = %v, want existing conflict blocker", err)
+	}
+	var identityCount int
+	if queryErr := database.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM identities WHERE provider_id = 'user@njupt.edu.cn'`).Scan(&identityCount); queryErr != nil {
+		t.Fatalf("count preserved identity: %v", queryErr)
+	}
+	if identityCount != 1 {
+		t.Fatalf("identity count = %d, want conflict preserved for manual repair", identityCount)
+	}
+	var triggerExists bool
+	if queryErr := database.QueryRowContext(context.Background(), triggerExistsQuery, "trg_user_login_email_not_identity").Scan(&triggerExists); queryErr != nil {
+		t.Fatalf("query V005 trigger: %v", queryErr)
+	}
+	if triggerExists {
+		t.Fatal("V005 trigger installed despite failed preflight")
+	}
 }
 
 func TestV3KeepsExistingCanonicalBuiltinOAuthClientOnDown(t *testing.T) {

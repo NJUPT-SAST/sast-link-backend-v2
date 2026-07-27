@@ -92,6 +92,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		UseTLS:        cfg.SMTPUseTLS,
 		MaxConcurrent: cfg.SMTPMaxConcurrent,
 	})
+	forgotPasswords := sessionworker.NewForgotPassword(users, store, emailer, audit)
 
 	service := session.Service{
 		Users:            users,
@@ -108,6 +109,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		VerificationCode: store,
 		RegisterTicket:   store,
 		BindTicket:       bindTickets,
+		ForgotPasswords:  forgotPasswords,
 		InternalClientID: cfg.InternalOAuthClientID,
 		JWT:              jwtManager,
 		RefreshTokens:    refreshManager,
@@ -123,7 +125,10 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	return &sessionRuntime{
 		Handler: sessionhandler.Handler{Service: service},
 		Auth:    authenticator,
-		Workers: []backgroundWorker{sessionworker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist}},
+		Workers: []backgroundWorker{
+			sessionworker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist},
+			forgotPasswords,
+		},
 	}, nil
 }
 

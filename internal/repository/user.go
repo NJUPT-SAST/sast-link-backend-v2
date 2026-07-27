@@ -23,6 +23,11 @@ type UserAuthState struct {
 	TokenVersion int
 }
 
+// TokenPairFactory builds the initial session after PostgreSQL has assigned the
+// new user's ID. It must perform local work only; the caller invokes it while a
+// registration transaction is open.
+type TokenPairFactory func(user *model.User) (*model.OAuthAccessToken, *model.OAuthRefreshToken, error)
+
 // NewUser constructs a UserRepository backed by database.
 func NewUser(database *gorm.DB) *UserRepository {
 	return &UserRepository{database: database}
@@ -49,6 +54,45 @@ func (r *UserRepository) CreateWithProfile(
 		profile.UserID = user.ID
 		if err := transaction.Create(profile).Error; err != nil {
 			return fmt.Errorf("create profile: %w", err)
+		}
+		return nil
+	})
+}
+
+// CreateRegistration creates an account, its profile and its initial session in
+// one PostgreSQL transaction. The factory runs after user.ID is assigned so the
+// signed token subject and token metadata refer to the persisted account.
+func (r *UserRepository) CreateRegistration(
+	ctx context.Context,
+	user *model.User,
+	profile *model.Profile,
+	pairFactory TokenPairFactory,
+) error {
+	if user == nil {
+		return fmt.Errorf("%w: user is nil", ErrInvalidArgument)
+	}
+	if profile == nil {
+		return fmt.Errorf("%w: profile is nil", ErrInvalidArgument)
+	}
+	if pairFactory == nil {
+		return fmt.Errorf("%w: token pair factory is nil", ErrInvalidArgument)
+	}
+
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Create(user).Error; err != nil {
+			return fmt.Errorf("create user: %w", err)
+		}
+		profile.UserID = user.ID
+		if err := transaction.Create(profile).Error; err != nil {
+			return fmt.Errorf("create profile: %w", err)
+		}
+
+		access, refresh, err := pairFactory(user)
+		if err != nil {
+			return fmt.Errorf("build initial token pair: %w", err)
+		}
+		if err := createTokenPairInTransaction(transaction, access, refresh); err != nil {
+			return fmt.Errorf("create initial token pair: %w", err)
 		}
 		return nil
 	})
