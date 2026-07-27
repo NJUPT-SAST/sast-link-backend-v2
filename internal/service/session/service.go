@@ -608,18 +608,19 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
 	}
-	if existing, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, email); findErr == nil {
-		if existing.UserID == input.UserID {
-			return nil, newError(ErrIdentityAlreadyBound, "该邮箱已绑定", nil)
-		}
-		return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", nil)
+	if _, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, email); findErr == nil {
+		// The conflict response must not reveal who owns the address: a distinct
+		// "already bound to you" error lets any authenticated caller enumerate
+		// other users' bindings. Every occupied email gets the same reply; the
+		// caller refreshes their own binding list through GET /user/profile.
+		return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", nil)
 	} else if !errors.Is(findErr, repository.ErrNotFound) {
 		return nil, newError(ErrInternal, "find identity", findErr)
 	}
 	if emailExists, err := s.Users.ExistsAsEmailAnywhere(ctx, email); err != nil {
 		return nil, newError(ErrInternal, "check email existence", err)
 	} else if emailExists {
-		return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", nil)
+		return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", nil)
 	}
 	count, err := s.Identities.CountByUserAndProvider(ctx, input.UserID, model.LoginMethodOtherMail)
 	if err != nil {
@@ -689,18 +690,15 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 		s.discardCode(ctx, purpose, payload.Email)
 		return nil, newError(ErrBindTicketInvalid, "Bind-Ticket 无效或已过期", nil)
 	}
-	if existing, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, payload.Email); findErr == nil {
-		if existing.UserID == input.UserID {
-			return nil, newError(ErrIdentityAlreadyBound, "该邮箱已绑定", nil)
-		}
-		return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", nil)
+	if _, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, payload.Email); findErr == nil {
+		return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", nil)
 	} else if !errors.Is(findErr, repository.ErrNotFound) {
 		return nil, newError(ErrInternal, "find identity", findErr)
 	}
 	if emailExists, err := s.Users.ExistsAsEmailAnywhere(ctx, payload.Email); err != nil {
 		return nil, newError(ErrInternal, "check email existence", err)
 	} else if emailExists {
-		return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", nil)
+		return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", nil)
 	}
 	identity := &model.Identity{
 		UserID:     input.UserID,

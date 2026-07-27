@@ -1467,6 +1467,31 @@ func TestBindEmailSendCodeRejectsOccupiedEmail(t *testing.T) {
 	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
 
+// An address bound to the caller and an address bound to someone else must
+// produce the identical conflict: distinct errors would let any authenticated
+// user enumerate which inboxes other accounts use for login.
+func TestBindEmailSendCodeSameConflictForSelfAndOtherBinding(t *testing.T) {
+	selfBound := newRegisterService(t)
+	selfBound.Identities = &fakeIdentities{byProviderID: map[string]*model.Identity{
+		"extra@gmail.com": {UserID: 42, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
+	}}
+	_, selfErr := selfBound.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+	assertKind(t, selfErr, KindConflict, errcode.CodeIdentityOccupied)
+
+	otherBound := newRegisterService(t)
+	otherBound.Identities = &fakeIdentities{byProviderID: map[string]*model.Identity{
+		"extra@gmail.com": {UserID: 99, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
+	}}
+	_, otherErr := otherBound.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+	assertKind(t, otherErr, KindConflict, errcode.CodeIdentityOccupied)
+
+	selfServiceErr, _ := selfErr.(*Error)
+	otherServiceErr, _ := otherErr.(*Error)
+	if selfServiceErr.Message != otherServiceErr.Message {
+		t.Fatalf("self message %q != other message %q", selfServiceErr.Message, otherServiceErr.Message)
+	}
+}
+
 func TestBindEmailSendCodeRejectsLoginEmail(t *testing.T) {
 	service := newRegisterService(t)
 	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "user@njupt.edu.cn"})

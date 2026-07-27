@@ -31,7 +31,7 @@ func mapServiceError(err error) error {
 	case errcode.CodeStudentIDOccupied:
 		message = "学号已被占用"
 	case errcode.CodeIdentityOccupied:
-		message = "第三方账号已被其他用户绑定"
+		message = "该邮箱已被绑定或占用"
 	case errcode.CodeIdentityAlreadyBound:
 		message = "该类型账号已绑定"
 	case errcode.CodeIdentityLimitReached:
