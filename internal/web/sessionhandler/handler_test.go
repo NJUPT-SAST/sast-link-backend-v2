@@ -489,6 +489,63 @@ func TestResetPasswordReturnsMessage(t *testing.T) {
 	}
 }
 
+func TestBindEmailSendCodeReturnsTicketAndExpiry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{bindEmailSendCodeResult: &session.BindEmailSendCodeResult{BindTicket: "be_ticket", ExpiresIn: 300}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email", strings.NewReader(`{"email":"extra@qq.com"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+	data := body.Data.(map[string]any)
+	if data["bind_ticket"] != "be_ticket" || data["expires_in"] != float64(300) {
+		t.Fatalf("data = %#v", data)
+	}
+	if service.bindEmailSendCodeInput.UserID != 42 || service.bindEmailSendCodeInput.Email != "extra@qq.com" {
+		t.Fatalf("bind email input = %+v", service.bindEmailSendCodeInput)
+	}
+}
+
+func TestBindEmailVerifyReturnsIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{bindEmailVerifyResult: &session.BindEmailVerifyResult{
+		Email: "extra@qq.com",
+		Identity: session.IdentityDTO{
+			ID:         7,
+			Provider:   "other_mail",
+			ProviderID: "extra@qq.com",
+		},
+	}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email/verify", strings.NewReader(`{"bind_ticket":"be_ticket","code":"123456"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+	data := body.Data.(map[string]any)
+	if data["message"] != "邮箱绑定成功" {
+		t.Fatalf("data = %#v", data)
+	}
+	identity, ok := data["identity"].(map[string]any)
+	if !ok || identity["provider"] != "other_mail" || identity["provider_id"] != "extra@qq.com" {
+		t.Fatalf("identity = %#v", data["identity"])
+	}
+	if service.bindEmailVerifyInput.UserID != 42 || service.bindEmailVerifyInput.BindTicket != "be_ticket" || service.bindEmailVerifyInput.Code != "123456" {
+		t.Fatalf("bind verify input = %+v", service.bindEmailVerifyInput)
+	}
+}
+
 // A binding min=8 tag used to reject short passwords during decode, collapsing
 // the documented 42201 into a generic 40000 and hiding the service's mapping.
 // The service must own the length rule for every password entry point.
