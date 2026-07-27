@@ -339,7 +339,14 @@ func doSendTLS(ctx context.Context, addr, host string, auth smtp.Auth, from stri
 		slog.Error("smtp DATA failed", "error", err)
 		return fmt.Errorf("smtp data: %w", err)
 	}
-	//codeql[go/email-injection] recipient validated by sanitizeAddress; subject/body encoded
+	// CodeQL reports go/email-injection here because it cannot follow what
+	// buildMessage does to its inputs. Recipients are validated by
+	// sanitizeRecipients before reaching buildMessage, the subject is Q-encoded,
+	// and bodies are quoted-printable inside a MIME part whose boundary is random
+	// per message. See TestBuildMessageKeepsInjectedHeadersOutOfTheHeaderBlock and
+	// TestBuildMessageBodyCannotForgeMimeBoundary, which fail if any of that
+	// changes. The alert is dismissed in the repository's code-scanning settings;
+	// CodeQL has no in-source suppression syntax for default setup.
 	if _, writeErr := w.Write(msg); writeErr != nil {
 		// Close releases the DATA writer so the connection can be torn down; its
 		// error is deliberately dropped because writeErr is the failure worth
