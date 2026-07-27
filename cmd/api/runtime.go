@@ -84,12 +84,13 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	failures := sessionredis.LoginFailureStore{Store: store, Limit: cfg.LoginFailureLimit, Window: cfg.LoginFailureWindow}
 	bindTickets := sessionredis.BindTicketStore{Store: store}
 	emailer := mailer.New(mailer.Config{
-		Host:     cfg.SMTPHost,
-		Port:     cfg.SMTPPort,
-		Username: cfg.SMTPUser,
-		Password: cfg.SMTPPass,
-		From:     cfg.SMTPFrom,
-		UseTLS:   cfg.SMTPUseTLS,
+		Host:          cfg.SMTPHost,
+		Port:          cfg.SMTPPort,
+		Username:      cfg.SMTPUser,
+		Password:      cfg.SMTPPass,
+		From:          cfg.SMTPFrom,
+		UseTLS:        cfg.SMTPUseTLS,
+		MaxConcurrent: cfg.SMTPMaxConcurrent,
 	})
 
 	service := session.Service{

@@ -71,6 +71,8 @@ type Config struct {
 	SMTPPass   string `env:"SMTP_PASSWORD"`
 	SMTPFrom   string `env:"SMTP_FROM"`
 	SMTPUseTLS bool   `env:"SMTP_USE_TLS" envDefault:"false"`
+	// SMTPMaxConcurrent caps simultaneous SMTP sends; see mailer.Config.
+	SMTPMaxConcurrent int `env:"SMTP_MAX_CONCURRENT" envDefault:"32"`
 }
 
 // Load parses configuration from environment variables and validates required fields.
@@ -141,6 +143,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("SMTP_PORT must be between 1 and %d", maximumTCPPort)
 	case strings.TrimSpace(c.SMTPFrom) == "":
 		return fmt.Errorf("SMTP_FROM is required")
+	case c.SMTPMaxConcurrent <= 0:
+		return fmt.Errorf("SMTP_MAX_CONCURRENT must be positive")
 	}
 	normalizedProxies, err := normalizeTrustedProxies(c.TrustedProxies)
 	if err != nil {

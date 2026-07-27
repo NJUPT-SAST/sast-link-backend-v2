@@ -29,16 +29,27 @@ type Config struct {
 	Password string
 	From     string
 	UseTLS   bool
+	// MaxConcurrent caps simultaneous SMTP sends. Each send dials a fresh TCP
+	// connection and performs a TLS handshake, so an unbounded burst (e.g. a
+	// verification-code storm) exhausts file descriptors and SMTP server
+	// connections. Requests beyond the cap queue until a slot frees.
+	// Non-positive values keep the previous unbounded behavior.
+	MaxConcurrent int
 }
 
 // Mailer sends email via SMTP.
 type Mailer struct {
 	cfg Config
+	sem chan struct{}
 }
 
 // New returns a Mailer from config.
 func New(cfg Config) *Mailer {
-	return &Mailer{cfg: cfg}
+	m := &Mailer{cfg: cfg}
+	if cfg.MaxConcurrent > 0 {
+		m.sem = make(chan struct{}, cfg.MaxConcurrent)
+	}
+	return m
 }
 
 // VerificationPurpose identifies the user action an email code authorizes.
@@ -103,6 +114,14 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 	}
 	if len(to) == 0 {
 		return fmt.Errorf("mailer: no recipients")
+	}
+	if m.sem != nil {
+		select {
+		case m.sem <- struct{}{}:
+			defer func() { <-m.sem }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	recipients, err := sanitizeRecipients(to)
 	if err != nil {
