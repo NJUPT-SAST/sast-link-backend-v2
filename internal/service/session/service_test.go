@@ -1146,6 +1146,40 @@ func TestSendRegisterCodeRejectsHeaderInjectionPayload(t *testing.T) {
 	}
 }
 
+// The send-code response must not reveal whether the address owns an account:
+// a "邮箱不存在" error tells unauthenticated callers exactly which inboxes are
+// worth phishing. Known and unknown emails get the identical success shape;
+// only the known one actually receives a code.
+func TestForgotPasswordSendCodeHidesAccountExistence(t *testing.T) {
+	t.Run("unknown email returns success without sending", func(t *testing.T) {
+		service := newRegisterService(t)
+		result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "nobody@njupt.edu.cn"})
+		if err != nil {
+			t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
+		}
+		if result.Email != "nobody@njupt.edu.cn" || result.ExpiresIn != 300 {
+			t.Fatalf("result = %+v, want the same success shape as a known email", result)
+		}
+		if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
+			t.Fatalf("mailer sent=%d, want 0 for unknown email", sent)
+		}
+	})
+
+	t.Run("known email returns success and sends", func(t *testing.T) {
+		service := newRegisterService(t)
+		result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn"})
+		if err != nil {
+			t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
+		}
+		if result.Email != "user@njupt.edu.cn" || result.ExpiresIn != 300 {
+			t.Fatalf("result = %+v, want success shape", result)
+		}
+		if sent := len(service.Mailer.(*fakeMailer).sent); sent != 1 {
+			t.Fatalf("mailer sent=%d, want 1 for known email", sent)
+		}
+	})
+}
+
 func TestSendRegisterCodeAllowsWhenEmailLimiterUnavailable(t *testing.T) {
 	service := newRegisterService(t)
 	service.EmailLimiter = &fakeLimiter{err: errors.New("redis unavailable")}

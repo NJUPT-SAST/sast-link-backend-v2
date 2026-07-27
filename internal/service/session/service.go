@@ -471,9 +471,16 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
 	}
+	// Always report success regardless of account existence: revealing that an
+	// address is or is not registered lets unauthenticated callers enumerate
+	// valid accounts for targeted phishing or credential stuffing. The email is
+	// only actually generated and sent when the account exists.
 	user, err := s.Users.FindByLoginEmail(ctx, email)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrUnknownIdentifier, "登录邮箱不存在", nil)
+		if auditErr := s.audit(ctx, nil, "forgot_password_send_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+			slog.Error("audit forgot password send code", "email", email, "error", auditErr)
+		}
+		return &ForgotPasswordResult{Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
 	}
 	if err != nil {
 		return nil, newError(ErrInternal, "find login email", err)
