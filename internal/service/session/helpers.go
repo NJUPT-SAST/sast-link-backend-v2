@@ -32,7 +32,7 @@ type issuedPair struct {
 
 func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence int, familyID string, requestedScopes []string) (*issuedPair, error) {
 	if user == nil || client == nil || s.JWT == nil || s.RefreshTokens == nil || s.Tokens == nil {
-		return nil, newError(ErrInternal, "session dependencies are not configured", nil)
+		return nil, newError(ErrInternal, "会话服务依赖未配置", nil)
 	}
 	now := s.now()
 	accessTTL := s.AccessTTL
@@ -45,11 +45,11 @@ func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence
 	}
 	scopes, err := scope.Normalize(requestedScopes)
 	if err != nil {
-		return nil, newError(ErrInternal, "normalize token scopes", err)
+		return nil, newError(ErrInternal, "规范化 Token scope 失败", err)
 	}
 	scopeClaim, err := scope.Claim(scopes)
 	if err != nil {
-		return nil, newError(ErrInternal, "encode session scopes", err)
+		return nil, newError(ErrInternal, "编码会话 scope 失败", err)
 	}
 	if familyID == "" {
 		familyID = uuid.NewString()
@@ -66,15 +66,15 @@ func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence
 		NotBefore:    now,
 	})
 	if err != nil {
-		return nil, newError(ErrInternal, "sign access token", err)
+		return nil, newError(ErrInternal, "签发 Access Token 失败", err)
 	}
 	refreshToken, err := s.RefreshTokens.NewRefreshToken()
 	if err != nil {
-		return nil, newError(ErrInternal, "create refresh token", err)
+		return nil, newError(ErrInternal, "创建 Refresh Token 失败", err)
 	}
 	refreshHash, err := s.RefreshTokens.HashRefreshToken(refreshToken)
 	if err != nil {
-		return nil, newError(ErrInternal, "hash refresh token", err)
+		return nil, newError(ErrInternal, "计算 Refresh Token 哈希失败", err)
 	}
 	access := &model.OAuthAccessToken{
 		TokenID:   jti,

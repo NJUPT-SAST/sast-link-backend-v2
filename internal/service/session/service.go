@@ -56,7 +56,7 @@ type Service struct {
 func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, error) {
 	identifier := normalizeIdentifier(input.Identifier)
 	if identifier == "" || input.Password == "" {
-		return nil, newError(ErrInvalidInput, "invalid login input", nil)
+		return nil, newError(ErrInvalidInput, "登录参数无效", nil)
 	}
 	if err := s.checkEndpointLimit(ctx, "login", loginLimitSubject(input, identifier)); err != nil {
 		return nil, err
@@ -71,10 +71,10 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		if lockErr := s.checkLoginLock(ctx, failureKey); lockErr != nil {
 			return nil, lockErr
 		}
-		return nil, s.failLogin(ctx, nil, input, failureKey, ErrUnknownIdentifier, "login identifier not found", nil)
+		return nil, s.failLogin(ctx, nil, input, failureKey, ErrUnknownIdentifier, "登录标识不存在", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find login user", err)
+		return nil, newError(ErrInternal, "查询登录用户失败", err)
 	}
 	failureKey := loginFailureKey(user, identifier)
 	if lockErr := s.checkLoginLock(ctx, failureKey); lockErr != nil {
@@ -84,7 +84,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, false, errcode.CodeAccountDeleted, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)}); auditErr != nil {
 			slog.Error("audit deleted login failure", "user_id", user.ID, "error", auditErr)
 		}
-		return nil, newError(ErrUserDeleted, "user is deleted", nil)
+		return nil, newError(ErrUserDeleted, "用户已注销", nil)
 	}
 	if passwordErr := s.Passwords.VerifyPassword(ctx, input.Password, user.PasswordHash); passwordErr != nil {
 		// A cancelled or timed-out caller never proved anything about the password,
@@ -92,16 +92,16 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		// client that disconnects mid-login drive its own account into the lockout
 		// window.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, newError(ErrDependencyUnavailable, "password verification abandoned", passwordErr)
+			return nil, newError(ErrDependencyUnavailable, "密码校验被中断", passwordErr)
 		}
-		return nil, s.failLogin(ctx, user, input, failureKey, ErrPasswordInvalid, "password is invalid", passwordErr)
+		return nil, s.failLogin(ctx, user, input, failureKey, ErrPasswordInvalid, "密码错误", passwordErr)
 	}
 	pair, err := s.issuePair(user, client, 0, "", sessionScopes)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.Tokens.CreatePair(ctx, pair.access, pair.refresh); err != nil {
-		return nil, newError(ErrInternal, "create token pair", err)
+		return nil, newError(ErrInternal, "创建 Token Pair 失败", err)
 	}
 	// From here the token pair is persisted. Any subsequent failure must
 	// compensate by revoking the family so no half-issued session survives.
@@ -139,47 +139,47 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 
 func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResult, error) {
 	if strings.TrimSpace(input.RefreshToken) == "" {
-		return nil, newError(ErrInvalidInput, "invalid refresh input", nil)
+		return nil, newError(ErrInvalidInput, "刷新参数无效", nil)
 	}
 	tokenHash, err := s.RefreshTokens.HashRefreshToken(input.RefreshToken)
 	if err != nil {
-		return nil, newError(ErrInvalidToken, "invalid refresh token", err)
+		return nil, newError(ErrInvalidToken, "Refresh Token 无效", err)
 	}
 	current, err := s.Tokens.FindRefreshToken(ctx, tokenHash)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrInvalidToken, "invalid refresh token", nil)
+		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find refresh token", err)
+		return nil, newError(ErrInternal, "查询 Refresh Token 失败", err)
 	}
 	if current.RevokedAt != nil {
 		entries, revokeErr := s.Tokens.RevokeFamily(ctx, current.FamilyID, s.now())
 		if revokeErr != nil {
-			return nil, newError(ErrInternal, "revoke replayed refresh family", revokeErr)
+			return nil, newError(ErrInternal, "撤销被重放的 Refresh Token 家族失败", revokeErr)
 		}
 		s.deliverBlacklist(ctx, entries, s.now())
 		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, input)
-		return nil, newError(ErrInvalidToken, "invalid refresh token", nil)
+		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	if !current.ExpiresAt.After(s.now()) {
-		return nil, newError(ErrInvalidToken, "invalid refresh token", nil)
+		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	client, err := s.findInternalClient(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if current.ClientID != client.ID {
-		return nil, newError(ErrInvalidToken, "refresh token client mismatch", nil)
+		return nil, newError(ErrInvalidToken, "Refresh Token 与客户端不匹配", nil)
 	}
 	user, err := s.Users.FindByID(ctx, current.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrInvalidToken, "invalid refresh token user", nil)
+		return nil, newError(ErrInvalidToken, "Refresh Token 所属用户无效", nil)
 	}
 	if err == nil && user.State == model.UserStateDeleted {
-		return nil, newError(ErrUserDeleted, "user is deleted", nil)
+		return nil, newError(ErrUserDeleted, "用户已注销", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find refresh user", err)
+		return nil, newError(ErrInternal, "查询 Refresh Token 所属用户失败", err)
 	}
 
 	pair, err := s.issuePair(user, client, current.Sequence+1, current.FamilyID, []string(current.Scopes))
@@ -192,13 +192,13 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			// RevokeFamily to obtain blacklist entries for synchronous Redis delivery.
 			entries, revokeErr := s.Tokens.RevokeFamily(ctx, current.FamilyID, s.now())
 			if revokeErr != nil {
-				return nil, newError(ErrInternal, "revoke refresh family after rotation failure", revokeErr)
+				return nil, newError(ErrInternal, "轮换失败后撤销 Refresh Token 家族失败", revokeErr)
 			}
 			s.deliverBlacklist(ctx, entries, s.now())
 			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, input)
-			return nil, newError(ErrInvalidToken, "invalid refresh token", rotateErr)
+			return nil, newError(ErrInvalidToken, "Refresh Token 无效", rotateErr)
 		}
-		return nil, newError(ErrInternal, "rotate refresh token", rotateErr)
+		return nil, newError(ErrInternal, "轮换 Refresh Token 失败", rotateErr)
 	}
 	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, input)
 	return &RefreshResult{
@@ -214,40 +214,40 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, error) {
 	principalJTI := strings.TrimSpace(input.PrincipalJTI)
 	if principalJTI == "" || input.PrincipalUserID <= 0 || strings.TrimSpace(input.RefreshToken) == "" {
-		return nil, newError(ErrInvalidInput, "invalid logout input", nil)
+		return nil, newError(ErrInvalidInput, "登出参数无效", nil)
 	}
 	access, err := s.Tokens.FindAccessTokenByJTI(ctx, principalJTI)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrInvalidToken, "access token metadata not found", nil)
+		return nil, newError(ErrInvalidToken, "未找到 Access Token 元数据", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find access token", err)
+		return nil, newError(ErrInternal, "查询 Access Token 失败", err)
 	}
 	tokenHash, err := s.RefreshTokens.HashRefreshToken(input.RefreshToken)
 	if err != nil {
-		return nil, newError(ErrInvalidToken, "invalid refresh token", err)
+		return nil, newError(ErrInvalidToken, "Refresh Token 无效", err)
 	}
 	refresh, err := s.Tokens.FindRefreshToken(ctx, tokenHash)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrInvalidToken, "refresh token metadata not found", nil)
+		return nil, newError(ErrInvalidToken, "未找到 Refresh Token 元数据", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find refresh token", err)
+		return nil, newError(ErrInternal, "查询 Refresh Token 失败", err)
 	}
 	now := s.now()
 	if !access.ExpiresAt.After(now) || !refresh.ExpiresAt.After(now) {
-		return nil, newError(ErrInvalidToken, "token is expired", nil)
+		return nil, newError(ErrInvalidToken, "Token 已过期", nil)
 	}
 	if access.RevokedAt != nil || refresh.RevokedAt != nil {
-		return nil, newError(ErrInvalidToken, "token is revoked", nil)
+		return nil, newError(ErrInvalidToken, "Token 已被撤销", nil)
 	}
 	if access.FamilyID == nil || *access.FamilyID != refresh.FamilyID || access.UserID != input.PrincipalUserID || refresh.UserID != input.PrincipalUserID || access.ClientID != refresh.ClientID {
-		return nil, newError(ErrInvalidToken, "token ownership mismatch", nil)
+		return nil, newError(ErrInvalidToken, "Token 归属不匹配", nil)
 	}
 	familyID := refresh.FamilyID
 	entries, revokeErr := s.Tokens.RevokeFamily(ctx, familyID, now)
 	if revokeErr != nil {
-		return nil, newError(ErrInternal, "revoke token family", revokeErr)
+		return nil, newError(ErrInternal, "撤销 Token 家族失败", revokeErr)
 	}
 	s.deliverBlacklist(ctx, entries, now)
 	if auditErr := s.audit(ctx, &input.PrincipalUserID, "logout", "session", &familyID, true, 0, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
@@ -258,17 +258,17 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 
 func (s Service) Profile(ctx context.Context, input ProfileInput) (*ProfileResult, error) {
 	if input.UserID <= 0 {
-		return nil, newError(ErrInvalidInput, "invalid profile input", nil)
+		return nil, newError(ErrInvalidInput, "用户资料参数无效", nil)
 	}
 	user, err := s.Users.FindByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrInvalidToken, "invalid profile principal", nil)
+		return nil, newError(ErrInvalidToken, "用户资料身份主体无效", nil)
 	}
 	if err == nil && user.State == model.UserStateDeleted {
-		return nil, newError(ErrUserDeleted, "user is deleted", nil)
+		return nil, newError(ErrUserDeleted, "用户已注销", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find profile user", err)
+		return nil, newError(ErrInternal, "查询用户资料失败", err)
 	}
 	return &ProfileResult{Profile: profileDTO(user)}, nil
 }
@@ -276,7 +276,7 @@ func (s Service) Profile(ctx context.Context, input ProfileInput) (*ProfileResul
 func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInput) (*SendRegisterCodeResult, error) {
 	email := normalizeIdentifier(input.Email)
 	if email == "" {
-		return nil, newError(ErrInvalidInput, "email is required", nil)
+		return nil, newError(ErrInvalidInput, "邮箱不能为空", nil)
 	}
 	if !validEmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
@@ -289,10 +289,10 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 	}
 	code, err := generateVerificationCode()
 	if err != nil {
-		return nil, newError(ErrInternal, "generate verification code", err)
+		return nil, newError(ErrInternal, "生成验证码失败", err)
 	}
 	if err := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeRegister), email, code, verificationTTL); err != nil {
-		return nil, newError(ErrDependencyUnavailable, "save verification code", err)
+		return nil, newError(ErrDependencyUnavailable, "保存验证码失败", err)
 	}
 	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeRegister); err != nil {
 		slog.Error("send register verification email", "email", email, "error", err)
@@ -307,7 +307,7 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCodeInput) (*VerifyRegisterCodeResult, error) {
 	email := normalizeIdentifier(input.Email)
 	if email == "" || input.Code == "" {
-		return nil, newError(ErrInvalidInput, "email and code are required", nil)
+		return nil, newError(ErrInvalidInput, "邮箱与验证码不能为空", nil)
 	}
 	if !validEmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
@@ -321,13 +321,13 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 	}
 	ticket, err := generateRegisterTicket()
 	if err != nil {
-		return nil, newError(ErrInternal, "generate register ticket", err)
+		return nil, newError(ErrInternal, "生成 Register-Ticket 失败", err)
 	}
 	if err := s.RegisterTicket.SaveRegisterTicket(ctx, ticket, email, verificationTTL); err != nil {
 		// The code already matched and was consumed; without a ticket the user has
 		// to restart, so make sure the spent code cannot be reused either.
 		s.discardCode(ctx, purpose, email)
-		return nil, newError(ErrDependencyUnavailable, "save register ticket", err)
+		return nil, newError(ErrDependencyUnavailable, "保存 Register-Ticket 失败", err)
 	}
 	if auditErr := s.audit(ctx, nil, "register_verify_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit register verify code", "email", email, "error", auditErr)
@@ -338,7 +338,7 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterResult, error) {
 	ticket := strings.TrimSpace(input.RegisterTicket)
 	if ticket == "" {
-		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket is required", nil)
+		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 不能为空", nil)
 	}
 	// The contract accepts registration_state + oauth_state for the third-party
 	// OAuth no-binding branch; reject them until OAuth login issues such states,
@@ -370,7 +370,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	// cost the user their one-time ticket and force a new send-code round trip.
 	email, found, err := s.RegisterTicket.PeekRegisterTicket(ctx, ticket)
 	if err != nil {
-		return nil, newError(ErrDependencyUnavailable, "read register ticket", err)
+		return nil, newError(ErrDependencyUnavailable, "读取 Register-Ticket 失败", err)
 	}
 	if !found {
 		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 无效或已过期", nil)
@@ -381,14 +381,14 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 
 	exists, err := s.Users.ExistsAsEmailAnywhere(ctx, email)
 	if err != nil {
-		return nil, newError(ErrInternal, "check email existence", err)
+		return nil, newError(ErrInternal, "查询邮箱是否已存在失败", err)
 	}
 	if exists {
 		return nil, newError(ErrEmailAlreadyRegistered, "邮箱已被注册", nil)
 	}
 	exists, err = s.Users.ExistsByStudentID(ctx, studentID)
 	if err != nil {
-		return nil, newError(ErrInternal, "check student id existence", err)
+		return nil, newError(ErrInternal, "查询学号是否已存在失败", err)
 	}
 	if exists {
 		return nil, newError(ErrStudentIDOccupied, "学号已被占用", nil)
@@ -434,7 +434,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 			slog.ErrorContext(ctx, "unmapped unique violation on register", "constraint", constraint)
 			return nil, newError(ErrConflict, "注册信息与现有账号冲突", createErr)
 		}
-		return nil, newError(ErrInternal, "create user", createErr)
+		return nil, newError(ErrInternal, "创建用户失败", createErr)
 	}
 
 	// The account exists, so the ticket has served its purpose. A failure here
@@ -453,7 +453,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return nil, err
 	}
 	if err := s.Tokens.CreatePair(ctx, pair.access, pair.refresh); err != nil {
-		return nil, newError(ErrInternal, "create token pair", err)
+		return nil, newError(ErrInternal, "创建 Token Pair 失败", err)
 	}
 
 	if auditErr := s.audit(ctx, &user.ID, "register", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
@@ -473,7 +473,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswordInput) (*ForgotPasswordResult, error) {
 	email := normalizeIdentifier(input.Email)
 	if email == "" {
-		return nil, newError(ErrInvalidInput, "email is required", nil)
+		return nil, newError(ErrInvalidInput, "邮箱不能为空", nil)
 	}
 	if !validEmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
@@ -493,14 +493,14 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 		return &ForgotPasswordResult{Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find login email", err)
+		return nil, newError(ErrInternal, "查询登录邮箱失败", err)
 	}
 	code, err := generateVerificationCode()
 	if err != nil {
-		return nil, newError(ErrInternal, "generate verification code", err)
+		return nil, newError(ErrInternal, "生成验证码失败", err)
 	}
 	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeResetPassword), email, code, verificationTTL); saveErr != nil {
-		return nil, newError(ErrDependencyUnavailable, "save verification code", saveErr)
+		return nil, newError(ErrDependencyUnavailable, "保存验证码失败", saveErr)
 	}
 	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeResetPassword); err != nil {
 		slog.Error("send forgot password email", "email", email, "error", err)
@@ -515,7 +515,7 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*ResetPasswordResult, error) {
 	email := normalizeIdentifier(input.Email)
 	if email == "" || input.Code == "" || input.Password == "" {
-		return nil, newError(ErrInvalidInput, "email, code and password are required", nil)
+		return nil, newError(ErrInvalidInput, "邮箱、验证码与密码不能为空", nil)
 	}
 	if !validEmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
@@ -533,7 +533,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 		return nil, newError(ErrUnknownIdentifier, "登录邮箱不存在", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find login email", err)
+		return nil, newError(ErrInternal, "查询登录邮箱失败", err)
 	}
 	// Distinguish "differs from the old password" from "could not check": a
 	// cancelled verification returns non-nil too, which would otherwise be read as
@@ -542,7 +542,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	case sameErr == nil:
 		return nil, newError(ErrPasswordUnchanged, "新密码不能与旧密码相同", nil)
 	case ctx.Err() != nil:
-		return nil, newError(ErrDependencyUnavailable, "password comparison abandoned", sameErr)
+		return nil, newError(ErrDependencyUnavailable, "密码比对被中断", sameErr)
 	}
 	passwordHash, err := s.Passwords.HashPassword(ctx, input.Password)
 	if err != nil {
@@ -554,7 +554,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	// "请重新登录" contract, so a revocation failure must fail the whole call.
 	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now)
 	if err != nil {
-		return nil, newError(ErrInternal, "reset password and revoke sessions", err)
+		return nil, newError(ErrInternal, "重置密码并撤销会话失败", err)
 	}
 	s.deliverBlacklist(ctx, entries, now)
 	s.clearLoginFailures(ctx, user, email)
@@ -566,10 +566,10 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 
 func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) (*ChangePasswordResult, error) {
 	if input.UserID <= 0 {
-		return nil, newError(ErrInvalidToken, "invalid principal", nil)
+		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
 	if input.OldPassword == "" || input.NewPassword == "" {
-		return nil, newError(ErrInvalidInput, "old_password and new_password are required", nil)
+		return nil, newError(ErrInvalidInput, "old_password 与 new_password 不能为空", nil)
 	}
 	if len(input.NewPassword) < 8 {
 		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
@@ -579,19 +579,19 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	}
 	user, err := s.Users.FindByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrInvalidToken, "invalid principal", nil)
+		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find change password user", err)
+		return nil, newError(ErrInternal, "查询待修改密码的用户失败", err)
 	}
 	if user.State == model.UserStateDeleted {
-		return nil, newError(ErrUserDeleted, "user is deleted", nil)
+		return nil, newError(ErrUserDeleted, "用户已注销", nil)
 	}
 	if verifyErr := s.Passwords.VerifyPassword(ctx, input.OldPassword, user.PasswordHash); verifyErr != nil {
 		// An abandoned verification is not a wrong password: auditing it as one
 		// would fill the log with phantom failures for clients that disconnected.
 		if ctx.Err() != nil {
-			return nil, newError(ErrDependencyUnavailable, "password verification abandoned", verifyErr)
+			return nil, newError(ErrDependencyUnavailable, "密码校验被中断", verifyErr)
 		}
 		if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, nil); auditErr != nil {
 			slog.Error("audit change password failure", "user_id", user.ID, "error", auditErr)
@@ -605,7 +605,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	now := s.now()
 	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now)
 	if err != nil {
-		return nil, newError(ErrInternal, "change password and revoke sessions", err)
+		return nil, newError(ErrInternal, "修改密码并撤销会话失败", err)
 	}
 	s.deliverBlacklist(ctx, entries, now)
 	s.clearLoginFailures(ctx, user, user.LoginEmail)
@@ -618,13 +618,13 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeInput) (*BindEmailSendCodeResult, error) {
 	email := normalizeIdentifier(input.Email)
 	if email == "" {
-		return nil, newError(ErrInvalidInput, "email is required", nil)
+		return nil, newError(ErrInvalidInput, "邮箱不能为空", nil)
 	}
 	if !validEmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
 	if input.UserID <= 0 {
-		return nil, newError(ErrInvalidToken, "invalid principal", nil)
+		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
@@ -636,33 +636,33 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 		// caller refreshes their own binding list through GET /user/profile.
 		return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", nil)
 	} else if !errors.Is(findErr, repository.ErrNotFound) {
-		return nil, newError(ErrInternal, "find identity", findErr)
+		return nil, newError(ErrInternal, "查询第三方绑定记录失败", findErr)
 	}
 	if emailExists, err := s.Users.ExistsAsEmailAnywhere(ctx, email); err != nil {
-		return nil, newError(ErrInternal, "check email existence", err)
+		return nil, newError(ErrInternal, "查询邮箱是否已存在失败", err)
 	} else if emailExists {
 		return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", nil)
 	}
 	count, err := s.Identities.CountByUserAndProvider(ctx, input.UserID, model.LoginMethodOtherMail)
 	if err != nil {
-		return nil, newError(ErrInternal, "count identities", err)
+		return nil, newError(ErrInternal, "统计第三方绑定数量失败", err)
 	}
 	if count >= maxOtherMailBindings {
 		return nil, newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
 	}
 	code, err := generateVerificationCode()
 	if err != nil {
-		return nil, newError(ErrInternal, "generate verification code", err)
+		return nil, newError(ErrInternal, "生成验证码失败", err)
 	}
 	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeBindEmail), email, code, verificationTTL); saveErr != nil {
-		return nil, newError(ErrDependencyUnavailable, "save verification code", saveErr)
+		return nil, newError(ErrDependencyUnavailable, "保存验证码失败", saveErr)
 	}
 	ticket, err := generateBindTicket()
 	if err != nil {
-		return nil, newError(ErrInternal, "generate bind ticket", err)
+		return nil, newError(ErrInternal, "生成 Bind-Ticket 失败", err)
 	}
 	if err := s.BindTicket.SaveBindTicket(ctx, ticket, BindTicketPayload{Email: email, UserID: input.UserID}, verificationTTL); err != nil {
-		return nil, newError(ErrInternal, "save bind ticket", err)
+		return nil, newError(ErrInternal, "保存 Bind-Ticket 失败", err)
 	}
 	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeBindEmail); err != nil {
 		slog.Error("send bind email verification", "email", email, "error", err)
@@ -676,18 +676,18 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 
 func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput) (*BindEmailVerifyResult, error) {
 	if input.UserID <= 0 {
-		return nil, newError(ErrInvalidToken, "invalid principal", nil)
+		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
 	ticket := strings.TrimSpace(input.BindTicket)
 	if ticket == "" || input.Code == "" {
-		return nil, newError(ErrInvalidInput, "bind_ticket and code are required", nil)
+		return nil, newError(ErrInvalidInput, "bind_ticket 与 code 不能为空", nil)
 	}
 	// Read the ticket without consuming it: a wrong verification code must not
 	// cost the user their Bind-Ticket, or every typo forces a fresh send-code
 	// round trip. The ticket is consumed only once the binding is about to happen.
 	payload, found, err := s.BindTicket.PeekBindTicket(ctx, ticket)
 	if err != nil {
-		return nil, newError(ErrDependencyUnavailable, "read bind ticket", err)
+		return nil, newError(ErrDependencyUnavailable, "读取 Bind-Ticket 失败", err)
 	}
 	if !found {
 		return nil, newError(ErrBindTicketInvalid, "Bind-Ticket 无效或已过期", nil)
@@ -705,7 +705,7 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	consumed, err := s.BindTicket.ConsumeBindTicket(ctx, ticket)
 	if err != nil {
 		s.discardCode(ctx, purpose, payload.Email)
-		return nil, newError(ErrDependencyUnavailable, "consume bind ticket", err)
+		return nil, newError(ErrDependencyUnavailable, "消费 Bind-Ticket 失败", err)
 	}
 	if !consumed {
 		s.discardCode(ctx, purpose, payload.Email)
@@ -714,10 +714,10 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	if _, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, payload.Email); findErr == nil {
 		return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", nil)
 	} else if !errors.Is(findErr, repository.ErrNotFound) {
-		return nil, newError(ErrInternal, "find identity", findErr)
+		return nil, newError(ErrInternal, "查询第三方绑定记录失败", findErr)
 	}
 	if emailExists, err := s.Users.ExistsAsEmailAnywhere(ctx, payload.Email); err != nil {
-		return nil, newError(ErrInternal, "check email existence", err)
+		return nil, newError(ErrInternal, "查询邮箱是否已存在失败", err)
 	} else if emailExists {
 		return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", nil)
 	}
@@ -733,7 +733,7 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 		if isDuplicateError(err) {
 			return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", err)
 		}
-		return nil, newError(ErrInternal, "create identity", err)
+		return nil, newError(ErrInternal, "创建第三方绑定记录失败", err)
 	}
 	if auditErr := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"provider": string(model.LoginMethodOtherMail), "provider_id": payload.Email}); auditErr != nil {
 		slog.Error("audit bind email", "user_id", input.UserID, "error", auditErr)
@@ -765,7 +765,7 @@ func (s Service) checkEndpointLimit(ctx context.Context, endpoint, subject strin
 		return nil
 	}
 	if !result.Allowed {
-		return withRetryAfter(newError(ErrRateLimited, "rate limited", nil), result.RetryAfter)
+		return withRetryAfter(newError(ErrRateLimited, "请求过于频繁", nil), result.RetryAfter)
 	}
 	return nil
 }
@@ -783,7 +783,7 @@ func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) er
 		case err != nil:
 			slog.WarnContext(ctx, "email limiter unavailable, allowing request", "error", err)
 		case !result.Allowed:
-			return withRetryAfter(newError(ErrRateLimited, "rate limited", nil), result.RetryAfter)
+			return withRetryAfter(newError(ErrRateLimited, "请求过于频繁", nil), result.RetryAfter)
 		}
 	}
 	if s.EmailIPLimiter != nil && strings.TrimSpace(clientIP) != "" {
@@ -792,7 +792,7 @@ func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) er
 		case err != nil:
 			slog.WarnContext(ctx, "email ip limiter unavailable, allowing request", "error", err)
 		case !result.Allowed:
-			return withRetryAfter(newError(ErrRateLimited, "rate limited", nil), result.RetryAfter)
+			return withRetryAfter(newError(ErrRateLimited, "请求过于频繁", nil), result.RetryAfter)
 		}
 	}
 	return nil
@@ -828,7 +828,7 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 func (s Service) verifyCode(ctx context.Context, purpose, email, code string) error {
 	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, email, code)
 	if err != nil {
-		return newError(ErrDependencyUnavailable, "verify verification code", err)
+		return newError(ErrDependencyUnavailable, "校验验证码失败", err)
 	}
 	if matched {
 		return nil
@@ -844,9 +844,9 @@ func (s Service) verifyCode(ctx context.Context, purpose, email, code string) er
 // fault; reporting that as a 500 would blame the server for a client that left.
 func (s Service) hashError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
-		return newError(ErrDependencyUnavailable, "password hashing abandoned", err)
+		return newError(ErrDependencyUnavailable, "密码哈希计算被中断", err)
 	}
-	return newError(ErrInternal, "hash password", err)
+	return newError(ErrInternal, "计算密码哈希失败", err)
 }
 
 // discardCode drops an already-matched code when a later step of the same flow
@@ -888,7 +888,7 @@ func (s Service) checkLoginLock(ctx context.Context, key string) error {
 		return nil
 	}
 	if locked {
-		return withRetryAfter(newError(ErrLocked, "login locked", nil), retryAfter)
+		return withRetryAfter(newError(ErrLocked, "登录已被锁定", nil), retryAfter)
 	}
 	return nil
 }
@@ -911,7 +911,7 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 		slog.Error("audit login failure", "error", err)
 	}
 	if locked {
-		return withRetryAfter(newError(ErrLocked, "login locked", nil), lockTTL)
+		return withRetryAfter(newError(ErrLocked, "登录已被锁定", nil), lockTTL)
 	}
 	return newError(sentinel, message, cause)
 }
@@ -931,20 +931,20 @@ func (s Service) auditRefresh(ctx context.Context, userID int64, familyID *strin
 
 func (s Service) findInternalClient(ctx context.Context) (*model.OAuthClient, error) {
 	if strings.TrimSpace(s.InternalClientID) == "" || s.Clients == nil {
-		return nil, newError(ErrInternal, "internal client is not configured", nil)
+		return nil, newError(ErrInternal, "内置 OAuth 客户端未配置", nil)
 	}
 	client, err := s.Clients.FindActiveByClientID(ctx, strings.TrimSpace(s.InternalClientID))
 	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
-		return nil, newError(ErrInternal, "internal client is not available", err)
+		return nil, newError(ErrInternal, "内置 OAuth 客户端不可用", err)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "find internal client", err)
+		return nil, newError(ErrInternal, "查询内置 OAuth 客户端失败", err)
 	}
 	if client.ClientType != model.ClientTypeFirstParty || client.ClientSecretHash != nil {
-		return nil, newError(ErrInternal, "internal client is not a public first-party client", nil)
+		return nil, newError(ErrInternal, "内置 OAuth 客户端不是公开的第一方客户端", nil)
 	}
 	if ok, err := scope.Equal([]string(client.Scopes), sessionScopes); err != nil || !ok {
-		return nil, newError(ErrInternal, "internal client scopes must be canonical session scopes", err)
+		return nil, newError(ErrInternal, "内置 OAuth 客户端的 scope 必须是标准会话 scope", err)
 	}
 	return client, nil
 }
