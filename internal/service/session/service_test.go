@@ -385,9 +385,10 @@ func (f *fakeFailures) Reset(_ context.Context, key string) error {
 }
 
 type fakeBlacklist struct {
-	jti string
-	ttl time.Duration
-	err error
+	jti     string
+	ttl     time.Duration
+	entries map[string]time.Duration
+	err     error
 }
 
 func (f *fakeBlacklist) BlacklistJTI(_ context.Context, jti string, ttl time.Duration) error {
@@ -396,6 +397,18 @@ func (f *fakeBlacklist) BlacklistJTI(_ context.Context, jti string, ttl time.Dur
 	}
 	f.jti = jti
 	f.ttl = ttl
+	return nil
+}
+
+func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.entries = entries
+	for jti, ttl := range entries {
+		f.jti = jti
+		f.ttl = ttl
+	}
 	return nil
 }
 

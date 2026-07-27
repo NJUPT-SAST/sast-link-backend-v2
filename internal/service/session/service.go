@@ -784,16 +784,21 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 	if s.Blacklist == nil {
 		return
 	}
+	batch := make(map[string]time.Duration, len(entries))
 	for _, entry := range entries {
 		ttl := entry.ExpiresAt.Sub(now)
 		if ttl <= 0 || strings.TrimSpace(entry.TokenID) == "" {
 			continue
 		}
-		if err := s.Blacklist.BlacklistJTI(ctx, entry.TokenID, ttl); err != nil {
-			// The same-transaction outbox row guarantees a worker retry, so a
-			// failed synchronous delivery is expected degradation, not an error.
-			slog.WarnContext(ctx, "deliver token blacklist entry, outbox worker will retry", "token_id", entry.TokenID, "error", err)
-		}
+		batch[entry.TokenID] = ttl
+	}
+	if len(batch) == 0 {
+		return
+	}
+	if err := s.Blacklist.BlacklistJTIBatch(ctx, batch); err != nil {
+		// The same-transaction outbox row guarantees a worker retry, so a
+		// failed synchronous delivery is expected degradation, not an error.
+		slog.WarnContext(ctx, "deliver token blacklist batch, outbox worker will retry", "count", len(batch), "error", err)
 	}
 }
 

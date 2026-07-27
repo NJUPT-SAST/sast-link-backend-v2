@@ -37,6 +37,9 @@ type LoginFailureStore interface {
 
 type TokenBlacklist interface {
 	BlacklistJTI(ctx context.Context, jti string, ttl time.Duration) error
+	// BlacklistJTIBatch delivers a revoked session set in one round trip.
+	// Implementations must tolerate an empty map as a no-op.
+	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
 }
 
 type UserRepository interface {

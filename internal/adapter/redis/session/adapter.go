@@ -60,6 +60,13 @@ func (s BlacklistStore) BlacklistJTI(ctx context.Context, jti string, ttl time.D
 	return s.Store.BlacklistJTI(ctx, jti, ttl)
 }
 
+// BlacklistJTIBatch delivers a whole revoked session set in one round trip.
+// Used by password change/reset where every live token of the user is revoked
+// at once; the per-token loop would cost one RTT per device.
+func (s BlacklistStore) BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error {
+	return s.Store.BlacklistJTIBatch(ctx, entries)
+}
+
 func (s BlacklistStore) IsJTIBlacklisted(ctx context.Context, jti string) (bool, error) {
 	return s.Store.IsJTIBlacklisted(ctx, jti)
 }

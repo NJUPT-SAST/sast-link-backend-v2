@@ -21,6 +21,7 @@ type Cmdable interface {
 	Del(context.Context, ...string) *goredis.IntCmd
 	PTTL(context.Context, string) *goredis.DurationCmd
 	Eval(context.Context, string, []string, ...any) *goredis.Cmd
+	Pipeline() goredis.Pipeliner
 }
 
 var (
@@ -351,6 +352,33 @@ func (s Store) BlacklistJTI(ctx context.Context, jti string, ttl time.Duration) 
 	}
 	if err := s.Client.Set(ctx, s.Keys.JTIBlacklist(jti), "1", ttl).Err(); err != nil {
 		return fmt.Errorf("blacklist jti: %w", err)
+	}
+	return nil
+}
+
+// BlacklistJTIBatch blacklists multiple JTIs in one MSET round trip. Password
+// change/reset revokes every live session of a user, so delivering each JTI
+// with its own SET costs one Redis RTT per device — MSET keeps it constant.
+// Every entry in the batch must already be validated (non-empty JTI, positive
+// TTL); empty batches are a no-op.
+func (s Store) BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error {
+	if s.Client == nil {
+		return fmt.Errorf("blacklist jti batch: %w", ErrInvalidArgument)
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	// MSET cannot carry per-key TTLs, so write each key with its expiry through
+	// a pipelined SET — still one network round trip for the whole batch.
+	pipe := s.Client.Pipeline()
+	for jti, ttl := range entries {
+		if jti == "" || ttl <= 0 {
+			continue
+		}
+		pipe.Set(ctx, s.Keys.JTIBlacklist(jti), "1", ttl)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("blacklist jti batch: %w", err)
 	}
 	return nil
 }

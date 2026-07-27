@@ -147,6 +147,34 @@ func TestJTIBlacklist(t *testing.T) {
 	}
 }
 
+// BlacklistJTIBatch backs whole-user revocation (password change/reset): every
+// live JTI must land in one round trip with its own TTL.
+func TestJTIBlacklistBatch(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+
+	if err := store.BlacklistJTIBatch(ctx, nil); err != nil {
+		t.Fatalf("BlacklistJTIBatch(nil) returned error: %v", err)
+	}
+	if err := store.BlacklistJTIBatch(ctx, map[string]time.Duration{
+		"jti-a": 2 * time.Second,
+		"jti-b": 3 * time.Second,
+	}); err != nil {
+		t.Fatalf("BlacklistJTIBatch returned error: %v", err)
+	}
+	for _, jti := range []string{"jti-a", "jti-b"} {
+		blacklisted, err := store.IsJTIBlacklisted(ctx, jti)
+		if err != nil || !blacklisted {
+			t.Fatalf("IsJTIBlacklisted(%q) = %v, %v; want true, nil", jti, blacklisted, err)
+		}
+		ttl, err := client.PTTL(ctx, store.Keys.JTIBlacklist(jti)).Result()
+		if err != nil || ttl <= 0 {
+			t.Fatalf("PTTL(%q) = %v, %v; want positive expiry", jti, ttl, err)
+		}
+	}
+}
+
 func TestFixedWindowLimiter(t *testing.T) {
 	client := testutil.StartRedis(t)
 	ctx := context.Background()
