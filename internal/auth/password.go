@@ -19,8 +19,23 @@ const (
 )
 
 // PasswordHasher hashes and verifies passwords using PBKDF2-SHA512.
+//
+// PBKDF2 at 600k iterations is deliberately CPU-heavy; a burst of concurrent
+// hashing (login storm, registration burst) can saturate every core and stall
+// unrelated requests. Semaphore is an optional weighted gate — when set, each
+// hash/verify acquires a slot and releases it when done, capping how many
+// derivations run at once. Nil means unbounded, matching previous behavior.
 type PasswordHasher struct {
-	Random RandomSource
+	Random    RandomSource
+	Semaphore chan struct{}
+}
+
+func (h PasswordHasher) acquire() func() {
+	if h.Semaphore == nil {
+		return func() {}
+	}
+	h.Semaphore <- struct{}{}
+	return func() { <-h.Semaphore }
 }
 
 // HashPassword returns a versioned PBKDF2-SHA512 password hash.
@@ -28,6 +43,8 @@ func (h PasswordHasher) HashPassword(password string) (string, error) {
 	if password == "" {
 		return "", ErrInvalidInput
 	}
+	release := h.acquire()
+	defer release()
 	salt, err := randomBytes(h.Random, passwordSaltBytes)
 	if err != nil {
 		return "", fmt.Errorf("generate password salt: %w", err)
@@ -65,6 +82,8 @@ func (h PasswordHasher) VerifyPassword(password, encodedHash string) error {
 	if err != nil || len(expected) != passwordKeyBytes {
 		return ErrInvalidInput
 	}
+	release := h.acquire()
+	defer release()
 	actual, err := pbkdf2.Key(sha512.New, password, salt, iterations, len(expected))
 	if err != nil {
 		return fmt.Errorf("derive password verification hash: %w", err)

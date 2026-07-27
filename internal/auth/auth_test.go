@@ -46,6 +46,36 @@ func TestPasswordHasherVersionedPBKDF2(t *testing.T) {
 	}
 }
 
+// The semaphore must bound in-flight derivations and hand the slot back when
+// the call returns, or a hashing burst would queue forever after the first
+// batch.
+func TestPasswordHasherSemaphoreBoundsAndReleases(t *testing.T) {
+	semaphore := make(chan struct{}, 1)
+	hasher := PasswordHasher{Random: fixedReader{data: bytes.Repeat([]byte{0x42}, 16)}, Semaphore: semaphore}
+
+	semaphore <- struct{}{} // occupy the only slot
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := hasher.HashPassword("queued")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("HashPassword completed while semaphore full: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	<-semaphore // release the slot
+	if err := <-done; err != nil {
+		t.Fatalf("HashPassword after release returned error: %v", err)
+	}
+	if len(semaphore) != 0 {
+		t.Fatalf("semaphore len = %d, want 0 after released hash", len(semaphore))
+	}
+}
+
 func TestRefreshTokenOpaqueAndHMAC(t *testing.T) {
 	manager := RefreshTokenManager{
 		Random: fixedReader{data: []byte{0x24}},

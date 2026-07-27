@@ -59,6 +59,10 @@ type Config struct {
 	LoginFailureLimit        int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
 	LoginFailureWindow       time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
 
+	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
+	// beyond this queues at the hasher instead of saturating every CPU core.
+	PasswordHashMaxConcurrent int `env:"PASSWORD_HASH_MAX_CONCURRENT" envDefault:"64"`
+
 	// SMTPHost has no default: a "localhost" fallback would let a deployment
 	// that forgot SMTP_HOST start cleanly and only fail when a user registers.
 	SMTPHost   string `env:"SMTP_HOST"`
@@ -126,6 +130,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
 	case c.LoginFailureWindow <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_WINDOW must be positive")
+	case c.PasswordHashMaxConcurrent <= 0:
+		return fmt.Errorf("PASSWORD_HASH_MAX_CONCURRENT must be positive")
 	// SMTP backs registration, password reset and email binding. Validating it
 	// at boot turns a missing value into a startup failure instead of a runtime
 	// "邮件发送失败" on the first user who tries to register.

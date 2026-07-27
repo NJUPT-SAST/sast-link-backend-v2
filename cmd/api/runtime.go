@@ -110,7 +110,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		InternalClientID: cfg.InternalOAuthClientID,
 		JWT:              jwtManager,
 		RefreshTokens:    refreshManager,
-		Passwords:        auth.PasswordHasher{},
+		Passwords:        auth.PasswordHasher{Semaphore: make(chan struct{}, cfg.PasswordHashMaxConcurrent)},
 		AccessTTL:        cfg.JWTAccessTokenExpiry,
 		RefreshTTL:       cfg.JWTRefreshTokenExpiry,
 	}
