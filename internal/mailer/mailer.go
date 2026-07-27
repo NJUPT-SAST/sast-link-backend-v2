@@ -341,7 +341,10 @@ func doSendTLS(ctx context.Context, addr, host string, auth smtp.Auth, from stri
 	}
 	//codeql[go/email-injection] recipient validated by sanitizeAddress; subject/body encoded
 	if _, writeErr := w.Write(msg); writeErr != nil {
-		w.Close()
+		// Close releases the DATA writer so the connection can be torn down; its
+		// error is deliberately dropped because writeErr is the failure worth
+		// reporting and closing after a failed write is expected to fail too.
+		_ = w.Close()
 		slog.Error("smtp write body failed", "error", writeErr)
 		return fmt.Errorf("smtp write: %w", writeErr)
 	}
