@@ -10,6 +10,7 @@ import (
 	sessionredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -51,6 +52,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	tokens := repository.NewToken(database)
 	outbox := repository.NewTokenBlacklistOutbox(database)
 	audit := repository.NewAuditLog(database)
+	identities := repository.NewIdentity(database)
 
 	keys := internalredis.NewKeys(cfg.RedisKeyPrefix)
 	store := internalredis.Store{Client: rdb, Keys: keys}
@@ -63,20 +65,55 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Window: cfg.RateLimitLoginWindow,
 		},
 	}
+	emailLimiter := sessionredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitSendEmailRPM,
+			Window: cfg.RateLimitSendEmailWindow,
+		},
+	}
+	emailIPLimiter := sessionredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitSendEmailIPRPM,
+			Window: cfg.RateLimitSendEmailWindow,
+		},
+	}
 	failures := sessionredis.LoginFailureStore{Store: store, Limit: cfg.LoginFailureLimit, Window: cfg.LoginFailureWindow}
+	bindTickets := sessionredis.BindTicketStore{Store: store}
+	emailer := mailer.New(mailer.Config{
+		Host:          cfg.SMTPHost,
+		Port:          cfg.SMTPPort,
+		Username:      cfg.SMTPUser,
+		Password:      cfg.SMTPPass,
+		From:          cfg.SMTPFrom,
+		UseTLS:        cfg.SMTPUseTLS,
+		MaxConcurrent: cfg.SMTPMaxConcurrent,
+	})
+	forgotPasswords := sessionworker.NewForgotPassword(users, store, emailer, audit)
 
 	service := session.Service{
 		Users:            users,
 		Clients:          clients,
 		Tokens:           tokens,
 		Audit:            audit,
+		Identities:       identities,
 		Limiter:          limiter,
+		EmailLimiter:     emailLimiter,
+		EmailIPLimiter:   emailIPLimiter,
 		Failures:         failures,
 		Blacklist:        blacklist,
+		Mailer:           emailer,
+		VerificationCode: store,
+		RegisterTicket:   store,
+		BindTicket:       bindTickets,
+		ForgotPasswords:  forgotPasswords,
 		InternalClientID: cfg.InternalOAuthClientID,
 		JWT:              jwtManager,
 		RefreshTokens:    refreshManager,
-		Passwords:        auth.PasswordHasher{},
+		Passwords:        auth.PasswordHasher{Semaphore: make(chan struct{}, cfg.PasswordHashMaxConcurrent)},
 		AccessTTL:        cfg.JWTAccessTokenExpiry,
 		RefreshTTL:       cfg.JWTRefreshTokenExpiry,
 	}
@@ -88,7 +125,10 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	return &sessionRuntime{
 		Handler: sessionhandler.Handler{Service: service},
 		Auth:    authenticator,
-		Workers: []backgroundWorker{sessionworker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist}},
+		Workers: []backgroundWorker{
+			sessionworker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist},
+			forgotPasswords,
+		},
 	}, nil
 }
 

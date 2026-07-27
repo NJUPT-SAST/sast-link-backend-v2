@@ -51,7 +51,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 | 缓存 | Redis | 8+ |
 | 对象存储 | 腾讯云 COS | 头像上传 |
 | 邮件 | SMTP | 验证码发送 |
-| 密码哈希 | PBKDF2-SHA512 | 600,000 轮，16 字节随机盐。Go 标准库 `crypto/pbkdf2` + `crypto/sha512`，零外部依赖 |
+| 密码哈希 | PBKDF2-SHA512 | 600,000 轮，16 字节随机盐。Go 标准库 `crypto/pbkdf2` + `crypto/sha512`，零外部依赖。单次派生约 380ms（16 核实测），并发上限 `PASSWORD_HASH_MAX_CONCURRENT`（默认 64）。派生排队可被 context 取消，客户端断开即释放队列位，避免无界积压 |
 | 认证授权 | OAuth 2.1 + RS256 | JWT（Access Token）含 `kid` 头，支持密钥轮换；通过 JWKS 端点分发公钥 |
 | 集成测试 | testcontainers-go | — |
 
@@ -65,7 +65,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 ### 3.3 部署架构
 
 - **容器化**：Docker 多阶段构建（golang:alpine → alpine），复用服务器上已有的 PostgreSQL 与 Redis 实例
-- **高可用**：API 服务无状态（JWT 自包含），可水平扩展；Redis 黑名单 / 设备记录在扩缩容时短暂不一致可接受（最多 1h Access Token 有效期窗口）。PostgreSQL 是唯一必需依赖，Redis 故障时服务降级但仍可提供认证能力（见 §6.0）
+- **高可用**：API 服务无状态（JWT 自包含），可水平扩展；黑名单仅是快速拒绝路径，`oauth_access_tokens.revoked_at` 每请求经 DB 校验，Redis 黑名单不一致不影响吊销正确性；设备记录在扩缩容时短暂不一致可接受。PostgreSQL 是唯一必需依赖，Redis 故障时服务降级但仍可提供认证能力（见 §6.0）
 - **定时任务**：pg_cron 在 PG 内部调度清理过期数据，无多实例重复执行问题
 - **Base URL**：`https://link.sast.fun/v2`
 
@@ -98,9 +98,11 @@ SAST Link 同时作为 OAuth 2.1 授权服务器和 OIDC Provider：
 
 **两步注册**：
 
-1. `POST /auth/register/send-code` → 校验邮箱域名 → 生成 6 位数字验证码 → SMTP 发送 → 验证码写 Redis（key: `sastlink:verify:{email}`，TTL 5min）
-2. `POST /auth/register/verify-code` → 校验验证码（成功后删除）→ 返回 Register-Ticket（`reg_` + 32 位 hex，Redis 5min，一次性，GetDel 消费）
-3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱 → 校验所有 user 字段已填且密码 ≥ 8 位 → PBKDF2-SHA512 哈希 → 创建 user + profile → 签发 Token Pair
+1. `POST /auth/register/send-code` → 校验邮箱域名 → 生成 6 位数字验证码 → SMTP 发送 → 验证码写 Redis（key: `sastlink:verify:register:{email}`，TTL 5min）
+2. `POST /auth/register/verify-code` → 校验验证码（匹配后删除；填错仅消耗一次尝试，验证码保留，最多 5 次后作废）→ 返回 Register-Ticket（`reg_` + 32 位 hex，Redis 5min，一次性）
+3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱（先只读校验）→ 校验所有 user 字段已填且密码 ≥ 8 位 → 查邮箱/学号是否被占用 → PBKDF2-SHA512 哈希 → 创建 user + profile → 建号成功后才 DEL 消费 ticket → 签发 Token Pair
+
+并发注册由 `user.login_email` 的 UNIQUE 约束串行化，不依赖 ticket 消费选主；因此 ticket 保留到建号成功为止，竞态失败者（40901/40902）可改字段后用同一 ticket 重试，无需重新发验证码。`user` 表有 `login_email` 与 `student_id` 两个 UNIQUE 约束，唯一冲突需按约束名区分后再映射错误码，否则学号冲突会被误报为「邮箱已被注册」
 
 **可选 registration_state 绑定**：传入 `registration_state` + `oauth_state`（OAuth 标准 state 参数）时，注册成功后 * 并消费 `registration_state` + `oauth_state` → 验证双值匹配 → 自动创建 identities 记录。用于第三方 OAuth 首次登录的无绑定分支——用户先经 OAuth 回调拿到 `registration_state`，再走注册流程，注册后自动绑定
 
@@ -209,7 +211,7 @@ POST /auth/forgot-password/send-code  →  发送验证码到注册邮箱
 POST /auth/reset-password             →  校验验证码 + 新密码
 ```
 
-- `POST /auth/forgot-password/send-code`：查邮箱对应账号是否存在，不存在返回 40106（邮箱不存在）；存在则发送验证码
+- `POST /auth/forgot-password/send-code`：对格式合法且未触发限流的邮箱统一返回“已受理”。请求进入有界内存队列，worker 再查账号并只向已注册邮箱发送验证码。响应不暴露账号是否存在，也不保证邮件已经送达；队列满或进程重启时任务可能丢失，用户可在限流窗口后重试
 - `POST /auth/reset-password`：校验验证码 + 新密码；账号不存在同样返回 40106
 - 验证码正确后 `user.token_version` 递增，撤销所有 Token，设备记录清除
 - 登录失败计数器清零
@@ -239,6 +241,7 @@ Body: { "password": "current_password" }
 
 - 必须输入当前密码二次确认
 - 主邮箱（`user.login_email`）不在 identities 中，不可通过此接口解绑
+- 该约束由数据库保证：V005 在 `user` 与 `identities` 两侧各建一个 BEFORE 触发器，禁止同一地址同时作为主邮箱与 `other_mail` 绑定存在。两列的 UNIQUE 各自只覆盖本表，应用层预检查挡不住并发（两个未提交事务互相不可见），故触发器内先按地址取 `pg_advisory_xact_lock` 串行化。违反时抛 `unique_violation`，约束名为 `ck_user_login_email_not_identity` / `ck_identities_provider_id_not_login_email`
 
 - 解绑冷却：Redis `sastlink:unbind:cooldown:{email}`，60s 防快速重复解绑
 
@@ -432,7 +435,8 @@ is_deleted ──(恢复)──► njupter
 
 | 场景 | Key | TTL | 数据结构 | 说明 |
 |------|-----|-----|----------|------|
-| 验证码 | `sastlink:verify:{email}` | 5min | String（GetDel 消费） | 注册/重置密码/绑定邮箱 |
+| 验证码 | `sastlink:verify:{purpose}:{email}` | 5min | String（Lua 原子比对，匹配后 DEL） | `purpose` ∈ `register` / `reset_password` / `bind_email`。按用途分键，使某一流程签发的验证码无法用于另一流程。填错不删除验证码（否则任何人都能用一次错误提交作废他人验证码），改为累计失败次数 |
+| 验证码失败计数 | `sastlink:verify:attempt:{purpose}:{email}` | 跟随验证码剩余 TTL | String（INCR） | 每个验证码最多 5 次尝试，用尽即连同验证码一并删除，避免 6 位码被无限爆破。重新发码时清零 |
 | 限流 | `sastlink:ratelimit:{ip}:{endpoint}` | 30s~15min | String（INCR 计数器 + EXPIRE） | 固定窗口计数器，按端点差异化配置（登录 15min/发验证码 60s 等） |
 | 设备管理 | `sastlink:devices:{user_id}` | 30d | Sorted Set（score=login_ts, member=device_id） | 最多 5 台同时登录，详情另存 Hash。淘汰/登出见 §6.1 |
 | 解绑冷却 | `sastlink:unbind:cooldown:{email}` | 60s | String（SET NX EX） | 防快速重复解绑 |
@@ -442,8 +446,8 @@ is_deleted ──(恢复)──► njupter
 | OAuth 注册暂存 | `sastlink:oauth:registration:{state}` | 15min | String（GetDel 消费，JSON 值） | OAuth 回调无绑定分支。暂存 `{provider, provider_id, identity_data, oauth_state}`，消费时校验双值匹配 |
 | 登录码 | `sastlink:auth:login_code:{code}` | 60s | String（GetDel 消费） | OAuth 回调已有绑定用户分支，暂存 user_id，前端交换 Token Pair |
 | 登录失败 | `sastlink:auth:login_failure:{email}` | 15min | String（INCR 计数器） | 连续失败 ≥ 10 次锁定，成功登录后 DEL 清零 |
-| Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GetDel 消费） | 注册两步间暂存已验证邮箱 |
-| Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GetDel 消费） | 绑定邮箱两步间暂存待绑定邮箱 + user_id |
+| Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GET 校验 → 建号成功后 DEL） | 注册两步间暂存已验证邮箱。并发由 `login_email` UNIQUE 约束串行化，ticket 不承担选主职责，故保留到建号成功，竞态失败者可重试 |
+| Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GET 校验 → 验证码通过后 DEL） | 绑定邮箱两步间暂存待绑定邮箱 + user_id。不在校验前消费，否则验证码填错会连 ticket 一起作废 |
 
 ### 6.0 Redis 不可用时的降级策略
 
@@ -512,7 +516,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 维度 | 方案 |
 |------|------|
 | 日志 | JSON 结构化日志（slog），含 trace_id / user_id / client_ip / method / path / status / latency |
-| 健康检查 | `GET /health` → `{ "status": "ok", "db": "ok", "redis": "ok" }`；Redis 故障时返回 200 且 `redis` 为 `degraded`（见 §6.2），仅 `db` 故障返回 500 |
+| 健康检查 | `GET /health` → `{ "status": "ok", "db": "ok", "redis": "ok" }`；Redis 故障时返回 200 且 `redis` 为 `degraded`（见 §6.0），仅 `db` 故障返回 500 |
 | 审计追踪 | `audit_logs` 表记录所有认证操作 |
 | 错误码 | 统一 5 位业务码（`{HTTP状态}{序号}`），详见附录 A |
 
@@ -595,7 +599,8 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 数据基础层 | 已完成 — V001–V004 SQL migrations、固定内置 `sast-link-web` first-party Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
 | 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI 黑名单/登录失败计数与 fixed-window limiter |
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流与登录/登出审计接入 |
-| 用户注册、密码与资料维护 | 待实现 — 注册、验证码、改密/重置、资料编辑与头像 endpoints |
+| 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
+| 用户资料管理 | 待实现 — 资料编辑与头像上传 endpoints |
 | OAuth/OIDC 业务 | 待实现 — OAuth 登录/绑定、authorize/token/revoke、discovery、UserInfo、ID Token 与客户端管理 endpoints |
 | 其余运维接入 | 待实现 — 设备管理、其他 endpoint 限流策略与 pg_cron |
 
@@ -605,7 +610,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [x] 数据基础层（V001–V004 migrations / 内置 first-party Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
 - [x] 认证基础设施（PBKDF2 / JWT + JWKS / Refresh Token / PKCE-S256 / scope / Redis auth state + limiter / token-family rotation）
 - [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
-- [ ] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码）
+- [x] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码 / 第三方邮箱绑定）
 - [ ] 用户资料管理（编辑 / 头像上传）
 - [ ] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [ ] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）

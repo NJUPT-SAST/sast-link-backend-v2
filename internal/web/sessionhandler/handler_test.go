@@ -24,21 +24,48 @@ type fixedClock struct{ value time.Time }
 func (c fixedClock) Now() time.Time { return c.value }
 
 type fakeService struct {
-	loginResult   *session.LoginResult
-	refreshResult *session.RefreshResult
-	logoutResult  *session.LogoutResult
-	profileResult *session.ProfileResult
-	loginErr      error
-	refreshErr    error
-	logoutErr     error
-	profileErr    error
-	loginInput    session.LoginInput
-	refreshInput  session.RefreshInput
-	logoutInput   session.LogoutInput
-	profileInput  session.ProfileInput
-	loginCalls    int
-	refreshCalls  int
-	logoutCalls   int
+	loginResult              *session.LoginResult
+	refreshResult            *session.RefreshResult
+	logoutResult             *session.LogoutResult
+	profileResult            *session.ProfileResult
+	sendRegisterCodeResult   *session.SendRegisterCodeResult
+	verifyRegisterCodeResult *session.VerifyRegisterCodeResult
+	registerResult           *session.RegisterResult
+	forgotPasswordResult     *session.ForgotPasswordResult
+	resetPasswordResult      *session.ResetPasswordResult
+	changePasswordResult     *session.ChangePasswordResult
+	bindEmailSendCodeResult  *session.BindEmailSendCodeResult
+	bindEmailVerifyResult    *session.BindEmailVerifyResult
+	loginErr                 error
+	refreshErr               error
+	logoutErr                error
+	profileErr               error
+	sendRegisterCodeErr      error
+	verifyRegisterCodeErr    error
+	registerErr              error
+	forgotPasswordErr        error
+	resetPasswordErr         error
+	changePasswordErr        error
+	bindEmailSendCodeErr     error
+	bindEmailVerifyErr       error
+	loginInput               session.LoginInput
+	refreshInput             session.RefreshInput
+	logoutInput              session.LogoutInput
+	profileInput             session.ProfileInput
+	sendRegisterCodeInput    session.SendRegisterCodeInput
+	verifyRegisterCodeInput  session.VerifyRegisterCodeInput
+	registerInput            session.RegisterInput
+	forgotPasswordInput      session.ForgotPasswordInput
+	resetPasswordInput       session.ResetPasswordInput
+	changePasswordInput      session.ChangePasswordInput
+	bindEmailSendCodeInput   session.BindEmailSendCodeInput
+	bindEmailVerifyInput     session.BindEmailVerifyInput
+	loginCalls               int
+	refreshCalls             int
+	logoutCalls              int
+	sendRegisterCodeCalls    int
+	verifyRegisterCodeCalls  int
+	registerCalls            int
 }
 
 func (s *fakeService) Login(_ context.Context, input session.LoginInput) (*session.LoginResult, error) {
@@ -62,6 +89,49 @@ func (s *fakeService) Logout(_ context.Context, input session.LogoutInput) (*ses
 func (s *fakeService) Profile(_ context.Context, input session.ProfileInput) (*session.ProfileResult, error) {
 	s.profileInput = input
 	return s.profileResult, s.profileErr
+}
+
+func (s *fakeService) SendRegisterCode(_ context.Context, input session.SendRegisterCodeInput) (*session.SendRegisterCodeResult, error) {
+	s.sendRegisterCodeCalls++
+	s.sendRegisterCodeInput = input
+	return s.sendRegisterCodeResult, s.sendRegisterCodeErr
+}
+
+func (s *fakeService) VerifyRegisterCode(_ context.Context, input session.VerifyRegisterCodeInput) (*session.VerifyRegisterCodeResult, error) {
+	s.verifyRegisterCodeCalls++
+	s.verifyRegisterCodeInput = input
+	return s.verifyRegisterCodeResult, s.verifyRegisterCodeErr
+}
+
+func (s *fakeService) Register(_ context.Context, input session.RegisterInput) (*session.RegisterResult, error) {
+	s.registerCalls++
+	s.registerInput = input
+	return s.registerResult, s.registerErr
+}
+
+func (s *fakeService) ForgotPasswordSendCode(_ context.Context, input session.ForgotPasswordInput) (*session.ForgotPasswordResult, error) {
+	s.forgotPasswordInput = input
+	return s.forgotPasswordResult, s.forgotPasswordErr
+}
+
+func (s *fakeService) ResetPassword(_ context.Context, input session.ResetPasswordInput) (*session.ResetPasswordResult, error) {
+	s.resetPasswordInput = input
+	return s.resetPasswordResult, s.resetPasswordErr
+}
+
+func (s *fakeService) ChangePassword(_ context.Context, input session.ChangePasswordInput) (*session.ChangePasswordResult, error) {
+	s.changePasswordInput = input
+	return s.changePasswordResult, s.changePasswordErr
+}
+
+func (s *fakeService) BindEmailSendCode(_ context.Context, input session.BindEmailSendCodeInput) (*session.BindEmailSendCodeResult, error) {
+	s.bindEmailSendCodeInput = input
+	return s.bindEmailSendCodeResult, s.bindEmailSendCodeErr
+}
+
+func (s *fakeService) BindEmailVerify(_ context.Context, input session.BindEmailVerifyInput) (*session.BindEmailVerifyResult, error) {
+	s.bindEmailVerifyInput = input
+	return s.bindEmailVerifyResult, s.bindEmailVerifyErr
 }
 
 func TestLoginReturnsEnvelopeDTOAndInput(t *testing.T) {
@@ -207,6 +277,7 @@ func TestServiceErrorMappingStatusAndCode(t *testing.T) {
 		{name: "rate", err: &session.Error{Kind: session.KindRateLimited, Code: errcode.CodeRateLimited, Message: "rate"}, wantStatus: http.StatusTooManyRequests, wantCode: errcode.CodeRateLimited},
 		{name: "rate with retry", err: &session.Error{Kind: session.KindRateLimited, Code: errcode.CodeRateLimited, Message: "rate", RetryAfter: time.Minute}, wantStatus: http.StatusTooManyRequests, wantCode: errcode.CodeRateLimited},
 		{name: "invalid token", err: &session.Error{Kind: session.KindInvalidToken, Code: errcode.CodeAccessTokenInvalid, Message: "invalid token"}, wantStatus: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
+		{name: "dependency unavailable", err: &session.Error{Kind: session.KindDependencyUnavailable, Code: errcode.CodeDependencyUnavailable, Message: "redis down"}, wantStatus: http.StatusServiceUnavailable, wantCode: errcode.CodeDependencyUnavailable},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -247,7 +318,7 @@ func TestProtectedRoutesRequireMiddleware(t *testing.T) {
 		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusUnauthorized, Code: errcode.CodeUnauthenticated, Message: "missing or invalid authorization header"})
 		c.Abort()
 	})
-	for _, test := range []struct{ method, path string }{{http.MethodPost, "/auth/logout"}, {http.MethodGet, "/user/profile"}} {
+	for _, test := range []struct{ method, path string }{{http.MethodPost, "/auth/logout"}, {http.MethodGet, "/user/profile"}, {http.MethodPost, "/auth/change-password"}, {http.MethodPost, "/user/identities/email"}, {http.MethodPost, "/user/identities/email/verify"}} {
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), test.method, test.path, strings.NewReader(`{"refresh_token":"rt_x"}`))
 		req.Header.Set("Content-Type", "application/json")
@@ -278,6 +349,245 @@ func TestLoginClientIPDoesNotTrustXForwardedFor(t *testing.T) {
 	}
 	if service.loginInput.ClientIP != "203.0.113.9" {
 		t.Fatalf("ClientIP = %q, want RemoteAddr host not XFF", service.loginInput.ClientIP)
+	}
+}
+
+func TestSendRegisterCodeReturnsMessageAndExpiry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{sendRegisterCodeResult: &session.SendRegisterCodeResult{Email: "pt@sast.fun", ExpiresIn: 300}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/register/send-code", strings.NewReader(`{"login_email":"pt@sast.fun"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+	data := body.Data.(map[string]any)
+	if data["message"] != "验证码已发送至邮箱" || data["expires_in"] != float64(300) {
+		t.Fatalf("data = %#v", data)
+	}
+	if service.sendRegisterCodeInput.Email != "pt@sast.fun" || service.sendRegisterCodeInput.UserAgent != "" {
+		t.Fatalf("send code input = %+v", service.sendRegisterCodeInput)
+	}
+}
+
+func TestSendRegisterCodeMapsDomainError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{sendRegisterCodeErr: &session.Error{Kind: session.KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/register/send-code", strings.NewReader(`{"login_email":"pt@gmail.com"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusBadRequest || body.Code != errcode.CodeEmailDomainNotAllowed {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+}
+
+func TestVerifyRegisterCodeReturnsTicket(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{verifyRegisterCodeResult: &session.VerifyRegisterCodeResult{RegisterTicket: "reg_xxx", Email: "pt@sast.fun", ExpiresIn: 300}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/register/verify-code", strings.NewReader(`{"login_email":"pt@sast.fun","code":"123456"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+	data := body.Data.(map[string]any)
+	if data["register_ticket"] != "reg_xxx" || data["expires_in"] != float64(300) {
+		t.Fatalf("data = %#v", data)
+	}
+}
+
+func TestRegisterReturnsTokensAndUser(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	service := &fakeService{registerResult: &session.RegisterResult{
+		AccessToken:     "access",
+		RefreshToken:    "refresh",
+		TokenType:       "Bearer",
+		Scope:           "openid profile email",
+		AccessExpiresAt: now.Add(90 * time.Second),
+		Profile: session.UserProfileDTO{
+			ID:         7,
+			Name:       "pt",
+			LoginEmail: "pt@sast.fun",
+			Role:       "freshman",
+			State:      "njupter",
+		},
+	}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, allowAuth())
+	recorder := httptest.NewRecorder()
+	body := `{"register_ticket":"reg_xxx","password":"password123","name":"pt","student_id":"B24040001","phone_number":"13800138000","qq_number":"10000","college":"其他","major":"CS"}`
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/register", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	resp := decodeBody(t, recorder)
+	if recorder.Code != http.StatusCreated || resp.Code != 0 {
+		t.Fatalf("response = %d %#v", recorder.Code, resp)
+	}
+	data := resp.Data.(map[string]any)
+	if data["access_token"] != "access" || data["refresh_token"] != "refresh" {
+		t.Fatalf("data = %#v", data)
+	}
+	if service.registerInput.Password != "password123" || service.registerInput.Name != "pt" || service.registerInput.College != "其他" {
+		t.Fatalf("register input = %+v", service.registerInput)
+	}
+}
+
+func TestChangePasswordReturnsMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{changePasswordResult: &session.ChangePasswordResult{UserID: 42}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/change-password", strings.NewReader(`{"old_password":"oldpassword","new_password":"newpassword"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+	data := body.Data.(map[string]any)
+	if data["message"] != "密码修改成功" {
+		t.Fatalf("data = %#v", data)
+	}
+	if service.changePasswordInput.UserID != 42 || service.changePasswordInput.OldPassword != "oldpassword" || service.changePasswordInput.NewPassword != "newpassword" {
+		t.Fatalf("change password input = %+v", service.changePasswordInput)
+	}
+}
+
+func TestResetPasswordReturnsMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{resetPasswordResult: &session.ResetPasswordResult{Email: "pt@sast.fun"}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/reset-password", strings.NewReader(`{"login_email":"pt@sast.fun","code":"123456","new_password":"newpassword"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+	data := body.Data.(map[string]any)
+	if data["message"] != "密码重置成功，请重新登录" {
+		t.Fatalf("data = %#v", data)
+	}
+	if service.resetPasswordInput.Email != "pt@sast.fun" || service.resetPasswordInput.Password != "newpassword" {
+		t.Fatalf("reset password input = %+v", service.resetPasswordInput)
+	}
+}
+
+func TestBindEmailSendCodeReturnsTicketAndExpiry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{bindEmailSendCodeResult: &session.BindEmailSendCodeResult{BindTicket: "be_ticket", ExpiresIn: 300}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email", strings.NewReader(`{"email":"extra@qq.com"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+	data := body.Data.(map[string]any)
+	if data["bind_ticket"] != "be_ticket" || data["expires_in"] != float64(300) {
+		t.Fatalf("data = %#v", data)
+	}
+	if service.bindEmailSendCodeInput.UserID != 42 || service.bindEmailSendCodeInput.Email != "extra@qq.com" {
+		t.Fatalf("bind email input = %+v", service.bindEmailSendCodeInput)
+	}
+}
+
+func TestBindEmailVerifyReturnsIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{bindEmailVerifyResult: &session.BindEmailVerifyResult{
+		Email: "extra@qq.com",
+		Identity: session.IdentityDTO{
+			ID:         7,
+			Provider:   "other_mail",
+			ProviderID: "extra@qq.com",
+		},
+	}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email/verify", strings.NewReader(`{"bind_ticket":"be_ticket","code":"123456"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+	data := body.Data.(map[string]any)
+	if data["message"] != "邮箱绑定成功" {
+		t.Fatalf("data = %#v", data)
+	}
+	identity, ok := data["identity"].(map[string]any)
+	if !ok || identity["provider"] != "other_mail" || identity["provider_id"] != "extra@qq.com" {
+		t.Fatalf("identity = %#v", data["identity"])
+	}
+	if service.bindEmailVerifyInput.UserID != 42 || service.bindEmailVerifyInput.BindTicket != "be_ticket" || service.bindEmailVerifyInput.Code != "123456" {
+		t.Fatalf("bind verify input = %+v", service.bindEmailVerifyInput)
+	}
+}
+
+// A binding min=8 tag used to reject short passwords during decode, collapsing
+// the documented 42201 into a generic 40000 and hiding the service's mapping.
+// The service must own the length rule for every password entry point.
+func TestShortPasswordReachesServiceForDocumentedCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tooShort := &session.Error{Kind: session.KindValidationFailed, Code: errcode.CodePasswordTooShort}
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "reset-password",
+			path: "/auth/reset-password",
+			body: `{"login_email":"pt@sast.fun","code":"123456","new_password":"short"}`,
+		},
+		{
+			name: "change-password",
+			path: "/auth/change-password",
+			body: `{"old_password":"oldpassword","new_password":"short"}`,
+		},
+		{
+			name: "register",
+			path: "/auth/register",
+			body: `{"register_ticket":"reg_x","password":"short","name":"pt","student_id":"B24","phone_number":"13800138000","qq_number":"10000","college":"其他","major":"CS"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeService{resetPasswordErr: tooShort, changePasswordErr: tooShort, registerErr: tooShort}
+			router := gin.New()
+			RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, test.path, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+
+			body := decodeBody(t, recorder)
+			if recorder.Code != http.StatusUnprocessableEntity || body.Code != errcode.CodePasswordTooShort {
+				t.Fatalf("response = %d %#v, want 422 with code %d", recorder.Code, body, errcode.CodePasswordTooShort)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -21,6 +22,11 @@ type UserAuthState struct {
 	State        model.UserState
 	TokenVersion int
 }
+
+// TokenPairFactory builds the initial session after PostgreSQL has assigned the
+// new user's ID. It must perform local work only; the caller invokes it while a
+// registration transaction is open.
+type TokenPairFactory func(user *model.User) (*model.OAuthAccessToken, *model.OAuthRefreshToken, error)
 
 // NewUser constructs a UserRepository backed by database.
 func NewUser(database *gorm.DB) *UserRepository {
@@ -48,6 +54,45 @@ func (r *UserRepository) CreateWithProfile(
 		profile.UserID = user.ID
 		if err := transaction.Create(profile).Error; err != nil {
 			return fmt.Errorf("create profile: %w", err)
+		}
+		return nil
+	})
+}
+
+// CreateRegistration creates an account, its profile and its initial session in
+// one PostgreSQL transaction. The factory runs after user.ID is assigned so the
+// signed token subject and token metadata refer to the persisted account.
+func (r *UserRepository) CreateRegistration(
+	ctx context.Context,
+	user *model.User,
+	profile *model.Profile,
+	pairFactory TokenPairFactory,
+) error {
+	if user == nil {
+		return fmt.Errorf("%w: user is nil", ErrInvalidArgument)
+	}
+	if profile == nil {
+		return fmt.Errorf("%w: profile is nil", ErrInvalidArgument)
+	}
+	if pairFactory == nil {
+		return fmt.Errorf("%w: token pair factory is nil", ErrInvalidArgument)
+	}
+
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Create(user).Error; err != nil {
+			return fmt.Errorf("create user: %w", err)
+		}
+		profile.UserID = user.ID
+		if err := transaction.Create(profile).Error; err != nil {
+			return fmt.Errorf("create profile: %w", err)
+		}
+
+		access, refresh, err := pairFactory(user)
+		if err != nil {
+			return fmt.Errorf("build initial token pair: %w", err)
+		}
+		if err := createTokenPairInTransaction(transaction, access, refresh); err != nil {
+			return fmt.Errorf("create initial token pair: %w", err)
 		}
 		return nil
 	})
@@ -98,6 +143,98 @@ func (r *UserRepository) FindByID(ctx context.Context, userID int64) (*model.Use
 		return nil, ErrNotFound
 	}
 	return nil, fmt.Errorf("find user by ID: %w", err)
+}
+
+// FindByLoginEmail finds a user by login email only (excludes other-mail identities).
+func (r *UserRepository) FindByLoginEmail(ctx context.Context, email string) (*model.User, error) {
+	var user model.User
+	err := r.database.WithContext(ctx).
+		Preload("Profile").
+		Preload("Identities").
+		Where("login_email = ?", email).
+		First(&user).Error
+	if err == nil {
+		return &user, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("find user by login email: %w", err)
+}
+
+// UpdatePasswordAndRevokeSessions replaces the password hash, increments
+// token_version and revokes every live token of the user in one transaction,
+// returning the access-token entries that still need blacklist delivery.
+//
+// The three steps must not be split: token_version alone only invalidates
+// access tokens (the refresh flow does not compare it), so a partial failure
+// would leave live refresh tokens able to mint fresh access tokens for an
+// account whose owner was told every session had ended.
+func (r *UserRepository) UpdatePasswordAndRevokeSessions(
+	ctx context.Context,
+	userID int64,
+	passwordHash string,
+	revokedAt time.Time,
+) ([]model.BlacklistEntry, error) {
+	var entries []model.BlacklistEntry
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Model(&model.User{}).
+			Where("id = ?", userID).
+			Update("password", passwordHash).Error; err != nil {
+			return fmt.Errorf("update password: %w", err)
+		}
+		if err := transaction.Model(&model.User{}).
+			Where("id = ?", userID).
+			UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error; err != nil {
+			return fmt.Errorf("increment token version: %w", err)
+		}
+		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
+		if revokeErr != nil {
+			return revokeErr
+		}
+		entries = revoked
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("update password and revoke sessions: %w", err)
+	}
+	return entries, nil
+}
+
+// ExistsByLoginEmail reports whether a user with the given login email exists.
+func (r *UserRepository) ExistsByLoginEmail(ctx context.Context, email string) (bool, error) {
+	var count int64
+	if err := r.database.WithContext(ctx).Model(&model.User{}).Where("login_email = ?", email).Count(&count).Error; err != nil {
+		return false, fmt.Errorf("count user by login email: %w", err)
+	}
+	return count > 0, nil
+}
+
+// ExistsByStudentID reports whether a user with the given student ID exists.
+func (r *UserRepository) ExistsByStudentID(ctx context.Context, studentID string) (bool, error) {
+	var count int64
+	if err := r.database.WithContext(ctx).Model(&model.User{}).Where("student_id = ?", studentID).Count(&count).Error; err != nil {
+		return false, fmt.Errorf("count user by student id: %w", err)
+	}
+	return count > 0, nil
+}
+
+// ExistsAsEmailAnywhere reports whether the email is already used as a login
+// email or as an other_mail identity provider_id. Both columns are unique, so
+// this is the single pre-flight guard against the same address living in both
+// tables.
+func (r *UserRepository) ExistsAsEmailAnywhere(ctx context.Context, email string) (bool, error) {
+	var exists bool
+	err := r.database.WithContext(ctx).Raw(`
+		SELECT EXISTS (
+			SELECT 1 FROM "user" WHERE login_email = ?
+			UNION
+			SELECT 1 FROM identities WHERE provider = ? AND provider_id = ?
+		)`, email, model.LoginMethodOtherMail, email).Scan(&exists).Error
+	if err != nil {
+		return false, fmt.Errorf("check email anywhere: %w", err)
+	}
+	return exists, nil
 }
 
 // FindAuthStateByID finds the minimal user state required to authenticate tokens.

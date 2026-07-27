@@ -3,6 +3,7 @@ package sessionredis
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
@@ -59,6 +60,36 @@ func (s BlacklistStore) BlacklistJTI(ctx context.Context, jti string, ttl time.D
 	return s.Store.BlacklistJTI(ctx, jti, ttl)
 }
 
+// BlacklistJTIBatch delivers a whole revoked session set in one round trip.
+// Used by password change/reset where every live token of the user is revoked
+// at once; the per-token loop would cost one RTT per device.
+func (s BlacklistStore) BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error {
+	return s.Store.BlacklistJTIBatch(ctx, entries)
+}
+
 func (s BlacklistStore) IsJTIBlacklisted(ctx context.Context, jti string) (bool, error) {
 	return s.Store.IsJTIBlacklisted(ctx, jti)
+}
+
+type BindTicketStore struct {
+	Store internalredis.Store
+}
+
+func (s BindTicketStore) SaveBindTicket(ctx context.Context, ticket string, payload session.BindTicketPayload, ttl time.Duration) error {
+	return s.Store.SetOneTime(ctx, s.Store.Keys.BindTicket(ticket), payload, ttl)
+}
+
+func (s BindTicketStore) PeekBindTicket(ctx context.Context, ticket string) (session.BindTicketPayload, bool, error) {
+	var payload session.BindTicketPayload
+	if err := s.Store.PeekOneTime(ctx, s.Store.Keys.BindTicket(ticket), &payload); err != nil {
+		if errors.Is(err, internalredis.ErrMiss) {
+			return session.BindTicketPayload{}, false, nil
+		}
+		return session.BindTicketPayload{}, false, err
+	}
+	return payload, true, nil
+}
+
+func (s BindTicketStore) ConsumeBindTicket(ctx context.Context, ticket string) (bool, error) {
+	return s.Store.DeleteOneTime(ctx, s.Store.Keys.BindTicket(ticket))
 }

@@ -20,7 +20,14 @@ const (
 	KindPasswordInvalid   Kind = "password_invalid"
 	KindUserDeleted       Kind = "user_deleted"
 	KindInvalidToken      Kind = "invalid_token"
+	KindEmailFailed       Kind = "email_failed"
+	KindConflict          Kind = "conflict"
+	KindValidationFailed  Kind = "validation_failed"
 	KindInternal          Kind = "internal"
+	// KindDependencyUnavailable is for fail-closed dependencies (verification
+	// codes, tickets) that cannot be validated when their Redis store is down.
+	// It maps to HTTP 503 so a Redis outage does not surface as a server bug.
+	KindDependencyUnavailable Kind = "dependency_unavailable"
 )
 
 // Error is a typed session service error. Kind selects the HTTP mapping and
@@ -61,14 +68,34 @@ func (e *Error) Is(target error) bool {
 
 // Sentinels for each business outcome.
 var (
-	ErrInvalidInput      = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
-	ErrRateLimited       = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
-	ErrLocked            = &Error{Kind: KindLocked, Code: errcode.CodeRateLimited}
-	ErrUnknownIdentifier = &Error{Kind: KindUnknownIdentifier, Code: errcode.CodeUnknownIdentifier}
-	ErrPasswordInvalid   = &Error{Kind: KindPasswordInvalid, Code: errcode.CodePasswordInvalid}
-	ErrUserDeleted       = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
-	ErrInvalidToken      = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}
-	ErrInternal          = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	ErrInvalidInput            = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
+	ErrRateLimited             = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
+	ErrLocked                  = &Error{Kind: KindLocked, Code: errcode.CodeRateLimited}
+	ErrUnknownIdentifier       = &Error{Kind: KindUnknownIdentifier, Code: errcode.CodeUnknownIdentifier}
+	ErrPasswordInvalid         = &Error{Kind: KindPasswordInvalid, Code: errcode.CodePasswordInvalid}
+	ErrUserDeleted             = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
+	ErrInvalidToken            = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}
+	ErrEmailFailed             = &Error{Kind: KindEmailFailed, Code: errcode.CodeEmailDeliveryFailed}
+	ErrVerificationCodeWrong   = &Error{Kind: KindInvalidInput, Code: errcode.CodeVerificationCodeWrong}
+	ErrVerificationCodeExpired = &Error{Kind: KindInvalidInput, Code: errcode.CodeVerificationCodeExpired}
+	ErrRegisterTicketInvalid   = &Error{Kind: KindInvalidToken, Code: errcode.CodeRegisterTicketInvalid}
+	ErrBindTicketInvalid       = &Error{Kind: KindInvalidToken, Code: errcode.CodeBindTicketInvalid}
+	ErrEmailAlreadyRegistered  = &Error{Kind: KindConflict, Code: errcode.CodeEmailAlreadyRegistered}
+	ErrStudentIDOccupied       = &Error{Kind: KindConflict, Code: errcode.CodeStudentIDOccupied}
+	// ErrConflict covers a uniqueness violation whose constraint is not mapped to a
+	// specific field, so the response does not misattribute the clash.
+	ErrConflict             = &Error{Kind: KindConflict, Code: errcode.CodeConflict}
+	ErrIdentityOccupied     = &Error{Kind: KindConflict, Code: errcode.CodeIdentityOccupied}
+	ErrIdentityAlreadyBound = &Error{Kind: KindConflict, Code: errcode.CodeIdentityAlreadyBound}
+	ErrIdentityLimitReached = &Error{Kind: KindConflict, Code: errcode.CodeIdentityLimitReached}
+	ErrPasswordTooShort     = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordTooShort}
+	ErrPasswordUnchanged    = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordUnchanged}
+	ErrInternal             = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	// ErrDependencyUnavailable reports that a fail-closed Redis-backed store
+	// (verification codes, register/bind tickets) is unreachable. Per PRD §6.0
+	// these flows must reject the request so the user can retry, not mask the
+	// outage as an internal 500.
+	ErrDependencyUnavailable = &Error{Kind: KindDependencyUnavailable, Code: errcode.CodeDependencyUnavailable}
 )
 
 // newError returns a contextual error that matches its sentinel via Kind.

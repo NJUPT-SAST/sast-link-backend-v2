@@ -5,12 +5,17 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
@@ -34,6 +39,17 @@ type fakeUsers struct {
 	byID    map[int64]*model.User
 	err     error
 	lookups []string
+	// tokens lets the fake mirror the repository's atomic
+	// password-update-plus-revocation transaction.
+	tokens            *fakeTokens
+	updatePasswordErr error
+	passwordUpdates   []int64
+	// createErr forces CreateWithProfile to fail, for racing-insert scenarios the
+	// in-memory maps cannot reproduce.
+	createErr error
+	// otherMailIdentities holds provider_id -> user_id for other_mail identities,
+	// so ExistsAsEmailAnywhere can mirror the cross-table uniqueness check.
+	otherMailIdentities map[string]int64
 }
 
 func (f *fakeUsers) FindByLoginIdentifier(_ context.Context, identifier string) (*model.User, error) {
@@ -42,6 +58,17 @@ func (f *fakeUsers) FindByLoginIdentifier(_ context.Context, identifier string) 
 		return nil, f.err
 	}
 	user, ok := f.byLogin[identifier]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	return user, nil
+}
+
+func (f *fakeUsers) FindByLoginEmail(_ context.Context, email string) (*model.User, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	user, ok := f.byLogin[email]
 	if !ok {
 		return nil, repository.ErrNotFound
 	}
@@ -57,6 +84,134 @@ func (f *fakeUsers) FindByID(_ context.Context, userID int64) (*model.User, erro
 		return nil, repository.ErrNotFound
 	}
 	return user, nil
+}
+
+func (f *fakeUsers) ExistsByLoginEmail(_ context.Context, email string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	_, ok := f.byLogin[email]
+	return ok, nil
+}
+
+func (f *fakeUsers) ExistsByStudentID(_ context.Context, studentID string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	for _, user := range f.byLogin {
+		if user.StudentID == studentID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeUsers) ExistsAsEmailAnywhere(_ context.Context, email string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	if _, ok := f.byLogin[email]; ok {
+		return true, nil
+	}
+	if f.otherMailIdentities != nil {
+		if _, ok := f.otherMailIdentities[email]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// uniqueViolation reproduces what PostgreSQL actually returns for a duplicate
+// key on the "user" table, including the constraint name the service dispatches
+// on. Verified against PostgreSQL 16 in internal/repository integration tests.
+func uniqueViolation(constraint string) error {
+	return &pgconn.PgError{
+		Code:           pgerrcode.UniqueViolation,
+		TableName:      "user",
+		ConstraintName: constraint,
+	}
+}
+
+func (f *fakeUsers) CreateWithProfile(_ context.Context, user *model.User, _ *model.Profile) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.createErr != nil {
+		return f.createErr
+	}
+	if f.byLogin == nil {
+		f.byLogin = map[string]*model.User{}
+	}
+	if _, ok := f.byLogin[user.LoginEmail]; ok {
+		return uniqueViolation(userLoginEmailConstraint)
+	}
+	for _, existing := range f.byLogin {
+		if existing.StudentID == user.StudentID {
+			return uniqueViolation(userStudentIDConstraint)
+		}
+	}
+	if f.byID == nil {
+		f.byID = map[int64]*model.User{}
+	}
+	user.ID = int64(len(f.byID) + 1)
+	f.byLogin[user.LoginEmail] = user
+	f.byID[user.ID] = user
+	return nil
+}
+
+func (f *fakeUsers) CreateRegistration(
+	ctx context.Context,
+	user *model.User,
+	profile *model.Profile,
+	pairFactory repository.TokenPairFactory,
+) error {
+	if err := f.CreateWithProfile(ctx, user, profile); err != nil {
+		return err
+	}
+	access, refresh, err := pairFactory(user)
+	if err != nil {
+		delete(f.byLogin, user.LoginEmail)
+		delete(f.byID, user.ID)
+		user.ID = 0
+		return err
+	}
+	if f.tokens == nil {
+		delete(f.byLogin, user.LoginEmail)
+		delete(f.byID, user.ID)
+		user.ID = 0
+		return errors.New("token repository unavailable")
+	}
+	if err := f.tokens.CreatePair(ctx, access, refresh); err != nil {
+		delete(f.byLogin, user.LoginEmail)
+		delete(f.byID, user.ID)
+		user.ID = 0
+		return err
+	}
+	return nil
+}
+
+func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
+	ctx context.Context,
+	userID int64,
+	passwordHash string,
+	revokedAt time.Time,
+) ([]model.BlacklistEntry, error) {
+	if f.updatePasswordErr != nil {
+		return nil, f.updatePasswordErr
+	}
+	user, ok := f.byID[userID]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	user.PasswordHash = passwordHash
+	user.TokenVersion++
+	f.passwordUpdates = append(f.passwordUpdates, userID)
+	if f.tokens == nil {
+		return nil, nil
+	}
+	// Mirror the repository: the real implementation revokes sessions in the
+	// same transaction that rewrites the password.
+	return f.tokens.RevokeAllByUser(ctx, userID, revokedAt)
 }
 
 type fakeClients struct {
@@ -79,9 +234,11 @@ type fakeTokens struct {
 	rotatedAccess       *model.OAuthAccessToken
 	rotatedRefresh      *model.OAuthRefreshToken
 	revokedFamilies     []string
+	revokedUsers        []int64
 	revokeContextErr    error
 	revokeContextHasTTL bool
 	rotateErr           error
+	createErr           error
 	revokeErr           error
 }
 
@@ -90,6 +247,9 @@ func newFakeTokens() *fakeTokens {
 }
 
 func (f *fakeTokens) CreatePair(_ context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
 	f.createdAccess = access
 	f.createdRefresh = refresh
 	f.accessByJTI[access.TokenID] = access
@@ -154,6 +314,29 @@ func (f *fakeTokens) RevokeFamily(ctx context.Context, familyID string, revokedA
 	}
 	for _, refresh := range f.refreshByHash {
 		if refresh.FamilyID == familyID {
+			refresh.RevokedAt = &revokedAt
+		}
+	}
+	return entries, nil
+}
+
+func (f *fakeTokens) RevokeAllByUser(_ context.Context, userID int64, revokedAt time.Time) ([]model.BlacklistEntry, error) {
+	if f.revokeErr != nil {
+		return nil, f.revokeErr
+	}
+	f.revokedUsers = append(f.revokedUsers, userID)
+	entries := make([]model.BlacklistEntry, 0)
+	for _, access := range f.accessByJTI {
+		if access.UserID != userID {
+			continue
+		}
+		if access.RevokedAt == nil && access.ExpiresAt.After(revokedAt) {
+			entries = append(entries, model.BlacklistEntry{TokenID: access.TokenID, ExpiresAt: access.ExpiresAt})
+		}
+		access.RevokedAt = &revokedAt
+	}
+	for _, refresh := range f.refreshByHash {
+		if refresh.UserID == userID {
 			refresh.RevokedAt = &revokedAt
 		}
 	}
@@ -237,9 +420,10 @@ func (f *fakeFailures) Reset(_ context.Context, key string) error {
 }
 
 type fakeBlacklist struct {
-	jti string
-	ttl time.Duration
-	err error
+	jti     string
+	ttl     time.Duration
+	entries map[string]time.Duration
+	err     error
 }
 
 func (f *fakeBlacklist) BlacklistJTI(_ context.Context, jti string, ttl time.Duration) error {
@@ -249,6 +433,242 @@ func (f *fakeBlacklist) BlacklistJTI(_ context.Context, jti string, ttl time.Dur
 	f.jti = jti
 	f.ttl = ttl
 	return nil
+}
+
+func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.entries = entries
+	for jti, ttl := range entries {
+		f.jti = jti
+		f.ttl = ttl
+	}
+	return nil
+}
+
+type fakeForgotPasswordDispatcher struct {
+	jobs     []ForgotPasswordJob
+	accepted bool
+}
+
+func (f *fakeForgotPasswordDispatcher) EnqueueForgotPassword(job ForgotPasswordJob) bool {
+	f.jobs = append(f.jobs, job)
+	return f.accepted
+}
+
+type fakeMailer struct {
+	sent []fakeMail
+	err  error
+}
+
+type fakeMail struct {
+	to   string
+	code string
+}
+
+func (f *fakeMailer) SendVerificationCode(_ context.Context, to, code string, _ mailer.VerificationPurpose) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.sent = append(f.sent, fakeMail{to: to, code: code})
+	return nil
+}
+
+// fakeVerificationCodeStore mirrors the Redis store: a wrong guess costs one
+// attempt but leaves the code usable until the budget is spent.
+type fakeVerificationCodeStore struct {
+	codes       map[string]string
+	attempts    map[string]int
+	attemptCap  int
+	err         error
+	discardErr  error
+	discarded   []string
+	verifyCalls int
+}
+
+func codeKey(purpose, email string) string { return purpose + "|" + email }
+
+func (f *fakeVerificationCodeStore) SaveVerificationCode(_ context.Context, purpose, email, code string, _ time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.codes == nil {
+		f.codes = map[string]string{}
+	}
+	f.codes[codeKey(purpose, email)] = code
+	delete(f.attempts, codeKey(purpose, email))
+	return nil
+}
+
+func (f *fakeVerificationCodeStore) VerifyVerificationCode(_ context.Context, purpose, email, code string) (bool, int, error) {
+	f.verifyCalls++
+	if f.err != nil {
+		return false, 0, f.err
+	}
+	key := codeKey(purpose, email)
+	stored, ok := f.codes[key]
+	if !ok {
+		return false, 0, nil
+	}
+	if stored == code {
+		delete(f.codes, key)
+		delete(f.attempts, key)
+		return true, 0, nil
+	}
+	if f.attempts == nil {
+		f.attempts = map[string]int{}
+	}
+	limit := f.attemptCap
+	if limit <= 0 {
+		limit = 5
+	}
+	f.attempts[key]++
+	if f.attempts[key] >= limit {
+		delete(f.codes, key)
+		delete(f.attempts, key)
+		return false, 0, nil
+	}
+	return false, limit - f.attempts[key], nil
+}
+
+func (f *fakeVerificationCodeStore) DiscardVerificationCode(_ context.Context, purpose, email string) error {
+	if f.discardErr != nil {
+		return f.discardErr
+	}
+	key := codeKey(purpose, email)
+	f.discarded = append(f.discarded, key)
+	delete(f.codes, key)
+	delete(f.attempts, key)
+	return nil
+}
+
+type fakeRegisterTicketStore struct {
+	tickets    map[string]string
+	err        error
+	consumeErr error
+}
+
+func (f *fakeRegisterTicketStore) SaveRegisterTicket(_ context.Context, ticket, email string, _ time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.tickets == nil {
+		f.tickets = map[string]string{}
+	}
+	f.tickets[ticket] = email
+	return nil
+}
+
+func (f *fakeRegisterTicketStore) PeekRegisterTicket(_ context.Context, ticket string) (string, bool, error) {
+	if f.err != nil {
+		return "", false, f.err
+	}
+	email, ok := f.tickets[ticket]
+	if !ok {
+		return "", false, nil
+	}
+	return email, true, nil
+}
+
+func (f *fakeRegisterTicketStore) ConsumeRegisterTicket(_ context.Context, ticket string) error {
+	if f.consumeErr != nil {
+		return f.consumeErr
+	}
+	delete(f.tickets, ticket)
+	return nil
+}
+
+type fakeIdentities struct {
+	byProviderID map[string]*model.Identity
+	err          error
+	createErr    error
+}
+
+func (f *fakeIdentities) CountByUserAndProvider(_ context.Context, userID int64, _ model.LoginMethod) (int64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	var count int64
+	for _, identity := range f.byProviderID {
+		if identity.UserID == userID {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (f *fakeIdentities) FindByProviderID(_ context.Context, _ model.LoginMethod, providerID string) (*model.Identity, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	identity, ok := f.byProviderID[providerID]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	return identity, nil
+}
+
+func (f *fakeIdentities) CreateWithinLimit(_ context.Context, identity *model.Identity, limit int64) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
+	if f.byProviderID == nil {
+		f.byProviderID = map[string]*model.Identity{}
+	}
+	if _, ok := f.byProviderID[identity.ProviderID]; ok {
+		return errors.New("duplicate identity")
+	}
+	var count int64
+	for _, existing := range f.byProviderID {
+		if existing.UserID == identity.UserID && existing.Provider == identity.Provider {
+			count++
+		}
+	}
+	if count >= limit {
+		return repository.ErrLimitExceeded
+	}
+	f.byProviderID[identity.ProviderID] = identity
+	return nil
+}
+
+type fakeBindTicketStore struct {
+	tickets    map[string]BindTicketPayload
+	err        error
+	consumeErr error
+}
+
+func (f *fakeBindTicketStore) SaveBindTicket(_ context.Context, ticket string, payload BindTicketPayload, _ time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.tickets == nil {
+		f.tickets = map[string]BindTicketPayload{}
+	}
+	f.tickets[ticket] = payload
+	return nil
+}
+
+func (f *fakeBindTicketStore) PeekBindTicket(_ context.Context, ticket string) (BindTicketPayload, bool, error) {
+	if f.err != nil {
+		return BindTicketPayload{}, false, f.err
+	}
+	payload, ok := f.tickets[ticket]
+	if !ok {
+		return BindTicketPayload{}, false, nil
+	}
+	return payload, true, nil
+}
+
+func (f *fakeBindTicketStore) ConsumeBindTicket(_ context.Context, ticket string) (bool, error) {
+	if f.consumeErr != nil {
+		return false, f.consumeErr
+	}
+	if _, ok := f.tickets[ticket]; !ok {
+		return false, nil
+	}
+	delete(f.tickets, ticket)
+	return true, nil
 }
 
 func TestLoginNormalizesIssuesTokensAndAudits(t *testing.T) {
@@ -559,6 +979,39 @@ func TestRefreshExpiredActiveTokenDoesNotRevokeFamily(t *testing.T) {
 	}
 }
 
+func TestRefreshAuditsSuccessAndReplay(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+
+	refresh, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	if err != nil {
+		t.Fatalf("Refresh returned error: %v", err)
+	}
+	if refresh.RefreshToken == "" {
+		t.Fatal("Refresh returned empty token")
+	}
+	var successEntry *model.AuditLog
+	for i := range audit.entries {
+		if audit.entries[i].Action == "refresh" {
+			successEntry = &audit.entries[i]
+		}
+	}
+	if successEntry == nil || successEntry.Success == nil || !*successEntry.Success {
+		t.Fatalf("audit entries = %#v, want successful refresh audit", audit.entries)
+	}
+
+	tokens.rotateErr = repository.ErrTokenReplay
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: refresh.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	last := audit.entries[len(audit.entries)-1]
+	if last.Action != "refresh" || last.Success == nil || *last.Success || last.ErrCode == nil || *last.ErrCode != errcode.CodeAccessTokenInvalid {
+		t.Fatalf("last audit = %+v, want failed refresh audit with invalid-token code", last)
+	}
+}
+
 func TestLoginLockoutBoundaryAndAliasReset(t *testing.T) {
 	service, _, _, _, _, failures := newTestService(t)
 	failures.retry = time.Minute
@@ -709,6 +1162,708 @@ func TestProfileDTOExcludesSecrets(t *testing.T) {
 	}
 }
 
+func TestVerifyRegisterCodeIssuesTicket(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	registerPurpose := string(mailer.VerificationPurposeRegister)
+	if err := codes.SaveVerificationCode(context.Background(), registerPurpose, "new@sast.fun", "123456", time.Minute); err != nil {
+		t.Fatalf("save verification code: %v", err)
+	}
+
+	result, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+	if err != nil {
+		t.Fatalf("VerifyRegisterCode returned error: %v", err)
+	}
+	if result.RegisterTicket == "" || result.Email != "new@sast.fun" || result.ExpiresIn != 300 {
+		t.Fatalf("result = %+v, want ticket, email and 300s expiry", result)
+	}
+	if _, ok := codes.codes[codeKey(registerPurpose, "new@sast.fun")]; ok {
+		t.Fatal("verification code was not consumed")
+	}
+}
+
+func TestVerifyRegisterCodeRejectsWrongOrExpiredCode(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeRegister), "new@sast.fun", "123456", time.Minute); err != nil {
+		t.Fatalf("save verification code: %v", err)
+	}
+
+	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+
+	_, err = service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "missing@sast.fun", Code: "123456"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeExpired)
+}
+
+func TestVerifyRegisterCodeRejectsCrossPurposeCode(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	// A code issued for password reset must not satisfy register verification.
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeResetPassword), "new@sast.fun", "123456", time.Minute); err != nil {
+		t.Fatalf("save verification code: %v", err)
+	}
+	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeExpired)
+}
+
+// Per the Redis degradation policy (PRD §6.0) limiter outages fail open; the
+// verification-code store is the fail-closed guard when Redis is fully down.
+func TestSendRegisterCodeRejectsHeaderInjectionPayload(t *testing.T) {
+	// The go-playground "email" validator lets CR/LF through, so the service
+	// layer must reject header-injection payloads before they reach the mailer
+	// or Redis keys. Each entry point is covered.
+	injection := "victim@gmail.com\r\nBcc: attacker@sast.fun"
+	service := newRegisterService(t)
+
+	_, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: injection})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	_, err = service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: injection, Code: "123456"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	_, err = service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: injection})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	_, err = service.ResetPassword(context.Background(), ResetPasswordInput{Email: injection, Code: "123456", Password: "longpassword"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	_, err = service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: injection})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	// No mail must have been sent for any of the rejected payloads.
+	if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
+		t.Fatalf("mailer sent=%d, want 0 (injection payload reached the mailer)", sent)
+	}
+}
+
+// The anonymous request path must be identical for known and unknown accounts:
+// both enqueue the same normalized job and neither performs SMTP or Redis work.
+func TestForgotPasswordSendCodeHidesAccountExistence(t *testing.T) {
+	for _, email := range []string{"nobody@njupt.edu.cn", "user@njupt.edu.cn"} {
+		t.Run(email, func(t *testing.T) {
+			service := newRegisterService(t)
+			dispatcher := service.ForgotPasswords.(*fakeForgotPasswordDispatcher)
+			result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: email, ClientIP: "127.0.0.1"})
+			if err != nil {
+				t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
+			}
+			if result.Email != email || result.ExpiresIn != 300 {
+				t.Fatalf("result = %+v, want uniform accepted shape", result)
+			}
+			if len(dispatcher.jobs) != 1 || dispatcher.jobs[0].Email != email {
+				t.Fatalf("jobs = %+v, want one normalized job", dispatcher.jobs)
+			}
+			if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
+				t.Fatalf("mailer sent=%d in request path, want 0", sent)
+			}
+		})
+	}
+}
+
+func TestForgotPasswordSendCodeReturnsAcceptedWhenQueueIsFull(t *testing.T) {
+	service := newRegisterService(t)
+	service.ForgotPasswords = &fakeForgotPasswordDispatcher{accepted: false}
+	result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn"})
+	if err != nil || result.Email != "user@njupt.edu.cn" || result.ExpiresIn != 300 {
+		t.Fatalf("result/error = %+v/%v, want uniform accepted response", result, err)
+	}
+}
+
+func TestSendRegisterCodeAllowsWhenEmailLimiterUnavailable(t *testing.T) {
+	service := newRegisterService(t)
+	service.EmailLimiter = &fakeLimiter{err: errors.New("redis unavailable")}
+	service.EmailIPLimiter = &fakeLimiter{err: errors.New("redis unavailable")}
+	result, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "new@sast.fun", ClientIP: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("SendRegisterCode returned error: %v", err)
+	}
+	if result.Email != "new@sast.fun" || len(service.Mailer.(*fakeMailer).sent) != 1 {
+		t.Fatalf("result=%+v sent=%d, want code delivered despite limiter outage", result, len(service.Mailer.(*fakeMailer).sent))
+	}
+}
+
+func TestSendRegisterCodeRejectsWhenEmailLimitExceeded(t *testing.T) {
+	service := newRegisterService(t)
+	service.EmailLimiter = &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: time.Minute}}
+	_, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "new@sast.fun", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+
+	service = newRegisterService(t)
+	service.EmailIPLimiter = &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: time.Minute}}
+	_, err = service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "new@sast.fun", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+}
+
+// Fail-closed stores (verification codes, tickets) must surface their outage as
+// dependency_unavailable (503), never as a bare internal error (500): the PRD
+// §6.0 policy rejects the request so the user can retry, while 500 would read
+// as a server bug to clients and alerting.
+func TestFailClosedStoresReturnDependencyUnavailable(t *testing.T) {
+	redisDown := errors.New("redis connection refused")
+
+	t.Run("send code", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
+		_, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "new@sast.fun"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("verify code", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
+		_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("reset password verify code", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
+		_, err := service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "longpassword"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("save register ticket", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.RegisterTicket = &fakeRegisterTicketStore{err: redisDown}
+		codes := service.VerificationCode.(*fakeVerificationCodeStore)
+		if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeRegister), "new@sast.fun", "123456", time.Minute); err != nil {
+			t.Fatalf("save code: %v", err)
+		}
+		_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("read register ticket", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.RegisterTicket = &fakeRegisterTicketStore{err: redisDown}
+		_, err := service.Register(context.Background(), RegisterInput{
+			RegisterTicket: "reg_xxx",
+			Password:       "newpassword",
+			Name:           "New",
+			StudentID:      "B24040099",
+			PhoneNumber:    "13800138000",
+			QQNumber:       "10000",
+			College:        string(model.CollegeOther),
+			Major:          "CS",
+		})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("bind send code", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
+		_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("peek bind ticket", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.BindTicket = &fakeBindTicketStore{err: redisDown}
+		_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("consume bind ticket", func(t *testing.T) {
+		service := newRegisterService(t)
+		bindTickets := service.BindTicket.(*fakeBindTicketStore)
+		if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "extra@gmail.com", UserID: 42}, time.Minute); err != nil {
+			t.Fatalf("save bind ticket: %v", err)
+		}
+		codes := service.VerificationCode.(*fakeVerificationCodeStore)
+		if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "extra@gmail.com", "123456", time.Minute); err != nil {
+			t.Fatalf("save code: %v", err)
+		}
+		bindTickets.consumeErr = redisDown
+		_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+}
+
+func TestRegisterCreatesUserAndIssuesTokens(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	result, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "New User",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if result.AccessToken == "" || result.RefreshToken == "" || result.Profile.ID == 0 {
+		t.Fatalf("result = %+v, want tokens and profile", result)
+	}
+	if result.Profile.LoginEmail != "new@sast.fun" {
+		t.Fatalf("profile email = %q, want new@sast.fun", result.Profile.LoginEmail)
+	}
+}
+
+func TestRegisterRejectsUsedTicket(t *testing.T) {
+	service := newRegisterService(t)
+	_, err := service.Register(context.Background(), RegisterInput{RegisterTicket: "reg_missing", Password: "newpassword", Name: "x", StudentID: "B1", PhoneNumber: "1", QQNumber: "1", College: string(model.CollegeOther), Major: "CS"})
+	assertKind(t, err, KindInvalidToken, errcode.CodeRegisterTicketInvalid)
+}
+
+func TestRegisterRejectsInvalidCollege(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "New",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        "不存在的学院",
+		Major:          "CS",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	// The rejected request must not consume the one-time ticket.
+	if _, ok := tickets.tickets["reg_xxx"]; !ok {
+		t.Fatal("register ticket was consumed by invalid college input")
+	}
+}
+
+func TestRegisterRejectsUnsupportedRegistrationState(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket:    "reg_xxx",
+		Password:          "newpassword",
+		Name:              "New",
+		StudentID:         "B24040099",
+		PhoneNumber:       "13800138000",
+		QQNumber:          "10000",
+		College:           string(model.CollegeOther),
+		Major:             "CS",
+		RegistrationState: "rs_abc",
+		OAuthState:        "os_abc",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if _, ok := tickets.tickets["reg_xxx"]; !ok {
+		t.Fatal("register ticket was consumed by rejected registration_state input")
+	}
+}
+
+func TestRegisterRejectsExistingEmail(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "user@njupt.edu.cn", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "Dup",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	assertKind(t, err, KindConflict, errcode.CodeEmailAlreadyRegistered)
+}
+
+func TestRegisterRejectsEmailBoundAsOtherMailIdentity(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	users.otherMailIdentities = map[string]int64{
+		"taken@sast.fun": 99,
+	}
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "taken@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "Dup",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	assertKind(t, err, KindConflict, errcode.CodeEmailAlreadyRegistered)
+}
+
+func TestRegisterRejectsShortPassword(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "short",
+		Name:           "New",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
+}
+
+func TestBindEmailSendCodeIssuesTicket(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	result, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+	if err != nil {
+		t.Fatalf("BindEmailSendCode returned error: %v", err)
+	}
+	if result.BindTicket == "" || result.ExpiresIn != 300 {
+		t.Fatalf("result = %+v, want bind ticket and 300s expiry", result)
+	}
+	if _, ok := codes.codes[codeKey(string(mailer.VerificationPurposeBindEmail), "extra@gmail.com")]; !ok {
+		t.Fatal("verification code not saved under bind_email purpose")
+	}
+}
+
+func TestBindEmailSendCodeRejectsOccupiedEmail(t *testing.T) {
+	service := newRegisterService(t)
+	identities := service.Identities.(*fakeIdentities)
+	identities.byProviderID = map[string]*model.Identity{
+		"extra@gmail.com": {UserID: 99, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
+	}
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
+}
+
+// An address bound to the caller and an address bound to someone else must
+// produce the identical conflict: distinct errors would let any authenticated
+// user enumerate which inboxes other accounts use for login.
+func TestBindEmailSendCodeSameConflictForSelfAndOtherBinding(t *testing.T) {
+	selfBound := newRegisterService(t)
+	selfBound.Identities = &fakeIdentities{byProviderID: map[string]*model.Identity{
+		"extra@gmail.com": {UserID: 42, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
+	}}
+	_, selfErr := selfBound.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+	assertKind(t, selfErr, KindConflict, errcode.CodeIdentityOccupied)
+
+	otherBound := newRegisterService(t)
+	otherBound.Identities = &fakeIdentities{byProviderID: map[string]*model.Identity{
+		"extra@gmail.com": {UserID: 99, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
+	}}
+	_, otherErr := otherBound.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+	assertKind(t, otherErr, KindConflict, errcode.CodeIdentityOccupied)
+
+	selfServiceErr, _ := selfErr.(*Error)
+	otherServiceErr, _ := otherErr.(*Error)
+	if selfServiceErr.Message != otherServiceErr.Message {
+		t.Fatalf("self message %q != other message %q", selfServiceErr.Message, otherServiceErr.Message)
+	}
+}
+
+func TestBindEmailSendCodeRejectsLoginEmail(t *testing.T) {
+	service := newRegisterService(t)
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "user@njupt.edu.cn"})
+	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
+}
+
+func TestBindEmailVerifyCreatesIdentity(t *testing.T) {
+	service := newRegisterService(t)
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "extra@gmail.com", UserID: 42}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "extra@gmail.com", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	result, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+	if err != nil {
+		t.Fatalf("BindEmailVerify returned error: %v", err)
+	}
+	if result.Email != "extra@gmail.com" || result.Identity.Provider != string(model.LoginMethodOtherMail) || result.Identity.ProviderID != "extra@gmail.com" {
+		t.Fatalf("result = %+v, want bound other_mail identity", result)
+	}
+	identities := service.Identities.(*fakeIdentities)
+	if identities.byProviderID["extra@gmail.com"] == nil {
+		t.Fatal("identity not created")
+	}
+}
+
+func TestBindEmailVerifyEnforcesLimitAtomically(t *testing.T) {
+	service := newRegisterService(t)
+	identities := service.Identities.(*fakeIdentities)
+	identities.byProviderID = map[string]*model.Identity{
+		"a@gmail.com": {UserID: 42, Provider: model.LoginMethodOtherMail, ProviderID: "a@gmail.com"},
+		"b@gmail.com": {UserID: 42, Provider: model.LoginMethodOtherMail, ProviderID: "b@gmail.com"},
+	}
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "c@gmail.com", UserID: 42}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "c@gmail.com", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+	assertKind(t, err, KindConflict, errcode.CodeIdentityLimitReached)
+}
+
+func TestBindEmailVerifyRejectsWrongCode(t *testing.T) {
+	service := newRegisterService(t)
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "extra@gmail.com", UserID: 42}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "extra@gmail.com", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+}
+
+func TestBindEmailVerifyRejectsLoginEmail(t *testing.T) {
+	service := newRegisterService(t)
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "user@njupt.edu.cn", UserID: 42}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
+}
+
+func TestBindEmailVerifyRejectsForeignTicket(t *testing.T) {
+	service := newRegisterService(t)
+	bindTickets := service.BindTicket.(*fakeBindTicketStore)
+	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "extra@gmail.com", UserID: 99}, time.Minute); err != nil {
+		t.Fatalf("save bind ticket: %v", err)
+	}
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+	assertKind(t, err, KindInvalidToken, errcode.CodeBindTicketInvalid)
+}
+
+func TestChangePasswordRotatesCredentialAndRevokesSessions(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tokens := service.Tokens.(*fakeTokens)
+	previousVersion := users.byID[42].TokenVersion
+
+	result, err := service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "secret", NewPassword: "brand-new-password"})
+	if err != nil {
+		t.Fatalf("ChangePassword returned error: %v", err)
+	}
+	if result.UserID != 42 {
+		t.Fatalf("result = %+v, want user 42", result)
+	}
+	if users.byID[42].TokenVersion != previousVersion+1 {
+		t.Fatalf("token version = %d, want %d", users.byID[42].TokenVersion, previousVersion+1)
+	}
+	if service.Passwords.VerifyPassword(context.Background(), "brand-new-password", users.byID[42].PasswordHash) != nil {
+		t.Fatal("new password does not verify against stored hash")
+	}
+	if len(tokens.revokedUsers) != 1 || tokens.revokedUsers[0] != 42 {
+		t.Fatalf("revoked users = %#v, want all sessions of user 42 revoked", tokens.revokedUsers)
+	}
+}
+
+func TestChangePasswordRejectsWrongOldSameNewAndShortNew(t *testing.T) {
+	service := newRegisterService(t)
+
+	_, err := service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "wrong", NewPassword: "brand-new-password"})
+	assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
+
+	_, err = service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "longpassword", NewPassword: "longpassword"})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordUnchanged)
+
+	_, err = service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "secret", NewPassword: "short"})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
+}
+
+func TestResetPasswordConsumesCodeAndRevokesSessions(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tokens := service.Tokens.(*fakeTokens)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	resetPurpose := string(mailer.VerificationPurposeResetPassword)
+	if err := codes.SaveVerificationCode(context.Background(), resetPurpose, "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+
+	_, err := service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "brand-new-password"})
+	if err != nil {
+		t.Fatalf("ResetPassword returned error: %v", err)
+	}
+	if service.Passwords.VerifyPassword(context.Background(), "brand-new-password", users.byID[42].PasswordHash) != nil {
+		t.Fatal("new password does not verify against stored hash")
+	}
+	if len(tokens.revokedUsers) != 1 || tokens.revokedUsers[0] != 42 {
+		t.Fatalf("revoked users = %#v, want all sessions of user 42 revoked", tokens.revokedUsers)
+	}
+	if _, ok := codes.codes[codeKey(resetPurpose, "user@njupt.edu.cn")]; ok {
+		t.Fatal("verification code was not consumed")
+	}
+}
+
+func TestResetPasswordRejectsUnchangedPassword(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	hash, err := service.Passwords.HashPassword(context.Background(), "longpassword")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	users.byID[42].PasswordHash = hash
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if saveErr := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeResetPassword), "user@njupt.edu.cn", "123456", time.Minute); saveErr != nil {
+		t.Fatalf("save code: %v", saveErr)
+	}
+	_, err = service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "longpassword"})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordUnchanged)
+}
+
+func TestResetPasswordShortPasswordDoesNotConsumeCode(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	resetPurpose := string(mailer.VerificationPurposeResetPassword)
+	if err := codes.SaveVerificationCode(context.Background(), resetPurpose, "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+	_, err := service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "short"})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
+	if _, ok := codes.codes[codeKey(resetPurpose, "user@njupt.edu.cn")]; !ok {
+		t.Fatal("verification code was consumed by rejected short password")
+	}
+}
+
+// Login counts failures under "user:<id>" once the account is known, so a reset
+// that only cleared "identifier:<email>" left a locked-out user locked for the
+// rest of the window — defeating the recovery path they just completed.
+func TestResetPasswordClearsUserScopedLockout(t *testing.T) {
+	service := newRegisterService(t)
+	failures := &fakeFailures{counts: map[string]int{}, retry: time.Minute}
+	service.Failures = failures
+	for range 10 {
+		if _, err := failures.RecordFailure(context.Background(), "user:42"); err != nil {
+			t.Fatalf("RecordFailure returned error: %v", err)
+		}
+	}
+	if locked, _, _ := failures.IsLocked(context.Background(), "user:42"); !locked {
+		t.Fatal("precondition: account should be locked after 10 failures")
+	}
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeResetPassword), "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+
+	if _, err := service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "brand-new-password"}); err != nil {
+		t.Fatalf("ResetPassword returned error: %v", err)
+	}
+	if locked, _, _ := failures.IsLocked(context.Background(), "user:42"); locked {
+		t.Fatalf("account still locked after reset; cleared keys = %#v", failures.resets)
+	}
+	if !slices.Contains(failures.resets, "identifier:user@njupt.edu.cn") {
+		t.Errorf("reset keys = %#v, want the identifier-scoped counter cleared too", failures.resets)
+	}
+}
+
+func TestChangePasswordClearsUserScopedLockout(t *testing.T) {
+	service := newRegisterService(t)
+	failures := &fakeFailures{counts: map[string]int{}, retry: time.Minute}
+	service.Failures = failures
+	for range 10 {
+		if _, err := failures.RecordFailure(context.Background(), "user:42"); err != nil {
+			t.Fatalf("RecordFailure returned error: %v", err)
+		}
+	}
+
+	if _, err := service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "secret", NewPassword: "brand-new-password"}); err != nil {
+		t.Fatalf("ChangePassword returned error: %v", err)
+	}
+	if locked, _, _ := failures.IsLocked(context.Background(), "user:42"); locked {
+		t.Fatalf("account still locked after change; cleared keys = %#v", failures.resets)
+	}
+}
+
+// A swallowed revocation failure reported success while live refresh tokens
+// survived: token_version alone does not stop them, because the refresh flow
+// never compares it.
+func TestPasswordUpdateFailsWhenSessionRevocationFails(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	users.updatePasswordErr = errors.New("revoke sessions failed")
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeResetPassword), "user@njupt.edu.cn", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+
+	_, err := service.ChangePassword(context.Background(), ChangePasswordInput{UserID: 42, OldPassword: "secret", NewPassword: "brand-new-password"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+
+	_, err = service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "brand-new-password"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+}
+
+func newRegisterService(t *testing.T) Service {
+	t.Helper()
+	clock := fixedClock{value: time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
+	hash, err := passwords.HashPassword(context.Background(), "secret")
+	if err != nil {
+		t.Fatalf("hash test password: %v", err)
+	}
+	user := testUserWithHash(42, "user@njupt.edu.cn", model.UserStateOnSAST, hash)
+	tokens := newFakeTokens()
+	users := &fakeUsers{
+		byLogin: map[string]*model.User{user.LoginEmail: user},
+		byID:    map[int64]*model.User{user.ID: user},
+		tokens:  tokens,
+	}
+	client := &model.OAuthClient{ID: 1, ClientID: "builtin", ClientType: model.ClientTypeFirstParty, IsActive: boolPtr(true), Scopes: model.StringArray(sessionScopes)}
+	clients := &fakeClients{byClientID: map[string]*model.OAuthClient{client.ClientID: client}}
+	return Service{
+		Users:            users,
+		Clients:          clients,
+		Tokens:           tokens,
+		Audit:            &fakeAudit{},
+		Identities:       &fakeIdentities{},
+		Limiter:          &fakeLimiter{},
+		Mailer:           &fakeMailer{},
+		VerificationCode: &fakeVerificationCodeStore{},
+		RegisterTicket:   &fakeRegisterTicketStore{},
+		BindTicket:       &fakeBindTicketStore{},
+		ForgotPasswords:  &fakeForgotPasswordDispatcher{accepted: true},
+		InternalClientID: "builtin",
+		JWT:              &auth.JWTManager{Issuer: "issuer", Audience: []string{"audience"}, Active: auth.JWTKeyPair{KID: "active", Private: key}, Clock: clock},
+		RefreshTokens:    &auth.RefreshTokenManager{Random: rand.Reader, Secret: []byte("0123456789abcdef0123456789abcdef")},
+		Passwords:        passwords,
+		Clock:            clock,
+		AccessTTL:        time.Hour,
+		RefreshTTL:       24 * time.Hour,
+	}
+}
+
 func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeTokens, *fakeAudit, *fakeFailures) {
 	t.Helper()
 	clock := fixedClock{value: time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)}
@@ -717,15 +1872,19 @@ func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeToken
 		t.Fatalf("generate RSA key: %v", err)
 	}
 	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword("secret")
+	hash, err := passwords.HashPassword(context.Background(), "secret")
 	if err != nil {
 		t.Fatalf("hash test password: %v", err)
 	}
 	user := testUserWithHash(42, "user@njupt.edu.cn", model.UserStateOnSAST, hash)
-	users := &fakeUsers{byLogin: map[string]*model.User{user.LoginEmail: user, "alias@sast.fun": user}, byID: map[int64]*model.User{user.ID: user}}
 	client := &model.OAuthClient{ID: 1, ClientID: "builtin", ClientType: model.ClientTypeFirstParty, IsActive: boolPtr(true), Scopes: model.StringArray(sessionScopes)}
 	clients := &fakeClients{byClientID: map[string]*model.OAuthClient{client.ClientID: client}}
 	tokens := newFakeTokens()
+	users := &fakeUsers{
+		byLogin: map[string]*model.User{user.LoginEmail: user, "alias@sast.fun": user},
+		byID:    map[int64]*model.User{user.ID: user},
+		tokens:  tokens,
+	}
 	audit := &fakeAudit{}
 	failures := &fakeFailures{}
 	return Service{
@@ -735,6 +1894,7 @@ func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeToken
 		Audit:            audit,
 		Limiter:          &fakeLimiter{},
 		Failures:         failures,
+		ForgotPasswords:  &fakeForgotPasswordDispatcher{accepted: true},
 		InternalClientID: "builtin",
 		JWT:              &auth.JWTManager{Issuer: "issuer", Audience: []string{"audience"}, Active: auth.JWTKeyPair{KID: "active", Private: key}, Clock: clock},
 		RefreshTokens:    &auth.RefreshTokenManager{Random: rand.Reader, Secret: []byte("0123456789abcdef0123456789abcdef")},
@@ -748,7 +1908,7 @@ func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeToken
 func testUser(t *testing.T, id int64, email string, state model.UserState) *model.User {
 	t.Helper()
 	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword("secret")
+	hash, err := passwords.HashPassword(context.Background(), "secret")
 	if err != nil {
 		t.Fatalf("hash test password: %v", err)
 	}
@@ -802,4 +1962,353 @@ func lastErrCode(audit *fakeAudit) int {
 		return 0
 	}
 	return *audit.entries[len(audit.entries)-1].ErrCode
+}
+
+// A wrong code used to consume the stored value, so one bad guess burned the
+// valid code for every flow that verifies one.
+func TestWrongVerificationCodeDoesNotBurnTheCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		save   func(*fakeVerificationCodeStore)
+		submit func(Service, string) error
+	}{
+		{
+			name: "register verify-code",
+			save: func(codes *fakeVerificationCodeStore) {
+				codes.codes = map[string]string{codeKey(string(mailer.VerificationPurposeRegister), "new@sast.fun"): "123456"}
+			},
+			submit: func(service Service, code string) error {
+				_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: code})
+				return err
+			},
+		},
+		{
+			name: "reset password",
+			save: func(codes *fakeVerificationCodeStore) {
+				codes.codes = map[string]string{codeKey(string(mailer.VerificationPurposeResetPassword), "user@njupt.edu.cn"): "123456"}
+			},
+			submit: func(service Service, code string) error {
+				_, err := service.ResetPassword(context.Background(), ResetPasswordInput{
+					Email:    "user@njupt.edu.cn",
+					Code:     code,
+					Password: "brand-new-password",
+				})
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := newRegisterService(t)
+			codes := service.VerificationCode.(*fakeVerificationCodeStore)
+			test.save(codes)
+
+			err := test.submit(service, "000000")
+			assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+
+			// The valid code must still work on the next try.
+			if err := test.submit(service, "123456"); err != nil {
+				t.Fatalf("correct code rejected after one wrong guess: %v", err)
+			}
+		})
+	}
+}
+
+// Once the store reports the attempt budget spent, the caller must surface the
+// expired outcome rather than an endless "wrong code".
+func TestExhaustedVerificationAttemptsReportExpired(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	codes.attemptCap = 2
+	codes.codes = map[string]string{codeKey(string(mailer.VerificationPurposeRegister), "new@sast.fun"): "123456"}
+
+	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+
+	_, err = service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeExpired)
+
+	_, err = service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeExpired)
+}
+
+// BindEmailVerify consumed the Bind-Ticket before checking the code, so a typo
+// cost the user their ticket and forced a new send-code round trip.
+func TestBindEmailVerifyKeepsTicketOnWrongCode(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := tickets.SaveBindTicket(context.Background(), "be_abc", BindTicketPayload{UserID: 42, Email: "bind@qq.com"}, time.Minute); err != nil {
+		t.Fatalf("SaveBindTicket() error = %v", err)
+	}
+	codes.codes = map[string]string{codeKey(string(mailer.VerificationPurposeBindEmail), "bind@qq.com"): "123456"}
+
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_abc", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+	if _, ok := tickets.tickets["be_abc"]; !ok {
+		t.Fatal("Bind-Ticket was consumed by a wrong verification code")
+	}
+
+	result, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_abc", Code: "123456"})
+	if err != nil {
+		t.Fatalf("BindEmailVerify() after retry error = %v", err)
+	}
+	if result.Email != "bind@qq.com" {
+		t.Fatalf("result = %+v, want bind@qq.com", result)
+	}
+	// The successful bind spends the ticket, so it cannot be replayed.
+	if _, ok := tickets.tickets["be_abc"]; ok {
+		t.Fatal("Bind-Ticket survived a successful bind")
+	}
+}
+
+// A ticket that does not belong to the caller must be rejected without being
+// spent, so the rightful owner can still use it.
+func TestBindEmailVerifyKeepsTicketOnOwnerMismatch(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.BindTicket.(*fakeBindTicketStore)
+	if err := tickets.SaveBindTicket(context.Background(), "be_abc", BindTicketPayload{UserID: 42, Email: "bind@qq.com"}, time.Minute); err != nil {
+		t.Fatalf("SaveBindTicket() error = %v", err)
+	}
+
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 99, BindTicket: "be_abc", Code: "123456"})
+	assertKind(t, err, KindInvalidToken, errcode.CodeBindTicketInvalid)
+	if _, ok := tickets.tickets["be_abc"]; !ok {
+		t.Fatal("Bind-Ticket was consumed by a request from the wrong user")
+	}
+}
+
+// Register consumed the ticket before the uniqueness checks, so a taken student
+// ID burned it too.
+func TestRegisterKeepsTicketWhenStudentIDOccupied(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	users := service.Users.(*fakeUsers)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+	occupied := users.byID[42].StudentID
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "Dup",
+		StudentID:      occupied,
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	assertKind(t, err, KindConflict, errcode.CodeStudentIDOccupied)
+	if _, ok := tickets.tickets["reg_xxx"]; !ok {
+		t.Fatal("Register-Ticket was consumed by an occupied student ID")
+	}
+
+	// The corrected retry must succeed on the same ticket.
+	if _, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "Fixed",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	}); err != nil {
+		t.Fatalf("Register() retry error = %v", err)
+	}
+	if _, ok := tickets.tickets["reg_xxx"]; ok {
+		t.Fatal("Register-Ticket survived a successful registration")
+	}
+}
+
+// If the ticket cannot be issued, the already-matched code must be discarded so
+// it cannot be replayed by a retry.
+func TestVerifyRegisterCodeDiscardsCodeWhenTicketSaveFails(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	purpose := string(mailer.VerificationPurposeRegister)
+	codes.codes = map[string]string{codeKey(purpose, "new@sast.fun"): "123456"}
+	service.RegisterTicket = &fakeRegisterTicketStore{err: errors.New("redis unavailable")}
+
+	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	if !slices.Contains(codes.discarded, codeKey(purpose, "new@sast.fun")) {
+		t.Fatalf("discarded = %#v, want the consumed code dropped", codes.discarded)
+	}
+}
+
+// The "user" table has two unique constraints, and the insert path used to map
+// every violation to 40901, telling a user whose student ID clashed that their
+// email was taken — pointing them at the wrong field.
+func TestRegisterMapsUniqueViolationToTheCollidingField(t *testing.T) {
+	tests := []struct {
+		name       string
+		constraint string
+		wantCode   int
+		wantKind   Kind
+	}{
+		{name: "student id", constraint: userStudentIDConstraint, wantCode: errcode.CodeStudentIDOccupied, wantKind: KindConflict},
+		{name: "login email", constraint: userLoginEmailConstraint, wantCode: errcode.CodeEmailAlreadyRegistered, wantKind: KindConflict},
+		{name: "login email bound as identity", constraint: userLoginEmailIsIdentityConstraint, wantCode: errcode.CodeEmailAlreadyRegistered, wantKind: KindConflict},
+		{name: "unmapped constraint", constraint: "user_some_future_key", wantCode: errcode.CodeConflict, wantKind: KindConflict},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := newRegisterService(t)
+			users := service.Users.(*fakeUsers)
+			tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+			if err := tickets.SaveRegisterTicket(context.Background(), "reg_x", "new@sast.fun", time.Minute); err != nil {
+				t.Fatalf("SaveRegisterTicket() error = %v", err)
+			}
+			// Simulate losing the race between the pre-flight check and the insert.
+			users.createErr = uniqueViolation(test.constraint)
+
+			_, err := service.Register(context.Background(), validRegisterInput("reg_x", "B24040111"))
+			assertKind(t, err, test.wantKind, test.wantCode)
+		})
+	}
+}
+
+// A conflict raised by the insert is a lost race, not a spent ticket: the user
+// must be able to correct the field and retry without a new verification code.
+func TestRegisterKeepsTicketWhenInsertRaces(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_x", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+	users.createErr = uniqueViolation(userStudentIDConstraint)
+
+	_, err := service.Register(context.Background(), validRegisterInput("reg_x", "B24040111"))
+	assertKind(t, err, KindConflict, errcode.CodeStudentIDOccupied)
+	if _, ok := tickets.tickets["reg_x"]; !ok {
+		t.Fatal("Register-Ticket was consumed by a losing race; the user must re-request a code")
+	}
+
+	// The corrected retry succeeds on the same ticket and spends it.
+	users.createErr = nil
+	if _, err := service.Register(context.Background(), validRegisterInput("reg_x", "B24040222")); err != nil {
+		t.Fatalf("Register() retry error = %v", err)
+	}
+	if _, ok := tickets.tickets["reg_x"]; ok {
+		t.Fatal("Register-Ticket survived a successful registration")
+	}
+}
+
+// A non-unique database failure must stay a 500 rather than being reported as a
+// conflict the user could act on.
+func TestRegisterReportsNonUniqueInsertFailureAsInternal(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_x", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+	users.createErr = errors.New("connection reset")
+
+	_, err := service.Register(context.Background(), validRegisterInput("reg_x", "B24040111"))
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+}
+
+func TestRegisterRollsBackAccountAndKeepsTicketWhenInitialSessionFails(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_atomic", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+	users.tokens.createErr = errors.New("token insert failed")
+
+	_, err := service.Register(context.Background(), validRegisterInput("reg_atomic", "B24040999"))
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+	if _, ok := users.byLogin["new@sast.fun"]; ok {
+		t.Fatal("account survived failed initial session transaction")
+	}
+	if _, ok := tickets.tickets["reg_atomic"]; !ok {
+		t.Fatal("Register-Ticket was consumed after transaction rollback")
+	}
+}
+
+func validRegisterInput(ticket, studentID string) RegisterInput {
+	return RegisterInput{
+		RegisterTicket: ticket,
+		Password:       "newpassword",
+		Name:           "pt",
+		StudentID:      studentID,
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	}
+}
+
+// Password verification queues behind a concurrency gate, so a cancelled caller
+// gets an error that is not a password mismatch. Counting it as a failed attempt
+// would let a client that disconnects mid-login drive its own account into the
+// lockout window, and would fill the audit log with failures nobody made.
+func TestLoginDoesNotCountAbandonedVerificationAsFailure(t *testing.T) {
+	service, _, _, _, audit, failures := newTestService(t)
+	service.Passwords = auth.PasswordHasher{Semaphore: make(chan struct{}, 1)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.Login(ctx, LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret", ClientIP: "127.0.0.1"})
+	if err == nil {
+		t.Fatal("Login() error = nil, want the abandoned request to fail")
+	}
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	if len(failures.failures) != 0 {
+		t.Fatalf("failures = %#v, want no failure recorded for an abandoned request", failures.failures)
+	}
+	for _, entry := range audit.entries {
+		if entry.Action == "login" && entry.Success != nil && !*entry.Success {
+			t.Fatal("abandoned login was audited as a failed attempt")
+		}
+	}
+}
+
+// The same rule for ChangePassword: an abandoned old-password check is not a
+// wrong old password.
+func TestChangePasswordDoesNotAuditAbandonedVerificationAsFailure(t *testing.T) {
+	service, _, _, _, audit, _ := newTestService(t)
+	service.Passwords = auth.PasswordHasher{Semaphore: make(chan struct{}, 1)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.ChangePassword(ctx, ChangePasswordInput{
+		UserID:      42,
+		OldPassword: "secret",
+		NewPassword: "brand-new-password",
+	})
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	for _, entry := range audit.entries {
+		if entry.Action == "change_password" && entry.Success != nil && !*entry.Success {
+			t.Fatal("abandoned change-password was audited as a wrong old password")
+		}
+	}
+}
+
+// Registration hashing is gated too; an abandoned hash is a 503, not a 500 that
+// blames the server for a client that left.
+func TestRegisterReportsAbandonedHashingAsDependencyUnavailable(t *testing.T) {
+	service := newRegisterService(t)
+	service.Passwords = auth.PasswordHasher{Semaphore: make(chan struct{}, 1)}
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_x", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.Register(ctx, validRegisterInput("reg_x", "B24040111"))
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	// The ticket must survive: nothing was decided about this registration.
+	if _, ok := tickets.tickets["reg_x"]; !ok {
+		t.Fatal("Register-Ticket was consumed by an abandoned request")
+	}
 }

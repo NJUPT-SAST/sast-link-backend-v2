@@ -15,6 +15,7 @@ const (
 	// minimumHSTSMaxAge is one year in seconds, matching the PRD §7.2 default.
 	// Smaller values leave the header present but effectively unenforced.
 	minimumHSTSMaxAge = 31536000
+	maximumTCPPort    = 65535
 )
 
 // Config holds all runtime configuration for the service.
@@ -46,14 +47,32 @@ type Config struct {
 	JWTRefreshTokenExpiry  time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
 	RefreshTokenHMACSecret string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
 
-	InternalOAuthClientID string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
-	CORSAllowedOrigins    []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
-	TrustedProxies        []string      `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
-	HSTSMaxAge            int           `env:"HSTS_MAX_AGE" envDefault:"31536000"`
-	RateLimitLoginRPM     int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"5"`
-	RateLimitLoginWindow  time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
-	LoginFailureLimit     int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
-	LoginFailureWindow    time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
+	InternalOAuthClientID    string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
+	CORSAllowedOrigins       []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
+	TrustedProxies           []string      `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
+	HSTSMaxAge               int           `env:"HSTS_MAX_AGE" envDefault:"31536000"`
+	RateLimitLoginRPM        int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"5"`
+	RateLimitLoginWindow     time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
+	RateLimitSendEmailRPM    int           `env:"RATE_LIMIT_SEND_EMAIL_RPM" envDefault:"3"`
+	RateLimitSendEmailIPRPM  int           `env:"RATE_LIMIT_SEND_EMAIL_IP_RPM" envDefault:"10"`
+	RateLimitSendEmailWindow time.Duration `env:"RATE_LIMIT_SEND_EMAIL_WINDOW" envDefault:"60s"`
+	LoginFailureLimit        int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
+	LoginFailureWindow       time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
+
+	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
+	// beyond this queues at the hasher instead of saturating every CPU core.
+	PasswordHashMaxConcurrent int `env:"PASSWORD_HASH_MAX_CONCURRENT" envDefault:"64"`
+
+	// SMTPHost has no default: a "localhost" fallback would let a deployment
+	// that forgot SMTP_HOST start cleanly and only fail when a user registers.
+	SMTPHost   string `env:"SMTP_HOST"`
+	SMTPPort   int    `env:"SMTP_PORT" envDefault:"587"`
+	SMTPUser   string `env:"SMTP_USERNAME"`
+	SMTPPass   string `env:"SMTP_PASSWORD"`
+	SMTPFrom   string `env:"SMTP_FROM"`
+	SMTPUseTLS bool   `env:"SMTP_USE_TLS" envDefault:"false"`
+	// SMTPMaxConcurrent caps simultaneous SMTP sends; see mailer.Config.
+	SMTPMaxConcurrent int `env:"SMTP_MAX_CONCURRENT" envDefault:"32"`
 }
 
 // Load parses configuration from environment variables and validates required fields.
@@ -103,10 +122,29 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_LOGIN_RPM must be positive")
 	case c.RateLimitLoginWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_LOGIN_WINDOW must be at least 1s")
+	case c.RateLimitSendEmailRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_SEND_EMAIL_RPM must be positive")
+	case c.RateLimitSendEmailIPRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_SEND_EMAIL_IP_RPM must be positive")
+	case c.RateLimitSendEmailWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_SEND_EMAIL_WINDOW must be at least 1s")
 	case c.LoginFailureLimit <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
 	case c.LoginFailureWindow <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_WINDOW must be positive")
+	case c.PasswordHashMaxConcurrent <= 0:
+		return fmt.Errorf("PASSWORD_HASH_MAX_CONCURRENT must be positive")
+	// SMTP backs registration, password reset and email binding. Validating it
+	// at boot turns a missing value into a startup failure instead of a runtime
+	// "邮件发送失败" on the first user who tries to register.
+	case strings.TrimSpace(c.SMTPHost) == "":
+		return fmt.Errorf("SMTP_HOST is required")
+	case c.SMTPPort <= 0 || c.SMTPPort > maximumTCPPort:
+		return fmt.Errorf("SMTP_PORT must be between 1 and %d", maximumTCPPort)
+	case strings.TrimSpace(c.SMTPFrom) == "":
+		return fmt.Errorf("SMTP_FROM is required")
+	case c.SMTPMaxConcurrent <= 0:
+		return fmt.Errorf("SMTP_MAX_CONCURRENT must be positive")
 	}
 	normalizedProxies, err := normalizeTrustedProxies(c.TrustedProxies)
 	if err != nil {

@@ -33,6 +33,9 @@ func setConfigEnv(t *testing.T, dbUser, dbPassword, dbName string) {
 	t.Setenv("JWT_ACCESS_TOKEN_EXPIRY", "15m")
 	t.Setenv("JWT_REFRESH_TOKEN_EXPIRY", "720h")
 	t.Setenv("REFRESH_TOKEN_HMAC_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("SMTP_HOST", "smtp.example.test")
+	t.Setenv("SMTP_PORT", "587")
+	t.Setenv("SMTP_FROM", "noreply@example.test")
 }
 
 func TestLoadMissingRequiredFields(t *testing.T) {
@@ -309,6 +312,37 @@ func TestValidateAPIAuthRejectsWeakHSTSMaxAge(t *testing.T) {
 			err = cfg.ValidateAPIAuth()
 			if err == nil || !strings.Contains(err.Error(), "HSTS_MAX_AGE") {
 				t.Fatalf("ValidateAPIAuth() error = %v, want HSTS_MAX_AGE validation for %q", err, value)
+			}
+		})
+	}
+}
+
+// SMTP is validated at boot so a missing value fails startup instead of
+// surfacing as a runtime mail failure for the first user who tries to register.
+func TestValidateAPIAuthRejectsIncompleteSMTP(t *testing.T) {
+	cases := []struct {
+		name    string
+		key     string
+		value   string
+		wantKey string
+	}{
+		{name: "missing host", key: "SMTP_HOST", value: "", wantKey: "SMTP_HOST"},
+		{name: "blank host", key: "SMTP_HOST", value: "   ", wantKey: "SMTP_HOST"},
+		{name: "missing from", key: "SMTP_FROM", value: "", wantKey: "SMTP_FROM"},
+		{name: "zero port", key: "SMTP_PORT", value: "0", wantKey: "SMTP_PORT"},
+		{name: "port above range", key: "SMTP_PORT", value: "70000", wantKey: "SMTP_PORT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(tc.key, tc.value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), tc.wantKey) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %s validation", err, tc.wantKey)
 			}
 		})
 	}
