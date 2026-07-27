@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
@@ -127,6 +128,24 @@ func isAllowedEmailDomain(email string) bool {
 // display-name brackets, and requires exactly one @. This is defense in depth
 // ahead of the mailer's own mail.ParseAddress check; it also keeps Redis keys
 // and audit detail free of unprintable bytes.
+//
+// Whitespace is rejected everywhere, not just at the ends. An address is used as
+// a Redis key segment and a rate-limit subject before the mailer ever sees it, so
+// letting whitespace through means "a b@x" and "ab@x" occupy different buckets
+// while naming the same mailbox. A bare `r < 0x20` test misses this: U+0020 sits
+// just outside it, and NBSP, U+3000, U+200B and U+2028 are far above it. Those
+// four also survive mail.ParseAddress, so the request would travel all the way to
+// SMTP before failing — surfacing a 50001 delivery error for what is really
+// malformed input.
+// Invisible codepoints that unicode.IsSpace does not classify as space. Named
+// rather than written as literals so they stay reviewable in source.
+const (
+	zeroWidthSpace     = '\u200b'
+	zeroWidthNonJoiner = '\u200c'
+	zeroWidthJoiner    = '\u200d'
+	byteOrderMark      = '\ufeff'
+)
+
 func validEmailFormat(email string) bool {
 	if email == "" || strings.Count(email, "@") != 1 {
 		return false
@@ -134,8 +153,18 @@ func validEmailFormat(email string) bool {
 	if strings.ContainsAny(email, ",<>") {
 		return false
 	}
-	for _, r := range email {
-		if r < 0x20 || r == 0x7f {
+	for _, symbol := range email {
+		if symbol < 0x20 || symbol == 0x7f {
+			return false
+		}
+		// unicode.IsSpace covers ASCII space, NBSP, U+2028/U+2029 and the U+2000
+		// block; the zero-width and BOM codepoints are invisible rather than space
+		// by Unicode's definition, so they need naming.
+		switch symbol {
+		case zeroWidthSpace, zeroWidthNonJoiner, zeroWidthJoiner, byteOrderMark:
+			return false
+		}
+		if unicode.IsSpace(symbol) {
 			return false
 		}
 	}
