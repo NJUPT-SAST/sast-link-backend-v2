@@ -425,7 +425,11 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		switch constraint := duplicateConstraint(createErr); constraint {
 		case userStudentIDConstraint:
 			return nil, newError(ErrStudentIDOccupied, "学号已被占用", createErr)
-		case userLoginEmailConstraint:
+		case userLoginEmailConstraint, userLoginEmailIsIdentityConstraint:
+			// The second name comes from V005: the address is already bound as
+			// someone's other_mail identity. From the registrant's side that is the
+			// same outcome as a taken login email, and saying more would reveal that
+			// another account has it bound.
 			return nil, newError(ErrEmailAlreadyRegistered, "邮箱已被注册", createErr)
 		case "":
 		default:
@@ -730,8 +734,11 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 		if errors.Is(err, repository.ErrLimitExceeded) {
 			return nil, newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
 		}
+		// Covers both the identities unique index and the V005 trigger that rejects
+		// an address already serving as somebody's login email. The reply stays
+		// deliberately vague about which one it was, and about who holds it.
 		if isDuplicateError(err) {
-			return nil, newError(ErrIdentityOccupied, "该邮箱已被其他账号绑定", err)
+			return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", err)
 		}
 		return nil, newError(ErrInternal, "创建第三方绑定记录失败", err)
 	}

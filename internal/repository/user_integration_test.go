@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -351,5 +352,122 @@ func TestUserRepositoryUniqueViolationConstraintNames(t *testing.T) {
 					pgErr.ConstraintName, test.wantConstraint)
 			}
 		})
+	}
+}
+
+// A login email must never also exist as an other_mail identity. The service
+// checks this before inserting, but the two columns are unique only within their
+// own table, so nothing but a cross-table rule can make the invariant hold.
+func TestLoginEmailCannotBeBoundAsIdentity(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	const contested = "contested@njupt.edu.cn"
+	owner := createUserWithProfile(t, userRepository, contested)
+
+	err := database.WithContext(context.Background()).Create(&model.Identity{
+		UserID:     owner.ID,
+		Provider:   model.LoginMethodOtherMail,
+		ProviderID: contested,
+	}).Error
+	if err == nil {
+		t.Fatal("Create(identity) error = nil, want the login email to be rejected")
+	}
+	assertUniqueViolation(t, err, "ck_identities_provider_id_not_login_email")
+
+	// A different provider is unaffected: only other_mail shares an address space
+	// with login_email.
+	if githubErr := database.WithContext(context.Background()).Create(&model.Identity{
+		UserID:     owner.ID,
+		Provider:   model.LoginMethodGitHub,
+		ProviderID: contested,
+	}).Error; githubErr != nil {
+		t.Fatalf("Create(github identity) error = %v, want the rule to apply only to other_mail", githubErr)
+	}
+}
+
+// The rule holds from the other direction too, so an address cannot be bound
+// first and then claimed as a login email.
+func TestBoundIdentityCannotBecomeLoginEmail(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	const bound = "bound@njupt.edu.cn"
+	holder := createUserWithProfile(t, userRepository, "holder@njupt.edu.cn")
+
+	if err := database.WithContext(context.Background()).Create(&model.Identity{
+		UserID:     holder.ID,
+		Provider:   model.LoginMethodOtherMail,
+		ProviderID: bound,
+	}).Error; err != nil {
+		t.Fatalf("Create(identity) error = %v", err)
+	}
+
+	newcomer := testUser(bound)
+	newcomer.StudentID = "B55550001"
+	err := userRepository.CreateWithProfile(context.Background(), newcomer, &model.Profile{})
+	if err == nil {
+		t.Fatal("CreateWithProfile() error = nil, want the bound address to be rejected")
+	}
+	assertUniqueViolation(t, err, "ck_user_login_email_not_identity")
+}
+
+// The pre-flight check in the service cannot close this race: both transactions
+// read before either commits, and neither row exists to lock. Only serializing on
+// the address itself keeps the address out of both tables.
+func TestConcurrentRegisterAndBindCannotShareAnAddress(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	const contested = "raced@njupt.edu.cn"
+	holder := createUserWithProfile(t, userRepository, "holder@njupt.edu.cn")
+
+	start := make(chan struct{})
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(2)
+	go func() {
+		defer waitGroup.Done()
+		<-start
+		user := testUser(contested)
+		user.StudentID = "B77770001"
+		_ = userRepository.CreateWithProfile(context.Background(), user, &model.Profile{})
+	}()
+	go func() {
+		defer waitGroup.Done()
+		<-start
+		_ = database.WithContext(context.Background()).Create(&model.Identity{
+			UserID:     holder.ID,
+			Provider:   model.LoginMethodOtherMail,
+			ProviderID: contested,
+		}).Error
+	}()
+	close(start)
+	waitGroup.Wait()
+
+	var userRows, identityRows int64
+	if err := database.Raw(`SELECT count(*) FROM "user" WHERE login_email = ?`, contested).
+		Scan(&userRows).Error; err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if err := database.Raw(`SELECT count(*) FROM identities WHERE provider = ? AND provider_id = ?`,
+		model.LoginMethodOtherMail, contested).Scan(&identityRows).Error; err != nil {
+		t.Fatalf("count identities: %v", err)
+	}
+	if userRows > 0 && identityRows > 0 {
+		t.Fatalf("address landed in both tables: user rows=%d identity rows=%d", userRows, identityRows)
+	}
+	if userRows+identityRows == 0 {
+		t.Fatal("both writers lost; exactly one should have succeeded")
+	}
+}
+
+func assertUniqueViolation(t *testing.T, err error, wantConstraint string) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("error = %v, want a *pgconn.PgError", err)
+	}
+	if pgErr.Code != pgerrcode.UniqueViolation {
+		t.Fatalf("SQLSTATE = %q, want %q", pgErr.Code, pgerrcode.UniqueViolation)
+	}
+	if pgErr.ConstraintName != wantConstraint {
+		t.Fatalf("constraint = %q, want %q", pgErr.ConstraintName, wantConstraint)
 	}
 }

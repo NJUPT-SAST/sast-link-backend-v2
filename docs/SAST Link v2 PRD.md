@@ -241,6 +241,7 @@ Body: { "password": "current_password" }
 
 - 必须输入当前密码二次确认
 - 主邮箱（`user.login_email`）不在 identities 中，不可通过此接口解绑
+- 该约束由数据库保证：V005 在 `user` 与 `identities` 两侧各建一个 BEFORE 触发器，禁止同一地址同时作为主邮箱与 `other_mail` 绑定存在。两列的 UNIQUE 各自只覆盖本表，应用层预检查挡不住并发（两个未提交事务互相不可见），故触发器内先按地址取 `pg_advisory_xact_lock` 串行化。违反时抛 `unique_violation`，约束名为 `ck_user_login_email_not_identity` / `ck_identities_provider_id_not_login_email`
 
 - 解绑冷却：Redis `sastlink:unbind:cooldown:{email}`，60s 防快速重复解绑
 

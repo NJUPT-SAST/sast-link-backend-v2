@@ -3,14 +3,44 @@ package migration_test
 import (
 	"context"
 	"database/sql"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/golang-migrate/migrate/v4"
 
+	migrations "github.com/NJUPT-SAST/sast-link-backend-v2/migrations"
+
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/migration"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/testutil"
 )
+
+// latestMigrationVersion is derived from the embedded migration set rather than
+// hardcoded, so adding a migration does not require editing assertions that are
+// really about "Up() reaches the newest version".
+var latestMigrationVersion = highestMigrationVersion()
+
+func highestMigrationVersion() uint {
+	entries, err := migrations.FS.ReadDir(".")
+	if err != nil {
+		panic("read embedded migrations: " + err.Error())
+	}
+	var highest uint64
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".up.sql") {
+			continue
+		}
+		version, parseErr := strconv.ParseUint(strings.SplitN(name, "_", 2)[0], 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		if version > highest {
+			highest = version
+		}
+	}
+	return uint(highest)
+}
 
 const tableExistsQuery = `SELECT to_regclass('public.' || $1) IS NOT NULL`
 
@@ -58,8 +88,8 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Current() error = %v", err)
 	}
-	if version != 4 || dirty {
-		t.Fatalf("Current() = (%d, %t), want (4, false)", version, dirty)
+	if version != latestMigrationVersion || dirty {
+		t.Fatalf("Current() = (%d, %t), want (%d, false)", version, dirty, latestMigrationVersion)
 	}
 
 	database := testutil.OpenSQL(t, databaseURL)
@@ -200,8 +230,8 @@ func TestV3DownKeepsReferencedBuiltinOAuthClient(t *testing.T) {
 	builtinClientID := readOAuthClientID(t, database, "sast-link-web")
 	insertOAuthAuthorization(t, database, "v3-down-referenced-code", builtinClientID, userID, "S256")
 
-	if err := instance.Steps(-2); err != nil {
-		t.Fatalf("Steps(-2) error = %v", err)
+	if err := instance.Migrate(2); err != nil {
+		t.Fatalf("Migrate(2) error = %v", err)
 	}
 	version, dirty, err := migration.Current(databaseURL)
 	if err != nil {
@@ -237,8 +267,8 @@ WHERE client_id = 'sast-link-web'
 		t.Fatalf("mutate built-in OAuth client before V003 down: %v", err)
 	}
 
-	if err := instance.Steps(-2); err != nil {
-		t.Fatalf("Steps(-2) error = %v", err)
+	if err := instance.Migrate(2); err != nil {
+		t.Fatalf("Migrate(2) error = %v", err)
 	}
 	assertOAuthClientExists(t, database, "sast-link-web")
 }
@@ -253,8 +283,8 @@ func TestV3DownDeletesUnreferencedBuiltinOAuthClient(t *testing.T) {
 	database := testutil.OpenSQL(t, databaseURL)
 	t.Cleanup(func() { _ = database.Close() })
 
-	if err := instance.Steps(-2); err != nil {
-		t.Fatalf("Steps(-2) error = %v", err)
+	if err := instance.Migrate(2); err != nil {
+		t.Fatalf("Migrate(2) error = %v", err)
 	}
 	assertOAuthClientMissing(t, database, "sast-link-web")
 }
@@ -343,8 +373,8 @@ func TestBaselineV1CanMigrateToLatest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Current() after latest migrations error = %v", err)
 	}
-	if version != 4 || dirty {
-		t.Fatalf("Current() after latest migrations = (%d, %t), want (4, false)", version, dirty)
+	if version != latestMigrationVersion || dirty {
+		t.Fatalf("Current() after latest migrations = (%d, %t), want (%d, false)", version, dirty, latestMigrationVersion)
 	}
 
 	database := testutil.OpenSQL(t, databaseURL)

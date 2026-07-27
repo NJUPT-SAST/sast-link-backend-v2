@@ -177,6 +177,11 @@ func generateBindTicket() (string, error) {
 const (
 	userLoginEmailConstraint = "user_login_email_key"
 	userStudentIDConstraint  = "user_student_id_key"
+	// V005 raises these from triggers, using unique_violation so they arrive here
+	// like any other duplicate. They fire when a login email and an other_mail
+	// identity would end up holding the same address.
+	userLoginEmailIsIdentityConstraint = "ck_user_login_email_not_identity"
+	identityIsLoginEmailConstraint     = "ck_identities_provider_id_not_login_email"
 )
 
 func isDuplicateError(err error) bool {
