@@ -1640,7 +1640,7 @@ func TestChangePasswordRotatesCredentialAndRevokesSessions(t *testing.T) {
 	if users.byID[42].TokenVersion != previousVersion+1 {
 		t.Fatalf("token version = %d, want %d", users.byID[42].TokenVersion, previousVersion+1)
 	}
-	if service.Passwords.VerifyPassword("brand-new-password", users.byID[42].PasswordHash) != nil {
+	if service.Passwords.VerifyPassword(context.Background(), "brand-new-password", users.byID[42].PasswordHash) != nil {
 		t.Fatal("new password does not verify against stored hash")
 	}
 	if len(tokens.revokedUsers) != 1 || tokens.revokedUsers[0] != 42 {
@@ -1675,7 +1675,7 @@ func TestResetPasswordConsumesCodeAndRevokesSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResetPassword returned error: %v", err)
 	}
-	if service.Passwords.VerifyPassword("brand-new-password", users.byID[42].PasswordHash) != nil {
+	if service.Passwords.VerifyPassword(context.Background(), "brand-new-password", users.byID[42].PasswordHash) != nil {
 		t.Fatal("new password does not verify against stored hash")
 	}
 	if len(tokens.revokedUsers) != 1 || tokens.revokedUsers[0] != 42 {
@@ -1689,7 +1689,7 @@ func TestResetPasswordConsumesCodeAndRevokesSessions(t *testing.T) {
 func TestResetPasswordRejectsUnchangedPassword(t *testing.T) {
 	service := newRegisterService(t)
 	users := service.Users.(*fakeUsers)
-	hash, err := service.Passwords.HashPassword("longpassword")
+	hash, err := service.Passwords.HashPassword(context.Background(), "longpassword")
 	if err != nil {
 		t.Fatalf("hash password: %v", err)
 	}
@@ -1792,7 +1792,7 @@ func newRegisterService(t *testing.T) Service {
 		t.Fatalf("generate RSA key: %v", err)
 	}
 	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword("secret")
+	hash, err := passwords.HashPassword(context.Background(), "secret")
 	if err != nil {
 		t.Fatalf("hash test password: %v", err)
 	}
@@ -1834,7 +1834,7 @@ func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeToken
 		t.Fatalf("generate RSA key: %v", err)
 	}
 	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword("secret")
+	hash, err := passwords.HashPassword(context.Background(), "secret")
 	if err != nil {
 		t.Fatalf("hash test password: %v", err)
 	}
@@ -1869,7 +1869,7 @@ func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeToken
 func testUser(t *testing.T, id int64, email string, state model.UserState) *model.User {
 	t.Helper()
 	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword("secret")
+	hash, err := passwords.HashPassword(context.Background(), "secret")
 	if err != nil {
 		t.Fatalf("hash test password: %v", err)
 	}
@@ -2182,5 +2182,74 @@ func validRegisterInput(ticket, studentID string) RegisterInput {
 		QQNumber:       "10000",
 		College:        string(model.CollegeOther),
 		Major:          "CS",
+	}
+}
+
+// Password verification queues behind a concurrency gate, so a cancelled caller
+// gets an error that is not a password mismatch. Counting it as a failed attempt
+// would let a client that disconnects mid-login drive its own account into the
+// lockout window, and would fill the audit log with failures nobody made.
+func TestLoginDoesNotCountAbandonedVerificationAsFailure(t *testing.T) {
+	service, _, _, _, audit, failures := newTestService(t)
+	service.Passwords = auth.PasswordHasher{Semaphore: make(chan struct{}, 1)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.Login(ctx, LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret", ClientIP: "127.0.0.1"})
+	if err == nil {
+		t.Fatal("Login() error = nil, want the abandoned request to fail")
+	}
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	if len(failures.failures) != 0 {
+		t.Fatalf("failures = %#v, want no failure recorded for an abandoned request", failures.failures)
+	}
+	for _, entry := range audit.entries {
+		if entry.Action == "login" && entry.Success != nil && !*entry.Success {
+			t.Fatal("abandoned login was audited as a failed attempt")
+		}
+	}
+}
+
+// The same rule for ChangePassword: an abandoned old-password check is not a
+// wrong old password.
+func TestChangePasswordDoesNotAuditAbandonedVerificationAsFailure(t *testing.T) {
+	service, _, _, _, audit, _ := newTestService(t)
+	service.Passwords = auth.PasswordHasher{Semaphore: make(chan struct{}, 1)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.ChangePassword(ctx, ChangePasswordInput{
+		UserID:      42,
+		OldPassword: "secret",
+		NewPassword: "brand-new-password",
+	})
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	for _, entry := range audit.entries {
+		if entry.Action == "change_password" && entry.Success != nil && !*entry.Success {
+			t.Fatal("abandoned change-password was audited as a wrong old password")
+		}
+	}
+}
+
+// Registration hashing is gated too; an abandoned hash is a 503, not a 500 that
+// blames the server for a client that left.
+func TestRegisterReportsAbandonedHashingAsDependencyUnavailable(t *testing.T) {
+	service := newRegisterService(t)
+	service.Passwords = auth.PasswordHasher{Semaphore: make(chan struct{}, 1)}
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_x", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := service.Register(ctx, validRegisterInput("reg_x", "B24040111"))
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	// The ticket must survive: nothing was decided about this registration.
+	if _, ok := tickets.tickets["reg_x"]; !ok {
+		t.Fatal("Register-Ticket was consumed by an abandoned request")
 	}
 }

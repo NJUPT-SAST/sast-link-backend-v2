@@ -86,7 +86,14 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		}
 		return nil, newError(ErrUserDeleted, "user is deleted", nil)
 	}
-	if passwordErr := s.Passwords.VerifyPassword(input.Password, user.PasswordHash); passwordErr != nil {
+	if passwordErr := s.Passwords.VerifyPassword(ctx, input.Password, user.PasswordHash); passwordErr != nil {
+		// A cancelled or timed-out caller never proved anything about the password,
+		// so it must not be recorded as a failed attempt: doing so would let a
+		// client that disconnects mid-login drive its own account into the lockout
+		// window.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, newError(ErrDependencyUnavailable, "password verification abandoned", passwordErr)
+		}
 		return nil, s.failLogin(ctx, user, input, failureKey, ErrPasswordInvalid, "password is invalid", passwordErr)
 	}
 	pair, err := s.issuePair(user, client, 0, "", sessionScopes)
@@ -387,9 +394,9 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return nil, newError(ErrStudentIDOccupied, "学号已被占用", nil)
 	}
 
-	passwordHash, err := s.Passwords.HashPassword(password)
+	passwordHash, err := s.Passwords.HashPassword(ctx, password)
 	if err != nil {
-		return nil, newError(ErrInternal, "hash password", err)
+		return nil, s.hashError(ctx, err)
 	}
 
 	user := &model.User{
@@ -528,12 +535,18 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	if err != nil {
 		return nil, newError(ErrInternal, "find login email", err)
 	}
-	if s.Passwords.VerifyPassword(input.Password, user.PasswordHash) == nil {
+	// Distinguish "differs from the old password" from "could not check": a
+	// cancelled verification returns non-nil too, which would otherwise be read as
+	// a successful difference check.
+	switch sameErr := s.Passwords.VerifyPassword(ctx, input.Password, user.PasswordHash); {
+	case sameErr == nil:
 		return nil, newError(ErrPasswordUnchanged, "新密码不能与旧密码相同", nil)
+	case ctx.Err() != nil:
+		return nil, newError(ErrDependencyUnavailable, "password comparison abandoned", sameErr)
 	}
-	passwordHash, err := s.Passwords.HashPassword(input.Password)
+	passwordHash, err := s.Passwords.HashPassword(ctx, input.Password)
 	if err != nil {
-		return nil, newError(ErrInternal, "hash password", err)
+		return nil, s.hashError(ctx, err)
 	}
 	now := s.now()
 	// The password rewrite and the session revocation share one transaction:
@@ -574,15 +587,20 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	if user.State == model.UserStateDeleted {
 		return nil, newError(ErrUserDeleted, "user is deleted", nil)
 	}
-	if verifyErr := s.Passwords.VerifyPassword(input.OldPassword, user.PasswordHash); verifyErr != nil {
+	if verifyErr := s.Passwords.VerifyPassword(ctx, input.OldPassword, user.PasswordHash); verifyErr != nil {
+		// An abandoned verification is not a wrong password: auditing it as one
+		// would fill the log with phantom failures for clients that disconnected.
+		if ctx.Err() != nil {
+			return nil, newError(ErrDependencyUnavailable, "password verification abandoned", verifyErr)
+		}
 		if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, nil); auditErr != nil {
 			slog.Error("audit change password failure", "user_id", user.ID, "error", auditErr)
 		}
 		return nil, newError(ErrPasswordInvalid, "旧密码错误", verifyErr)
 	}
-	passwordHash, err := s.Passwords.HashPassword(input.NewPassword)
+	passwordHash, err := s.Passwords.HashPassword(ctx, input.NewPassword)
 	if err != nil {
-		return nil, newError(ErrInternal, "hash password", err)
+		return nil, s.hashError(ctx, err)
 	}
 	now := s.now()
 	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now)
@@ -819,6 +837,16 @@ func (s Service) verifyCode(ctx context.Context, purpose, email, code string) er
 		return newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
 	}
 	return newError(ErrVerificationCodeWrong, "验证码错误", nil)
+}
+
+// hashError classifies a password-derivation failure. Hashing queues behind a
+// concurrency gate, so a cancelled caller gets ctx.Err() rather than a genuine
+// fault; reporting that as a 500 would blame the server for a client that left.
+func (s Service) hashError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return newError(ErrDependencyUnavailable, "password hashing abandoned", err)
+	}
+	return newError(ErrInternal, "hash password", err)
 }
 
 // discardCode drops an already-matched code when a later step of the same flow

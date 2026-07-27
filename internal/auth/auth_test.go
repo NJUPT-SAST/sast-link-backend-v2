@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -31,17 +32,17 @@ func (c fixedClock) Now() time.Time { return c.value }
 
 func TestPasswordHasherVersionedPBKDF2(t *testing.T) {
 	hasher := PasswordHasher{Random: fixedReader{data: bytes.Repeat([]byte{0x42}, 16)}}
-	hash, err := hasher.HashPassword("correct horse battery staple")
+	hash, err := hasher.HashPassword(context.Background(), "correct horse battery staple")
 	if err != nil {
 		t.Fatalf("HashPassword returned error: %v", err)
 	}
 	if !strings.HasPrefix(hash, "pbkdf2-sha512-v1$600000$") {
 		t.Fatalf("hash = %q, want versioned PBKDF2-SHA512 format", hash)
 	}
-	if err := hasher.VerifyPassword("correct horse battery staple", hash); err != nil {
+	if err := hasher.VerifyPassword(context.Background(), "correct horse battery staple", hash); err != nil {
 		t.Fatalf("VerifyPassword returned error: %v", err)
 	}
-	if err := hasher.VerifyPassword("wrong", hash); !errors.Is(err, ErrInvalidSecret) {
+	if err := hasher.VerifyPassword(context.Background(), "wrong", hash); !errors.Is(err, ErrInvalidSecret) {
 		t.Fatalf("VerifyPassword wrong password error = %v, want ErrInvalidSecret", err)
 	}
 }
@@ -57,7 +58,7 @@ func TestPasswordHasherSemaphoreBoundsAndReleases(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := hasher.HashPassword("queued")
+		_, err := hasher.HashPassword(context.Background(), "queued")
 		done <- err
 	}()
 
@@ -392,4 +393,109 @@ func signRawJWT(t *testing.T, manager JWTManager, payload jwtPayload) string {
 		t.Fatalf("sign raw JWT: %v", err)
 	}
 	return signed
+}
+
+// Bounding derivation concurrency turns CPU pressure into a queue. A single
+// derivation costs roughly 380ms, and nothing else bounds the backlog (no HTTP
+// WriteTimeout, per-IP-only login limits), so a caller that has gone away must
+// stop occupying a queue slot instead of waiting for its turn to burn a core.
+func TestPasswordHasherAbandonsQueueWhenCallerCancelled(t *testing.T) {
+	semaphore := make(chan struct{}, 1)
+	hasher := PasswordHasher{Random: fixedReader{data: bytes.Repeat([]byte{0x42}, 16)}, Semaphore: semaphore}
+	semaphore <- struct{}{} // occupy the only slot
+
+	ctx, cancel := context.WithCancel(context.Background())
+	hashed := make(chan error, 1)
+	go func() {
+		_, err := hasher.HashPassword(ctx, "queued")
+		hashed <- err
+	}()
+
+	select {
+	case err := <-hashed:
+		t.Fatalf("HashPassword returned %v while the semaphore was full", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-hashed:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("HashPassword error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HashPassword ignored cancellation and stayed queued")
+	}
+
+	// Abandoning the wait must not leak the slot it never acquired.
+	if len(semaphore) != 1 {
+		t.Fatalf("semaphore len = %d, want the original holder's slot still taken", len(semaphore))
+	}
+	<-semaphore
+}
+
+// VerifyPassword shares the same gate, and its cancellation must be reported as
+// such rather than as a password mismatch.
+func TestPasswordHasherVerifyAbandonsQueueWhenCallerCancelled(t *testing.T) {
+	hasher := PasswordHasher{Random: fixedReader{data: bytes.Repeat([]byte{0x42}, 16)}}
+	hash, err := hasher.HashPassword(context.Background(), "correct horse battery staple")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+
+	semaphore := make(chan struct{}, 1)
+	gated := PasswordHasher{Random: hasher.Random, Semaphore: semaphore}
+	semaphore <- struct{}{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	verified := make(chan error, 1)
+	go func() {
+		verified <- gated.VerifyPassword(ctx, "correct horse battery staple", hash)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-verified:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("VerifyPassword error = %v, want context.Canceled", err)
+		}
+		// The error must stay distinguishable from a real mismatch, or callers
+		// would count an abandoned request as a failed login attempt.
+		if errors.Is(err, ErrInvalidSecret) {
+			t.Fatal("cancellation is indistinguishable from a wrong password")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("VerifyPassword ignored cancellation and stayed queued")
+	}
+	<-semaphore
+}
+
+// A context that is already done must lose even when a slot happens to be free:
+// a select with both cases ready picks pseudo-randomly, which would admit
+// abandoned work roughly half the time.
+func TestPasswordHasherRejectsAlreadyCancelledContext(t *testing.T) {
+	hasher := PasswordHasher{
+		Random:    fixedReader{data: bytes.Repeat([]byte{0x42}, 16)},
+		Semaphore: make(chan struct{}, 4), // deliberately idle
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for attempt := range 20 {
+		if _, err := hasher.HashPassword(ctx, "abandoned"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("attempt %d: error = %v, want context.Canceled", attempt, err)
+		}
+	}
+}
+
+// An unset semaphore must keep working without a context requirement changing
+// behaviour, so deployments that leave it nil are unaffected.
+func TestPasswordHasherWithoutSemaphoreIgnoresCancellation(t *testing.T) {
+	hasher := PasswordHasher{Random: fixedReader{data: bytes.Repeat([]byte{0x42}, 16)}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := hasher.HashPassword(ctx, "unbounded"); err != nil {
+		t.Fatalf("HashPassword() with nil semaphore error = %v, want nil", err)
+	}
 }

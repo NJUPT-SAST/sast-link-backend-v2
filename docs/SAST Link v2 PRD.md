@@ -51,7 +51,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 | 缓存 | Redis | 8+ |
 | 对象存储 | 腾讯云 COS | 头像上传 |
 | 邮件 | SMTP | 验证码发送 |
-| 密码哈希 | PBKDF2-SHA512 | 600,000 轮，16 字节随机盐。Go 标准库 `crypto/pbkdf2` + `crypto/sha512`，零外部依赖 |
+| 密码哈希 | PBKDF2-SHA512 | 600,000 轮，16 字节随机盐。Go 标准库 `crypto/pbkdf2` + `crypto/sha512`，零外部依赖。单次派生约 380ms（16 核实测），并发上限 `PASSWORD_HASH_MAX_CONCURRENT`（默认 64）。派生排队可被 context 取消，客户端断开即释放队列位，避免无界积压 |
 | 认证授权 | OAuth 2.1 + RS256 | JWT（Access Token）含 `kid` 头，支持密钥轮换；通过 JWKS 端点分发公钥 |
 | 集成测试 | testcontainers-go | — |
 
