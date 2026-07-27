@@ -277,7 +277,7 @@ POST /auth/register
 }
 ```
 
-**说明**: Register-Ticket 已包含验证过的邮箱，无需再次传入 `login_email`；密码最短 8 位；注册成功后自动签发 Token，无需单独登录。`registration_state` + `oauth_state` 为可选字段，来自第三方 OAuth 回调（GitHub / 飞书）的无绑定分支——传入双值后注册成功的同时校验匹配并自动创建对应的 identities 绑定记录。
+**说明**: Register-Ticket 已包含验证过的邮箱，无需再次传入 `login_email`；密码最短 8 位；注册成功后自动签发 Token，无需单独登录。`registration_state` + `oauth_state` 为可选字段，来自第三方 OAuth 回调（GitHub / 飞书）的无绑定分支——传入双值后注册成功的同时校验匹配并自动创建对应的 identities 绑定记录。**当前实现**：第三方 OAuth 登录尚未开放，传入任一非空 `registration_state` / `oauth_state` 会被拒绝并返回 `40000`；待 OAuth 回调实现后才会消费这对字段并自动创建绑定。
 
 **错误码**: 400xx（参数错误）、40020（邮箱域名不允许）、40103（Register-Ticket 无效或已过期）、40901（邮箱已被注册）、40902（学号已被占用）、40900（其他唯一性冲突）、42201（密码长度不足）
 

@@ -112,8 +112,10 @@ paths:
       summary: 完成注册
       deprecated: false
       description: >-
-        注册第二步。凭 Register-Ticket + 补充信息完成注册，成功后自动签发 Token。若传入
-        oauth_state，注册成功后自动创建对应的 identities 绑定记录。
+        注册第二步。凭 Register-Ticket + 补充信息完成注册，成功后自动签发 Token。
+        registration_state / oauth_state 是为第三方 OAuth 无绑定分支预留的可选字段；
+        当前实现中传入任一非空值会被拒绝（40000），待 OAuth 登录开放后才会消费并自动创建
+        identities 绑定记录。
       operationId: authCompleteRegister
       tags:
         - Auth
