@@ -921,6 +921,39 @@ func TestRefreshExpiredActiveTokenDoesNotRevokeFamily(t *testing.T) {
 	}
 }
 
+func TestRefreshAuditsSuccessAndReplay(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+
+	refresh, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	if err != nil {
+		t.Fatalf("Refresh returned error: %v", err)
+	}
+	if refresh.RefreshToken == "" {
+		t.Fatal("Refresh returned empty token")
+	}
+	var successEntry *model.AuditLog
+	for i := range audit.entries {
+		if audit.entries[i].Action == "refresh" {
+			successEntry = &audit.entries[i]
+		}
+	}
+	if successEntry == nil || successEntry.Success == nil || !*successEntry.Success {
+		t.Fatalf("audit entries = %#v, want successful refresh audit", audit.entries)
+	}
+
+	tokens.rotateErr = repository.ErrTokenReplay
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: refresh.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	last := audit.entries[len(audit.entries)-1]
+	if last.Action != "refresh" || last.Success == nil || *last.Success || last.ErrCode == nil || *last.ErrCode != errcode.CodeAccessTokenInvalid {
+		t.Fatalf("last audit = %+v, want failed refresh audit with invalid-token code", last)
+	}
+}
+
 func TestLoginLockoutBoundaryAndAliasReset(t *testing.T) {
 	service, _, _, _, _, failures := newTestService(t)
 	failures.retry = time.Minute

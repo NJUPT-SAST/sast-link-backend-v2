@@ -242,7 +242,11 @@ func (h Handler) Refresh(c *gin.Context) {
 		response.Error(c, badRequest())
 		return
 	}
-	result, err := h.Service.Refresh(c.Request.Context(), session.RefreshInput{RefreshToken: req.RefreshToken})
+	result, err := h.Service.Refresh(c.Request.Context(), session.RefreshInput{
+		RefreshToken: req.RefreshToken,
+		ClientIP:     c.ClientIP(),
+		UserAgent:    c.Request.UserAgent(),
+	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))
 		return

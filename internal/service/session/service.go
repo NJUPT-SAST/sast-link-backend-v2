@@ -151,6 +151,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			return nil, newError(ErrInternal, "revoke replayed refresh family", revokeErr)
 		}
 		s.deliverBlacklist(ctx, entries, s.now())
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, input)
 		return nil, newError(ErrInvalidToken, "invalid refresh token", nil)
 	}
 	if !current.ExpiresAt.After(s.now()) {
@@ -187,10 +188,12 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 				return nil, newError(ErrInternal, "revoke refresh family after rotation failure", revokeErr)
 			}
 			s.deliverBlacklist(ctx, entries, s.now())
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, input)
 			return nil, newError(ErrInvalidToken, "invalid refresh token", rotateErr)
 		}
 		return nil, newError(ErrInternal, "rotate refresh token", rotateErr)
 	}
+	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, input)
 	return &RefreshResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -878,6 +881,19 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 		return withRetryAfter(newError(ErrLocked, "login locked", nil), lockTTL)
 	}
 	return newError(sentinel, message, cause)
+}
+
+// auditRefresh records a refresh rotation outcome. Failures mean the token
+// family was revoked as a replay defense, so they carry the invalid-token code;
+// the audit itself is fail-open like every other audit call in this service.
+func (s Service) auditRefresh(ctx context.Context, userID int64, familyID *string, success bool, input RefreshInput) {
+	errCode := 0
+	if !success {
+		errCode = errcode.CodeAccessTokenInvalid
+	}
+	if auditErr := s.audit(ctx, &userID, "refresh", "session", familyID, success, errCode, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
+		slog.Error("audit refresh", "family_id", familyID, "error", auditErr)
+	}
 }
 
 func (s Service) findInternalClient(ctx context.Context) (*model.OAuthClient, error) {

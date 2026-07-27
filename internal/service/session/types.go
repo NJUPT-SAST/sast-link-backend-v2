@@ -146,6 +146,8 @@ type LoginResult struct {
 
 type RefreshInput struct {
 	RefreshToken string
+	ClientIP     string
+	UserAgent    string
 }
 
 type RefreshResult struct {
