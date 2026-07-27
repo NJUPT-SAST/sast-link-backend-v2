@@ -277,6 +277,7 @@ func TestServiceErrorMappingStatusAndCode(t *testing.T) {
 		{name: "rate", err: &session.Error{Kind: session.KindRateLimited, Code: errcode.CodeRateLimited, Message: "rate"}, wantStatus: http.StatusTooManyRequests, wantCode: errcode.CodeRateLimited},
 		{name: "rate with retry", err: &session.Error{Kind: session.KindRateLimited, Code: errcode.CodeRateLimited, Message: "rate", RetryAfter: time.Minute}, wantStatus: http.StatusTooManyRequests, wantCode: errcode.CodeRateLimited},
 		{name: "invalid token", err: &session.Error{Kind: session.KindInvalidToken, Code: errcode.CodeAccessTokenInvalid, Message: "invalid token"}, wantStatus: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
+		{name: "dependency unavailable", err: &session.Error{Kind: session.KindDependencyUnavailable, Code: errcode.CodeDependencyUnavailable, Message: "redis down"}, wantStatus: http.StatusServiceUnavailable, wantCode: errcode.CodeDependencyUnavailable},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

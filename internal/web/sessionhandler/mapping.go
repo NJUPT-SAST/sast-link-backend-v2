@@ -58,6 +58,9 @@ func mapServiceError(err error) error {
 		status = http.StatusConflict
 	case session.KindValidationFailed:
 		status = http.StatusUnprocessableEntity
+	case session.KindDependencyUnavailable:
+		message = "依赖服务暂不可用，请稍后重试"
+		status = http.StatusServiceUnavailable
 	case session.KindInternal:
 		message = "服务器内部错误"
 		status = http.StatusInternalServerError
@@ -90,6 +93,8 @@ func defaultCode(kind session.Kind) int {
 		return errcode.CodeConflict
 	case session.KindValidationFailed:
 		return errcode.CodeValidationFailed
+	case session.KindDependencyUnavailable:
+		return errcode.CodeDependencyUnavailable
 	default:
 		return errcode.CodeInternal
 	}
@@ -115,6 +120,8 @@ func defaultMessage(kind session.Kind) string {
 		return "资源已存在"
 	case session.KindValidationFailed:
 		return "业务校验失败"
+	case session.KindDependencyUnavailable:
+		return "依赖服务暂不可用，请稍后重试"
 	default:
 		return "服务器内部错误"
 	}

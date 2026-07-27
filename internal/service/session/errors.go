@@ -24,6 +24,10 @@ const (
 	KindConflict          Kind = "conflict"
 	KindValidationFailed  Kind = "validation_failed"
 	KindInternal          Kind = "internal"
+	// KindDependencyUnavailable is for fail-closed dependencies (verification
+	// codes, tickets) that cannot be validated when their Redis store is down.
+	// It maps to HTTP 503 so a Redis outage does not surface as a server bug.
+	KindDependencyUnavailable Kind = "dependency_unavailable"
 )
 
 // Error is a typed session service error. Kind selects the HTTP mapping and
@@ -87,6 +91,11 @@ var (
 	ErrPasswordTooShort     = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordTooShort}
 	ErrPasswordUnchanged    = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordUnchanged}
 	ErrInternal             = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	// ErrDependencyUnavailable reports that a fail-closed Redis-backed store
+	// (verification codes, register/bind tickets) is unreachable. Per PRD §6.0
+	// these flows must reject the request so the user can retry, not mask the
+	// outage as an internal 500.
+	ErrDependencyUnavailable = &Error{Kind: KindDependencyUnavailable, Code: errcode.CodeDependencyUnavailable}
 )
 
 // newError returns a contextual error that matches its sentinel via Kind.

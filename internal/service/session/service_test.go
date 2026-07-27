@@ -1171,6 +1171,98 @@ func TestSendRegisterCodeRejectsWhenEmailLimitExceeded(t *testing.T) {
 	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
 }
 
+// Fail-closed stores (verification codes, tickets) must surface their outage as
+// dependency_unavailable (503), never as a bare internal error (500): the PRD
+// §6.0 policy rejects the request so the user can retry, while 500 would read
+// as a server bug to clients and alerting.
+func TestFailClosedStoresReturnDependencyUnavailable(t *testing.T) {
+	redisDown := errors.New("redis connection refused")
+
+	t.Run("send code", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
+		_, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "new@sast.fun"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("forgot password send code", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
+		_, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("verify code", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
+		_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("reset password verify code", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
+		_, err := service.ResetPassword(context.Background(), ResetPasswordInput{Email: "user@njupt.edu.cn", Code: "123456", Password: "longpassword"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("save register ticket", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.RegisterTicket = &fakeRegisterTicketStore{err: redisDown}
+		codes := service.VerificationCode.(*fakeVerificationCodeStore)
+		if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeRegister), "new@sast.fun", "123456", time.Minute); err != nil {
+			t.Fatalf("save code: %v", err)
+		}
+		_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("read register ticket", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.RegisterTicket = &fakeRegisterTicketStore{err: redisDown}
+		_, err := service.Register(context.Background(), RegisterInput{
+			RegisterTicket: "reg_xxx",
+			Password:       "newpassword",
+			Name:           "New",
+			StudentID:      "B24040099",
+			PhoneNumber:    "13800138000",
+			QQNumber:       "10000",
+			College:        string(model.CollegeOther),
+			Major:          "CS",
+		})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("bind send code", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
+		_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("peek bind ticket", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.BindTicket = &fakeBindTicketStore{err: redisDown}
+		_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
+	t.Run("consume bind ticket", func(t *testing.T) {
+		service := newRegisterService(t)
+		bindTickets := service.BindTicket.(*fakeBindTicketStore)
+		if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "extra@gmail.com", UserID: 42}, time.Minute); err != nil {
+			t.Fatalf("save bind ticket: %v", err)
+		}
+		codes := service.VerificationCode.(*fakeVerificationCodeStore)
+		if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "extra@gmail.com", "123456", time.Minute); err != nil {
+			t.Fatalf("save code: %v", err)
+		}
+		bindTickets.consumeErr = redisDown
+		_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+}
+
 func TestRegisterCreatesUserAndIssuesTokens(t *testing.T) {
 	service := newRegisterService(t)
 	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
@@ -1896,7 +1988,7 @@ func TestVerifyRegisterCodeDiscardsCodeWhenTicketSaveFails(t *testing.T) {
 	service.RegisterTicket = &fakeRegisterTicketStore{err: errors.New("redis unavailable")}
 
 	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
-	assertKind(t, err, KindInternal, errcode.CodeInternal)
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
 	if !slices.Contains(codes.discarded, codeKey(purpose, "new@sast.fun")) {
 		t.Fatalf("discarded = %#v, want the consumed code dropped", codes.discarded)
 	}

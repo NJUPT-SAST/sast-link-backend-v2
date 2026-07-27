@@ -41,8 +41,9 @@ const (
 
 	CodeRateLimited = 42900 // 请求过于频繁
 
-	CodeInternal            = 50000 // 服务器内部错误
-	CodeEmailDeliveryFailed = 50001 // 邮件发送失败
-	CodeObjectUploadFailed  = 50002 // 对象存储上传失败
-	CodeDatabaseFailed      = 50003 // 数据库错误
+	CodeInternal              = 50000 // 服务器内部错误
+	CodeEmailDeliveryFailed   = 50001 // 邮件发送失败
+	CodeObjectUploadFailed    = 50002 // 对象存储上传失败
+	CodeDatabaseFailed        = 50003 // 数据库错误
+	CodeDependencyUnavailable = 50300 // 依赖服务暂不可用
 )

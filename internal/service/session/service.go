@@ -282,7 +282,7 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 		return nil, newError(ErrInternal, "generate verification code", err)
 	}
 	if err := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeRegister), email, code, verificationTTL); err != nil {
-		return nil, newError(ErrInternal, "save verification code", err)
+		return nil, newError(ErrDependencyUnavailable, "save verification code", err)
 	}
 	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeRegister); err != nil {
 		slog.Error("send register verification email", "email", email, "error", err)
@@ -317,7 +317,7 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 		// The code already matched and was consumed; without a ticket the user has
 		// to restart, so make sure the spent code cannot be reused either.
 		s.discardCode(ctx, purpose, email)
-		return nil, newError(ErrInternal, "save register ticket", err)
+		return nil, newError(ErrDependencyUnavailable, "save register ticket", err)
 	}
 	if auditErr := s.audit(ctx, nil, "register_verify_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit register verify code", "email", email, "error", auditErr)
@@ -360,7 +360,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	// cost the user their one-time ticket and force a new send-code round trip.
 	email, found, err := s.RegisterTicket.PeekRegisterTicket(ctx, ticket)
 	if err != nil {
-		return nil, newError(ErrInternal, "read register ticket", err)
+		return nil, newError(ErrDependencyUnavailable, "read register ticket", err)
 	}
 	if !found {
 		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 无效或已过期", nil)
@@ -483,7 +483,7 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 		return nil, newError(ErrInternal, "generate verification code", err)
 	}
 	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeResetPassword), email, code, verificationTTL); saveErr != nil {
-		return nil, newError(ErrInternal, "save verification code", saveErr)
+		return nil, newError(ErrDependencyUnavailable, "save verification code", saveErr)
 	}
 	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeResetPassword); err != nil {
 		slog.Error("send forgot password email", "email", email, "error", err)
@@ -626,7 +626,7 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 		return nil, newError(ErrInternal, "generate verification code", err)
 	}
 	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeBindEmail), email, code, verificationTTL); saveErr != nil {
-		return nil, newError(ErrInternal, "save verification code", saveErr)
+		return nil, newError(ErrDependencyUnavailable, "save verification code", saveErr)
 	}
 	ticket, err := generateBindTicket()
 	if err != nil {
@@ -658,7 +658,7 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	// round trip. The ticket is consumed only once the binding is about to happen.
 	payload, found, err := s.BindTicket.PeekBindTicket(ctx, ticket)
 	if err != nil {
-		return nil, newError(ErrInternal, "read bind ticket", err)
+		return nil, newError(ErrDependencyUnavailable, "read bind ticket", err)
 	}
 	if !found {
 		return nil, newError(ErrBindTicketInvalid, "Bind-Ticket 无效或已过期", nil)
@@ -676,7 +676,7 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	consumed, err := s.BindTicket.ConsumeBindTicket(ctx, ticket)
 	if err != nil {
 		s.discardCode(ctx, purpose, payload.Email)
-		return nil, newError(ErrInternal, "consume bind ticket", err)
+		return nil, newError(ErrDependencyUnavailable, "consume bind ticket", err)
 	}
 	if !consumed {
 		s.discardCode(ctx, purpose, payload.Email)
@@ -797,7 +797,7 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 func (s Service) verifyCode(ctx context.Context, purpose, email, code string) error {
 	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, email, code)
 	if err != nil {
-		return newError(ErrInternal, "verify verification code", err)
+		return newError(ErrDependencyUnavailable, "verify verification code", err)
 	}
 	if matched {
 		return nil
