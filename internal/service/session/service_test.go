@@ -374,9 +374,16 @@ func (f *fakeMailer) SendVerificationCode(_ context.Context, to, code string, _ 
 	return nil
 }
 
+// fakeVerificationCodeStore mirrors the Redis store: a wrong guess costs one
+// attempt but leaves the code usable until the budget is spent.
 type fakeVerificationCodeStore struct {
-	codes map[string]string
-	err   error
+	codes       map[string]string
+	attempts    map[string]int
+	attemptCap  int
+	err         error
+	discardErr  error
+	discarded   []string
+	verifyCalls int
 }
 
 func codeKey(purpose, email string) string { return purpose + "|" + email }
@@ -389,24 +396,56 @@ func (f *fakeVerificationCodeStore) SaveVerificationCode(_ context.Context, purp
 		f.codes = map[string]string{}
 	}
 	f.codes[codeKey(purpose, email)] = code
+	delete(f.attempts, codeKey(purpose, email))
 	return nil
 }
 
-func (f *fakeVerificationCodeStore) ConsumeVerificationCode(_ context.Context, purpose, email string) (string, bool, error) {
+func (f *fakeVerificationCodeStore) VerifyVerificationCode(_ context.Context, purpose, email, code string) (bool, int, error) {
+	f.verifyCalls++
 	if f.err != nil {
-		return "", false, f.err
+		return false, 0, f.err
 	}
-	code, ok := f.codes[codeKey(purpose, email)]
+	key := codeKey(purpose, email)
+	stored, ok := f.codes[key]
 	if !ok {
-		return "", false, nil
+		return false, 0, nil
 	}
-	delete(f.codes, codeKey(purpose, email))
-	return code, true, nil
+	if stored == code {
+		delete(f.codes, key)
+		delete(f.attempts, key)
+		return true, 0, nil
+	}
+	if f.attempts == nil {
+		f.attempts = map[string]int{}
+	}
+	limit := f.attemptCap
+	if limit <= 0 {
+		limit = 5
+	}
+	f.attempts[key]++
+	if f.attempts[key] >= limit {
+		delete(f.codes, key)
+		delete(f.attempts, key)
+		return false, 0, nil
+	}
+	return false, limit - f.attempts[key], nil
+}
+
+func (f *fakeVerificationCodeStore) DiscardVerificationCode(_ context.Context, purpose, email string) error {
+	if f.discardErr != nil {
+		return f.discardErr
+	}
+	key := codeKey(purpose, email)
+	f.discarded = append(f.discarded, key)
+	delete(f.codes, key)
+	delete(f.attempts, key)
+	return nil
 }
 
 type fakeRegisterTicketStore struct {
-	tickets map[string]string
-	err     error
+	tickets    map[string]string
+	err        error
+	consumeErr error
 }
 
 func (f *fakeRegisterTicketStore) SaveRegisterTicket(_ context.Context, ticket, email string, _ time.Duration) error {
@@ -420,7 +459,7 @@ func (f *fakeRegisterTicketStore) SaveRegisterTicket(_ context.Context, ticket, 
 	return nil
 }
 
-func (f *fakeRegisterTicketStore) ConsumeRegisterTicket(_ context.Context, ticket string) (string, bool, error) {
+func (f *fakeRegisterTicketStore) PeekRegisterTicket(_ context.Context, ticket string) (string, bool, error) {
 	if f.err != nil {
 		return "", false, f.err
 	}
@@ -428,8 +467,18 @@ func (f *fakeRegisterTicketStore) ConsumeRegisterTicket(_ context.Context, ticke
 	if !ok {
 		return "", false, nil
 	}
-	delete(f.tickets, ticket)
 	return email, true, nil
+}
+
+func (f *fakeRegisterTicketStore) ConsumeRegisterTicket(_ context.Context, ticket string) (bool, error) {
+	if f.consumeErr != nil {
+		return false, f.consumeErr
+	}
+	if _, ok := f.tickets[ticket]; !ok {
+		return false, nil
+	}
+	delete(f.tickets, ticket)
+	return true, nil
 }
 
 type fakeIdentities struct {
@@ -486,8 +535,9 @@ func (f *fakeIdentities) CreateWithinLimit(_ context.Context, identity *model.Id
 }
 
 type fakeBindTicketStore struct {
-	tickets map[string]BindTicketPayload
-	err     error
+	tickets    map[string]BindTicketPayload
+	err        error
+	consumeErr error
 }
 
 func (f *fakeBindTicketStore) SaveBindTicket(_ context.Context, ticket string, payload BindTicketPayload, _ time.Duration) error {
@@ -501,7 +551,7 @@ func (f *fakeBindTicketStore) SaveBindTicket(_ context.Context, ticket string, p
 	return nil
 }
 
-func (f *fakeBindTicketStore) ConsumeBindTicket(_ context.Context, ticket string) (BindTicketPayload, bool, error) {
+func (f *fakeBindTicketStore) PeekBindTicket(_ context.Context, ticket string) (BindTicketPayload, bool, error) {
 	if f.err != nil {
 		return BindTicketPayload{}, false, f.err
 	}
@@ -509,8 +559,18 @@ func (f *fakeBindTicketStore) ConsumeBindTicket(_ context.Context, ticket string
 	if !ok {
 		return BindTicketPayload{}, false, nil
 	}
-	delete(f.tickets, ticket)
 	return payload, true, nil
+}
+
+func (f *fakeBindTicketStore) ConsumeBindTicket(_ context.Context, ticket string) (bool, error) {
+	if f.consumeErr != nil {
+		return false, f.consumeErr
+	}
+	if _, ok := f.tickets[ticket]; !ok {
+		return false, nil
+	}
+	delete(f.tickets, ticket)
+	return true, nil
 }
 
 func TestLoginNormalizesIssuesTokensAndAudits(t *testing.T) {
@@ -1582,4 +1642,178 @@ func lastErrCode(audit *fakeAudit) int {
 		return 0
 	}
 	return *audit.entries[len(audit.entries)-1].ErrCode
+}
+
+// A wrong code used to consume the stored value, so one bad guess burned the
+// valid code for every flow that verifies one.
+func TestWrongVerificationCodeDoesNotBurnTheCode(t *testing.T) {
+	tests := []struct {
+		name   string
+		save   func(*fakeVerificationCodeStore)
+		submit func(Service, string) error
+	}{
+		{
+			name: "register verify-code",
+			save: func(codes *fakeVerificationCodeStore) {
+				codes.codes = map[string]string{codeKey(string(mailer.VerificationPurposeRegister), "new@sast.fun"): "123456"}
+			},
+			submit: func(service Service, code string) error {
+				_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: code})
+				return err
+			},
+		},
+		{
+			name: "reset password",
+			save: func(codes *fakeVerificationCodeStore) {
+				codes.codes = map[string]string{codeKey(string(mailer.VerificationPurposeResetPassword), "user@njupt.edu.cn"): "123456"}
+			},
+			submit: func(service Service, code string) error {
+				_, err := service.ResetPassword(context.Background(), ResetPasswordInput{
+					Email:    "user@njupt.edu.cn",
+					Code:     code,
+					Password: "brand-new-password",
+				})
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := newRegisterService(t)
+			codes := service.VerificationCode.(*fakeVerificationCodeStore)
+			test.save(codes)
+
+			err := test.submit(service, "000000")
+			assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+
+			// The valid code must still work on the next try.
+			if err := test.submit(service, "123456"); err != nil {
+				t.Fatalf("correct code rejected after one wrong guess: %v", err)
+			}
+		})
+	}
+}
+
+// Once the store reports the attempt budget spent, the caller must surface the
+// expired outcome rather than an endless "wrong code".
+func TestExhaustedVerificationAttemptsReportExpired(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	codes.attemptCap = 2
+	codes.codes = map[string]string{codeKey(string(mailer.VerificationPurposeRegister), "new@sast.fun"): "123456"}
+
+	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+
+	_, err = service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeExpired)
+
+	_, err = service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeExpired)
+}
+
+// BindEmailVerify consumed the Bind-Ticket before checking the code, so a typo
+// cost the user their ticket and forced a new send-code round trip.
+func TestBindEmailVerifyKeepsTicketOnWrongCode(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.BindTicket.(*fakeBindTicketStore)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	if err := tickets.SaveBindTicket(context.Background(), "be_abc", BindTicketPayload{UserID: 42, Email: "bind@qq.com"}, time.Minute); err != nil {
+		t.Fatalf("SaveBindTicket() error = %v", err)
+	}
+	codes.codes = map[string]string{codeKey(string(mailer.VerificationPurposeBindEmail), "bind@qq.com"): "123456"}
+
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_abc", Code: "000000"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
+	if _, ok := tickets.tickets["be_abc"]; !ok {
+		t.Fatal("Bind-Ticket was consumed by a wrong verification code")
+	}
+
+	result, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_abc", Code: "123456"})
+	if err != nil {
+		t.Fatalf("BindEmailVerify() after retry error = %v", err)
+	}
+	if result.Email != "bind@qq.com" {
+		t.Fatalf("result = %+v, want bind@qq.com", result)
+	}
+	// The successful bind spends the ticket, so it cannot be replayed.
+	if _, ok := tickets.tickets["be_abc"]; ok {
+		t.Fatal("Bind-Ticket survived a successful bind")
+	}
+}
+
+// A ticket that does not belong to the caller must be rejected without being
+// spent, so the rightful owner can still use it.
+func TestBindEmailVerifyKeepsTicketOnOwnerMismatch(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.BindTicket.(*fakeBindTicketStore)
+	if err := tickets.SaveBindTicket(context.Background(), "be_abc", BindTicketPayload{UserID: 42, Email: "bind@qq.com"}, time.Minute); err != nil {
+		t.Fatalf("SaveBindTicket() error = %v", err)
+	}
+
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 99, BindTicket: "be_abc", Code: "123456"})
+	assertKind(t, err, KindInvalidToken, errcode.CodeBindTicketInvalid)
+	if _, ok := tickets.tickets["be_abc"]; !ok {
+		t.Fatal("Bind-Ticket was consumed by a request from the wrong user")
+	}
+}
+
+// Register consumed the ticket before the uniqueness checks, so a taken student
+// ID burned it too.
+func TestRegisterKeepsTicketWhenStudentIDOccupied(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	users := service.Users.(*fakeUsers)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+	occupied := users.byID[42].StudentID
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "Dup",
+		StudentID:      occupied,
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	assertKind(t, err, KindConflict, errcode.CodeStudentIDOccupied)
+	if _, ok := tickets.tickets["reg_xxx"]; !ok {
+		t.Fatal("Register-Ticket was consumed by an occupied student ID")
+	}
+
+	// The corrected retry must succeed on the same ticket.
+	if _, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "Fixed",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	}); err != nil {
+		t.Fatalf("Register() retry error = %v", err)
+	}
+	if _, ok := tickets.tickets["reg_xxx"]; ok {
+		t.Fatal("Register-Ticket survived a successful registration")
+	}
+}
+
+// If the ticket cannot be issued, the already-matched code must be discarded so
+// it cannot be replayed by a retry.
+func TestVerifyRegisterCodeDiscardsCodeWhenTicketSaveFails(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	purpose := string(mailer.VerificationPurposeRegister)
+	codes.codes = map[string]string{codeKey(purpose, "new@sast.fun"): "123456"}
+	service.RegisterTicket = &fakeRegisterTicketStore{err: errors.New("redis unavailable")}
+
+	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "new@sast.fun", Code: "123456"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+	if !slices.Contains(codes.discarded, codeKey(purpose, "new@sast.fun")) {
+		t.Fatalf("discarded = %#v, want the consumed code dropped", codes.discarded)
+	}
 }

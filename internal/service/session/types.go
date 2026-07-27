@@ -72,12 +72,24 @@ type AuditRepository interface {
 // email, so a code issued for one flow cannot be replayed against another.
 type VerificationCodeStore interface {
 	SaveVerificationCode(ctx context.Context, purpose, email, code string, ttl time.Duration) error
-	ConsumeVerificationCode(ctx context.Context, purpose, email string) (code string, found bool, err error)
+	// VerifyVerificationCode compares the submitted code against the stored one
+	// without discarding it on a wrong guess, so a typo stays recoverable. The
+	// store bounds the attempts and drops the code once the budget is spent;
+	// remaining reports how many guesses are left after a mismatch.
+	VerifyVerificationCode(ctx context.Context, purpose, email, code string) (matched bool, remaining int, err error)
+	// DiscardVerificationCode drops an already-matched code so a later failure in
+	// the same flow cannot leave it replayable.
+	DiscardVerificationCode(ctx context.Context, purpose, email string) error
 }
 
 type RegisterTicketStore interface {
 	SaveRegisterTicket(ctx context.Context, ticket, email string, ttl time.Duration) error
-	ConsumeRegisterTicket(ctx context.Context, ticket string) (email string, found bool, err error)
+	// PeekRegisterTicket reads the verified email without consuming the ticket, so
+	// a rejectable request does not spend it.
+	PeekRegisterTicket(ctx context.Context, ticket string) (email string, found bool, err error)
+	// ConsumeRegisterTicket atomically deletes the ticket, reporting whether this
+	// caller removed it. Concurrent replays of one ticket elect a single winner.
+	ConsumeRegisterTicket(ctx context.Context, ticket string) (consumed bool, err error)
 }
 
 type BindTicketPayload struct {
@@ -87,7 +99,13 @@ type BindTicketPayload struct {
 
 type BindTicketStore interface {
 	SaveBindTicket(ctx context.Context, ticket string, payload BindTicketPayload, ttl time.Duration) error
-	ConsumeBindTicket(ctx context.Context, ticket string) (payload BindTicketPayload, found bool, err error)
+	// PeekBindTicket reads a ticket without consuming it, so a wrong verification
+	// code does not cost the user their ticket.
+	PeekBindTicket(ctx context.Context, ticket string) (payload BindTicketPayload, found bool, err error)
+	// ConsumeBindTicket atomically deletes the ticket, reporting whether this
+	// caller was the one that removed it. Callers rely on that to serialize
+	// concurrent binds using the same ticket.
+	ConsumeBindTicket(ctx context.Context, ticket string) (consumed bool, err error)
 }
 
 type IdentityRepository interface {

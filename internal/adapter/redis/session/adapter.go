@@ -72,13 +72,17 @@ func (s BindTicketStore) SaveBindTicket(ctx context.Context, ticket string, payl
 	return s.Store.SetOneTime(ctx, s.Store.Keys.BindTicket(ticket), payload, ttl)
 }
 
-func (s BindTicketStore) ConsumeBindTicket(ctx context.Context, ticket string) (session.BindTicketPayload, bool, error) {
+func (s BindTicketStore) PeekBindTicket(ctx context.Context, ticket string) (session.BindTicketPayload, bool, error) {
 	var payload session.BindTicketPayload
-	if err := s.Store.GetDelOneTime(ctx, s.Store.Keys.BindTicket(ticket), &payload); err != nil {
+	if err := s.Store.PeekOneTime(ctx, s.Store.Keys.BindTicket(ticket), &payload); err != nil {
 		if errors.Is(err, internalredis.ErrMiss) {
 			return session.BindTicketPayload{}, false, nil
 		}
 		return session.BindTicketPayload{}, false, err
 	}
 	return payload, true, nil
+}
+
+func (s BindTicketStore) ConsumeBindTicket(ctx context.Context, ticket string) (bool, error) {
+	return s.Store.DeleteOneTime(ctx, s.Store.Keys.BindTicket(ticket))
 }

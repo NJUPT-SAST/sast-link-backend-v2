@@ -305,21 +305,18 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 	if !isAllowedEmailDomain(email) {
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
 	}
-	stored, found, err := s.VerificationCode.ConsumeVerificationCode(ctx, string(mailer.VerificationPurposeRegister), email)
-	if err != nil {
-		return nil, newError(ErrInternal, "consume verification code", err)
-	}
-	if !found {
-		return nil, newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
-	}
-	if stored != input.Code {
-		return nil, newError(ErrVerificationCodeWrong, "验证码错误", nil)
+	purpose := string(mailer.VerificationPurposeRegister)
+	if err := s.verifyCode(ctx, purpose, email, input.Code); err != nil {
+		return nil, err
 	}
 	ticket, err := generateRegisterTicket()
 	if err != nil {
 		return nil, newError(ErrInternal, "generate register ticket", err)
 	}
 	if err := s.RegisterTicket.SaveRegisterTicket(ctx, ticket, email, verificationTTL); err != nil {
+		// The code already matched and was consumed; without a ticket the user has
+		// to restart, so make sure the spent code cannot be reused either.
+		s.discardCode(ctx, purpose, email)
 		return nil, newError(ErrInternal, "save register ticket", err)
 	}
 	if auditErr := s.audit(ctx, nil, "register_verify_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
@@ -358,9 +355,12 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
 	}
 
-	email, found, err := s.RegisterTicket.ConsumeRegisterTicket(ctx, ticket)
+	// Read the ticket first and only spend it once every rejectable condition has
+	// been checked: a recoverable error such as an occupied student ID must not
+	// cost the user their one-time ticket and force a new send-code round trip.
+	email, found, err := s.RegisterTicket.PeekRegisterTicket(ctx, ticket)
 	if err != nil {
-		return nil, newError(ErrInternal, "consume register ticket", err)
+		return nil, newError(ErrInternal, "read register ticket", err)
 	}
 	if !found {
 		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 无效或已过期", nil)
@@ -382,6 +382,16 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	}
 	if exists {
 		return nil, newError(ErrStudentIDOccupied, "学号已被占用", nil)
+	}
+
+	// Spend the ticket now. Deleting it elects a single winner among concurrent
+	// requests replaying the same ticket, so only one can create the account.
+	consumed, err := s.RegisterTicket.ConsumeRegisterTicket(ctx, ticket)
+	if err != nil {
+		return nil, newError(ErrInternal, "consume register ticket", err)
+	}
+	if !consumed {
+		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 无效或已过期", nil)
 	}
 
 	passwordHash, err := s.Passwords.HashPassword(password)
@@ -484,15 +494,8 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	if len(input.Password) < 8 {
 		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
 	}
-	stored, found, err := s.VerificationCode.ConsumeVerificationCode(ctx, string(mailer.VerificationPurposeResetPassword), email)
-	if err != nil {
-		return nil, newError(ErrInternal, "consume verification code", err)
-	}
-	if !found {
-		return nil, newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
-	}
-	if stored != input.Code {
-		return nil, newError(ErrVerificationCodeWrong, "验证码错误", nil)
+	if err := s.verifyCode(ctx, string(mailer.VerificationPurposeResetPassword), email, input.Code); err != nil {
+		return nil, err
 	}
 	user, err := s.Users.FindByLoginEmail(ctx, email)
 	if errors.Is(err, repository.ErrNotFound) {
@@ -631,9 +634,12 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	if ticket == "" || input.Code == "" {
 		return nil, newError(ErrInvalidInput, "bind_ticket and code are required", nil)
 	}
-	payload, found, err := s.BindTicket.ConsumeBindTicket(ctx, ticket)
+	// Read the ticket without consuming it: a wrong verification code must not
+	// cost the user their Bind-Ticket, or every typo forces a fresh send-code
+	// round trip. The ticket is consumed only once the binding is about to happen.
+	payload, found, err := s.BindTicket.PeekBindTicket(ctx, ticket)
 	if err != nil {
-		return nil, newError(ErrInternal, "consume bind ticket", err)
+		return nil, newError(ErrInternal, "read bind ticket", err)
 	}
 	if !found {
 		return nil, newError(ErrBindTicketInvalid, "Bind-Ticket 无效或已过期", nil)
@@ -641,15 +647,21 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	if payload.UserID != input.UserID {
 		return nil, newError(ErrBindTicketInvalid, "Bind-Ticket 不属于当前用户", nil)
 	}
-	stored, codeFound, err := s.VerificationCode.ConsumeVerificationCode(ctx, string(mailer.VerificationPurposeBindEmail), payload.Email)
+	purpose := string(mailer.VerificationPurposeBindEmail)
+	if verifyErr := s.verifyCode(ctx, purpose, payload.Email, input.Code); verifyErr != nil {
+		return nil, verifyErr
+	}
+	// The code matched, so the ticket has served its purpose. Consuming it here
+	// also serializes concurrent requests replaying the same ticket: only the
+	// caller that removes the key proceeds to insert the identity.
+	consumed, err := s.BindTicket.ConsumeBindTicket(ctx, ticket)
 	if err != nil {
-		return nil, newError(ErrInternal, "consume verification code", err)
+		s.discardCode(ctx, purpose, payload.Email)
+		return nil, newError(ErrInternal, "consume bind ticket", err)
 	}
-	if !codeFound {
-		return nil, newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
-	}
-	if stored != input.Code {
-		return nil, newError(ErrVerificationCodeWrong, "验证码错误", nil)
+	if !consumed {
+		s.discardCode(ctx, purpose, payload.Email)
+		return nil, newError(ErrBindTicketInvalid, "Bind-Ticket 无效或已过期", nil)
 	}
 	if existing, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, payload.Email); findErr == nil {
 		if existing.UserID == input.UserID {
@@ -750,6 +762,33 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 			// failed synchronous delivery is expected degradation, not an error.
 			slog.WarnContext(ctx, "deliver token blacklist entry, outbox worker will retry", "token_id", entry.TokenID, "error", err)
 		}
+	}
+}
+
+// verifyCode checks a submitted email code. The store keeps the code alive
+// through a bounded number of wrong guesses, so a mistyped digit no longer burns
+// it — a wrong guess used to delete the valid code, which let anyone who knew an
+// address invalidate its code at will. Once the budget is spent the store drops
+// the code and the caller sees the expired outcome.
+func (s Service) verifyCode(ctx context.Context, purpose, email, code string) error {
+	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, email, code)
+	if err != nil {
+		return newError(ErrInternal, "verify verification code", err)
+	}
+	if matched {
+		return nil
+	}
+	if remaining <= 0 {
+		return newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
+	}
+	return newError(ErrVerificationCodeWrong, "验证码错误", nil)
+}
+
+// discardCode drops an already-matched code when a later step of the same flow
+// fails, so the spent code cannot be replayed by a retry.
+func (s Service) discardCode(ctx context.Context, purpose, email string) {
+	if err := s.VerificationCode.DiscardVerificationCode(ctx, purpose, email); err != nil {
+		slog.WarnContext(ctx, "discard consumed verification code", "purpose", purpose, "error", err)
 	}
 }
 

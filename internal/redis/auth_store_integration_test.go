@@ -207,3 +207,196 @@ func TestLoginFailures(t *testing.T) {
 		t.Fatalf("GetLoginFailures after reset = %+v, %v", state, err)
 	}
 }
+
+// A wrong guess used to delete the stored code outright, so anyone who knew an
+// address could invalidate its verification code at will. The code must now
+// survive a mismatch until the attempt budget runs out.
+func TestVerifyVerificationCodeSurvivesWrongGuess(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+	const (
+		purpose = "register"
+		email   = "survive@njupt.edu.cn"
+	)
+	if err := store.SaveVerificationCode(ctx, purpose, email, "123456", time.Minute); err != nil {
+		t.Fatalf("SaveVerificationCode() error = %v", err)
+	}
+
+	matched, remaining, err := store.VerifyVerificationCode(ctx, purpose, email, "000000")
+	if err != nil {
+		t.Fatalf("VerifyVerificationCode(wrong) error = %v", err)
+	}
+	if matched || remaining != maximumVerificationCodeAttempts-1 {
+		t.Fatalf("wrong guess = (%t, %d), want (false, %d)", matched, remaining, maximumVerificationCodeAttempts-1)
+	}
+
+	matched, _, err = store.VerifyVerificationCode(ctx, purpose, email, "123456")
+	if err != nil {
+		t.Fatalf("VerifyVerificationCode(correct) error = %v", err)
+	}
+	if !matched {
+		t.Fatal("correct code rejected after one wrong guess: the guess burned it")
+	}
+
+	// A matching code is consumed, so it cannot be replayed.
+	matched, remaining, err = store.VerifyVerificationCode(ctx, purpose, email, "123456")
+	if err != nil {
+		t.Fatalf("VerifyVerificationCode(replay) error = %v", err)
+	}
+	if matched || remaining != 0 {
+		t.Fatalf("replay = (%t, %d), want (false, 0)", matched, remaining)
+	}
+}
+
+// The attempt budget is what keeps a 6-digit code from being brute-forced, so it
+// must actually terminate and must not be resettable by re-guessing.
+func TestVerifyVerificationCodeExhaustsAttempts(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+	const (
+		purpose = "reset_password"
+		email   = "brute@njupt.edu.cn"
+	)
+	if err := store.SaveVerificationCode(ctx, purpose, email, "123456", time.Minute); err != nil {
+		t.Fatalf("SaveVerificationCode() error = %v", err)
+	}
+
+	for attempt := 1; attempt < maximumVerificationCodeAttempts; attempt++ {
+		matched, remaining, err := store.VerifyVerificationCode(ctx, purpose, email, "000000")
+		if err != nil {
+			t.Fatalf("attempt %d error = %v", attempt, err)
+		}
+		if matched {
+			t.Fatalf("attempt %d matched a wrong code", attempt)
+		}
+		if want := maximumVerificationCodeAttempts - attempt; remaining != want {
+			t.Fatalf("attempt %d remaining = %d, want %d", attempt, remaining, want)
+		}
+	}
+
+	matched, remaining, err := store.VerifyVerificationCode(ctx, purpose, email, "000000")
+	if err != nil {
+		t.Fatalf("final attempt error = %v", err)
+	}
+	if matched || remaining != 0 {
+		t.Fatalf("final attempt = (%t, %d), want (false, 0)", matched, remaining)
+	}
+	// Budget spent: the code is gone, so even the correct value fails.
+	if matched, _, err = store.VerifyVerificationCode(ctx, purpose, email, "123456"); err != nil {
+		t.Fatalf("post-exhaustion error = %v", err)
+	} else if matched {
+		t.Fatal("correct code still accepted after the attempt budget was spent")
+	}
+
+	// A freshly issued code must start with a full budget rather than inherit the
+	// spent one, or it would die on its first use.
+	if reissueErr := store.SaveVerificationCode(ctx, purpose, email, "654321", time.Minute); reissueErr != nil {
+		t.Fatalf("SaveVerificationCode(reissue) error = %v", reissueErr)
+	}
+	matched, remaining, err = store.VerifyVerificationCode(ctx, purpose, email, "000000")
+	if err != nil {
+		t.Fatalf("reissued wrong guess error = %v", err)
+	}
+	if matched || remaining != maximumVerificationCodeAttempts-1 {
+		t.Fatalf("reissued code = (%t, %d), want (false, %d)", matched, remaining, maximumVerificationCodeAttempts-1)
+	}
+}
+
+// The attempt counter must not outlive the code it guards.
+func TestVerifyVerificationCodeAttemptCounterExpiresWithCode(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+	const (
+		purpose = "bind_email"
+		email   = "ttl@njupt.edu.cn"
+	)
+	if err := store.SaveVerificationCode(ctx, purpose, email, "123456", 2*time.Second); err != nil {
+		t.Fatalf("SaveVerificationCode() error = %v", err)
+	}
+	if _, _, err := store.VerifyVerificationCode(ctx, purpose, email, "000000"); err != nil {
+		t.Fatalf("VerifyVerificationCode() error = %v", err)
+	}
+	ttl, err := client.PTTL(ctx, store.Keys.VerificationCodeAttempt(purpose, email)).Result()
+	if err != nil {
+		t.Fatalf("PTTL() error = %v", err)
+	}
+	if ttl <= 0 || ttl > 2*time.Second {
+		t.Fatalf("attempt counter TTL = %v, want a positive value bounded by the code TTL", ttl)
+	}
+}
+
+func TestDiscardVerificationCodeRemovesCodeAndAttempts(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+	const (
+		purpose = "register"
+		email   = "discard@njupt.edu.cn"
+	)
+	if err := store.SaveVerificationCode(ctx, purpose, email, "123456", time.Minute); err != nil {
+		t.Fatalf("SaveVerificationCode() error = %v", err)
+	}
+	if _, _, err := store.VerifyVerificationCode(ctx, purpose, email, "000000"); err != nil {
+		t.Fatalf("VerifyVerificationCode() error = %v", err)
+	}
+	if err := store.DiscardVerificationCode(ctx, purpose, email); err != nil {
+		t.Fatalf("DiscardVerificationCode() error = %v", err)
+	}
+	for _, key := range []string{
+		store.Keys.VerifyCode(purpose, email),
+		store.Keys.VerificationCodeAttempt(purpose, email),
+	} {
+		count, err := client.Exists(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("Exists(%q) error = %v", key, err)
+		}
+		if count != 0 {
+			t.Fatalf("key %q still present after discard", key)
+		}
+	}
+}
+
+// Peek must leave the ticket usable, and only one concurrent consumer may win it.
+func TestPeekAndConsumeTicketsElectSingleWinner(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+	if err := store.SaveRegisterTicket(ctx, "reg_peek", "peek@njupt.edu.cn", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+
+	for range 3 {
+		email, found, err := store.PeekRegisterTicket(ctx, "reg_peek")
+		if err != nil || !found || email != "peek@njupt.edu.cn" {
+			t.Fatalf("PeekRegisterTicket() = (%q, %t, %v), want the email preserved", email, found, err)
+		}
+	}
+
+	const racers = 8
+	var waitGroup sync.WaitGroup
+	var winners atomic.Int64
+	for range racers {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			consumed, err := store.ConsumeRegisterTicket(ctx, "reg_peek")
+			if err != nil {
+				t.Errorf("ConsumeRegisterTicket() error = %v", err)
+				return
+			}
+			if consumed {
+				winners.Add(1)
+			}
+		}()
+	}
+	waitGroup.Wait()
+	if got := winners.Load(); got != 1 {
+		t.Fatalf("winners = %d, want exactly 1", got)
+	}
+	if _, found, err := store.PeekRegisterTicket(ctx, "reg_peek"); err != nil || found {
+		t.Fatalf("PeekRegisterTicket() after consume = (%t, %v), want not found", found, err)
+	}
+}

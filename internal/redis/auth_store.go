@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -134,6 +135,38 @@ func (s Store) SetOneTime(ctx context.Context, key string, payload any, ttl time
 	return nil
 }
 
+// PeekOneTime reads a one-time JSON payload without consuming it, for flows that
+// must validate further input before spending the token.
+func (s Store) PeekOneTime(ctx context.Context, key string, target any) error {
+	if s.Client == nil || key == "" || target == nil {
+		return fmt.Errorf("peek one-time: %w", ErrInvalidArgument)
+	}
+	value, err := s.Client.Get(ctx, key).Result()
+	if errors.Is(err, goredis.Nil) {
+		return ErrMiss
+	}
+	if err != nil {
+		return fmt.Errorf("peek one-time: %w", err)
+	}
+	if err := json.Unmarshal([]byte(value), target); err != nil {
+		return fmt.Errorf("unmarshal one-time payload: %w", err)
+	}
+	return nil
+}
+
+// DeleteOneTime removes a one-time key and reports whether this call was the one
+// that deleted it. Concurrent callers can use that to elect a single winner.
+func (s Store) DeleteOneTime(ctx context.Context, key string) (bool, error) {
+	if s.Client == nil || key == "" {
+		return false, fmt.Errorf("delete one-time: %w", ErrInvalidArgument)
+	}
+	deleted, err := s.Client.Del(ctx, key).Result()
+	if err != nil {
+		return false, fmt.Errorf("delete one-time: %w", err)
+	}
+	return deleted > 0, nil
+}
+
 // GetDelOneTime atomically consumes a JSON payload.
 func (s Store) GetDelOneTime(ctx context.Context, key string, target any) error {
 	if s.Client == nil || key == "" || target == nil {
@@ -152,30 +185,129 @@ func (s Store) GetDelOneTime(ctx context.Context, key string, target any) error 
 	return nil
 }
 
-// SaveVerificationCode stores a numeric verification code for the given purpose and email.
+// SaveVerificationCode stores a numeric verification code for the given purpose
+// and email, resetting the failed-attempt counter so a freshly issued code
+// always starts with a full attempt budget. Without the reset, exhausted
+// attempts from a previous code would kill the new one on its first use.
 func (s Store) SaveVerificationCode(ctx context.Context, purpose, email, code string, ttl time.Duration) error {
 	if s.Client == nil || purpose == "" || email == "" || code == "" || ttl <= 0 {
 		return fmt.Errorf("save verification code: %w", ErrInvalidArgument)
 	}
-	if err := s.Client.Set(ctx, s.Keys.VerifyCode(purpose, email), code, ttl).Err(); err != nil {
+	milliseconds := ttl.Milliseconds()
+	if milliseconds <= 0 || milliseconds > math.MaxInt {
+		return fmt.Errorf("save verification code: %w", ErrInvalidArgument)
+	}
+	keys := []string{
+		s.Keys.VerifyCode(purpose, email),
+		s.Keys.VerificationCodeAttempt(purpose, email),
+	}
+	if err := s.Client.Eval(ctx, saveVerificationCodeScript, keys, code, int(milliseconds)).Err(); err != nil {
 		return fmt.Errorf("save verification code: %w", err)
 	}
 	return nil
 }
 
-// ConsumeVerificationCode atomically reads and deletes a verification code.
-func (s Store) ConsumeVerificationCode(ctx context.Context, purpose, email string) (string, bool, error) {
-	if s.Client == nil || purpose == "" || email == "" {
-		return "", false, fmt.Errorf("consume verification code: %w", ErrInvalidArgument)
+// saveVerificationCodeScript writes the code and clears the attempt counter in
+// one step, so a new code can never inherit a spent attempt budget.
+const saveVerificationCodeScript = `
+redis.call("SET", KEYS[1], ARGV[1], "PX", tonumber(ARGV[2]))
+redis.call("DEL", KEYS[2])
+return 1
+`
+
+// verificationCodeAttemptScript compares a submitted code against the stored one
+// and deletes the key only on a match or once the attempt budget is spent.
+//
+// A plain GETDEL would let one wrong guess burn the valid code (a trivial denial
+// of service against any known address), while never deleting on mismatch would
+// turn a 6-digit code into an unlimited brute-force target. Bounding the
+// attempts keeps a typo recoverable and caps the guess space at ARGV[2]/10^6.
+//
+// The attempt counter shares the code's remaining TTL, so it cannot outlive the
+// code or be reset by re-submitting.
+//
+// Returns {status, attempts_remaining}: 0 = missing/exhausted, 1 = match,
+// 2 = mismatch with attempts left.
+const verificationCodeAttemptScript = `
+local stored = redis.call("GET", KEYS[1])
+if not stored then
+  redis.call("DEL", KEYS[2])
+  return {0, 0}
+end
+if stored == ARGV[1] then
+  redis.call("DEL", KEYS[1], KEYS[2])
+  return {1, 0}
+end
+local attempts = redis.call("INCR", KEYS[2])
+local limit = tonumber(ARGV[2])
+if attempts == 1 then
+  local ttl = redis.call("PTTL", KEYS[1])
+  if ttl > 0 then
+    redis.call("PEXPIRE", KEYS[2], ttl)
+  end
+end
+if attempts >= limit then
+  redis.call("DEL", KEYS[1], KEYS[2])
+  return {0, 0}
+end
+return {2, limit - attempts}
+`
+
+// maximumVerificationCodeAttempts bounds guesses per issued code. Five leaves
+// room for typos while capping the brute-force success rate at 5-in-a-million.
+const maximumVerificationCodeAttempts = 5
+
+// VerificationCodeAttempt returns the key holding the failed-attempt counter for
+// an issued verification code.
+func (k Keys) VerificationCodeAttempt(purpose, email string) string {
+	return k.join("verify", "attempt", dynamicKeySegment(purpose), dynamicKeySegment(email))
+}
+
+// VerifyVerificationCode atomically compares code against the stored value. The
+// code survives a wrong guess until the attempt budget is exhausted, so a typo
+// does not force the user to request a new one. It reports whether the code
+// matched and, on mismatch, how many attempts remain.
+func (s Store) VerifyVerificationCode(ctx context.Context, purpose, email, code string) (bool, int, error) {
+	if s.Client == nil || purpose == "" || email == "" || code == "" {
+		return false, 0, fmt.Errorf("verify verification code: %w", ErrInvalidArgument)
 	}
-	code, err := s.Client.GetDel(ctx, s.Keys.VerifyCode(purpose, email)).Result()
-	if errors.Is(err, goredis.Nil) {
-		return "", false, nil
+	keys := []string{
+		s.Keys.VerifyCode(purpose, email),
+		s.Keys.VerificationCodeAttempt(purpose, email),
 	}
+	values, err := s.Client.Eval(ctx, verificationCodeAttemptScript, keys, code, maximumVerificationCodeAttempts).Slice()
 	if err != nil {
-		return "", false, fmt.Errorf("consume verification code: %w", err)
+		return false, 0, fmt.Errorf("verify verification code eval: %w", err)
 	}
-	return code, true, nil
+	if len(values) != 2 {
+		return false, 0, fmt.Errorf("verify verification code eval: unexpected result")
+	}
+	status, err := redisInt(values[0])
+	if err != nil {
+		return false, 0, err
+	}
+	remaining, err := redisInt(values[1])
+	if err != nil {
+		return false, 0, err
+	}
+	return status == 1, remaining, nil
+}
+
+// DiscardVerificationCode drops a verified code and its attempt counter. Used
+// when a later step in the same flow fails after the code already matched, so a
+// retry cannot reuse it.
+func (s Store) DiscardVerificationCode(ctx context.Context, purpose, email string) error {
+	if s.Client == nil || purpose == "" || email == "" {
+		return fmt.Errorf("discard verification code: %w", ErrInvalidArgument)
+	}
+	keys := []string{
+		s.Keys.VerifyCode(purpose, email),
+		s.Keys.VerificationCodeAttempt(purpose, email),
+	}
+	if err := s.Client.Del(ctx, keys...).Err(); err != nil {
+		return fmt.Errorf("discard verification code: %w", err)
+	}
+	return nil
 }
 
 // SaveRegisterTicket stores a one-time ticket bound to the verified email.
@@ -186,19 +318,27 @@ func (s Store) SaveRegisterTicket(ctx context.Context, ticket, email string, ttl
 	return s.SetOneTime(ctx, s.Keys.RegisterTicket(ticket), email, ttl)
 }
 
-// ConsumeRegisterTicket atomically reads and deletes a ticket, returning the stored email.
-func (s Store) ConsumeRegisterTicket(ctx context.Context, ticket string) (string, bool, error) {
+// PeekRegisterTicket reads the email bound to a ticket without consuming it.
+func (s Store) PeekRegisterTicket(ctx context.Context, ticket string) (string, bool, error) {
 	if s.Client == nil || ticket == "" {
-		return "", false, fmt.Errorf("consume register ticket: %w", ErrInvalidArgument)
+		return "", false, fmt.Errorf("peek register ticket: %w", ErrInvalidArgument)
 	}
 	var email string
-	if err := s.GetDelOneTime(ctx, s.Keys.RegisterTicket(ticket), &email); err != nil {
+	if err := s.PeekOneTime(ctx, s.Keys.RegisterTicket(ticket), &email); err != nil {
 		if errors.Is(err, ErrMiss) {
 			return "", false, nil
 		}
 		return "", false, err
 	}
 	return email, true, nil
+}
+
+// ConsumeRegisterTicket deletes a ticket, reporting whether this call removed it.
+func (s Store) ConsumeRegisterTicket(ctx context.Context, ticket string) (bool, error) {
+	if s.Client == nil || ticket == "" {
+		return false, fmt.Errorf("consume register ticket: %w", ErrInvalidArgument)
+	}
+	return s.DeleteOneTime(ctx, s.Keys.RegisterTicket(ticket))
 }
 
 // BlacklistJTI blacklists a JWT ID until its token expiry.

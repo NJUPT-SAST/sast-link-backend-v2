@@ -99,8 +99,8 @@ SAST Link 同时作为 OAuth 2.1 授权服务器和 OIDC Provider：
 **两步注册**：
 
 1. `POST /auth/register/send-code` → 校验邮箱域名 → 生成 6 位数字验证码 → SMTP 发送 → 验证码写 Redis（key: `sastlink:verify:register:{email}`，TTL 5min）
-2. `POST /auth/register/verify-code` → 校验验证码（成功后删除）→ 返回 Register-Ticket（`reg_` + 32 位 hex，Redis 5min，一次性，GetDel 消费）
-3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱 → 校验所有 user 字段已填且密码 ≥ 8 位 → PBKDF2-SHA512 哈希 → 创建 user + profile → 签发 Token Pair
+2. `POST /auth/register/verify-code` → 校验验证码（匹配后删除；填错仅消耗一次尝试，验证码保留，最多 5 次后作废）→ 返回 Register-Ticket（`reg_` + 32 位 hex，Redis 5min，一次性）
+3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱（先只读校验）→ 校验所有 user 字段已填且密码 ≥ 8 位 → 查邮箱/学号是否被占用 → 全部通过后才 DEL 消费 ticket → PBKDF2-SHA512 哈希 → 创建 user + profile → 签发 Token Pair
 
 **可选 registration_state 绑定**：传入 `registration_state` + `oauth_state`（OAuth 标准 state 参数）时，注册成功后 * 并消费 `registration_state` + `oauth_state` → 验证双值匹配 → 自动创建 identities 记录。用于第三方 OAuth 首次登录的无绑定分支——用户先经 OAuth 回调拿到 `registration_state`，再走注册流程，注册后自动绑定
 
@@ -432,7 +432,8 @@ is_deleted ──(恢复)──► njupter
 
 | 场景 | Key | TTL | 数据结构 | 说明 |
 |------|-----|-----|----------|------|
-| 验证码 | `sastlink:verify:{purpose}:{email}` | 5min | String（GetDel 消费） | `purpose` ∈ `register` / `reset_password` / `bind_email`。按用途分键，使某一流程签发的验证码无法用于另一流程 |
+| 验证码 | `sastlink:verify:{purpose}:{email}` | 5min | String（Lua 原子比对，匹配后 DEL） | `purpose` ∈ `register` / `reset_password` / `bind_email`。按用途分键，使某一流程签发的验证码无法用于另一流程。填错不删除验证码（否则任何人都能用一次错误提交作废他人验证码），改为累计失败次数 |
+| 验证码失败计数 | `sastlink:verify:attempt:{purpose}:{email}` | 跟随验证码剩余 TTL | String（INCR） | 每个验证码最多 5 次尝试，用尽即连同验证码一并删除，避免 6 位码被无限爆破。重新发码时清零 |
 | 限流 | `sastlink:ratelimit:{ip}:{endpoint}` | 30s~15min | String（INCR 计数器 + EXPIRE） | 固定窗口计数器，按端点差异化配置（登录 15min/发验证码 60s 等） |
 | 设备管理 | `sastlink:devices:{user_id}` | 30d | Sorted Set（score=login_ts, member=device_id） | 最多 5 台同时登录，详情另存 Hash。淘汰/登出见 §6.1 |
 | 解绑冷却 | `sastlink:unbind:cooldown:{email}` | 60s | String（SET NX EX） | 防快速重复解绑 |
@@ -442,8 +443,8 @@ is_deleted ──(恢复)──► njupter
 | OAuth 注册暂存 | `sastlink:oauth:registration:{state}` | 15min | String（GetDel 消费，JSON 值） | OAuth 回调无绑定分支。暂存 `{provider, provider_id, identity_data, oauth_state}`，消费时校验双值匹配 |
 | 登录码 | `sastlink:auth:login_code:{code}` | 60s | String（GetDel 消费） | OAuth 回调已有绑定用户分支，暂存 user_id，前端交换 Token Pair |
 | 登录失败 | `sastlink:auth:login_failure:{email}` | 15min | String（INCR 计数器） | 连续失败 ≥ 10 次锁定，成功登录后 DEL 清零 |
-| Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GetDel 消费） | 注册两步间暂存已验证邮箱 |
-| Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GetDel 消费） | 绑定邮箱两步间暂存待绑定邮箱 + user_id |
+| Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GET 校验 → 全部前置检查通过后 DEL） | 注册两步间暂存已验证邮箱。DEL 返回 1 者为唯一赢家，并发重放只有一个能建号 |
+| Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GET 校验 → 验证码通过后 DEL） | 绑定邮箱两步间暂存待绑定邮箱 + user_id。不在校验前消费，否则验证码填错会连 ticket 一起作废 |
 
 ### 6.0 Redis 不可用时的降级策略
 
