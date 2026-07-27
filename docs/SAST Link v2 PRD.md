@@ -100,7 +100,9 @@ SAST Link 同时作为 OAuth 2.1 授权服务器和 OIDC Provider：
 
 1. `POST /auth/register/send-code` → 校验邮箱域名 → 生成 6 位数字验证码 → SMTP 发送 → 验证码写 Redis（key: `sastlink:verify:register:{email}`，TTL 5min）
 2. `POST /auth/register/verify-code` → 校验验证码（匹配后删除；填错仅消耗一次尝试，验证码保留，最多 5 次后作废）→ 返回 Register-Ticket（`reg_` + 32 位 hex，Redis 5min，一次性）
-3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱（先只读校验）→ 校验所有 user 字段已填且密码 ≥ 8 位 → 查邮箱/学号是否被占用 → 全部通过后才 DEL 消费 ticket → PBKDF2-SHA512 哈希 → 创建 user + profile → 签发 Token Pair
+3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱（先只读校验）→ 校验所有 user 字段已填且密码 ≥ 8 位 → 查邮箱/学号是否被占用 → PBKDF2-SHA512 哈希 → 创建 user + profile → 建号成功后才 DEL 消费 ticket → 签发 Token Pair
+
+并发注册由 `user.login_email` 的 UNIQUE 约束串行化，不依赖 ticket 消费选主；因此 ticket 保留到建号成功为止，竞态失败者（40901/40902）可改字段后用同一 ticket 重试，无需重新发验证码。`user` 表有 `login_email` 与 `student_id` 两个 UNIQUE 约束，唯一冲突需按约束名区分后再映射错误码，否则学号冲突会被误报为「邮箱已被注册」
 
 **可选 registration_state 绑定**：传入 `registration_state` + `oauth_state`（OAuth 标准 state 参数）时，注册成功后 * 并消费 `registration_state` + `oauth_state` → 验证双值匹配 → 自动创建 identities 记录。用于第三方 OAuth 首次登录的无绑定分支——用户先经 OAuth 回调拿到 `registration_state`，再走注册流程，注册后自动绑定
 
@@ -443,7 +445,7 @@ is_deleted ──(恢复)──► njupter
 | OAuth 注册暂存 | `sastlink:oauth:registration:{state}` | 15min | String（GetDel 消费，JSON 值） | OAuth 回调无绑定分支。暂存 `{provider, provider_id, identity_data, oauth_state}`，消费时校验双值匹配 |
 | 登录码 | `sastlink:auth:login_code:{code}` | 60s | String（GetDel 消费） | OAuth 回调已有绑定用户分支，暂存 user_id，前端交换 Token Pair |
 | 登录失败 | `sastlink:auth:login_failure:{email}` | 15min | String（INCR 计数器） | 连续失败 ≥ 10 次锁定，成功登录后 DEL 清零 |
-| Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GET 校验 → 全部前置检查通过后 DEL） | 注册两步间暂存已验证邮箱。DEL 返回 1 者为唯一赢家，并发重放只有一个能建号 |
+| Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GET 校验 → 建号成功后 DEL） | 注册两步间暂存已验证邮箱。并发由 `login_email` UNIQUE 约束串行化，ticket 不承担选主职责，故保留到建号成功，竞态失败者可重试 |
 | Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GET 校验 → 验证码通过后 DEL） | 绑定邮箱两步间暂存待绑定邮箱 + user_id。不在校验前消费，否则验证码填错会连 ticket 一起作废 |
 
 ### 6.0 Redis 不可用时的降级策略

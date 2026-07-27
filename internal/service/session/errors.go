@@ -78,12 +78,15 @@ var (
 	ErrBindTicketInvalid       = &Error{Kind: KindInvalidToken, Code: errcode.CodeBindTicketInvalid}
 	ErrEmailAlreadyRegistered  = &Error{Kind: KindConflict, Code: errcode.CodeEmailAlreadyRegistered}
 	ErrStudentIDOccupied       = &Error{Kind: KindConflict, Code: errcode.CodeStudentIDOccupied}
-	ErrIdentityOccupied        = &Error{Kind: KindConflict, Code: errcode.CodeIdentityOccupied}
-	ErrIdentityAlreadyBound    = &Error{Kind: KindConflict, Code: errcode.CodeIdentityAlreadyBound}
-	ErrIdentityLimitReached    = &Error{Kind: KindConflict, Code: errcode.CodeIdentityLimitReached}
-	ErrPasswordTooShort        = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordTooShort}
-	ErrPasswordUnchanged       = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordUnchanged}
-	ErrInternal                = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	// ErrConflict covers a uniqueness violation whose constraint is not mapped to a
+	// specific field, so the response does not misattribute the clash.
+	ErrConflict             = &Error{Kind: KindConflict, Code: errcode.CodeConflict}
+	ErrIdentityOccupied     = &Error{Kind: KindConflict, Code: errcode.CodeIdentityOccupied}
+	ErrIdentityAlreadyBound = &Error{Kind: KindConflict, Code: errcode.CodeIdentityAlreadyBound}
+	ErrIdentityLimitReached = &Error{Kind: KindConflict, Code: errcode.CodeIdentityLimitReached}
+	ErrPasswordTooShort     = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordTooShort}
+	ErrPasswordUnchanged    = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordUnchanged}
+	ErrInternal             = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 )
 
 // newError returns a contextual error that matches its sentinel via Kind.

@@ -170,9 +170,29 @@ func generateBindTicket() (string, error) {
 	return prefix + hex.EncodeToString(bytes[:]), nil
 }
 
+// PostgreSQL's default unique-index names for the "user" table. The table
+// carries two unique constraints, so a bare SQLSTATE 23505 check cannot tell
+// which column collided — reporting "邮箱已被注册" for a student-ID clash sends the
+// user looking at the wrong field.
+const (
+	userLoginEmailConstraint = "user_login_email_key"
+	userStudentIDConstraint  = "user_student_id_key"
+)
+
 func isDuplicateError(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation
+}
+
+// duplicateConstraint returns the violated unique constraint's name, or "" when
+// err is not a unique violation. PostgreSQL leaves ColumnName empty for index
+// violations, so the constraint name is the only reliable discriminator.
+func duplicateConstraint(err error) string {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != pgerrcode.UniqueViolation {
+		return ""
+	}
+	return pgErr.ConstraintName
 }
 
 func loginLimitSubject(input LoginInput, identifier string) string {

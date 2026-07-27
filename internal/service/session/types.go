@@ -87,9 +87,11 @@ type RegisterTicketStore interface {
 	// PeekRegisterTicket reads the verified email without consuming the ticket, so
 	// a rejectable request does not spend it.
 	PeekRegisterTicket(ctx context.Context, ticket string) (email string, found bool, err error)
-	// ConsumeRegisterTicket atomically deletes the ticket, reporting whether this
-	// caller removed it. Concurrent replays of one ticket elect a single winner.
-	ConsumeRegisterTicket(ctx context.Context, ticket string) (consumed bool, err error)
+	// ConsumeRegisterTicket deletes the ticket once the account exists. Races
+	// between concurrent registrations are settled by the login_email unique
+	// constraint, not by this delete, so the caller does not need to know whether
+	// it was the one that removed the key.
+	ConsumeRegisterTicket(ctx context.Context, ticket string) error
 }
 
 type BindTicketPayload struct {

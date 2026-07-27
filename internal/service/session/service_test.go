@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
@@ -41,6 +44,9 @@ type fakeUsers struct {
 	tokens            *fakeTokens
 	updatePasswordErr error
 	passwordUpdates   []int64
+	// createErr forces CreateWithProfile to fail, for racing-insert scenarios the
+	// in-memory maps cannot reproduce.
+	createErr error
 }
 
 func (f *fakeUsers) FindByLoginIdentifier(_ context.Context, identifier string) (*model.User, error) {
@@ -97,15 +103,34 @@ func (f *fakeUsers) ExistsByStudentID(_ context.Context, studentID string) (bool
 	return false, nil
 }
 
+// uniqueViolation reproduces what PostgreSQL actually returns for a duplicate
+// key on the "user" table, including the constraint name the service dispatches
+// on. Verified against PostgreSQL 16 in internal/repository integration tests.
+func uniqueViolation(constraint string) error {
+	return &pgconn.PgError{
+		Code:           pgerrcode.UniqueViolation,
+		TableName:      "user",
+		ConstraintName: constraint,
+	}
+}
+
 func (f *fakeUsers) CreateWithProfile(_ context.Context, user *model.User, _ *model.Profile) error {
 	if f.err != nil {
 		return f.err
+	}
+	if f.createErr != nil {
+		return f.createErr
 	}
 	if f.byLogin == nil {
 		f.byLogin = map[string]*model.User{}
 	}
 	if _, ok := f.byLogin[user.LoginEmail]; ok {
-		return errors.New("duplicate login_email")
+		return uniqueViolation(userLoginEmailConstraint)
+	}
+	for _, existing := range f.byLogin {
+		if existing.StudentID == user.StudentID {
+			return uniqueViolation(userStudentIDConstraint)
+		}
 	}
 	if f.byID == nil {
 		f.byID = map[int64]*model.User{}
@@ -470,15 +495,12 @@ func (f *fakeRegisterTicketStore) PeekRegisterTicket(_ context.Context, ticket s
 	return email, true, nil
 }
 
-func (f *fakeRegisterTicketStore) ConsumeRegisterTicket(_ context.Context, ticket string) (bool, error) {
+func (f *fakeRegisterTicketStore) ConsumeRegisterTicket(_ context.Context, ticket string) error {
 	if f.consumeErr != nil {
-		return false, f.consumeErr
-	}
-	if _, ok := f.tickets[ticket]; !ok {
-		return false, nil
+		return f.consumeErr
 	}
 	delete(f.tickets, ticket)
-	return true, nil
+	return nil
 }
 
 type fakeIdentities struct {
@@ -1815,5 +1837,91 @@ func TestVerifyRegisterCodeDiscardsCodeWhenTicketSaveFails(t *testing.T) {
 	assertKind(t, err, KindInternal, errcode.CodeInternal)
 	if !slices.Contains(codes.discarded, codeKey(purpose, "new@sast.fun")) {
 		t.Fatalf("discarded = %#v, want the consumed code dropped", codes.discarded)
+	}
+}
+
+// The "user" table has two unique constraints, and the insert path used to map
+// every violation to 40901, telling a user whose student ID clashed that their
+// email was taken — pointing them at the wrong field.
+func TestRegisterMapsUniqueViolationToTheCollidingField(t *testing.T) {
+	tests := []struct {
+		name       string
+		constraint string
+		wantCode   int
+		wantKind   Kind
+	}{
+		{name: "student id", constraint: userStudentIDConstraint, wantCode: errcode.CodeStudentIDOccupied, wantKind: KindConflict},
+		{name: "login email", constraint: userLoginEmailConstraint, wantCode: errcode.CodeEmailAlreadyRegistered, wantKind: KindConflict},
+		{name: "unmapped constraint", constraint: "user_some_future_key", wantCode: errcode.CodeConflict, wantKind: KindConflict},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := newRegisterService(t)
+			users := service.Users.(*fakeUsers)
+			tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+			if err := tickets.SaveRegisterTicket(context.Background(), "reg_x", "new@sast.fun", time.Minute); err != nil {
+				t.Fatalf("SaveRegisterTicket() error = %v", err)
+			}
+			// Simulate losing the race between the pre-flight check and the insert.
+			users.createErr = uniqueViolation(test.constraint)
+
+			_, err := service.Register(context.Background(), validRegisterInput("reg_x", "B24040111"))
+			assertKind(t, err, test.wantKind, test.wantCode)
+		})
+	}
+}
+
+// A conflict raised by the insert is a lost race, not a spent ticket: the user
+// must be able to correct the field and retry without a new verification code.
+func TestRegisterKeepsTicketWhenInsertRaces(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_x", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+	users.createErr = uniqueViolation(userStudentIDConstraint)
+
+	_, err := service.Register(context.Background(), validRegisterInput("reg_x", "B24040111"))
+	assertKind(t, err, KindConflict, errcode.CodeStudentIDOccupied)
+	if _, ok := tickets.tickets["reg_x"]; !ok {
+		t.Fatal("Register-Ticket was consumed by a losing race; the user must re-request a code")
+	}
+
+	// The corrected retry succeeds on the same ticket and spends it.
+	users.createErr = nil
+	if _, err := service.Register(context.Background(), validRegisterInput("reg_x", "B24040222")); err != nil {
+		t.Fatalf("Register() retry error = %v", err)
+	}
+	if _, ok := tickets.tickets["reg_x"]; ok {
+		t.Fatal("Register-Ticket survived a successful registration")
+	}
+}
+
+// A non-unique database failure must stay a 500 rather than being reported as a
+// conflict the user could act on.
+func TestRegisterReportsNonUniqueInsertFailureAsInternal(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_x", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+	users.createErr = errors.New("connection reset")
+
+	_, err := service.Register(context.Background(), validRegisterInput("reg_x", "B24040111"))
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
+}
+
+func validRegisterInput(ticket, studentID string) RegisterInput {
+	return RegisterInput{
+		RegisterTicket: ticket,
+		Password:       "newpassword",
+		Name:           "pt",
+		StudentID:      studentID,
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
 	}
 }

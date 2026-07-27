@@ -382,9 +382,9 @@ func TestPeekAndConsumeTicketsElectSingleWinner(t *testing.T) {
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			consumed, err := store.ConsumeRegisterTicket(ctx, "reg_peek")
+			consumed, err := store.DeleteOneTime(ctx, store.Keys.RegisterTicket("reg_peek"))
 			if err != nil {
-				t.Errorf("ConsumeRegisterTicket() error = %v", err)
+				t.Errorf("DeleteOneTime() error = %v", err)
 				return
 			}
 			if consumed {

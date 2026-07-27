@@ -333,12 +333,15 @@ func (s Store) PeekRegisterTicket(ctx context.Context, ticket string) (string, b
 	return email, true, nil
 }
 
-// ConsumeRegisterTicket deletes a ticket, reporting whether this call removed it.
-func (s Store) ConsumeRegisterTicket(ctx context.Context, ticket string) (bool, error) {
+// ConsumeRegisterTicket deletes a register ticket.
+func (s Store) ConsumeRegisterTicket(ctx context.Context, ticket string) error {
 	if s.Client == nil || ticket == "" {
-		return false, fmt.Errorf("consume register ticket: %w", ErrInvalidArgument)
+		return fmt.Errorf("consume register ticket: %w", ErrInvalidArgument)
 	}
-	return s.DeleteOneTime(ctx, s.Keys.RegisterTicket(ticket))
+	if _, err := s.DeleteOneTime(ctx, s.Keys.RegisterTicket(ticket)); err != nil {
+		return err
+	}
+	return nil
 }
 
 // BlacklistJTI blacklists a JWT ID until its token expiry.

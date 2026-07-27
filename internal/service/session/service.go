@@ -384,16 +384,6 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return nil, newError(ErrStudentIDOccupied, "学号已被占用", nil)
 	}
 
-	// Spend the ticket now. Deleting it elects a single winner among concurrent
-	// requests replaying the same ticket, so only one can create the account.
-	consumed, err := s.RegisterTicket.ConsumeRegisterTicket(ctx, ticket)
-	if err != nil {
-		return nil, newError(ErrInternal, "consume register ticket", err)
-	}
-	if !consumed {
-		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 无效或已过期", nil)
-	}
-
 	passwordHash, err := s.Passwords.HashPassword(password)
 	if err != nil {
 		return nil, newError(ErrInternal, "hash password", err)
@@ -413,11 +403,35 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	}
 	profile := &model.Profile{}
 
+	// The ticket is still live at this point. login_email carries a UNIQUE
+	// constraint, so the INSERT itself is the serialization point for concurrent
+	// registrations of the same email — the ticket does not need to elect a winner,
+	// and keeping it until the account exists means a losing racer can retry.
 	if createErr := s.Users.CreateWithProfile(ctx, user, profile); createErr != nil {
-		if isDuplicateError(createErr) {
+		// A unique violation here means the pre-flight checks raced a concurrent
+		// registration. The table has two unique constraints, so dispatch on the
+		// constraint name: reporting "邮箱已被注册" for a student-ID clash points the
+		// user at the wrong field.
+		switch constraint := duplicateConstraint(createErr); constraint {
+		case userStudentIDConstraint:
+			return nil, newError(ErrStudentIDOccupied, "学号已被占用", createErr)
+		case userLoginEmailConstraint:
 			return nil, newError(ErrEmailAlreadyRegistered, "邮箱已被注册", createErr)
+		case "":
+		default:
+			// An unmapped unique constraint. Report a generic conflict rather than
+			// guessing a field, and log the name so the mapping can be added.
+			slog.ErrorContext(ctx, "unmapped unique violation on register", "constraint", constraint)
+			return nil, newError(ErrConflict, "注册信息与现有账号冲突", createErr)
 		}
 		return nil, newError(ErrInternal, "create user", createErr)
+	}
+
+	// The account exists, so the ticket has served its purpose. A failure here
+	// leaves a live ticket whose email is already registered; the next attempt is
+	// rejected by the email-exists check, so it cannot create a second account.
+	if consumeErr := s.RegisterTicket.ConsumeRegisterTicket(ctx, ticket); consumeErr != nil {
+		slog.WarnContext(ctx, "consume register ticket after account creation", "user_id", user.ID, "error", consumeErr)
 	}
 
 	client, err := s.findInternalClient(ctx)

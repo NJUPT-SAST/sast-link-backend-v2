@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -258,4 +261,59 @@ func TestTokenRepositoryRevokeAllByUserLeavesOtherUsersAlone(t *testing.T) {
 	}
 	assertTokenRevokedAt(t, database, "target-access", "target-refresh", revokedAt)
 	assertTokenUnrevoked(t, database, "bystander-access", "bystander-refresh")
+}
+
+// The session service dispatches duplicate-registration errors on the unique
+// constraint's name to tell a student-ID clash from an email clash. Those names
+// are PostgreSQL defaults rather than anything the code declares, so pin them
+// here: a rename in a future migration would silently break that mapping and
+// send users to the wrong field.
+func TestUserRepositoryUniqueViolationConstraintNames(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	existing := createUserWithProfile(t, userRepository, "pinned@njupt.edu.cn")
+
+	tests := []struct {
+		name           string
+		build          func() *model.User
+		wantConstraint string
+	}{
+		{
+			name: "login email",
+			build: func() *model.User {
+				user := testUser("pinned@njupt.edu.cn")
+				user.StudentID = "B90000001"
+				return user
+			},
+			wantConstraint: "user_login_email_key",
+		},
+		{
+			name: "student id",
+			build: func() *model.User {
+				user := testUser("fresh@njupt.edu.cn")
+				user.StudentID = existing.StudentID
+				return user
+			},
+			wantConstraint: "user_student_id_key",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := userRepository.CreateWithProfile(context.Background(), test.build(), &model.Profile{})
+			if err == nil {
+				t.Fatal("CreateWithProfile() error = nil, want a unique violation")
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) {
+				t.Fatalf("error = %v, want a *pgconn.PgError", err)
+			}
+			if pgErr.Code != pgerrcode.UniqueViolation {
+				t.Fatalf("SQLSTATE = %q, want %q", pgErr.Code, pgerrcode.UniqueViolation)
+			}
+			if pgErr.ConstraintName != test.wantConstraint {
+				t.Fatalf("constraint = %q, want %q; update the session service mapping if this was renamed deliberately",
+					pgErr.ConstraintName, test.wantConstraint)
+			}
+		})
+	}
 }
