@@ -149,6 +149,38 @@ func TestUserRepositoryUpdateProfileRejectsUnknownUser(t *testing.T) {
 	}
 }
 
+// A closed account must not be editable here even though the auth middleware
+// already rejects its tokens. The profile-only case is the one that used to slip
+// through: it never reads "user", so RowsAffected on an existing profile row
+// reported success for an account that no longer exists.
+func TestUserRepositoryUpdateProfileRejectsDeletedUser(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	user := createUserWithProfile(t, userRepository, "closed@njupt.edu.cn")
+	if err := database.Exec(`UPDATE "user" SET state = ? WHERE id = ?`, model.UserStateDeleted, user.ID).Error; err != nil {
+		t.Fatalf("soft delete user: %v", err)
+	}
+
+	for name, update := range map[string]repository.ProfileUpdate{
+		"user column":    {Name: stringPtr("改名")},
+		"profile column": {Nickname: stringPtr("改昵称")},
+		"both tables":    {Name: stringPtr("改名"), Nickname: stringPtr("改昵称")},
+	} {
+		if _, err := userRepository.UpdateProfile(context.Background(), user.ID, update); !errors.Is(err, repository.ErrNotFound) {
+			t.Fatalf("UpdateProfile(deleted, %s) error = %v, want ErrNotFound", name, err)
+		}
+	}
+
+	// Nothing was written on any of those attempts.
+	var nickname *string
+	if err := database.Raw(`SELECT nickname FROM profile WHERE user_id = ?`, user.ID).Scan(&nickname).Error; err != nil {
+		t.Fatalf("read back nickname: %v", err)
+	}
+	if nickname != nil {
+		t.Fatalf("nickname = %q, want NULL — a closed account was edited", *nickname)
+	}
+}
+
 func TestUserRepositoryUpdateProfileRejectsEmptyUpdate(t *testing.T) {
 	database := setupDatabase(t)
 	userRepository := repository.NewUser(database)

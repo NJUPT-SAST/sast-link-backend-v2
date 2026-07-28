@@ -338,8 +338,13 @@ func (r *UserRepository) UpdateProfile(
 		return nil, fmt.Errorf("%w: update has no fields", ErrInvalidArgument)
 	}
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		// The state predicate makes a soft-deleted account indistinguishable from a
+		// missing one here, so this repository never edits a closed account even if
+		// a caller reaches it without the auth middleware's state gate.
 		if userColumns := update.userColumns(); len(userColumns) > 0 {
-			result := transaction.Model(&model.User{}).Where("id = ?", userID).Updates(userColumns)
+			result := transaction.Model(&model.User{}).
+				Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
+				Updates(userColumns)
 			if result.Error != nil {
 				return fmt.Errorf("update user profile fields: %w", result.Error)
 			}
@@ -351,22 +356,24 @@ func (r *UserRepository) UpdateProfile(
 		if len(profileColumns) == 0 {
 			return nil
 		}
+		// Verify the owner first, not only on the insert path. A request touching
+		// profile columns alone never reads "user", so without this an update to a
+		// missing or soft-deleted account would report success off RowsAffected.
+		var owner model.User
+		if err := transaction.Select("id").
+			Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
+			First(&owner).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("load profile owner: %w", err)
+		}
 		result := transaction.Model(&model.Profile{}).Where("user_id = ?", userID).Updates(profileColumns)
 		if result.Error != nil {
 			return fmt.Errorf("update profile fields: %w", result.Error)
 		}
 		if result.RowsAffected > 0 {
 			return nil
-		}
-		// No profile row yet. Verify the user exists before inserting, so a bad ID
-		// cannot create an orphan-shaped row and report success; the FK would reject
-		// it anyway, but ErrNotFound is the honest answer.
-		var owner model.User
-		if err := transaction.Select("id").Where("id = ?", userID).First(&owner).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("load profile owner: %w", err)
 		}
 		profileColumns["user_id"] = userID
 		// ON CONFLICT rather than a bare INSERT: two concurrent first writes both
