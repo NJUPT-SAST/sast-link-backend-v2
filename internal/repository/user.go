@@ -410,14 +410,20 @@ func profileColumnNames(columns map[string]any) []string {
 // PublicCard is the unauthenticated display-card projection of a user. It holds
 // only the columns PRD §4.14 lists as public; nothing from "user" beyond the ID
 // is included, so a query change cannot accidentally widen the public surface.
+// Column tags are explicit on every field rather than left to the naming
+// strategy. GORM's initialism replacer knows URL but not Hub, so it derives
+// git_hub_url from GitHubURL; the column then matches no field and the scanned
+// value is silently discarded, which reads as an unset github_url on the card
+// rather than as an error. model.Profile carries the same tags for the same
+// reason.
 type PublicCard struct {
-	ID         int64
-	Nickname   *string
-	Department *model.Department
-	Intro      *string
-	Avatar     *string
-	BlogURL    *string
-	GitHubURL  *string
+	ID         int64             `gorm:"column:id"`
+	Nickname   *string           `gorm:"column:nickname"`
+	Department *model.Department `gorm:"column:department"`
+	Intro      *string           `gorm:"column:intro"`
+	Avatar     *string           `gorm:"column:avatar"`
+	BlogURL    *string           `gorm:"column:blog_url"`
+	GitHubURL  *string           `gorm:"column:github_url"`
 }
 
 // FindPublicCardByUserID returns the public card of a non-deleted user.

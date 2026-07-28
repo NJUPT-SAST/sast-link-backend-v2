@@ -206,8 +206,21 @@ func TestUserRepositoryFindPublicCard(t *testing.T) {
 	if got := card.Department; got == nil || *got != department {
 		t.Fatalf("department = %v, want software", got)
 	}
+	if got := card.Intro; got == nil || *got != "自我介绍" {
+		t.Fatalf("intro = %v, want 自我介绍", got)
+	}
+	// Asserted explicitly because a missing column tag drops the value silently
+	// rather than erroring: GORM derives git_hub_url from GitHubURL, which matches
+	// no column, and the scan discards it. Setting the field without checking it
+	// is what let that through.
+	if got := card.GitHubURL; got == nil || *got != "https://github.com/example" {
+		t.Fatalf("github_url = %v, want https://github.com/example", got)
+	}
 	if card.Avatar != nil {
 		t.Fatalf("avatar = %v, want NULL", *card.Avatar)
+	}
+	if card.BlogURL != nil {
+		t.Fatalf("blog_url = %v, want NULL", *card.BlogURL)
 	}
 }
 
