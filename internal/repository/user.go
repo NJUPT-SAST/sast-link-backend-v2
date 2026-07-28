@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
@@ -235,6 +237,227 @@ func (r *UserRepository) ExistsAsEmailAnywhere(ctx context.Context, email string
 		return false, fmt.Errorf("check email anywhere: %w", err)
 	}
 	return exists, nil
+}
+
+// ProfileUpdate carries the self-service field changes for one user. A nil
+// pointer means "leave unchanged"; a non-nil pointer to the zero value means
+// "write that value". The two are distinct because PUT /user/profile is a
+// partial update and clearing a nullable profile field is a legitimate edit.
+//
+// Identity and permission columns (login_email, role, state, email_type) are
+// deliberately absent: they are admin-only per PRD §4.9, and leaving them out of
+// the struct makes that unreachable rather than merely unvalidated.
+type ProfileUpdate struct {
+	Name        *string
+	PhoneNumber *string
+	QQNumber    *string
+	StudentID   *string
+	College     *model.College
+	Major       *string
+
+	Nickname   *string
+	Department *model.Department
+	Intro      *string
+	Email      *string
+	BlogURL    *string
+	GitHubURL  *string
+}
+
+// userColumns returns the "user" table assignments, empty when untouched.
+func (u ProfileUpdate) userColumns() map[string]any {
+	columns := make(map[string]any, 6)
+	assign(columns, "name", u.Name)
+	assign(columns, "phone_number", u.PhoneNumber)
+	assign(columns, "qq_number", u.QQNumber)
+	assign(columns, "student_id", u.StudentID)
+	assign(columns, "major", u.Major)
+	if u.College != nil {
+		columns["college"] = *u.College
+	}
+	return columns
+}
+
+// profileColumns returns the profile table assignments, empty when untouched.
+// A non-nil pointer to "" writes SQL NULL: the columns are nullable display
+// fields, and the API expresses "clear my intro" as an empty string.
+func (u ProfileUpdate) profileColumns() map[string]any {
+	columns := make(map[string]any, 6)
+	assignNullable(columns, "nickname", u.Nickname)
+	assignNullable(columns, "intro", u.Intro)
+	assignNullable(columns, "email", u.Email)
+	assignNullable(columns, "blog_url", u.BlogURL)
+	assignNullable(columns, "github_url", u.GitHubURL)
+	if u.Department != nil {
+		if *u.Department == "" {
+			columns["department"] = nil
+		} else {
+			columns["department"] = *u.Department
+		}
+	}
+	return columns
+}
+
+// Empty reports whether the update would touch no column at all.
+func (u ProfileUpdate) Empty() bool {
+	return len(u.userColumns()) == 0 && len(u.profileColumns()) == 0
+}
+
+func assign(columns map[string]any, name string, value *string) {
+	if value != nil {
+		columns[name] = *value
+	}
+}
+
+func assignNullable(columns map[string]any, name string, value *string) {
+	if value == nil {
+		return
+	}
+	if *value == "" {
+		columns[name] = nil
+		return
+	}
+	columns[name] = *value
+}
+
+// UpdateProfile applies a partial self-service update across "user" and profile
+// in one transaction and returns the reloaded aggregate.
+//
+// The profile row is upserted rather than updated: profile is created alongside
+// the user at registration, but a row imported before V001's registration flow
+// (or removed by hand) would otherwise make the display fields silently
+// unwritable while the response still reported success.
+func (r *UserRepository) UpdateProfile(
+	ctx context.Context,
+	userID int64,
+	update ProfileUpdate,
+) (*model.User, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("%w: user id must be positive", ErrInvalidArgument)
+	}
+	if update.Empty() {
+		return nil, fmt.Errorf("%w: update has no fields", ErrInvalidArgument)
+	}
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		// The state predicate makes a soft-deleted account indistinguishable from a
+		// missing one here, so this repository never edits a closed account even if
+		// a caller reaches it without the auth middleware's state gate.
+		if userColumns := update.userColumns(); len(userColumns) > 0 {
+			result := transaction.Model(&model.User{}).
+				Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
+				Updates(userColumns)
+			if result.Error != nil {
+				return fmt.Errorf("update user profile fields: %w", result.Error)
+			}
+			if result.RowsAffected == 0 {
+				return ErrNotFound
+			}
+		}
+		profileColumns := update.profileColumns()
+		if len(profileColumns) == 0 {
+			return nil
+		}
+		// Verify the owner first, not only on the insert path. A request touching
+		// profile columns alone never reads "user", so without this an update to a
+		// missing or soft-deleted account would report success off RowsAffected.
+		var owner model.User
+		if err := transaction.Select("id").
+			Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
+			First(&owner).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("load profile owner: %w", err)
+		}
+		result := transaction.Model(&model.Profile{}).Where("user_id = ?", userID).Updates(profileColumns)
+		if result.Error != nil {
+			return fmt.Errorf("update profile fields: %w", result.Error)
+		}
+		if result.RowsAffected > 0 {
+			return nil
+		}
+		profileColumns["user_id"] = userID
+		// ON CONFLICT rather than a bare INSERT: two concurrent first writes both
+		// see RowsAffected == 0 and both insert, and the loser would violate
+		// profile_user_id_key. That is a retryable race on the user's own row, but
+		// the constraint name is unmapped upstream and would surface as a 40900
+		// "conflicts with an existing account". Merging instead makes both callers
+		// succeed with their own columns.
+		if err := transaction.Model(&model.Profile{}).Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "user_id"}},
+			DoUpdates: clause.AssignmentColumns(profileColumnNames(profileColumns)),
+		}).Create(profileColumns).Error; err != nil {
+			return fmt.Errorf("create profile for update: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("update profile: %w", err)
+	}
+	return r.FindByID(ctx, userID)
+}
+
+// profileColumnNames returns the assignable column names of a profile upsert,
+// excluding user_id: it is the conflict target, so re-assigning it is redundant.
+// Sorted so the generated statement is stable across runs.
+func profileColumnNames(columns map[string]any) []string {
+	names := make([]string, 0, len(columns))
+	for name := range columns {
+		if name == "user_id" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// PublicCard is the unauthenticated display-card projection of a user. It holds
+// only the columns PRD §4.14 lists as public; nothing from "user" beyond the ID
+// is included, so a query change cannot accidentally widen the public surface.
+// Column tags are explicit on every field rather than left to the naming
+// strategy. GORM's initialism replacer knows URL but not Hub, so it derives
+// git_hub_url from GitHubURL; the column then matches no field and the scanned
+// value is silently discarded, which reads as an unset github_url on the card
+// rather than as an error. model.Profile carries the same tags for the same
+// reason.
+type PublicCard struct {
+	ID         int64             `gorm:"column:id"`
+	Nickname   *string           `gorm:"column:nickname"`
+	Department *model.Department `gorm:"column:department"`
+	Intro      *string           `gorm:"column:intro"`
+	Avatar     *string           `gorm:"column:avatar"`
+	BlogURL    *string           `gorm:"column:blog_url"`
+	GitHubURL  *string           `gorm:"column:github_url"`
+}
+
+// FindPublicCardByUserID returns the public card of a non-deleted user.
+//
+// Soft-deleted accounts are filtered in SQL rather than by the caller: /card/:id
+// needs no authentication, so a missed check would publish the profile of an
+// account the owner asked to have removed. A deleted user is reported as
+// ErrNotFound, which is also what the contract documents (404).
+func (r *UserRepository) FindPublicCardByUserID(ctx context.Context, userID int64) (*PublicCard, error) {
+	if userID <= 0 {
+		return nil, ErrNotFound
+	}
+	var card PublicCard
+	err := r.database.WithContext(ctx).
+		Model(&model.User{}).
+		Select(`"user".id`, "profile.nickname", "profile.department", "profile.intro",
+			"profile.avatar", "profile.blog_url", "profile.github_url").
+		Joins(`LEFT JOIN profile ON profile.user_id = "user".id`).
+		Where(`"user".id = ? AND "user".state <> ?`, userID, model.UserStateDeleted).
+		Take(&card).Error
+	if err == nil {
+		return &card, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("find public card by user ID: %w", err)
 }
 
 // FindAuthStateByID finds the minimal user state required to authenticate tokens.

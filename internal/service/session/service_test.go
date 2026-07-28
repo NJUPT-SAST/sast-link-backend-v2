@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,10 @@ type fakeUsers struct {
 	// otherMailIdentities holds provider_id -> user_id for other_mail identities,
 	// so ExistsAsEmailAnywhere can mirror the cross-table uniqueness check.
 	otherMailIdentities map[string]int64
+	// updateProfileErr forces UpdateProfile to fail, for conflict scenarios the
+	// in-memory maps cannot reproduce.
+	updateProfileErr error
+	profileUpdates   []repository.ProfileUpdate
 }
 
 func (f *fakeUsers) FindByLoginIdentifier(_ context.Context, identifier string) (*model.User, error) {
@@ -212,6 +217,82 @@ func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
 	// Mirror the repository: the real implementation revokes sessions in the
 	// same transaction that rewrites the password.
 	return f.tokens.RevokeAllByUser(ctx, userID, revokedAt)
+}
+
+// UpdateProfile mirrors the repository's partial update: only non-nil fields are
+// applied, and the reloaded aggregate is returned.
+func (f *fakeUsers) UpdateProfile(_ context.Context, userID int64, update repository.ProfileUpdate) (*model.User, error) {
+	if f.updateProfileErr != nil {
+		return nil, f.updateProfileErr
+	}
+	user, ok := f.byID[userID]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	f.profileUpdates = append(f.profileUpdates, update)
+	applyString(&user.Name, update.Name)
+	applyString(&user.PhoneNumber, update.PhoneNumber)
+	applyString(&user.QQNumber, update.QQNumber)
+	applyString(&user.StudentID, update.StudentID)
+	applyString(&user.Major, update.Major)
+	if update.College != nil {
+		user.College = *update.College
+	}
+	if user.Profile == nil {
+		user.Profile = &model.Profile{UserID: userID}
+	}
+	applyNullable(&user.Profile.Nickname, update.Nickname)
+	applyNullable(&user.Profile.Intro, update.Intro)
+	applyNullable(&user.Profile.Email, update.Email)
+	applyNullable(&user.Profile.BlogURL, update.BlogURL)
+	applyNullable(&user.Profile.GitHubURL, update.GitHubURL)
+	if update.Department != nil {
+		if *update.Department == "" {
+			user.Profile.Department = nil
+		} else {
+			department := *update.Department
+			user.Profile.Department = &department
+		}
+	}
+	return user, nil
+}
+
+func (f *fakeUsers) FindPublicCardByUserID(_ context.Context, userID int64) (*repository.PublicCard, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	user, ok := f.byID[userID]
+	if !ok || user.State == model.UserStateDeleted {
+		return nil, repository.ErrNotFound
+	}
+	card := &repository.PublicCard{ID: user.ID}
+	if user.Profile != nil {
+		card.Nickname = user.Profile.Nickname
+		card.Department = user.Profile.Department
+		card.Intro = user.Profile.Intro
+		card.Avatar = user.Profile.Avatar
+		card.BlogURL = user.Profile.BlogURL
+		card.GitHubURL = user.Profile.GitHubURL
+	}
+	return card, nil
+}
+
+func applyString(target *string, value *string) {
+	if value != nil {
+		*target = *value
+	}
+}
+
+func applyNullable(target **string, value *string) {
+	if value == nil {
+		return
+	}
+	if *value == "" {
+		*target = nil
+		return
+	}
+	assigned := *value
+	*target = &assigned
 }
 
 type fakeClients struct {
@@ -583,6 +664,9 @@ type fakeIdentities struct {
 	byProviderID map[string]*model.Identity
 	err          error
 	createErr    error
+	deleteErr    error
+	deleted      []int64
+	beforeDelete func()
 }
 
 func (f *fakeIdentities) CountByUserAndProvider(_ context.Context, userID int64, _ model.LoginMethod) (int64, error) {
@@ -630,6 +714,49 @@ func (f *fakeIdentities) CreateWithinLimit(_ context.Context, identity *model.Id
 	}
 	f.byProviderID[identity.ProviderID] = identity
 	return nil
+}
+
+func (f *fakeIdentities) ListByUser(_ context.Context, userID int64) ([]model.Identity, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	identities := make([]model.Identity, 0, len(f.byProviderID))
+	for _, identity := range f.byProviderID {
+		if identity.UserID == userID {
+			identities = append(identities, *identity)
+		}
+	}
+	sort.Slice(identities, func(i, j int) bool { return identities[i].ID < identities[j].ID })
+	return identities, nil
+}
+
+func (f *fakeIdentities) FindByIDAndUser(_ context.Context, identityID, userID int64) (*model.Identity, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	for _, identity := range f.byProviderID {
+		if identity.ID == identityID && identity.UserID == userID {
+			return identity, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
+
+func (f *fakeIdentities) DeleteByIDAndUser(_ context.Context, identityID, userID int64) error {
+	if f.beforeDelete != nil {
+		f.beforeDelete()
+	}
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	for providerID, identity := range f.byProviderID {
+		if identity.ID == identityID && identity.UserID == userID {
+			delete(f.byProviderID, providerID)
+			f.deleted = append(f.deleted, identityID)
+			return nil
+		}
+	}
+	return repository.ErrNotFound
 }
 
 type fakeBindTicketStore struct {
@@ -1853,6 +1980,7 @@ func newRegisterService(t *testing.T) Service {
 		VerificationCode: &fakeVerificationCodeStore{},
 		RegisterTicket:   &fakeRegisterTicketStore{},
 		BindTicket:       &fakeBindTicketStore{},
+		UnbindLimiter:    &fakeLimiter{},
 		ForgotPasswords:  &fakeForgotPasswordDispatcher{accepted: true},
 		InternalClientID: "builtin",
 		JWT:              &auth.JWTManager{Issuer: "issuer", Audience: []string{"audience"}, Active: auth.JWTKeyPair{KID: "active", Private: key}, Clock: clock},

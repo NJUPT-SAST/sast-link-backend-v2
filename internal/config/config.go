@@ -58,6 +58,12 @@ type Config struct {
 	RateLimitSendEmailWindow time.Duration `env:"RATE_LIMIT_SEND_EMAIL_WINDOW" envDefault:"60s"`
 	LoginFailureLimit        int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
 	LoginFailureWindow       time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
+	// Unbind throttling is per caller, not per address: keying by provider_id let
+	// one user's unbind lock out a different user who later bound the same
+	// address. Fail-open, since PostgreSQL owns the binding state and is also the
+	// serialization point for concurrent deletes of one record.
+	RateLimitUnbindRPM    int           `env:"RATE_LIMIT_UNBIND_RPM" envDefault:"3"`
+	RateLimitUnbindWindow time.Duration `env:"RATE_LIMIT_UNBIND_WINDOW" envDefault:"60s"`
 
 	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
 	// beyond this queues at the hasher instead of saturating every CPU core.
@@ -132,6 +138,10 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
 	case c.LoginFailureWindow <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_WINDOW must be positive")
+	case c.RateLimitUnbindRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_UNBIND_RPM must be positive")
+	case c.RateLimitUnbindWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_UNBIND_WINDOW must be at least 1s")
 	case c.PasswordHashMaxConcurrent <= 0:
 		return fmt.Errorf("PASSWORD_HASH_MAX_CONCURRENT must be positive")
 	// SMTP backs registration, password reset and email binding. Validating it

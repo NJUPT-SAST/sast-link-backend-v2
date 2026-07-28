@@ -40,6 +40,21 @@ func mapServiceError(err error) error {
 		message = "密码长度不足"
 	case errcode.CodePasswordUnchanged:
 		message = "新旧密码相同"
+	case errcode.CodeUserNotFound:
+		// Without a case here the message falls back to the KindNotFound default
+		// ("资源不存在"), which contradicts the code's own meaning and the handler's
+		// malformed-ID path.
+		message = "用户不存在"
+	case errcode.CodeNotFound:
+		// Only the unbind path raises this. The handler's malformed-ID branch already
+		// answers "绑定记录不存在"; without this case the service path answered the
+		// KindNotFound default instead, so the same 40400 had two messages.
+		message = "绑定记录不存在"
+	case errcode.CodeValidationFailed:
+		// Only ErrLastLoginMethod raises this. The KindValidationFailed default
+		// ("业务校验失败") drops the one thing the client needs to know: which rule
+		// it broke.
+		message = "不能解绑唯一的登录方式"
 	}
 	var status int
 	switch serviceErr.Kind {
@@ -58,6 +73,8 @@ func mapServiceError(err error) error {
 		status = http.StatusConflict
 	case session.KindValidationFailed:
 		status = http.StatusUnprocessableEntity
+	case session.KindNotFound:
+		status = http.StatusNotFound
 	case session.KindDependencyUnavailable:
 		message = "依赖服务暂不可用，请稍后重试"
 		status = http.StatusServiceUnavailable
@@ -93,6 +110,8 @@ func defaultCode(kind session.Kind) int {
 		return errcode.CodeConflict
 	case session.KindValidationFailed:
 		return errcode.CodeValidationFailed
+	case session.KindNotFound:
+		return errcode.CodeNotFound
 	case session.KindDependencyUnavailable:
 		return errcode.CodeDependencyUnavailable
 	default:
@@ -120,6 +139,8 @@ func defaultMessage(kind session.Kind) string {
 		return "资源已存在"
 	case session.KindValidationFailed:
 		return "业务校验失败"
+	case session.KindNotFound:
+		return "资源不存在"
 	case session.KindDependencyUnavailable:
 		return "依赖服务暂不可用，请稍后重试"
 	default:

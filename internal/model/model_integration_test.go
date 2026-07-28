@@ -409,6 +409,37 @@ func jsonEqual(left model.JSONB, right model.JSONB) bool {
 	return reflect.DeepEqual(leftValue, rightValue)
 }
 
+// A named type over json.RawMessage does not inherit its marshaller, so the
+// default []byte handling would base64-encode the document and every DTO exposing
+// a JSONB column would contradict its documented object shape.
+func TestJSONBMarshalsAsJSONNotBase64(t *testing.T) {
+	payload := model.JSONB(`{"login":"github_username"}`)
+	encoded, err := json.Marshal(map[string]any{"identity_data": payload})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if got, want := string(encoded), `{"identity_data":{"login":"github_username"}}`; got != want {
+		t.Fatalf("Marshal() = %s, want %s", got, want)
+	}
+
+	var nilPayload model.JSONB
+	encoded, err = json.Marshal(map[string]any{"identity_data": nilPayload})
+	if err != nil {
+		t.Fatalf("Marshal(nil) error = %v", err)
+	}
+	if got, want := string(encoded), `{"identity_data":null}`; got != want {
+		t.Fatalf("Marshal(nil) = %s, want %s", got, want)
+	}
+
+	var round model.JSONB
+	if err := json.Unmarshal([]byte(`{"login":"x"}`), &round); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if string(round) != `{"login":"x"}` {
+		t.Fatalf("Unmarshal() = %s, want the document verbatim", round)
+	}
+}
+
 func TestJSONBScannerAndValuer(t *testing.T) {
 	var value model.JSONB
 	if err := value.Scan([]byte(`{"key":"value"}`)); err != nil {

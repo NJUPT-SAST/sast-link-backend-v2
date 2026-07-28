@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -171,6 +172,34 @@ func validEmailFormat(email string) bool {
 	return true
 }
 
+// validHTTPURL reports whether value is an absolute http/https URL with a host.
+//
+// The scheme allowlist is the point: blog_url and github_url are rendered as
+// links on the public card, so accepting an arbitrary URL would let a user store
+// javascript: or data: and turn every viewer of their card into a target. A
+// relative or scheme-less value is rejected too, since it would resolve against
+// whichever site embeds the card.
+func validHTTPURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return false
+	}
+	if parsed.Host == "" {
+		return false
+	}
+	for _, symbol := range value {
+		if symbol < 0x20 || symbol == 0x7f || unicode.IsSpace(symbol) {
+			return false
+		}
+	}
+	return true
+}
+
 func GenerateVerificationCode() (string, error) {
 	// Six-digit numeric code.
 	const max = 1_000_000
@@ -292,17 +321,21 @@ func profileDTO(user *model.User) UserProfileDTO {
 		}
 	}
 	for _, identity := range user.Identities {
-		dto.Identities = append(dto.Identities, IdentityDTO{
-			ID:             identity.ID,
-			Provider:       string(identity.Provider),
-			ProviderID:     identity.ProviderID,
-			IdentityData:   identity.IdentityData,
-			TokenExpiresAt: identity.TokenExpiresAt,
-			CreatedAt:      identity.CreatedAt,
-			UpdatedAt:      identity.UpdatedAt,
-		})
+		dto.Identities = append(dto.Identities, identityDTO(identity))
 	}
 	return dto
+}
+
+func identityDTO(identity model.Identity) IdentityDTO {
+	return IdentityDTO{
+		ID:             identity.ID,
+		Provider:       string(identity.Provider),
+		ProviderID:     identity.ProviderID,
+		IdentityData:   identity.IdentityData,
+		TokenExpiresAt: identity.TokenExpiresAt,
+		CreatedAt:      identity.CreatedAt,
+		UpdatedAt:      identity.UpdatedAt,
+	}
 }
 
 func (s Service) audit(ctx context.Context, userID *int64, action, resource string, resourceID *string, success bool, errCode int, clientIP, userAgent string, detail map[string]any) error {
@@ -342,4 +375,26 @@ func (s Service) audit(ctx context.Context, userID *int64, action, resource stri
 		ErrCode:    errCodePtr,
 		CreatedAt:  s.now(),
 	})
+}
+
+// hasControlCharacter reports whether value contains a C0/C1 control character.
+//
+// PostgreSQL rejects U+0000 in text at the protocol level (SQLSTATE 22021), which
+// is not a unique violation and so surfaces as a 500 naming no field. The other
+// control characters do store, but they travel into audit logs and onto the
+// public card, where a stray CR or LF splits a log line or a rendered value.
+// Display text has no legitimate use for any of them.
+//
+// Interior spaces are deliberately allowed: names, intros and majors contain
+// them, and callers already trim the edges.
+func hasControlCharacter(value string) bool {
+	for _, symbol := range value {
+		if symbol < 0x20 || symbol == 0x7f {
+			return true
+		}
+		if symbol >= 0x80 && symbol <= 0x9f {
+			return true
+		}
+	}
+	return false
 }

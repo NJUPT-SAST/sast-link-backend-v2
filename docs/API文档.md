@@ -629,16 +629,16 @@ PUT /user/profile
 
 **Headers**: `Authorization: Bearer <access_token>`
 
-更新当前登录用户可自助维护的个人信息。未传字段保持不变；`login_email`、`role`、`state`、`email_type` 等身份与权限字段不可通过此接口修改。
+更新当前登录用户可自助维护的个人信息。未传字段保持不变；`login_email`、`role`、`state`、`email_type` 等身份与权限字段不可通过此接口修改，传入未知字段返回 `40000`。
 
-**Request**:
+**Request**（所有字段均可选，至少传一个）:
 ```json
 {
   "name": "张三",
   "student_id": "B2404****",
   "phone_number": "13800138000",
   "qq_number": "1234567890",
-  "college": "计算机学院",
+  "college": "计算机学院、软件学院、网络空间安全学院",
   "major": "软件工程",
   "nickname": "新昵称",
   "department": "software",
@@ -648,6 +648,27 @@ PUT /user/profile
   "github_url": "https://github.com/example"
 }
 ```
+
+**字段语义**:
+
+| 字段组 | 归属 | 传空字符串 |
+|--------|------|-----------|
+| `nickname` / `department` / `intro` / `email` / `blog_url` / `github_url` | `profile`（可空） | 清空为 `null` |
+| `name` / `student_id` / `phone_number` / `qq_number` / `college` / `major` | `user`（NOT NULL） | 返回 `40000` |
+
+- 未传的键与传空字符串语义不同：前者保持不变，后者对可空字段表示清空
+- 传 `null` 等同于未传该键（保持不变），**不表示清空**；清空请用空字符串
+- `college` 必须是 `college_enum` 完整枚举值（见附录 A），简称如「计算机学院」会被拒绝
+- `department` 仅接受 `software` / `media` 或空字符串
+- `blog_url` / `github_url` 必须是 http/https 绝对 URL——这两个字段会在公开卡片上渲染为链接，故拒绝 `javascript:`、`data:` 等 scheme
+- 所有文本字段拒绝控制字符（NUL、CR、LF、Tab 及其他 C0/C1），返回 `40000`；字段内部的空格保留，仅首尾被裁剪
+- 字段长度上限按数据库列宽校验（`name`/`nickname`/`intro`/`email` 255，`phone_number`/`qq_number` 20，`student_id`/`major` 50，两个 URL 512）
+- `email` 为展示邮箱（非登录邮箱），非空时校验格式，不合法返回 `40000`
+- 可空字段传纯空白（如 `" "`）等同于传空字符串，首尾裁剪后为空即清空为 `NULL`；NOT NULL 字段传纯空白返回 `40000`
+
+**错误码**: `40000`（参数/枚举/长度/链接校验失败、未知字段、无任何待更新字段）、`40902`（学号已被占用）、`40900`（其他唯一性冲突）、`40102`（未认证）、`40301`（账号已注销）、`50000`（服务器内部错误）
+
+审计日志 `update_profile` 的 `detail.changed_fields` 记录本次实际写入的字段名。
 
 **Response** `200`:
 ```json
@@ -663,7 +684,7 @@ PUT /user/profile
     "phone_number": "13800138000",
     "qq_number": "1234567890",
     "student_id": "B2404****",
-    "college": "计算机学院",
+    "college": "计算机学院、软件学院、网络空间安全学院",
     "major": "软件工程",
     "profile": { ... },
     "identities": [ ... ],
@@ -722,7 +743,11 @@ GET /card/:id
 }
 ```
 
-**说明**: 返回 `profile` 表中公开字段，用于公开个人主页、homepage 友链展示及 OIDC `profile` claim 指向。用户 ID 不存在或已注销时返回 404。
+**说明**: 返回 `profile` 表中公开字段，用于公开个人主页、homepage 友链展示及 OIDC `profile` claim 指向。用户 ID 不存在或已注销（`state = is_deleted`）时返回 404（`40401`），两者不区分；ID 格式非法（非正整数、含非数字字符）同样返回 `40401`，避免探测哪些 ID 曾经存在。
+
+**错误码**: `40401`（用户不存在、已注销或 ID 格式非法）、`50000`（服务器内部错误）
+
+该端点**不使用**标准响应信封（见 §10.1），字段直接位于顶层。未填写的展示字段返回 `null`；用户无 `profile` 记录时除 `id` 外全部为 `null`。`id` 非正整数或含非数字字符时同样返回 404。
 
 ---
 
@@ -770,6 +795,8 @@ GET /user/identities
   ]
 }
 ```
+
+**错误码**: `40102`（未认证）、`40301`（账号已注销）、`50000`（服务器内部错误）
 
 ---
 
@@ -927,9 +954,15 @@ DELETE /user/identities/:id
 ```
 
 **约束**:
-- 必须输入当前密码进行二次确认
+- 必须输入当前密码进行二次确认——仅凭 Access Token 不足以摘除账号的登录方式
 - 主邮箱（`user.login_email`）不在 identities 中，不可通过此接口解绑
 - 不能解绑唯一登录方式（解绑后无其他登录手段则拒绝）
+- 单个用户 60s 内最多解绑 3 次，超出返回 `42900` 并带 `Retry-After`；限流在密码校验之前生效，密码错误的请求同样消耗配额
+- 并发解绑同一条记录由数据库串行化，只有一个能删到行，另一个返回 `40400`
+
+**错误码**: `40000`（`password` 缺失、未知字段或 Content-Type 非 JSON）、`40105`（密码错误）、`40400`（绑定记录不存在或不属于当前用户）、`42200`（不能解绑唯一的登录方式）、`42900`（解绑过于频繁，带 `Retry-After`）、`40301`（账号已注销）、`50300`（密码派生被中断，依赖暂不可用）、`50000`（服务器内部错误）
+
+不属于当前用户的绑定 ID 与不存在的 ID 均返回 `40400`，不区分两者，避免探测他人绑定记录是否存在。
 
 ---
 
@@ -1626,6 +1659,7 @@ RP (Relying Party)                         SAST Link v2 (OIDC Provider)
 | 422 | 业务校验失败 | `422xx` |
 | 429 | 请求频率限制 | `429xx` |
 | 500 | 服务器内部错误 | `500xx` |
+| 503 | 依赖服务暂不可用 | `503xx` |
 
 ### C. Token 生命周期
 

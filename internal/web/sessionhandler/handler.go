@@ -27,6 +27,10 @@ type Service interface {
 	ChangePassword(ctx context.Context, input session.ChangePasswordInput) (*session.ChangePasswordResult, error)
 	BindEmailSendCode(ctx context.Context, input session.BindEmailSendCodeInput) (*session.BindEmailSendCodeResult, error)
 	BindEmailVerify(ctx context.Context, input session.BindEmailVerifyInput) (*session.BindEmailVerifyResult, error)
+	UpdateProfile(ctx context.Context, input session.UpdateProfileInput) (*session.UpdateProfileResult, error)
+	ListIdentities(ctx context.Context, input session.ListIdentitiesInput) (*session.ListIdentitiesResult, error)
+	UnbindIdentity(ctx context.Context, input session.UnbindIdentityInput) (*session.UnbindIdentityResult, error)
+	Card(ctx context.Context, input session.CardInput) (*session.CardResult, error)
 }
 
 type Handler struct {
@@ -200,13 +204,21 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	r.POST("/auth/register", h.Register)
 	r.POST("/auth/forgot-password/send-code", h.ForgotPasswordSendCode)
 	r.POST("/auth/reset-password", h.ResetPassword)
+	// The card is a deliberately public read (PRD §4.14): it backs homepage friend
+	// links and the OIDC profile claim target, so it stays outside the JWT group.
+	// The repository projection filters soft-deleted users and exposes display
+	// columns only.
+	r.GET("/card/:id", h.Card)
 	protected := r.Group("")
 	protected.Use(authMiddleware)
 	protected.POST("/auth/logout", h.Logout)
 	protected.POST("/auth/change-password", h.ChangePassword)
 	protected.GET("/user/profile", h.Profile)
+	protected.PUT("/user/profile", h.UpdateProfile)
+	protected.GET("/user/identities", h.ListIdentities)
 	protected.POST("/user/identities/email", h.BindEmailSendCode)
 	protected.POST("/user/identities/email/verify", h.BindEmailVerify)
+	protected.DELETE("/user/identities/:id", h.UnbindIdentity)
 }
 
 func (h Handler) Login(c *gin.Context) {
@@ -262,7 +274,7 @@ func (h Handler) Refresh(c *gin.Context) {
 func (h Handler) Logout(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	var req logoutRequest
@@ -286,7 +298,7 @@ func (h Handler) Logout(c *gin.Context) {
 func (h Handler) Profile(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	result, err := h.Service.Profile(c.Request.Context(), session.ProfileInput{UserID: principal.UserID})
@@ -409,7 +421,7 @@ func (h Handler) ResetPassword(c *gin.Context) {
 func (h Handler) ChangePassword(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	var req changePasswordRequest
@@ -433,7 +445,7 @@ func (h Handler) ChangePassword(c *gin.Context) {
 func (h Handler) BindEmailSendCode(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	var req bindEmailRequest
@@ -457,7 +469,7 @@ func (h Handler) BindEmailSendCode(c *gin.Context) {
 func (h Handler) BindEmailVerify(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	var req bindEmailVerifyRequest
@@ -496,4 +508,8 @@ func expiresIn(now, expiry time.Time) int64 {
 
 func badRequest() error {
 	return &response.BusinessError{HTTPStatus: http.StatusBadRequest, Code: errcode.CodeBadRequest, Message: "请求参数错误"}
+}
+
+func internalError() error {
+	return &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"}
 }

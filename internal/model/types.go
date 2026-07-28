@@ -26,6 +26,18 @@ const (
 	DepartmentMedia    Department = "media"
 )
 
+// Valid reports whether d is a defined department_enum value. The column is
+// nullable, so an empty Department means "unset" and is not valid input here;
+// callers clear the field with a NULL instead.
+func (d Department) Valid() bool {
+	switch d {
+	case DepartmentSoftware, DepartmentMedia:
+		return true
+	default:
+		return false
+	}
+}
+
 // LoginMethod is a value from PostgreSQL's login_method_enum.
 type LoginMethod string
 
@@ -262,4 +274,34 @@ func (j JSONB) Value() (driver.Value, error) {
 		return nil, fmt.Errorf("JSONB value is invalid JSON")
 	}
 	return []byte(j), nil
+}
+
+// MarshalJSON emits the stored document as JSON rather than as a base64 string.
+//
+// JSONB is a named type over json.RawMessage, and a named byte-slice type does
+// not inherit the underlying type's marshaller, so encoding/json falls back to
+// its default []byte handling and base64-encodes the payload. Any DTO exposing a
+// JSONB column would then contradict its documented object shape.
+func (j JSONB) MarshalJSON() ([]byte, error) {
+	if len(j) == 0 {
+		return []byte("null"), nil
+	}
+	if !json.Valid(j) {
+		return nil, fmt.Errorf("JSONB value is invalid JSON")
+	}
+	return []byte(j), nil
+}
+
+// UnmarshalJSON stores the raw document verbatim, mirroring MarshalJSON so a
+// round trip through JSON preserves the value.
+func (j *JSONB) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*j = nil
+		return nil
+	}
+	if !json.Valid(data) {
+		return fmt.Errorf("JSONB value is invalid JSON")
+	}
+	*j = append((*j)[:0], data...)
+	return nil
 }

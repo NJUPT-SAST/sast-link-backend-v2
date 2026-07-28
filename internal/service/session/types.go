@@ -59,6 +59,12 @@ type UserRepository interface {
 	// and revokes every live token of the user atomically, returning the
 	// access-token entries still pending blacklist delivery.
 	UpdatePasswordAndRevokeSessions(ctx context.Context, userID int64, passwordHash string, revokedAt time.Time) ([]model.BlacklistEntry, error)
+	// UpdateProfile applies a partial self-service field update across "user" and
+	// profile in one transaction and returns the reloaded aggregate.
+	UpdateProfile(ctx context.Context, userID int64, update repository.ProfileUpdate) (*model.User, error)
+	// FindPublicCardByUserID returns the public display card of a non-deleted
+	// user, or repository.ErrNotFound.
+	FindPublicCardByUserID(ctx context.Context, userID int64) (*repository.PublicCard, error)
 }
 
 type ClientRepository interface {
@@ -126,6 +132,14 @@ type IdentityRepository interface {
 	// limit identities of the same provider, checked under a row lock so
 	// concurrent binds cannot exceed the limit.
 	CreateWithinLimit(ctx context.Context, identity *model.Identity, limit int64) error
+	// ListByUser returns every identity owned by the user, oldest first.
+	ListByUser(ctx context.Context, userID int64) ([]model.Identity, error)
+	// FindByIDAndUser resolves an identity scoped to its owner, so a foreign ID is
+	// indistinguishable from a missing one.
+	FindByIDAndUser(ctx context.Context, identityID, userID int64) (*model.Identity, error)
+	// DeleteByIDAndUser removes an owned identity, reporting
+	// repository.ErrNotFound when nothing matched.
+	DeleteByIDAndUser(ctx context.Context, identityID, userID int64) error
 }
 
 type Mailer interface {
@@ -305,6 +319,79 @@ type BindEmailVerifyInput struct {
 type BindEmailVerifyResult struct {
 	Email    string
 	Identity IdentityDTO
+}
+
+// UpdateProfileInput carries a partial self-service profile edit. Every field is
+// a pointer so "absent" is distinguishable from "set to empty": PUT
+// /user/profile leaves unsent fields untouched, while an explicit empty string
+// clears a nullable display field.
+type UpdateProfileInput struct {
+	UserID int64
+
+	Name        *string
+	PhoneNumber *string
+	QQNumber    *string
+	StudentID   *string
+	College     *string
+	Major       *string
+
+	Nickname   *string
+	Department *string
+	Intro      *string
+	Email      *string
+	BlogURL    *string
+	GitHubURL  *string
+
+	ClientIP  string
+	UserAgent string
+}
+
+type ListIdentitiesInput struct {
+	UserID int64
+}
+
+type ListIdentitiesResult struct {
+	Identities []IdentityDTO
+}
+
+type UnbindIdentityInput struct {
+	UserID     int64
+	IdentityID int64
+	Password   string
+	ClientIP   string
+	UserAgent  string
+}
+
+type UnbindIdentityResult struct {
+	Provider   string
+	ProviderID string
+}
+
+type CardInput struct {
+	UserID int64
+}
+
+type CardResult struct {
+	Card CardDTO
+}
+
+// CardDTO is the public display card. Only PRD §4.14's public fields appear
+// here; nothing from the user's identity or permission columns is carried.
+type CardDTO struct {
+	ID         int64
+	Nickname   *string
+	Department *string
+	Intro      *string
+	Avatar     *string
+	BlogURL    *string
+	GitHubURL  *string
+}
+
+type UpdateProfileResult struct {
+	Profile UserProfileDTO
+	// ChangedFields lists the request fields that were applied, in contract
+	// order. It feeds the update_profile audit detail defined in PRD §4.13.
+	ChangedFields []string
 }
 
 type UserProfileDTO struct {
