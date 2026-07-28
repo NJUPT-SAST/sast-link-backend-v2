@@ -47,12 +47,14 @@
 
 **直出响应例外**：
 
-- `/oauth/authorize`：成功或错误均重定向到 `redirect_uri`，通过 query 参数返回 `code` / `state` 或 `error` / `error_description`。
+- `/oauth/authorize`：成功重定向至前端授权页（携带 `request_id`）；错误按可重定向性重定向至授权页或客户端 `redirect_uri`（携带 `error` / `error_description`）。授权码在第二段 `/oauth/authorize/consent` 才签发，详见 §5.1。
 - `/oauth/token`：请求体为 `application/x-www-form-urlencoded`；成功和错误均使用 OAuth JSON 格式（RFC 6749），字段名使用 `scope`（单数）。
 - `/oauth/revoke`：请求体为 `application/x-www-form-urlencoded`；遵循 RFC 7009，成功固定 `200 OK` 且响应体为空，错误使用 OAuth JSON 格式。
 - `/userinfo`：成功直出 OIDC UserInfo claims；错误遵循 RFC 6750 Bearer Token 错误格式。
 - `/.well-known/openid-configuration`：直出 OIDC Discovery JSON。
 - `/.well-known/jwks.json`：直出 JWKS JSON。
+
+`/oauth/authorize/consent` 是 SAST Link 自有端点而非 RFC 定义端点，**使用标准信封**，不在上述例外之列。
 - `/health`：直出 `{ "status", "db", "redis" }`。
 - `/card/{id}`：直出公开 profile 字段。
 
@@ -1752,43 +1754,62 @@ Content-Type: application/json
 **OIDC 授权码流完整交互**：
 
 ```
-RP (Relying Party)                         SAST Link v2 (OIDC Provider)
-      |                                              |
-      | GET /oauth/authorize?                        |
-      |   response_type=code                         |
-      |   client_id=xxx                              |
-      |   redirect_uri=https://rp.example/cb         |
-      |   scope=openid+profile+email                 |
-      |   state=random_state                         |
-      |   code_challenge=S256(challenge)             |
-      |   code_challenge_method=S256                 |
-      |   nonce=random_nonce                         |
-      |--------------------------------------------->|
-      |                                              | 用户登录 + 授权确认
-      | 302 ?code=auth_code&state=random_state       |
-      |<---------------------------------------------|
-      |                                              |
-      | POST /oauth/token                            |
-      |   grant_type=authorization_code              |
-      |   code=auth_code                             |
-      |   redirect_uri=https://rp.example/cb         |
-      |   client_id=xxx                              |
-      |   code_verifier=challenge                   |
-      |--------------------------------------------->|
-      |                                              | 校验 code / PKCE / nonce
-      | { access_token, refresh_token,               |
-      |   id_token, expires_in, scope }              |
-      |<---------------------------------------------|
-      |                                              |
-      | 验证 id_token 签名 (/.well-known/jwks.json)   |
-      | 对比 nonce / iss / aud                       |
-      |                                              |
-      | GET /userinfo                                |
-      |   Authorization: Bearer <access_token>       |
-      |--------------------------------------------->|
-      | { sub, name, email, ... }                    |
-      |<---------------------------------------------|
+RP (Relying Party)          浏览器 / 前端授权页          SAST Link v2 (OIDC Provider)
+      |                            |                              |
+      | 302 至 /oauth/authorize    |                              |
+      |--------------------------->|                              |
+      |                            | GET /oauth/authorize?        |
+      |                            |   response_type=code         |
+      |                            |   client_id=xxx              |
+      |                            |   redirect_uri=https://rp.example/cb
+      |                            |   scope=openid+profile+email |
+      |                            |   state=random_state         |
+      |                            |   code_challenge=S256(verifier)
+      |                            |   code_challenge_method=S256 |
+      |                            |   nonce=random_nonce         |
+      |                            |   （无 Authorization header）|
+      |                            |----------------------------->|
+      |                            |                              | 校验参数 → Redis 暂存
+      |                            | 302 {OAUTH_CONSENT_URL}?     |
+      |                            |   request_id=ar_xxx          |
+      |                            |   &client_name=..&scope=..   |
+      |                            |<-----------------------------|
+      |                            |                              |
+      |                            | 展示授权页，用户点击「同意」 |
+      |                            | POST /oauth/authorize/consent|
+      |                            |   Authorization: Bearer <at> |
+      |                            |   { request_id, approve }    |
+      |                            |----------------------------->|
+      |                            |                              | GetDel 消费暂存
+      |                            |                              | → 建授权码（新 family）
+      |                            | 200 { redirect_uri }         |
+      |                            |<-----------------------------|
+      |                            |                              |
+      | 前端 navigate 至 redirect_uri（?code=..&state=..）        |
+      |<---------------------------|                              |
+      |                            |                              |
+      | POST /oauth/token（RP 后端直连，不经浏览器）              |
+      |   grant_type=authorization_code                           |
+      |   code=auth_code                                          |
+      |   redirect_uri=https://rp.example/cb                      |
+      |   client_id=xxx                                           |
+      |   code_verifier=verifier                                  |
+      |---------------------------------------------------------->|
+      |                            |            校验 client / code / redirect_uri / PKCE
+      | { access_token, refresh_token, id_token, expires_in, scope }
+      |<----------------------------------------------------------|
+      |                            |                              |
+      | 验证 id_token 签名（/.well-known/jwks.json）              |
+      | 对比 nonce / iss / aud                                    |
+      |                            |                              |
+      | GET /userinfo                                             |
+      |   Authorization: Bearer <access_token>                    |
+      |---------------------------------------------------------->|
+      | { sub, name, email, ... }                                 |
+      |<----------------------------------------------------------|
 ```
+
+时序图中 `code_verifier` 与 `code_challenge` 的关系：`code_challenge = BASE64URL(SHA256(code_verifier))`，RP 在发起授权时发送 challenge，兑换时发送原始 verifier。`nonce` 由服务端写入 ID Token 的 claim，RP 需自行比对——本服务不校验 nonce，它的用途正是让 RP 检测 ID Token 重放。
 
 ---
 

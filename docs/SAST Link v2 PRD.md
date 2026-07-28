@@ -596,8 +596,8 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ### 10.1 响应规范
 
 - **标准端点**：统一响应信封 `{ "code": 0, "message": "ok", "data": {...} }`
-- **OAuth 端点**：`/oauth/authorize` 成功/错误均使用 redirect response；`/oauth/token` 成功和错误均使用 RFC 6749 JSON 格式；`/oauth/revoke` 使用 RFC 7009，成功固定 `200 OK` 空响应体，错误使用 OAuth JSON 格式。
-- **OIDC UserInfo 端点**：错误时 RFC 6750 格式 `{ "error": "invalid_token", "error_description": "..." }`
+- **OAuth 端点**：`/oauth/authorize` 成功/错误均使用 redirect response；`/oauth/token` 成功和错误均使用 RFC 6749 JSON 格式（成功另带 `Cache-Control: no-store`）；`/oauth/revoke` 使用 RFC 7009，成功固定 `200 OK` 空响应体，错误使用 OAuth JSON 格式。**例外**：`/oauth/authorize/consent` 是自有端点而非 RFC 定义端点，使用标准信封。
+- **OIDC UserInfo 端点**：错误时 RFC 6750 格式 `{ "error": "invalid_token", "error_description": "..." }`，并附带 `WWW-Authenticate` Bearer 挑战头
 - **OIDC Discovery / JWKS**：直接返回协议标准 JSON（`/.well-known/openid-configuration`、`/.well-known/jwks.json`）
 - **健康检查**：直接返回 `{ "status", "db", "redis" }`
 - **个人卡片公开端点**：`/card/{id}` 直接返回公开 profile 字段
@@ -647,18 +647,18 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 模块 | 状态 |
 |------|------|
 | Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
-| 数据基础层 | 已完成 — V001–V004 SQL migrations、固定内置 `sast-link-web` first-party Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
+| 数据基础层 | 已完成 — V001–V005 SQL migrations、固定内置 `sast-link-web` first-party Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
 | 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI 黑名单/登录失败计数与 fixed-window limiter |
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流与登录/登出审计接入 |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
 | 用户资料管理 | 部分完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）已完成；头像上传待实现（依赖对象存储接入） |
-| OAuth/OIDC 业务 | 部分完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）与 OIDC Provider（discovery / JWKS / UserInfo / ID Token）已完成；OAuth 第三方登录/绑定（GitHub / 飞书回调）与客户端管理 endpoints 待实现 |
+| OAuth/OIDC 业务 | 部分完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）与 OIDC Provider（discovery / JWKS / UserInfo / ID Token）已完成，含跨层端到端集成测试（真实 PostgreSQL + Redis）；OAuth 第三方登录/绑定（GitHub / 飞书回调）与客户端管理 endpoints 待实现 |
 | 其余运维接入 | 待实现 — 设备管理、其他 endpoint 限流策略与 pg_cron |
 
 ## 11. 实现顺序
 
 - [x] Go 服务骨架（配置 / DB 与 Redis 连接 / Web 基础设施 / 健康检查）
-- [x] 数据基础层（V001–V004 migrations / 内置 first-party Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
+- [x] 数据基础层（V001–V005 migrations / 内置 first-party Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
 - [x] 认证基础设施（PBKDF2 / JWT + JWKS / Refresh Token / PKCE-S256 / scope / Redis auth state + limiter / token-family rotation）
 - [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
 - [x] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码 / 第三方邮箱绑定）
