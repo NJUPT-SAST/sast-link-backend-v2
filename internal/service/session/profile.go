@@ -109,6 +109,9 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 		if utf8.RuneCountInString(trimmed) > entry.limit {
 			return update, nil, newError(ErrInvalidInput, entry.field+" 超出长度限制", nil)
 		}
+		if hasControlCharacter(trimmed) {
+			return update, nil, newError(ErrInvalidInput, entry.field+" 含非法字符", nil)
+		}
 		value := trimmed
 		*entry.into = &value
 		present[entry.field] = true
@@ -144,6 +147,9 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 		trimmed := strings.TrimSpace(*entry.value)
 		if utf8.RuneCountInString(trimmed) > entry.limit {
 			return update, nil, newError(ErrInvalidInput, entry.field+" 超出长度限制", nil)
+		}
+		if hasControlCharacter(trimmed) {
+			return update, nil, newError(ErrInvalidInput, entry.field+" 含非法字符", nil)
 		}
 		value := trimmed
 		*entry.into = &value

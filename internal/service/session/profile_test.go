@@ -120,6 +120,49 @@ func TestUpdateProfileRejectsOverlongValues(t *testing.T) {
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 }
 
+// A NUL byte is rejected by PostgreSQL at the protocol level (SQLSTATE 22021),
+// which is not a unique violation and would surface as a 500 naming no field.
+// The other control characters do store, but they reach audit logs and the public
+// card, where a CR or LF splits a line. Both classes belong to 40000.
+func TestUpdateProfileRejectsControlCharacters(t *testing.T) {
+	tests := map[string]UpdateProfileInput{
+		"nul in nickname":     {UserID: 42, Nickname: stringPtr("pt\x00x")},
+		"nul in name":         {UserID: 42, Name: stringPtr("张\x00三")},
+		"newline in intro":    {UserID: 42, Intro: stringPtr("line\nbreak")},
+		"cr in major":         {UserID: 42, Major: stringPtr("软件\r工程")},
+		"tab in student id":   {UserID: 42, StudentID: stringPtr("B24\t04")},
+		"del in phone":        {UserID: 42, PhoneNumber: stringPtr("138\x7f00138000")},
+		"c1 control in intro": {UserID: 42, Intro: stringPtr("intro\u0085next")},
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			service := newRegisterService(t)
+			_, err := service.UpdateProfile(context.Background(), input)
+			assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+		})
+	}
+}
+
+// Interior spaces are legitimate in display text and must survive the control
+// character guard; only the edges are trimmed.
+func TestUpdateProfileKeepsInteriorSpaces(t *testing.T) {
+	service := newRegisterService(t)
+	result, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
+		UserID: 42,
+		Name:   stringPtr("  张 三  "),
+		Intro:  stringPtr("hello world"),
+	})
+	if err != nil {
+		t.Fatalf("UpdateProfile() error = %v", err)
+	}
+	if got := result.Profile.Name; got != "张 三" {
+		t.Fatalf("name = %q, want interior space kept and edges trimmed", got)
+	}
+	if got := result.Profile.Profile.Intro; got == nil || *got != "hello world" {
+		t.Fatalf("intro = %v, want \"hello world\"", got)
+	}
+}
+
 // blog_url and github_url are rendered as links on the public card, so a
 // javascript: scheme would turn every card viewer into a target.
 func TestUpdateProfileRejectsNonHTTPLinks(t *testing.T) {

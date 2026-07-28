@@ -376,3 +376,25 @@ func (s Service) audit(ctx context.Context, userID *int64, action, resource stri
 		CreatedAt:  s.now(),
 	})
 }
+
+// hasControlCharacter reports whether value contains a C0/C1 control character.
+//
+// PostgreSQL rejects U+0000 in text at the protocol level (SQLSTATE 22021), which
+// is not a unique violation and so surfaces as a 500 naming no field. The other
+// control characters do store, but they travel into audit logs and onto the
+// public card, where a stray CR or LF splits a log line or a rendered value.
+// Display text has no legitimate use for any of them.
+//
+// Interior spaces are deliberately allowed: names, intros and majors contain
+// them, and callers already trim the edges.
+func hasControlCharacter(value string) bool {
+	for _, symbol := range value {
+		if symbol < 0x20 || symbol == 0x7f {
+			return true
+		}
+		if symbol >= 0x80 && symbol <= 0x9f {
+			return true
+		}
+	}
+	return false
+}
