@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
@@ -367,7 +369,16 @@ func (r *UserRepository) UpdateProfile(
 			return fmt.Errorf("load profile owner: %w", err)
 		}
 		profileColumns["user_id"] = userID
-		if err := transaction.Model(&model.Profile{}).Create(profileColumns).Error; err != nil {
+		// ON CONFLICT rather than a bare INSERT: two concurrent first writes both
+		// see RowsAffected == 0 and both insert, and the loser would violate
+		// profile_user_id_key. That is a retryable race on the user's own row, but
+		// the constraint name is unmapped upstream and would surface as a 40900
+		// "conflicts with an existing account". Merging instead makes both callers
+		// succeed with their own columns.
+		if err := transaction.Model(&model.Profile{}).Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "user_id"}},
+			DoUpdates: clause.AssignmentColumns(profileColumnNames(profileColumns)),
+		}).Create(profileColumns).Error; err != nil {
 			return fmt.Errorf("create profile for update: %w", err)
 		}
 		return nil
@@ -379,6 +390,21 @@ func (r *UserRepository) UpdateProfile(
 		return nil, fmt.Errorf("update profile: %w", err)
 	}
 	return r.FindByID(ctx, userID)
+}
+
+// profileColumnNames returns the assignable column names of a profile upsert,
+// excluding user_id: it is the conflict target, so re-assigning it is redundant.
+// Sorted so the generated statement is stable across runs.
+func profileColumnNames(columns map[string]any) []string {
+	names := make([]string, 0, len(columns))
+	for name := range columns {
+		if name == "user_id" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // PublicCard is the unauthenticated display-card projection of a user. It holds
