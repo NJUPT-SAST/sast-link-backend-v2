@@ -629,16 +629,16 @@ PUT /user/profile
 
 **Headers**: `Authorization: Bearer <access_token>`
 
-更新当前登录用户可自助维护的个人信息。未传字段保持不变；`login_email`、`role`、`state`、`email_type` 等身份与权限字段不可通过此接口修改。
+更新当前登录用户可自助维护的个人信息。未传字段保持不变；`login_email`、`role`、`state`、`email_type` 等身份与权限字段不可通过此接口修改，传入未知字段返回 `40000`。
 
-**Request**:
+**Request**（所有字段均可选，至少传一个）:
 ```json
 {
   "name": "张三",
   "student_id": "B2404****",
   "phone_number": "13800138000",
   "qq_number": "1234567890",
-  "college": "计算机学院",
+  "college": "计算机学院、软件学院、网络空间安全学院",
   "major": "软件工程",
   "nickname": "新昵称",
   "department": "software",
@@ -648,6 +648,23 @@ PUT /user/profile
   "github_url": "https://github.com/example"
 }
 ```
+
+**字段语义**:
+
+| 字段组 | 归属 | 传空字符串 |
+|--------|------|-----------|
+| `nickname` / `department` / `intro` / `email` / `blog_url` / `github_url` | `profile`（可空） | 清空为 `null` |
+| `name` / `student_id` / `phone_number` / `qq_number` / `college` / `major` | `user`（NOT NULL） | 返回 `40000` |
+
+- 未传的键与传空字符串语义不同：前者保持不变，后者对可空字段表示清空
+- `college` 必须是 `college_enum` 完整枚举值（见附录 A），简称如「计算机学院」会被拒绝
+- `department` 仅接受 `software` / `media` 或空字符串
+- `blog_url` / `github_url` 必须是 http/https 绝对 URL——这两个字段会在公开卡片上渲染为链接，故拒绝 `javascript:`、`data:` 等 scheme
+- 字段长度上限按数据库列宽校验（`name`/`nickname`/`intro`/`email` 255，`phone_number`/`qq_number` 20，`student_id`/`major` 50，两个 URL 512）
+
+**错误码**: `40000`（参数/枚举/长度/链接校验失败、未知字段、无任何待更新字段）、`40902`（学号已被占用）
+
+审计日志 `update_profile` 的 `detail.changed_fields` 记录本次实际写入的字段名。
 
 **Response** `200`:
 ```json
@@ -663,7 +680,7 @@ PUT /user/profile
     "phone_number": "13800138000",
     "qq_number": "1234567890",
     "student_id": "B2404****",
-    "college": "计算机学院",
+    "college": "计算机学院、软件学院、网络空间安全学院",
     "major": "软件工程",
     "profile": { ... },
     "identities": [ ... ],
@@ -722,7 +739,9 @@ GET /card/:id
 }
 ```
 
-**说明**: 返回 `profile` 表中公开字段，用于公开个人主页、homepage 友链展示及 OIDC `profile` claim 指向。用户 ID 不存在或已注销时返回 404。
+**说明**: 返回 `profile` 表中公开字段，用于公开个人主页、homepage 友链展示及 OIDC `profile` claim 指向。用户 ID 不存在或已注销（`state = is_deleted`）时返回 404（`40400`），两者不区分。
+
+该端点**不使用**标准响应信封（见 §10.1），字段直接位于顶层。未填写的展示字段返回 `null`；用户无 `profile` 记录时除 `id` 外全部为 `null`。`id` 非正整数或含非数字字符时同样返回 404。
 
 ---
 
@@ -927,9 +946,14 @@ DELETE /user/identities/:id
 ```
 
 **约束**:
-- 必须输入当前密码进行二次确认
+- 必须输入当前密码进行二次确认——仅凭 Access Token 不足以摘除账号的登录方式
 - 主邮箱（`user.login_email`）不在 identities 中，不可通过此接口解绑
 - 不能解绑唯一登录方式（解绑后无其他登录手段则拒绝）
+- 同一地址 60s 内不可重复解绑；冷却在删除前抢占，故并发请求只有一个能通过
+
+**错误码**: `40105`（密码错误）、`40400`（绑定记录不存在或不属于当前用户）、`42200`（不能解绑唯一的登录方式）、`42900`（解绑冷却中，带 `Retry-After`）、`40301`（账号已注销）
+
+不属于当前用户的绑定 ID 与不存在的 ID 均返回 `40400`，不区分两者，避免探测他人绑定记录是否存在。
 
 ---
 

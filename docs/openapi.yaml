@@ -624,7 +624,13 @@ paths:
       description: |
         更新当前登录用户可自助维护的个人信息。允许更新 user 表中的基础信息
         （真实姓名、手机号、QQ 号、学院、专业、学号）以及 profile 表中的展示资料。
-        登录邮箱、角色、状态、邮箱类型等身份与权限字段不可通过此接口修改。
+        登录邮箱、角色、状态、邮箱类型等身份与权限字段不可通过此接口修改，传入未知字段返回 40000。
+
+        未传的字段保持不变。profile 侧的可空展示字段（nickname、intro、email、
+        blog_url、github_url、department）传空字符串表示清空为 null；user 侧字段
+        NOT NULL，传空字符串或纯空白返回 40000。
+        blog_url / github_url 必须是 http/https 绝对 URL。
+        college 必须是 college_enum 完整枚举值，department 必须是 software / media 或空字符串。
       operationId: userUpdateProfile
       tags:
         - Profile
@@ -709,7 +715,10 @@ paths:
           description: 未认证（401xx）
         '400':
           $ref: '#/components/responses/BadRequest'
-          description: 参数错误（400xx）
+          description: 参数错误、未知字段、枚举/长度/链接校验失败（40000）
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 学号已被占用（40902）
         '422':
           $ref: '#/components/responses/Unprocessable'
           description: 业务校验失败（422xx）
@@ -947,7 +956,10 @@ paths:
     delete:
       summary: 解绑第三方账号
       deprecated: false
-      description: 必须输入当前密码进行二次确认。主邮箱（user.login_email）不在 identities 中，不可通过此接口解绑。
+      description: >-
+        必须输入当前密码进行二次确认。主邮箱（user.login_email）不在 identities 中，不可通过此接口解绑。
+        不属于当前用户的绑定 ID 与不存在的 ID 均返回 40400，不区分两者。
+        解绑后若无其他登录方式则拒绝（42200）。同一地址 60s 内不可重复解绑（42900，带 Retry-After）。
       operationId: userUnbindIdentity
       tags:
         - Identities
@@ -985,10 +997,13 @@ paths:
           description: 未认证（401xx）
         '404':
           $ref: '#/components/responses/NotFound'
-          description: 资源不存在（404xx）
+          description: 绑定记录不存在或不属于当前用户（40400）
         '422':
           $ref: '#/components/responses/Unprocessable'
-          description: 业务校验失败（422xx）
+          description: 不能解绑唯一的登录方式（42200）
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: 解绑冷却中（42900）
       security:
         - bearerAuth: []
   /oauth/authorize:
