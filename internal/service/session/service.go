@@ -19,9 +19,6 @@ const (
 	defaultAccessTTL         = time.Hour
 	defaultRefreshTTL        = 30 * 24 * time.Hour
 	loginCompensationTimeout = 5 * time.Second
-	// cooldownReleaseTimeout bounds the detached unbind-cooldown release, which
-	// runs after the caller's context is likely already cancelled.
-	cooldownReleaseTimeout = 5 * time.Second
 	// verificationTTL bounds email verification codes and the tickets derived
 	// from them (Register-Ticket / Bind-Ticket), per the API contract's 5-minute
 	// one-time semantics.
@@ -47,7 +44,10 @@ type Service struct {
 	VerificationCode VerificationCodeStore
 	RegisterTicket   RegisterTicketStore
 	BindTicket       BindTicketStore
-	UnbindCooldowns  UnbindCooldownStore
+	// UnbindLimiter is separate from Limiter because checkEndpointLimit reads the
+	// quota off the instance, not the endpoint name — sharing one would give unbind
+	// the login budget.
+	UnbindLimiter    EndpointLimiter
 	ForgotPasswords  ForgotPasswordDispatcher
 	InternalClientID string
 	JWT              *auth.JWTManager
@@ -63,7 +63,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	if identifier == "" || input.Password == "" {
 		return nil, newError(ErrInvalidInput, "登录参数无效", nil)
 	}
-	if err := s.checkEndpointLimit(ctx, "login", loginLimitSubject(input, identifier)); err != nil {
+	if err := s.checkEndpointLimit(ctx, s.Limiter, "login", loginLimitSubject(input, identifier)); err != nil {
 		return nil, err
 	}
 	client, err := s.findInternalClient(ctx)
@@ -736,11 +736,14 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	}, nil
 }
 
-func (s Service) checkEndpointLimit(ctx context.Context, endpoint, subject string) error {
-	if s.Limiter == nil {
+// checkEndpointLimit throttles one endpoint against one subject. The limiter is a
+// parameter because each endpoint carries its own quota on its own instance; the
+// endpoint name only scopes the Redis key.
+func (s Service) checkEndpointLimit(ctx context.Context, limiter EndpointLimiter, endpoint, subject string) error {
+	if limiter == nil {
 		return nil
 	}
-	result, err := s.Limiter.Allow(ctx, endpoint, subject)
+	result, err := limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
 		// Redis-backed throttling has no durable fallback. Rejecting every
 		// request would take the endpoint down entirely, so allow the call and

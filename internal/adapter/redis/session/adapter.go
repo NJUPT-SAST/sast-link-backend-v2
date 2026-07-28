@@ -93,26 +93,3 @@ func (s BindTicketStore) PeekBindTicket(ctx context.Context, ticket string) (ses
 func (s BindTicketStore) ConsumeBindTicket(ctx context.Context, ticket string) (bool, error) {
 	return s.Store.DeleteOneTime(ctx, s.Store.Keys.BindTicket(ticket))
 }
-
-// UnbindCooldownStore adapts the identity-unbind cooldown to the session port.
-// Window is the PRD §4.8 cooldown length; a non-positive value disables the
-// cooldown, which the service treats as "not configured" rather than "always
-// allowed at zero TTL".
-type UnbindCooldownStore struct {
-	Store  internalredis.Store
-	Window time.Duration
-}
-
-func (s UnbindCooldownStore) Acquire(ctx context.Context, subject string) (bool, time.Duration, error) {
-	if s.Window <= 0 {
-		return true, 0, nil
-	}
-	return s.Store.AcquireUnbindCooldown(ctx, subject, s.Window)
-}
-
-func (s UnbindCooldownStore) Release(ctx context.Context, subject string) error {
-	if s.Window <= 0 {
-		return nil
-	}
-	return s.Store.ReleaseUnbindCooldown(ctx, subject)
-}

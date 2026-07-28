@@ -142,18 +142,6 @@ type IdentityRepository interface {
 	DeleteByIDAndUser(ctx context.Context, identityID, userID int64) error
 }
 
-// UnbindCooldownStore guards against rapid repeated unbind/rebind cycles of the
-// same address (PRD §4.8). It is fail-open per §6.0: PostgreSQL holds the
-// authoritative binding state, and losing the cooldown only widens a rate
-// window rather than allowing an unauthorized unbind.
-type UnbindCooldownStore interface {
-	// Acquire claims the cooldown for subject, reporting whether this caller won
-	// it and how long the existing claim has left when it did not.
-	Acquire(ctx context.Context, subject string) (acquired bool, retryAfter time.Duration, err error)
-	// Release drops a claim whose unbind did not complete.
-	Release(ctx context.Context, subject string) error
-}
-
 type Mailer interface {
 	SendVerificationCode(ctx context.Context, to, code string, purpose mailer.VerificationPurpose) error
 }

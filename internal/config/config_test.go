@@ -128,8 +128,11 @@ func TestLoadValidConfig(t *testing.T) {
 	if cfg.LoginFailureWindow != 15*time.Minute {
 		t.Errorf("LoginFailureWindow = %s, want 15m", cfg.LoginFailureWindow)
 	}
-	if cfg.UnbindCooldown != time.Minute {
-		t.Errorf("UnbindCooldown = %s, want 60s", cfg.UnbindCooldown)
+	if cfg.RateLimitUnbindRPM != 3 {
+		t.Errorf("RateLimitUnbindRPM = %d, want 3", cfg.RateLimitUnbindRPM)
+	}
+	if cfg.RateLimitUnbindWindow != time.Minute {
+		t.Errorf("RateLimitUnbindWindow = %s, want 60s", cfg.RateLimitUnbindWindow)
 	}
 }
 
@@ -213,7 +216,8 @@ func TestValidateAPIAuthRejectsNonPositiveRateSettings(t *testing.T) {
 		{name: "login window", envName: "RATE_LIMIT_LOGIN_WINDOW", value: "500ms", want: "RATE_LIMIT_LOGIN_WINDOW must be at least 1s"},
 		{name: "failure limit", envName: "LOGIN_FAILURE_LIMIT", value: "0", want: "LOGIN_FAILURE_LIMIT must be positive"},
 		{name: "failure window", envName: "LOGIN_FAILURE_WINDOW", value: "0", want: "LOGIN_FAILURE_WINDOW must be positive"},
-		{name: "unbind cooldown", envName: "UNBIND_COOLDOWN", value: "0", want: "UNBIND_COOLDOWN must be positive"},
+		{name: "unbind rpm", envName: "RATE_LIMIT_UNBIND_RPM", value: "0", want: "RATE_LIMIT_UNBIND_RPM must be positive"},
+		{name: "unbind window", envName: "RATE_LIMIT_UNBIND_WINDOW", value: "500ms", want: "RATE_LIMIT_UNBIND_WINDOW must be at least 1s"},
 	}
 
 	for _, tc := range cases {

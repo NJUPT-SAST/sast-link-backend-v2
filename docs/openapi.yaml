@@ -1018,7 +1018,7 @@ paths:
           description: 不能解绑唯一的登录方式（42200）
         '429':
           $ref: '#/components/responses/TooManyRequests'
-          description: 解绑冷却中（42900）
+          description: 解绑过于频繁（42900），60s 内最多 3 次，按调用者限流
       security:
         - bearerAuth: []
   /oauth/authorize:

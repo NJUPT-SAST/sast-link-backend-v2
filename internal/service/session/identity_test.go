@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
@@ -156,75 +157,52 @@ func TestUnbindIdentityAllowsLastIdentityWhenLoginEmailRemains(t *testing.T) {
 	}
 }
 
-// The cooldown is claimed before the delete, so a second immediate attempt is
-// rejected rather than both passing the check.
-func TestUnbindIdentityEnforcesCooldown(t *testing.T) {
+// Throttled before the password check, so guessing attempts consume the budget
+// too. The old cooldown was claimed only after the password verified, which left
+// this endpoint with no protection against guessing at all — and it has no
+// login-failure counter of its own.
+func TestUnbindIdentityThrottlesBeforePasswordCheck(t *testing.T) {
 	service := bindableService(t)
-	cooldowns := service.UnbindCooldowns.(*fakeUnbindCooldowns)
-	cooldowns.held = map[string]bool{"extra@gmail.com": true}
-	cooldowns.retryAfter = 42
+	service.UnbindLimiter = &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: 42 * time.Second}}
+	audits := service.Audit.(*fakeAudit)
+	before := len(audits.entries)
 
 	_, err := service.UnbindIdentity(context.Background(), UnbindIdentityInput{
-		UserID: 42, IdentityID: 12, Password: "secret",
+		UserID: 42, IdentityID: 12, Password: "wrong-password",
 	})
 	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+	// A rejected password writes an audit entry; a throttled request never reaches
+	// the check, so nothing is recorded.
+	if len(audits.entries) != before {
+		t.Fatalf("audit entries grew by %d, want 0 — the limiter must run first", len(audits.entries)-before)
+	}
 	if deleted := service.Identities.(*fakeIdentities).deleted; len(deleted) != 0 {
-		t.Fatalf("deleted = %v, want nothing deleted while cooling down", deleted)
+		t.Fatalf("deleted = %v, want nothing deleted while throttled", deleted)
 	}
 }
 
-// A delete that fails must release the claim: holding it would block a legitimate
-// retry for the full window over an error the user did not cause.
-func TestUnbindIdentityReleasesCooldownOnDeleteFailure(t *testing.T) {
+// Keyed per caller, not per address. Keying by provider_id let one user's unbind
+// lock out a different user who later bound the same address.
+func TestUnbindIdentityThrottlesPerUser(t *testing.T) {
 	service := bindableService(t)
-	service.Identities.(*fakeIdentities).deleteErr = errors.New("boom")
+	limiter := &fakeLimiter{}
+	service.UnbindLimiter = limiter
 
-	_, err := service.UnbindIdentity(context.Background(), UnbindIdentityInput{
+	if _, err := service.UnbindIdentity(context.Background(), UnbindIdentityInput{
 		UserID: 42, IdentityID: 12, Password: "secret",
-	})
-	assertKind(t, err, KindInternal, errcode.CodeInternal)
-	cooldowns := service.UnbindCooldowns.(*fakeUnbindCooldowns)
-	if !slices.Equal(cooldowns.releases, []string{"extra@gmail.com"}) {
-		t.Fatalf("releases = %v, want the claim released", cooldowns.releases)
+	}); err != nil {
+		t.Fatalf("UnbindIdentity returned error: %v", err)
+	}
+	if want := []string{"unbind:user:42"}; !slices.Equal(limiter.calls, want) {
+		t.Fatalf("limiter calls = %v, want %v", limiter.calls, want)
 	}
 }
 
-// A cancelled caller is the most likely reason the delete failed, and it is the
-// case where holding the claim hurts most: nothing was unbound, yet the address
-// would stay locked for the rest of the window. The release must therefore not
-// ride on the caller's context.
-func TestUnbindIdentityReleasesCooldownWhenCallerCancelled(t *testing.T) {
+// Fail-open per PRD §6.0: PostgreSQL owns the binding state, so a limiter outage
+// must not block a password-confirmed unbind.
+func TestUnbindIdentityFailsOpenWhenLimiterUnavailable(t *testing.T) {
 	service := bindableService(t)
-	service.Identities.(*fakeIdentities).deleteErr = context.Canceled
-
-	ctx, cancel := context.WithCancel(context.Background())
-	primed := make(chan struct{})
-	service.Identities.(*fakeIdentities).beforeDelete = func() {
-		close(primed)
-		cancel()
-	}
-
-	_, err := service.UnbindIdentity(ctx, UnbindIdentityInput{
-		UserID: 42, IdentityID: 12, Password: "secret",
-	})
-	if err == nil {
-		t.Fatal("UnbindIdentity() error = nil, want failure")
-	}
-	<-primed
-	cooldowns := service.UnbindCooldowns.(*fakeUnbindCooldowns)
-	if !slices.Equal(cooldowns.releases, []string{"extra@gmail.com"}) {
-		t.Fatalf("releases = %v, want the claim released despite cancellation", cooldowns.releases)
-	}
-	if cooldowns.held["extra@gmail.com"] {
-		t.Fatal("claim still held after a cancelled unbind failed")
-	}
-}
-
-// The cooldown is fail-open per PRD §6.0: PostgreSQL owns the binding state, so a
-// Redis outage must not block a password-confirmed unbind.
-func TestUnbindIdentityFailsOpenWhenCooldownUnavailable(t *testing.T) {
-	service := bindableService(t)
-	service.UnbindCooldowns.(*fakeUnbindCooldowns).err = errors.New("redis down")
+	service.UnbindLimiter = &fakeLimiter{err: errors.New("redis down")}
 
 	if _, err := service.UnbindIdentity(context.Background(), UnbindIdentityInput{
 		UserID: 42, IdentityID: 12, Password: "secret",

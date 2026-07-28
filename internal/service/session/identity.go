@@ -49,6 +49,13 @@ func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) 
 	if input.Password == "" {
 		return nil, newError(ErrInvalidInput, "password 不能为空", nil)
 	}
+	// Throttled before the password check, so repeated wrong-password attempts
+	// consume the budget too. The old cooldown was claimed only after the password
+	// verified, which meant it did nothing against guessing; this endpoint has no
+	// login-failure counter of its own.
+	if err := s.checkEndpointLimit(ctx, s.UnbindLimiter, "unbind", "user:"+strconv.FormatInt(input.UserID, 10)); err != nil {
+		return nil, err
+	}
 	user, err := s.Users.FindByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
@@ -81,25 +88,9 @@ func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) 
 		return nil, newError(ErrLastLoginMethod, "不能解绑唯一的登录方式", nil)
 	}
 
-	// Claim the cooldown before deleting. Claiming afterwards would let two
-	// concurrent requests both pass the check, which is the rapid repeat the
-	// cooldown exists to prevent. Fail-open per PRD §6.0: PostgreSQL owns the
-	// binding state, so losing Redis only widens the window.
-	cooldownSubject := identity.ProviderID
-	if s.UnbindCooldowns != nil {
-		acquired, retryAfter, cooldownErr := s.UnbindCooldowns.Acquire(ctx, cooldownSubject)
-		switch {
-		case cooldownErr != nil:
-			slog.WarnContext(ctx, "unbind cooldown unavailable, allowing request", "error", cooldownErr)
-		case !acquired:
-			return nil, withRetryAfter(newError(ErrRateLimited, "解绑操作过于频繁，请稍后再试", nil), retryAfter)
-		}
-	}
-
+	// No claim to compensate here: concurrent deletes of one record serialize at
+	// PostgreSQL, where the loser matches no row and gets 绑定记录不存在.
 	if deleteErr := s.Identities.DeleteByIDAndUser(ctx, input.IdentityID, input.UserID); deleteErr != nil {
-		// The unbind did not happen, so the cooldown must not hold the address for
-		// the rest of the window; the user is entitled to retry immediately.
-		s.releaseUnbindCooldown(ctx, cooldownSubject)
 		if errors.Is(deleteErr, repository.ErrNotFound) {
 			return nil, newError(ErrIdentityNotFound, "绑定记录不存在", nil)
 		}
@@ -126,25 +117,6 @@ func hasOtherLoginMethod(user *model.User, excludeID int64) bool {
 		}
 	}
 	return false
-}
-
-// releaseUnbindCooldown drops a claim whose unbind did not land.
-//
-// It deliberately detaches from the caller's context. The most likely reason the
-// delete failed is that ctx was cancelled — a disconnected client or an expired
-// deadline — and go-redis refuses to acquire a connection on a cancelled context,
-// so reusing ctx here would make the release a no-op in exactly the case it
-// exists for, holding the address for the rest of the window over an unbind that
-// never happened. Same shape as the login compensation path.
-func (s Service) releaseUnbindCooldown(ctx context.Context, subject string) {
-	if s.UnbindCooldowns == nil {
-		return
-	}
-	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cooldownReleaseTimeout)
-	defer cancel()
-	if err := s.UnbindCooldowns.Release(releaseCtx, subject); err != nil {
-		slog.WarnContext(ctx, "release unbind cooldown after failed unbind", "error", err)
-	}
 }
 
 func (s Service) auditUnbind(ctx context.Context, input UnbindIdentityInput, identity *model.Identity, success bool, errCode int) {

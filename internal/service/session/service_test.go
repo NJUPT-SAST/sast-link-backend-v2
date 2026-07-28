@@ -1980,7 +1980,7 @@ func newRegisterService(t *testing.T) Service {
 		VerificationCode: &fakeVerificationCodeStore{},
 		RegisterTicket:   &fakeRegisterTicketStore{},
 		BindTicket:       &fakeBindTicketStore{},
-		UnbindCooldowns:  &fakeUnbindCooldowns{},
+		UnbindLimiter:    &fakeLimiter{},
 		ForgotPasswords:  &fakeForgotPasswordDispatcher{accepted: true},
 		InternalClientID: "builtin",
 		JWT:              &auth.JWTManager{Issuer: "issuer", Audience: []string{"audience"}, Active: auth.JWTKeyPair{KID: "active", Private: key}, Clock: clock},
@@ -2439,40 +2439,4 @@ func TestRegisterReportsAbandonedHashingAsDependencyUnavailable(t *testing.T) {
 	if _, ok := tickets.tickets["reg_x"]; !ok {
 		t.Fatal("Register-Ticket was consumed by an abandoned request")
 	}
-}
-
-// fakeUnbindCooldowns mirrors the Redis SET NX claim: the first Acquire for a
-// subject wins, later ones are rejected until Release.
-type fakeUnbindCooldowns struct {
-	held       map[string]bool
-	err        error
-	retryAfter time.Duration
-	acquires   []string
-	releases   []string
-}
-
-func (f *fakeUnbindCooldowns) Acquire(_ context.Context, subject string) (bool, time.Duration, error) {
-	if f.err != nil {
-		return false, 0, f.err
-	}
-	f.acquires = append(f.acquires, subject)
-	if f.held[subject] {
-		return false, f.retryAfter, nil
-	}
-	if f.held == nil {
-		f.held = map[string]bool{}
-	}
-	f.held[subject] = true
-	return true, 0, nil
-}
-
-// Release mirrors go-redis: a cancelled context fails before the command is
-// issued, so a release that reuses the caller's cancelled context is a no-op.
-func (f *fakeUnbindCooldowns) Release(ctx context.Context, subject string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	f.releases = append(f.releases, subject)
-	delete(f.held, subject)
-	return nil
 }

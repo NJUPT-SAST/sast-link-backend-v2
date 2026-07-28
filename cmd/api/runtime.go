@@ -83,7 +83,14 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	}
 	failures := sessionredis.LoginFailureStore{Store: store, Limit: cfg.LoginFailureLimit, Window: cfg.LoginFailureWindow}
 	bindTickets := sessionredis.BindTicketStore{Store: store}
-	unbindCooldowns := sessionredis.UnbindCooldownStore{Store: store, Window: cfg.UnbindCooldown}
+	unbindLimiter := sessionredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitUnbindRPM,
+			Window: cfg.RateLimitUnbindWindow,
+		},
+	}
 	emailer := mailer.New(mailer.Config{
 		Host:          cfg.SMTPHost,
 		Port:          cfg.SMTPPort,
@@ -110,7 +117,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		VerificationCode: store,
 		RegisterTicket:   store,
 		BindTicket:       bindTickets,
-		UnbindCooldowns:  unbindCooldowns,
+		UnbindLimiter:    unbindLimiter,
 		ForgotPasswords:  forgotPasswords,
 		InternalClientID: cfg.InternalOAuthClientID,
 		JWT:              jwtManager,

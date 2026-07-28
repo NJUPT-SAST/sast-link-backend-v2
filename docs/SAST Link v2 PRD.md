@@ -243,7 +243,7 @@ Body: { "password": "current_password" }
 - 主邮箱（`user.login_email`）不在 identities 中，不可通过此接口解绑
 - 该约束由数据库保证：V005 在 `user` 与 `identities` 两侧各建一个 BEFORE 触发器，禁止同一地址同时作为主邮箱与 `other_mail` 绑定存在。两列的 UNIQUE 各自只覆盖本表，应用层预检查挡不住并发（两个未提交事务互相不可见），故触发器内先按地址取 `pg_advisory_xact_lock` 串行化。违反时抛 `unique_violation`，约束名为 `ck_user_login_email_not_identity` / `ck_identities_provider_id_not_login_email`
 
-- 解绑冷却：Redis `sastlink:unbind:cooldown:{provider_id}`，60s 防快速重复解绑，删除前抢占（见 §6 键表）
+- 解绑限流：Redis `sastlink:ratelimit:user:{user_id}:unbind`，60s 窗口内最多 3 次，在密码校验**之前**检查（见 §6 键表）
 - 不属于当前用户的绑定 ID 与不存在的 ID 均返回 40400，避免探测他人绑定记录
 - 「唯一登录方式」判定：持有 `login_email` 的账号恒可解绑任意 identity；仅靠 identity 登录的账号在解绑最后一条时被拒（42200）
 
@@ -441,7 +441,7 @@ is_deleted ──(恢复)──► njupter
 | 验证码失败计数 | `sastlink:verify:attempt:{purpose}:{email}` | 跟随验证码剩余 TTL | String（INCR） | 每个验证码最多 5 次尝试，用尽即连同验证码一并删除，避免 6 位码被无限爆破。重新发码时清零 |
 | 限流 | `sastlink:ratelimit:{ip}:{endpoint}` | 30s~15min | String（INCR 计数器 + EXPIRE） | 固定窗口计数器，按端点差异化配置（登录 15min/发验证码 60s 等） |
 | 设备管理 | `sastlink:devices:{user_id}` | 30d | Sorted Set（score=login_ts, member=device_id） | 最多 5 台同时登录，详情另存 Hash。淘汰/登出见 §6.1 |
-| 解绑冷却 | `sastlink:unbind:cooldown:{provider_id}` | 60s | String（SET NX EX，抢占式） | 防快速重复解绑。键按 `provider_id` 命名：`other_mail` 的 provider_id 即邮箱地址，与原设计一致，且可直接扩展到 github/lark。在删除**之前**抢占：若改为删除后写入，两个并发请求会同时通过检查并各自删除，正是冷却要防的场景。删除失败时释放该键，避免用户为一次服务端错误等满整个窗口 |
+| 解绑限流 | `sastlink:ratelimit:user:{user_id}:unbind` | 60s | Fixed window（INCR + EXPIRE） | 限制单个用户的解绑频率。键按 `user_id` 而非 `provider_id`：后者会让 A 解绑某地址后，B 绑定同一地址再解绑时撞上 A 的窗口。在密码校验**之前**检查，否则爆破尝试不消耗配额——本端点没有独立的登录失败计数。并发解绑同一条记录由 PostgreSQL 串行化：输的一方匹配不到行，返回 `40400` |
 | Token 黑名单 | `sastlink:token:blacklist:{jti}` | Token 剩余有效期 | String（SET EX，值任意） | 登出/改密后 Access Token 失效，利用 TTL 自动过期清理 |
 | 幂等性 | `sastlink:idempotency:{key}` | 24h | String（SET NX，存响应体） | 敏感写操作（注册、绑定等）。key 由客户端传入（`Idempotency-Key` header），同一 key 重复请求返回首次结果 |
 | OAuth State | `sastlink:oauth:state:{state}` | 10min | String（GetDel 消费） | OAuth 授权标准 state 参数，发起时写入，回调时 GetDel 校验防 CSRF |
@@ -458,7 +458,7 @@ is_deleted ──(恢复)──► njupter
 | 类别 | 判据 | 场景 | 故障行为 |
 |------|------|------|----------|
 | **Fail-closed** | Redis 是唯一存储，取不到值不等于校验通过 | 验证码、OAuth State、registration_state、login_code、Register-Ticket、Bind-Ticket、幂等性 key | 拒绝请求，用户重走流程。所有 key 均带 TTL，冷启动自愈 |
-| **Fail-open** | PostgreSQL 持有权威副本，或丢失仅放宽速率窗口 | Token 黑名单、登录失败计数与锁定、限流、解绑冷却 | WARN 日志后继续，不返回 5xx |
+| **Fail-open** | PostgreSQL 持有权威副本，或丢失仅放宽速率窗口 | Token 黑名单、登录失败计数与锁定、限流（含解绑限流） | WARN 日志后继续，不返回 5xx |
 
 Token 黑名单可以跳过的依据：JTI 写入黑名单与 `oauth_access_tokens.revoked_at` 在**同一事务**内完成，而登录态校验始终执行那条 DB 查询（§4.1），因此 DB 拒绝的集合是黑名单的严格超集。黑名单是快速拒绝路径与纵深防御，不是权威。
 
@@ -602,7 +602,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI 黑名单/登录失败计数与 fixed-window limiter |
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流与登录/登出审计接入 |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
-| 用户资料管理 | 部分完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 冷却）、公开个人卡片（`GET /card/:id`）已完成；头像上传待实现（依赖对象存储接入） |
+| 用户资料管理 | 部分完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）已完成；头像上传待实现（依赖对象存储接入） |
 | OAuth/OIDC 业务 | 待实现 — OAuth 登录/绑定、authorize/token/revoke、discovery、UserInfo、ID Token 与客户端管理 endpoints |
 | 其余运维接入 | 待实现 — 设备管理、其他 endpoint 限流策略与 pg_cron |
 
