@@ -53,7 +53,7 @@ type Authenticator struct {
 
 func (a Authenticator) RequireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		principal, err := a.authenticate(c.Request.Context(), c.GetHeader("Authorization"))
+		principal, err := a.Authenticate(c.Request.Context(), c.GetHeader("Authorization"))
 		if err != nil {
 			response.Error(c, err)
 			c.Abort()
@@ -62,6 +62,28 @@ func (a Authenticator) RequireAuth() gin.HandlerFunc {
 		c.Set(principalContextKey, principal)
 		c.Next()
 	}
+}
+
+// Authenticate validates an Authorization header and returns its principal.
+//
+// Exported so endpoints that answer in a non-standard error format can reuse the
+// exact same validation instead of reimplementing it. OIDC UserInfo is the case:
+// RFC 6750 requires a WWW-Authenticate challenge and an {error, error_description}
+// body, which this middleware's envelope cannot produce, but the token checks
+// themselves — signature, blacklist, DB revocation, token_version, account state —
+// must not diverge between the two paths.
+//
+// The returned error is a *response.BusinessError, so a caller that wants the
+// standard envelope can pass it straight to response.Error.
+func (a Authenticator) Authenticate(ctx context.Context, header string) (Principal, error) {
+	return a.authenticate(ctx, header)
+}
+
+// SetPrincipal stores an already-validated principal on the request context, so a
+// handler that authenticated through Authenticate can expose it to helpers that
+// read PrincipalFrom.
+func SetPrincipal(c *gin.Context, principal Principal) {
+	c.Set(principalContextKey, principal)
 }
 
 func PrincipalFrom(c *gin.Context) (Principal, bool) {
