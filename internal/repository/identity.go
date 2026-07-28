@@ -32,6 +32,57 @@ func (r *IdentityRepository) CountByUserAndProvider(ctx context.Context, userID 
 	return count, nil
 }
 
+// ListByUser returns every identity owned by userID, oldest binding first so the
+// list is stable across calls.
+func (r *IdentityRepository) ListByUser(ctx context.Context, userID int64) ([]model.Identity, error) {
+	var identities []model.Identity
+	if err := r.database.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("id ASC").
+		Find(&identities).Error; err != nil {
+		return nil, fmt.Errorf("list identities by user: %w", err)
+	}
+	return identities, nil
+}
+
+// FindByIDAndUser returns the identity with the given primary key only when
+// userID owns it. Scoping the lookup by owner rather than filtering afterwards
+// means a caller cannot learn that somebody else's binding ID exists: a foreign
+// ID and a missing ID are indistinguishable ErrNotFound.
+func (r *IdentityRepository) FindByIDAndUser(ctx context.Context, identityID, userID int64) (*model.Identity, error) {
+	var identity model.Identity
+	err := r.database.WithContext(ctx).
+		Where("id = ? AND user_id = ?", identityID, userID).
+		First(&identity).Error
+	if err == nil {
+		return &identity, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("find identity by ID and user: %w", err)
+}
+
+// DeleteByIDAndUser removes an identity owned by userID.
+//
+// The delete carries the owner in its WHERE clause instead of trusting a prior
+// read: between the caller's ownership check and this statement the row could
+// have been re-bound, and a bare `DELETE WHERE id = ?` would then unbind another
+// user's identity. It reports ErrNotFound when nothing matched, so a caller that
+// raced a concurrent unbind of the same row does not report success twice.
+func (r *IdentityRepository) DeleteByIDAndUser(ctx context.Context, identityID, userID int64) error {
+	result := r.database.WithContext(ctx).
+		Where("id = ? AND user_id = ?", identityID, userID).
+		Delete(&model.Identity{})
+	if result.Error != nil {
+		return fmt.Errorf("delete identity by ID and user: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // FindByProviderID returns the identity bound to the given provider+providerID pair.
 func (r *IdentityRepository) FindByProviderID(ctx context.Context, provider model.LoginMethod, providerID string) (*model.Identity, error) {
 	var identity model.Identity
