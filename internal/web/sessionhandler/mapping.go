@@ -58,6 +58,8 @@ func mapServiceError(err error) error {
 		status = http.StatusConflict
 	case session.KindValidationFailed:
 		status = http.StatusUnprocessableEntity
+	case session.KindNotFound:
+		status = http.StatusNotFound
 	case session.KindDependencyUnavailable:
 		message = "依赖服务暂不可用，请稍后重试"
 		status = http.StatusServiceUnavailable
@@ -93,6 +95,8 @@ func defaultCode(kind session.Kind) int {
 		return errcode.CodeConflict
 	case session.KindValidationFailed:
 		return errcode.CodeValidationFailed
+	case session.KindNotFound:
+		return errcode.CodeNotFound
 	case session.KindDependencyUnavailable:
 		return errcode.CodeDependencyUnavailable
 	default:
@@ -120,6 +124,8 @@ func defaultMessage(kind session.Kind) string {
 		return "资源已存在"
 	case session.KindValidationFailed:
 		return "业务校验失败"
+	case session.KindNotFound:
+		return "资源不存在"
 	case session.KindDependencyUnavailable:
 		return "依赖服务暂不可用，请稍后重试"
 	default:
