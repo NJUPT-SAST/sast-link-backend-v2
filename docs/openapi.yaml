@@ -1048,8 +1048,25 @@ paths:
       summary: 授权端点
       deprecated: false
       description: |
-        检查用户登录状态 → 展示授权页 → 用户同意后重定向至 redirect_uri，携带 code 和 state。
-        使用 PKCE-S256 进行授权码交换，仅接受 code_challenge_method=S256。错误时重定向携带 error 参数。
+        授权流程的第一段，**无需认证**——从第三方跳转来的浏览器不携带 Authorization header。
+
+        校验参数后将请求暂存 10 分钟，302 重定向至前端授权页
+        `{OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..`。
+        用户决定由第二段 `POST /oauth/authorize/consent` 提交。
+
+        使用 PKCE-S256，仅接受 code_challenge_method=S256。
+        redirect_uri 必须与客户端注册值精确字符串相等，不做前缀匹配。
+
+        错误分两条重定向路径：
+        - client_id / redirect_uri 校验通过之前的错误（invalid_request、invalid_client）
+          重定向至授权页，携带 error / error_description，不携带 state。
+          RFC 6749 §4.1.2.1 禁止将错误重定向至未校验的 redirect_uri，否则本端点
+          会退化为 open redirector。
+        - 校验通过之后的错误（unsupported_response_type、invalid_scope、
+          unauthorized_client、invalid_request）重定向至客户端 redirect_uri，
+          携带 error / error_description / state。
+
+        按调用方 IP 限流（默认 20 次/60s）：本端点无认证且每次调用写一个 Redis 暂存键。
       operationId: oauthAuthorize
       tags:
         - OAuth 2.1 Server
@@ -1110,10 +1127,112 @@ paths:
       responses:
         '302':
           description: >-
-            重定向至 redirect_uri，携带 code 和 state。错误时携带 error 参数（如
-            `?error=invalid_request&error_description=...`）。
-          headers: {}
+            成功时重定向至前端授权页，携带 request_id / client_name / scope。
+            错误时按可重定向性重定向至授权页或客户端 redirect_uri，携带
+            error / error_description。
+          headers:
+            Location:
+              description: 授权页或客户端回调地址
+              schema:
+                type: string
+                format: uri
       security: []
+  /oauth/authorize/consent:
+    post:
+      summary: 授权确认
+      deprecated: false
+      description: |
+        授权流程的第二段。SAST Link 自有端点而非 RFC 定义端点，因此使用标准响应信封。
+
+        用户身份取自校验过的 access token，不从请求体读取。授权码的
+        client / scope / PKCE challenge / nonce 全部取自暂存内容，不采信请求体回传值——
+        否则调用方可以确认一个请求而为另一个客户端或另一组 scope 签发授权码。
+
+        暂存内容以 Redis GetDel 原子消费，一个 request_id 最多产出一个授权码；
+        并发重复提交只有一个成功。
+
+        approve=false 同样返回 200 与一个 redirect_uri，其中携带
+        error=access_denied 与原始 state（RFC 6749 §4.1.2.1 要求把拒绝告知客户端）。
+
+        返回 JSON 而非 302，因为调用方是授权页自身的 fetch——302 会被 fetch 跟随，
+        浏览器不会跳转。
+      operationId: oauthAuthorizeConsent
+      tags:
+        - OAuth 2.1 Server
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - request_id
+                - approve
+              properties:
+                request_id:
+                  type: string
+                  description: GET /oauth/authorize 重定向携带的暂存标识
+                  example: ar_3f2a1b4c5d6e7f8a9b0c1d2e3f4a5b6c
+                approve:
+                  type: boolean
+                  description: 用户决定。字段缺失返回 40000，不默认为拒绝
+                  example: true
+        required: true
+      responses:
+        '200':
+          description: 授权决定已记录，返回浏览器应跳转的地址
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/StandardEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          redirect_uri:
+                            type: string
+                            format: uri
+                            example: https://app.example.com/callback?code=ac_abc123&state=xyz
+          headers: {}
+        '400':
+          description: request_id / approve 缺失、未知字段、暂存已过期或已消费
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardEnvelope'
+          headers: {}
+        '401':
+          description: 未登录或 Access Token 无效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardEnvelope'
+          headers: {}
+        '403':
+          description: 账号已注销
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardEnvelope'
+          headers: {}
+        '404':
+          description: 两段之间客户端被停用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardEnvelope'
+          headers: {}
+        '503':
+          description: Redis 暂存不可读（fail-closed）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardEnvelope'
+          headers: {}
+      security:
+        - bearerAuth: []
   /oauth/token:
     post:
       summary: Token 端点
@@ -1289,18 +1408,21 @@ paths:
                 $ref: '#/components/schemas/UserInfoResponse'
           headers: {}
         '401':
-          description: 未认证或 Token 无效
+          description: >-
+            未认证或 Token 无效。签名无效、已过期、已撤销、token_version 不匹配、
+            账号已注销统一归为 invalid_token——RFC 6750 对「token 被拒」只有此一个错误码。
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-                    example: invalid_token
-                  error_description:
-                    type: string
-                    example: The access token is invalid or expired
+                $ref: '#/components/schemas/OAuthError'
+          headers:
+            WWW-Authenticate:
+              description: >-
+                RFC 6750 §3 Bearer 挑战头。符合规范的 OIDC 客户端读取此 header
+                判断是否需要刷新 token。
+              schema:
+                type: string
+                example: 'Bearer realm="sast-link", error="invalid_token"'
       security:
         - bearerAuth: []
     post:
@@ -1322,18 +1444,21 @@ paths:
                 $ref: '#/components/schemas/UserInfoResponse'
           headers: {}
         '401':
-          description: 未认证或 Token 无效
+          description: >-
+            未认证或 Token 无效。签名无效、已过期、已撤销、token_version 不匹配、
+            账号已注销统一归为 invalid_token——RFC 6750 对「token 被拒」只有此一个错误码。
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-                    example: invalid_token
-                  error_description:
-                    type: string
-                    example: The access token is invalid or expired
+                $ref: '#/components/schemas/OAuthError'
+          headers:
+            WWW-Authenticate:
+              description: >-
+                RFC 6750 §3 Bearer 挑战头。符合规范的 OIDC 客户端读取此 header
+                判断是否需要刷新 token。
+              schema:
+                type: string
+                example: 'Bearer realm="sast-link", error="invalid_token"'
       security:
         - bearerAuth: []
   /admin/users:
@@ -2218,8 +2343,17 @@ components:
             - invalid_grant
             - unauthorized_client
             - unsupported_grant_type
+            - unsupported_response_type
             - invalid_scope
-          description: RFC 6749 错误代码
+            - access_denied
+            - invalid_token
+            - temporarily_unavailable
+            - server_error
+          description: >-
+            RFC 6749 §4.1.2.1 / §5.2、RFC 6750 §3.1 错误代码。
+            invalid_client 对应 401 并附带 WWW-Authenticate；
+            invalid_token 仅出现在 /userinfo，附带 Bearer 挑战头；
+            temporarily_unavailable 用于限流（429）与依赖不可用（503）。
         error_description:
           type: string
           description: 错误描述
@@ -2228,9 +2362,13 @@ components:
     # 以下 StandardEnvelope 为通用模板，各端点的 data schema 在内嵌中各自定义。
     #
     # 不使用信封的例外：
-    #   - /oauth/authorize → 成功/错误均为 redirect response，query 携带 code/state 或 error/error_description
-    #   - /oauth/token → application/x-www-form-urlencoded 请求；成功/错误均为 OAuth JSON，字段名使用 scope（单数）
+    #   - /oauth/authorize → 成功/错误均为 redirect response，query 携带 request_id 或 error/error_description
+    #   - /oauth/token → application/x-www-form-urlencoded 请求；成功/错误均为 OAuth JSON，字段名使用 scope（单数）；
+    #     成功响应携带 Cache-Control: no-store 与 Pragma: no-cache（RFC 6749 §5.1）
     #   - /oauth/revoke → application/x-www-form-urlencoded 请求；RFC 7009 成功为 200 空响应体，错误为 OAuth JSON
+    #
+    # 使用信封的 OAuth 端点：
+    #   - /oauth/authorize/consent → SAST Link 自有端点而非 RFC 定义端点，沿用标准信封
     #   - /userinfo → 成功为 OIDC UserInfo claims；错误为 RFC 6750 Bearer Token 格式
     #   - /health → 直接 {status, db, redis}
     #   - /card/{id} → 直接 profile 公开字段

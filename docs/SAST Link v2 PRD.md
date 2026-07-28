@@ -269,27 +269,63 @@ Body: { "password": "current_password" }
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/oauth/authorize` | GET | 授权端点。强制参数：response_type=code / client_id / redirect_uri / scope / state / code_challenge / code_challenge_method；可选：nonce（OIDC） |
+| `/oauth/authorize` | GET | 授权端点，**无认证**。强制参数：response_type=code / client_id / redirect_uri / scope / state / code_challenge / code_challenge_method；可选：nonce（OIDC） |
+| `/oauth/authorize/consent` | POST | 授权确认端点，Bearer 认证。SAST Link 自有端点，使用标准信封 |
 | `/oauth/token` | POST | Token 端点。支持 grant_type: authorization_code / refresh_token。第一方用 PKCE（无 client_secret），第三方用 client_secret_post。scope 含 openid 时额外返回 id_token |
 | `/oauth/revoke` | POST | 撤销整条 token family |
+
+#### 两段式授权流程
+
+`GET /oauth/authorize` 不需要认证——从第三方跳转来的浏览器不会携带 `Authorization` header。流程拆为两段：
+
+```
+GET /oauth/authorize     → 校验参数 → Redis 暂存（ar_，10min）→ 302 至 OAUTH_CONSENT_URL
+POST /oauth/authorize/consent  → Bearer 认证 → GetDel 消费暂存 → 建授权码 → 返回 redirect_uri
+```
+
+**决策依据**：采用两段式而非 cookie session，是为保持 §7.1「JWT 不存 cookie，不存在 CSRF 攻击面」；保留标准 `GET /oauth/authorize` 入口 URL，则是为让第三方 OAuth 库无需特殊适配。
+
+授权码的 client / scope / PKCE challenge / nonce 全部取自暂存内容，不采信 consent 请求体的回传值——否则调用方可以确认一个请求而为另一个客户端或另一组 scope 签发授权码。暂存以 GetDel 原子消费，一个 `request_id` 最多产出一个授权码。
+
+`family_id` 在用户点击同意的那一刻生成，由授权码传递给后续 token pair。这正是授权码重放能够撤销「已由该 code 签发的 token」的原因。
 
 #### 安全约束
 
 - Authorization Code 有效期 5min，单次使用（is_used 标记），过期后 pg_cron 每小时清理
 - PKCE-S256 强制，仅接受 `code_challenge_method=S256`。V001 数据库历史约束仍允许 `plain` 存量值，实际协议层由 V002 迁移收紧为 S256-only。
 - State 参数强制，回调时必须校验
-- Redirect URI 必须精确匹配 `oauth_clients.redirect_uris` 之一
+- Redirect URI 必须**精确字符串相等**于 `oauth_clients.redirect_uris` 之一。不做前缀匹配：前缀规则允许攻击者追加客户端从未注册的路径并在那里接收授权码
 - 第一方应用（`first_party`）：无 client_secret，PKCE 认证；可请求任意 scope
 - 第三方应用（`third_party`）：client_secret_post 认证；scope 受注册时声明范围限制
+- 公开客户端携带 `client_secret` 会被拒绝而非忽略——这说明客户端搞错了自己的类型
 - 授权码重放检测：`is_used=TRUE` 的同 code 再次出现 → 通过 `family_id` 级联撤销整条 token 链
+- **PKCE 校验失败同样消耗授权码**。否则窃得授权码的攻击者可对着一个始终有效的 code 无限枚举 `code_verifier`
+- 授权码过期不触发级联撤销：过期的 code 从未被兑换，没有需要惩罚的 family
+- `client_secret` 以 SHA-256 存储（非 PBKDF2）。client_secret 是 32 字节 crypto/rand 高熵值，不存在字典攻击面；而 PBKDF2 的 600k 迭代约 380ms/次，会让 token 端点成为 CPU 瓶颈。这与 API key 存 SHA-256 是同一论证
+- `GET /oauth/authorize` 按调用方 IP 限流（默认 20 次/60s）：该端点无认证且每次调用写一个 Redis 暂存键
+- **不支持 scope 收窄**（已知偏差）。RFC 6749 §6 允许 refresh 时请求更小的 scope，但仓储层要求轮换后的 token pair 携带与当前完全一致的 scope。客户端如需更小的 scope 须重新授权
+
+#### 错误重定向规则
+
+错误分两条路径，取决于 `redirect_uri` 是否已通过校验：
+
+| 阶段 | 去向 | 携带 `state` |
+|------|------|--------------|
+| `client_id` / `redirect_uri` 校验通过之前 | `OAUTH_CONSENT_URL` | 否 |
+| 校验通过之后 | 客户端 `redirect_uri` | 是 |
+
+RFC 6749 §4.1.2.1 禁止把错误重定向到未经校验的 `redirect_uri`——否则任何人填入任意地址即可让本服务把浏览器弹送过去，端点退化为 open redirector。无法识别的错误按不可重定向处理：这恰恰是可重定向性无法确立的情形。
 
 #### 响应格式
 
 OAuth 端点不遵循 SAST Link 标准响应信封：
 
 - `/oauth/authorize`：成功/错误均使用 redirect response。
-- `/oauth/token`：请求体为 `application/x-www-form-urlencoded`；成功 `200` 返回 `{ "access_token", "refresh_token", "token_type", "expires_in", "scope" }`，错误使用 RFC 6749 JSON `{ "error": "invalid_grant", "error_description": "..." }`。
-- `/oauth/revoke`：请求体为 `application/x-www-form-urlencoded`；遵循 RFC 7009，成功固定 `200 OK` 空响应体，错误使用 OAuth JSON 格式。
+- `/oauth/token`：请求体为 `application/x-www-form-urlencoded`；成功 `200` 返回 `{ "access_token", "refresh_token", "token_type", "expires_in", "scope", "id_token" }` 并携带 `Cache-Control: no-store` 与 `Pragma: no-cache`（RFC 6749 §5.1，防止共享缓存把一个客户端的 token 投递给另一个），错误使用 RFC 6749 JSON `{ "error": "invalid_grant", "error_description": "..." }`。`invalid_client` 为 `401` 并附带 `WWW-Authenticate`，其余错误为 `400`（RFC 6749 §5.2）。
+- `/oauth/revoke`：请求体为 `application/x-www-form-urlencoded`；遵循 RFC 7009，成功固定 `200 OK` 空响应体，错误使用 OAuth JSON 格式。未知/已过期/已撤销的 token 一律 `200`——客户端诉求已成立，反之会把端点变成探测 token 存在性的 oracle。
+- 请求参数只从请求体读取，query string 被忽略；重复参数直接拒绝（RFC 6749 §3.2，避免与链路上代理对生效值产生分歧）。
+
+**例外**：`/oauth/authorize/consent` 是 SAST Link 自有端点而非 RFC 定义端点，沿用标准信封与业务错误码。
 
 ### 4.11 OIDC Provider
 
@@ -335,6 +371,17 @@ Payload: {
 | `openid`（必选） | `sub` |
 | `profile` | `name`, `picture`, `preferred_username`, `profile`, `updated_at` |
 | `email` | `email`, `email_verified` |
+
+授权范围之外的 claim **完全不出现**，而非返回空值：relying party 无法区分 `"name": ""` 与「该用户没有名字」。ID Token 与 UserInfo 共用同一套 claim 构造与同一道 scope 闸门，因此两个端点对同一 token 不会给出不一致的结论。
+
+- `preferred_username` 取 `profile.nickname`，未设置或为空白时回退到 `user.name`
+- `profile` 指向公开名片 URL（`OAUTH_CARD_BASE_URL` + `/` + user ID）。该配置独立于 `JWT_ISSUER`：issuer 带 API 的 `/v2` 基路径，而名片是不带它的前端路由
+- `auth_time` 取授权码行的 `created_at`——两段式流程中授权码正是在用户点「同意」那一刻创建的，语义精确，无需额外建列。refresh 轮换不是重新认证，因此保持该 family 首个 refresh token 的创建时刻
+- ID Token 的 `aud` 是 `client_id`，与 access token（`aud` 为本服务）分属两条独立签名路径。若共用一条，要么破坏中间件的 audience 校验，要么签发出能被本服务当作自身 bearer 凭证接受的 ID Token
+
+#### ID Token 与 Access Token 的关系
+
+第三方 access token 仍使用服务 audience，因此能通过现有 JWT 中间件认证——`/userinfo` 正依赖这一点。`/userinfo` 自行完成认证而非挂在中间件之后，只是为了按 RFC 6750 格式应答（`WWW-Authenticate` 挑战头），token 校验逻辑本身复用中间件的 `Authenticate`。
 
 ### 4.12 管理后台
 
@@ -450,6 +497,7 @@ is_deleted ──(恢复)──► njupter
 | 登录失败 | `sastlink:auth:login_failure:{email}` | 15min | String（INCR 计数器） | 连续失败 ≥ 10 次锁定，成功登录后 DEL 清零 |
 | Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GET 校验 → 建号成功后 DEL） | 注册两步间暂存已验证邮箱。并发由 `login_email` UNIQUE 约束串行化，ticket 不承担选主职责，故保留到建号成功，竞态失败者可重试 |
 | Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GET 校验 → 验证码通过后 DEL） | 绑定邮箱两步间暂存待绑定邮箱 + user_id。不在校验前消费，否则验证码填错会连 ticket 一起作废 |
+| 授权请求暂存 | `sastlink:oauth:authorize_request:{request_id}` | 10min | String（SET NX 写入，GetDel 消费，JSON 值） | 两段式授权流程（§4.10）在 `GET /oauth/authorize` 与 `POST /oauth/authorize/consent` 之间暂存已校验的请求参数：`{client_id, redirect_uri, scopes, state, code_challenge, code_challenge_method, nonce}`。GetDel 保证一个 `request_id` 最多产出一个授权码；写入用 SET NX 而非覆盖，使一个 ID 只能绑定一组授权参数 |
 
 ### 6.0 Redis 不可用时的降级策略
 
@@ -457,8 +505,8 @@ is_deleted ──(恢复)──► njupter
 
 | 类别 | 判据 | 场景 | 故障行为 |
 |------|------|------|----------|
-| **Fail-closed** | Redis 是唯一存储，取不到值不等于校验通过 | 验证码、OAuth State、registration_state、login_code、Register-Ticket、Bind-Ticket、幂等性 key | 拒绝请求，用户重走流程。所有 key 均带 TTL，冷启动自愈 |
-| **Fail-open** | PostgreSQL 持有权威副本，或丢失仅放宽速率窗口 | Token 黑名单、登录失败计数与锁定、限流（含解绑限流） | WARN 日志后继续，不返回 5xx |
+| **Fail-closed** | Redis 是唯一存储，取不到值不等于校验通过 | 验证码、OAuth State、registration_state、login_code、Register-Ticket、Bind-Ticket、幂等性 key、授权请求暂存 | 拒绝请求，用户重走流程。所有 key 均带 TTL，冷启动自愈 |
+| **Fail-open** | PostgreSQL 持有权威副本，或丢失仅放宽速率窗口 | Token 黑名单、登录失败计数与锁定、限流（含解绑限流、authorize 限流） | WARN 日志后继续，不返回 5xx |
 
 Token 黑名单可以跳过的依据：JTI 写入黑名单与 `oauth_access_tokens.revoked_at` 在**同一事务**内完成，而登录态校验始终执行那条 DB 查询（§4.1），因此 DB 拒绝的集合是黑名单的严格超集。黑名单是快速拒绝路径与纵深防御，不是权威。
 
@@ -487,7 +535,8 @@ sastlink:device:{device_id}   Hash          {ua, ip, login_time, last_seen}
 | 威胁 | 措施 |
 |------|------|
 | 暴力破解 | 15min 内 10 次失败锁定；限流中间件按 IP 限制频率 |
-| CSRF | OAuth state 参数强制；JWT 不存 cookie，不存在 CSRF 攻击面 |
+| CSRF | OAuth state 参数强制；JWT 不存 cookie，不存在 CSRF 攻击面。授权确认走两段式 + Bearer 认证（§4.10）而非 cookie session，正是为了维持这一前提 |
+| Open redirect | `/oauth/authorize` 的错误只在 `client_id` 与 `redirect_uri` 均校验通过后才允许重定向到客户端；`redirect_uri` 精确字符串匹配注册值（§4.10） |
 | Token 泄露 | refresh_token rotation + 重放检测 + 全链撤销；token_version 改密全局失效 |
 | 账号接管 | OAuth 绑定需登录态；registration_state 仅用于新建用户 + OAuth state 双重绑定，registration_state 泄露者无法单独滥用 |
 | SQL 注入 | GORM 参数化查询 |
@@ -603,7 +652,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流与登录/登出审计接入 |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
 | 用户资料管理 | 部分完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）已完成；头像上传待实现（依赖对象存储接入） |
-| OAuth/OIDC 业务 | 待实现 — OAuth 登录/绑定、authorize/token/revoke、discovery、UserInfo、ID Token 与客户端管理 endpoints |
+| OAuth/OIDC 业务 | 部分完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）与 OIDC Provider（discovery / JWKS / UserInfo / ID Token）已完成；OAuth 第三方登录/绑定（GitHub / 飞书回调）与客户端管理 endpoints 待实现 |
 | 其余运维接入 | 待实现 — 设备管理、其他 endpoint 限流策略与 pg_cron |
 
 ## 11. 实现顺序
@@ -620,9 +669,9 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [ ] 限流与防刷扩展（登录 endpoint 已接入；验证码、注册等策略待对应业务实现）
 - [ ] 审计日志扩展（登录/登出已接入；其余业务随 endpoint 实现）
 - [ ] 头像内容审核（腾讯云 COS）
-- [ ] OAuth 2.1 授权服务端（authorize / token / revoke + PKCE）
-- [ ] OIDC Provider（discovery / JWKS / UserInfo / ID Token）
-- [ ] OAuth 客户端注册 API
+- [x] OAuth 2.1 授权服务端（两段式 authorize / consent / token / revoke + PKCE-S256 + 重放级联撤销）
+- [x] OIDC Provider（discovery / JWKS / UserInfo / ID Token）
+- [ ] OAuth 客户端注册 API（在此之前第三方客户端无创建入口，`client_secret` 校验路径在生产上走不到）
 - [ ] 管理后台（用户管理 / OAuth 客户端管理 / 审计日志查询）
 - [ ] pg_cron 定时清理
 - [x] 个人卡片端点（`GET /card/:id`；前端页面另计）

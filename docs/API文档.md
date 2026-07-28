@@ -159,7 +159,9 @@
 |--------|------|
 | `50300` | 依赖服务暂不可用，请稍后重试 |
 
-`50300` 用于 fail-closed 依赖不可用场景：验证码、Register-Ticket、Bind-Ticket 等仅存于 Redis 的状态在 Redis 不可用时无法校验，服务端拒绝请求并返回 `50300`，客户端应提示用户稍后重试。HTTP 状态码为 503。
+`50300` 用于 fail-closed 依赖不可用场景：验证码、Register-Ticket、Bind-Ticket、OAuth 授权请求暂存等仅存于 Redis 的状态在 Redis 不可用时无法校验，服务端拒绝请求并返回 `50300`，客户端应提示用户稍后重试。HTTP 状态码为 503。
+
+OAuth 的 RFC 端点（`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`、`/userinfo`）不使用上述业务错误码，改用 RFC 6749 / RFC 6750 的 `{error, error_description}` 格式，详见 §5。`/oauth/authorize/consent` 是 SAST Link 自有端点，沿用本表业务码。
 
 密码派生（PBKDF2）有并发上限，请求需排队等待槽位。若客户端在排队期间断开或超时，服务端放弃该次派生并返回 `50300`，且**不计入登录失败次数、不写入失败审计**——未完成的校验不构成密码错误的证据。
 
@@ -987,13 +989,89 @@ GET /oauth/authorize
 | `code_challenge_method` | 是 | 固定 `S256`；不接受 `plain` |
 | `nonce` | 否 | OIDC nonce |
 
-**行为**: 检查用户登录状态 → 展示授权页 → 用户同意后重定向至 `redirect_uri`，携带 `code` 和 `state`。
+**行为**: 授权分两段完成。本端点**不需要认证**——从第三方跳转来的浏览器不会携带 `Authorization` header。
+
+```
+第三方 app
+  └─> GET /oauth/authorize?client_id=..&redirect_uri=..&code_challenge=..
+        校验参数 → 暂存请求（10min）→ 302
+  └─> {OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..
+        前端展示授权页，读取本地 access_token
+  └─> POST /oauth/authorize/consent   （见 §5.2）
+        Authorization: Bearer <access_token>
+        → 200 { redirect_uri }
+  └─> 前端 navigate 至 redirect_uri（携带 code 与 state）
+```
+
+采用两段式而非 cookie session，是为了保持 PRD §7.1「JWT 不存 cookie，不存在 CSRF 攻击面」；保留标准的 `GET /oauth/authorize` 入口 URL，则是为了让第三方 OAuth 库无需特殊适配。
+
+**错误重定向规则**：错误分两条路径，取决于 `redirect_uri` 是否已通过校验。
+
+| 阶段 | 错误 | 去向 |
+|------|------|------|
+| `client_id` / `redirect_uri` 校验通过**之前** | `invalid_request`、`invalid_client` | 302 至 `OAUTH_CONSENT_URL`，携带 `error` / `error_description`，**不带 `state`** |
+| 校验通过**之后** | `unsupported_response_type`、`invalid_scope`、`unauthorized_client`、`invalid_request` | 302 至客户端 `redirect_uri`，携带 `error` / `error_description` / `state` |
+
+RFC 6749 §4.1.2.1 禁止把错误重定向到未经校验的 `redirect_uri`——否则任何人填入任意地址即可让本服务把浏览器弹送过去，端点退化为 open redirector。`redirect_uri` 必须与 `oauth_clients.redirect_uris` 之一**精确字符串相等**，前缀匹配不成立（`https://app.example.com/cb/../evil` 会被拒绝）。
+
+**scope 限制**：`first_party` 客户端可请求任意受支持 scope；`third_party` 客户端只能请求注册时声明的子集，超出返回 `invalid_scope`。
+
+**限流**：按调用方 IP 固定窗口限流（默认 20 次/60s，`RATE_LIMIT_AUTHORIZE_RPM`）。本端点无认证且每次调用写一个 Redis 暂存键，若不限流可被灌满键空间。限流器故障时 fail-open（PRD §6.0）。
 
 **PKCE 说明**：协议层与当前 V002 数据库约束均为 S256-only，不接受 `plain`；V001 曾允许 `plain` 仅作为早期 schema 历史。
 
 ---
 
-### 5.2 Token 端点
+### 5.2 授权确认端点
+
+```
+POST /oauth/authorize/consent
+```
+
+授权流程的第二段。这是 SAST Link 自有端点而非 RFC 定义端点，因此**使用标准响应信封**。
+
+**Headers**: `Authorization: Bearer <access_token>`
+**Content-Type**: `application/json`
+
+**Request**:
+```json
+{
+  "request_id": "ar_3f2a1b...",
+  "approve": true
+}
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `request_id` | 是 | `GET /oauth/authorize` 重定向携带的暂存标识 |
+| `approve` | 是 | 用户决定。字段缺失返回 `40000`，不默认为拒绝 |
+
+**Response** `200`:
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "redirect_uri": "https://app.example.com/callback?code=ac_abc123&state=xyz"
+  }
+}
+```
+
+前端拿到 `redirect_uri` 后自行 navigate。此处返回 JSON 而非 302，是因为调用方是授权页自身的 fetch——302 会被 fetch 跟随，浏览器不会跳转。
+
+**说明**：
+
+- 用户身份取自校验过的 access token，**不从请求体读取**
+- 授权码的 client / scope / PKCE challenge / nonce 全部取自暂存内容，不采信请求体回传值。否则调用方可以确认一个请求而为另一个客户端或另一组 scope 签发授权码
+- 暂存内容以 GetDel 原子消费，一个 `request_id` 最多产出一个授权码；并发重复提交只有一个成功，其余返回 `40000`
+- `approve: false` 同样返回 `200` 与一个 `redirect_uri`，其中携带 `error=access_denied` 与原始 `state`（RFC 6749 §4.1.2.1 要求把拒绝告知客户端，而非静默丢弃）
+- 授权码有效期 5min，一次性使用，`family_id` 在此刻生成并由授权码传递给后续 token pair
+
+**错误码**: `40000`（`request_id` / `approve` 缺失、未知字段、Content-Type 非 JSON、暂存已过期或已消费）、`40100`/`40102`（未登录或 token 无效）、`40402`（两段之间客户端被停用）、`40300`（账号已注销）、`50300`（Redis 暂存不可读，fail-closed）、`50000`（服务器内部错误）
+
+---
+
+### 5.3 Token 端点
 
 ```
 POST /oauth/token
@@ -1051,9 +1129,50 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=refresh_token&refresh_token=rt_abc123...&client_id=381c34b9-14a4-4df9-a9db-40c2455be09f&client_secret=3K7mDzX434GbFm9YAePJ9FXQNjT6MF0U
 ```
 
+**响应头**：成功响应固定携带 `Cache-Control: no-store` 与 `Pragma: no-cache`（RFC 6749 §5.1）。若被共享缓存缓存，一个客户端的 token 可能被投递给另一个客户端。
+
+**错误响应**（RFC 6749 §5.2，不使用标准信封）:
+
+```json
+{
+  "error": "invalid_grant",
+  "error_description": "授权码无效"
+}
+```
+
+| HTTP | `error` | 触发条件 |
+|------|---------|----------|
+| `400` | `invalid_request` | 缺少必填参数、Content-Type 非 `application/x-www-form-urlencoded`、重复参数 |
+| `400` | `invalid_grant` | 授权码无效/已过期/已使用、PKCE 校验失败、`redirect_uri` 不一致、授权码或 refresh token 不属于该客户端、refresh token 已撤销或过期、账号已注销 |
+| `400` | `unsupported_grant_type` | `grant_type` 非 `authorization_code` / `refresh_token` |
+| `400` | `unauthorized_client` | 客户端未注册该 grant type |
+| `401` | `invalid_client` | 客户端认证失败。附带 `WWW-Authenticate` header（RFC 6749 §5.2 单独规定此项为 401，其余皆为 400） |
+| `429` | `temporarily_unavailable` | 限流，附带 `Retry-After` |
+| `500` | `server_error` | 服务器内部错误 |
+
+**客户端认证**：
+
+- 公开客户端（`oauth_clients.client_secret` 为 NULL）仅凭 PKCE 认证，**不得携带 `client_secret`**。携带则返回 `invalid_client`——这说明客户端搞错了自己的类型，静默接受会掩盖配置错误
+- 机密客户端必须提供 `client_secret`，以 SHA-256 + 常量时间比较校验
+- 请求参数只从**请求体**读取，query string 被忽略。授权码与 refresh token 若出现在 URL 中会进入访问日志与浏览器历史
+- 重复参数（如两个 `grant_type`）直接拒绝（RFC 6749 §3.2）。若择一采用，本服务与链路上的代理/网关可能对生效值产生分歧，即典型的参数走私缺口
+
+**授权码模式行为**：
+
+- 授权码单次使用。**PKCE 校验失败同样消耗授权码**——否则窃得授权码的攻击者可对着一个始终有效的 code 无限枚举 `code_verifier`
+- 授权码重放（第二次兑换）触发 `family_id` 全链级联撤销：首次兑换签发的 access / refresh token 一并作废并投递黑名单（PRD §4.10）
+- 授权码过期不触发级联撤销：过期的 code 从未被兑换，没有需要惩罚的 family
+
+**Refresh Token 模式行为**：
+
+- 轮换式：旧 refresh token 立即撤销，`sequence + 1`
+- 重放已轮换的 refresh token 触发整条 family 级联撤销
+- **不支持 scope 收窄**。RFC 6749 §6 允许 refresh 时请求更小的 scope，但当前仓储层要求轮换后的 token pair 携带与当前完全一致的 scope，因此轮换后 scope 原样继承。客户端如需更小的 scope，须重新走一次授权流程。这是已知偏差
+- 轮换不是重新认证，因此 ID Token 的 `auth_time` 保持该 family 首个 refresh token 的创建时刻
+
 ---
 
-### 5.3 Token 撤销
+### 5.4 Token 撤销
 
 ```
 POST /oauth/revoke
@@ -1068,9 +1187,23 @@ Content-Type: application/x-www-form-urlencoded
 token=rt_abc123...&token_type_hint=refresh_token&client_id=381c34b9-14a4-4df9-a9db-40c2455be09f
 ```
 
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `token` | 是 | 待撤销的 refresh token 或 access token |
+| `token_type_hint` | 否 | `refresh_token` / `access_token`，仅调整查找顺序 |
+| `client_id` | 是 | 客户端标识 |
+| `client_secret` | 条件 | 机密客户端必填 |
+
 **Response** `200`：空响应体。
 
-**说明**: 撤销整条 token family。
+**说明**:
+
+- 撤销整条 token family。客户端要求撤销 family 中任一 token，意味着结束该会话；若只撤销单个 token，同族 access token 在其 TTL 内仍然可用，与调用方意图相悖
+- 未知、已过期、已撤销的 token **一律返回 `200`**（RFC 7009 §2.2）。客户端的诉求是「该 token 不再可用」，这已经成立；反之则会把本端点变成探测 token 是否存在的 oracle
+- `token_type_hint` 猜错只影响查找顺序，token 仍会被撤销（RFC 7009 §2.1）
+- 撤销 access token 时**验证签名**后取其 `jti`，而非仅解码 JWT。未验签的 claim 是攻击者可控的，若信任其中的 `jti`，任何人伪造一个即可撤销任意 family
+- 不属于该客户端的 token 视为「未找到」，同样返回 `200`，因此一个客户端无法结束另一个客户端的会话
+- 仅客户端认证失败（`401 invalid_client`）与 `token` 缺失（`400 invalid_request`）返回错误
 
 ---
 
@@ -1453,6 +1586,13 @@ GET /.well-known/openid-configuration
 }
 ```
 
+**说明**：
+
+- 各端点 URL 由 `JWT_ISSUER` 派生而非独立配置。OIDC 要求本文档的 `issuer` 与每个 ID Token 的 `iss` claim 完全一致，两者同源可确保不漂移
+- 本文档不使用标准信封——通用 OIDC 客户端库不解析本项目的信封格式
+- `token_endpoint_auth_methods_supported` 中的 `none` 指公开客户端仅凭 PKCE 认证；不支持 HTTP Basic
+- 声明的能力与实现严格一致：信任本文档却被拒绝的 relying party 没有申诉渠道
+
 ---
 
 ### 8.2 JWKS 公钥集
@@ -1529,6 +1669,28 @@ POST /userinfo
 - `sub` 为用户唯一标识（`user.id` 字符串），始终返回
 - `email` 为注册邮箱（非对外展示邮箱）。`email_verified` 固定为 `true`（SAST Link 注册时已校验邮箱）
 - `updated_at` 为 Unix timestamp
+- 响应体为裸 claim 集合，**不使用标准信封**——通用 OIDC 客户端库不解析本项目的信封格式
+- 授权范围之外的 claim **完全不出现**，而非返回空值。relying party 无法区分 `"name": ""` 与「该用户没有名字」
+- `preferred_username` 取 `profile.nickname`，未设置或为空白时回退到 `user.name`，保证 relying party 总有可展示的值
+- 仅当 scope 含 `profile` 时才查询 profile 表；限定为 `openid` 或 `email` 的 token 完全不触碰该表
+- 响应携带 `Cache-Control: no-store`
+- 同时支持 `GET` 与 `POST`。`GET` 使 token 留在 header 中，`POST` 供偏好该方式的客户端使用
+- 本端点自行完成认证而不挂在 JWT 中间件之后，目的是按 RFC 6750 格式应答；token 校验逻辑本身复用中间件的 `Authenticate`，两条路径不会漂移
+
+**错误响应**（RFC 6750 §3）：token 被拒时返回 `401`，并携带 `WWW-Authenticate` 挑战头：
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="sast-link", error="invalid_token", error_description="Access Token 无效或已过期"
+Content-Type: application/json
+
+{
+  "error": "invalid_token",
+  "error_description": "Access Token 无效或已过期"
+}
+```
+
+挑战头是 RFC 6750 与 RFC 6749 错误格式的关键差异：符合规范的 OIDC 客户端读取此 header 来判断是否需要刷新 token。签名无效、已过期、已撤销、`token_version` 不匹配、账号已注销等情形统一归为 `invalid_token`——RFC 6750 对「token 被拒」只有这一个错误码。
 
 ---
 
