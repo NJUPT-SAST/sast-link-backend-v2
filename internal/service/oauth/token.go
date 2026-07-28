@@ -1,0 +1,341 @@
+package oauth
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
+)
+
+// Token implements RFC 6749 §4.1.3 and §6 for the two supported grants.
+func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, error) {
+	switch strings.TrimSpace(input.GrantType) {
+	case grantTypeAuthorizationCode:
+		return s.tokenByAuthorizationCode(ctx, input)
+	case grantTypeRefreshToken:
+		return s.tokenByRefreshToken(ctx, input)
+	case "":
+		return nil, newError(ErrInvalidRequest, "grant_type 不能为空", nil)
+	default:
+		return nil, newError(ErrUnsupportedGrantType, "仅支持 authorization_code 与 refresh_token", nil)
+	}
+}
+
+// tokenByAuthorizationCode redeems an authorization code for a token pair.
+//
+// Order matters. The client is authenticated first, then the code is consumed,
+// and only then are the code's bindings checked. Consuming before the bindings
+// are verified is deliberate: the code is single-use, so a request that fails
+// PKCE must still burn it — otherwise an attacker holding a stolen code could
+// probe verifiers indefinitely against a code that stays live.
+func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput) (*TokenResult, error) {
+	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains([]string(client.GrantTypes), grantTypeAuthorizationCode) {
+		return nil, newError(ErrUnauthorizedClient, "客户端未获授权使用 authorization_code", nil)
+	}
+	code := strings.TrimSpace(input.Code)
+	if code == "" {
+		return nil, newError(ErrInvalidRequest, "code 不能为空", nil)
+	}
+	verifier := strings.TrimSpace(input.CodeVerifier)
+	if verifier == "" {
+		return nil, newError(ErrInvalidRequest, "code_verifier 不能为空", nil)
+	}
+
+	authorization, consumeErr := s.Authorizations.Consume(ctx, code, s.now())
+	switch {
+	case errors.Is(consumeErr, repository.ErrNotFound):
+		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
+	case errors.Is(consumeErr, repository.ErrAuthorizationReplayed):
+		// PRD §4.10: a replayed code means the code leaked, and whatever tokens were
+		// already minted from it are suspect. Cut the whole family.
+		if authorization != nil && authorization.FamilyID != nil {
+			s.revokeFamily(ctx, *authorization.FamilyID)
+		}
+		s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_replayed")
+		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
+	case errors.Is(consumeErr, repository.ErrAuthorizationExpired):
+		return nil, newError(ErrInvalidGrant, "授权码已过期", nil)
+	case consumeErr != nil:
+		return nil, newError(ErrInternal, "消费授权码失败", consumeErr)
+	}
+
+	// The code must belong to the authenticated client. Without this a client could
+	// redeem a code issued to a different client and receive tokens for it.
+	if authorization.ClientID != client.ID {
+		return nil, newError(ErrInvalidGrant, "授权码与客户端不匹配", nil)
+	}
+	// RFC 6749 §4.1.3 requires redirect_uri to match the authorization request.
+	if redirectErr := matchRedirectURI(authorization.RedirectURI, input.RedirectURI); redirectErr != nil {
+		return nil, redirectErr
+	}
+	if pkceErr := auth.VerifyPKCES256(verifier, authorization.CodeChallenge, authorization.CodeChallengeMethod); pkceErr != nil {
+		return nil, newError(ErrInvalidGrant, "code_verifier 校验失败", pkceErr)
+	}
+
+	user, err := s.Users.FindByID(ctx, authorization.UserID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, newError(ErrInvalidGrant, "授权码所属用户无效", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询授权码所属用户失败", err)
+	}
+	if user.State == model.UserStateDeleted {
+		return nil, newError(ErrInvalidGrant, "账号已注销", nil)
+	}
+
+	scopes := []string(authorization.Scopes)
+	familyID := ""
+	if authorization.FamilyID != nil {
+		familyID = *authorization.FamilyID
+	}
+	pair, err := s.issuer().Issue(tokenissue.Request{
+		User:       user,
+		Client:     client,
+		Sequence:   0,
+		FamilyID:   familyID,
+		Scopes:     scopes,
+		AccessTTL:  s.accessTTL(),
+		RefreshTTL: s.refreshTTL(),
+	})
+	if err != nil {
+		return nil, newError(ErrInternal, "签发 Token Pair 失败", err)
+	}
+	if createErr := s.Tokens.CreatePair(ctx, pair.Access, pair.Refresh); createErr != nil {
+		return nil, newError(ErrInternal, "持久化 Token Pair 失败", createErr)
+	}
+
+	nonce := ""
+	if authorization.Nonce != nil {
+		nonce = *authorization.Nonce
+	}
+	// auth_time is the code's creation instant, which in this flow is exactly when
+	// the user confirmed the authorization: Consent creates the row on approval.
+	idToken, err := s.signIDToken(ctx, user, client, scopes, nonce, authorization.CreatedAt)
+	if err != nil {
+		// The pair is already persisted, so a signing failure must not leave a live
+		// session the client never learned about.
+		s.revokeFamily(ctx, pair.FamilyID)
+		return nil, err
+	}
+
+	s.auditToken(ctx, &user.ID, client.ClientID, grantTypeAuthorizationCode, input, true, 0, "issued")
+	return s.tokenResult(pair, idToken), nil
+}
+
+// tokenByRefreshToken rotates a refresh token, per RFC 6749 §6.
+func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*TokenResult, error) {
+	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains([]string(client.GrantTypes), grantTypeRefreshToken) {
+		return nil, newError(ErrUnauthorizedClient, "客户端未获授权使用 refresh_token", nil)
+	}
+	presented := strings.TrimSpace(input.RefreshToken)
+	if presented == "" {
+		return nil, newError(ErrInvalidRequest, "refresh_token 不能为空", nil)
+	}
+
+	tokenHash, err := s.RefreshTokens.HashRefreshToken(presented)
+	if err != nil {
+		// A token that is not even shaped like ours cannot be looked up; reporting
+		// invalid_grant keeps a malformed value indistinguishable from an unknown one.
+		return nil, newError(ErrInvalidGrant, "refresh_token 无效", err)
+	}
+	current, err := s.Tokens.FindRefreshToken(ctx, tokenHash)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, newError(ErrInvalidGrant, "refresh_token 无效", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询 refresh_token 失败", err)
+	}
+
+	// The token must belong to the authenticated client. This is also what keeps
+	// the OAuth path and the internal session path from crossing: a session token
+	// belongs to the built-in client, so presenting it here with a third-party
+	// client_id fails, and vice versa in session.Refresh.
+	if current.ClientID != client.ID {
+		return nil, newError(ErrInvalidGrant, "refresh_token 与客户端不匹配", nil)
+	}
+	if current.RevokedAt != nil {
+		// Replay of an already-rotated token: the family is compromised.
+		s.revokeFamily(ctx, current.FamilyID)
+		s.auditToken(ctx, &current.UserID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
+		return nil, newError(ErrInvalidGrant, "refresh_token 无效", nil)
+	}
+	if !current.ExpiresAt.After(s.now()) {
+		return nil, newError(ErrInvalidGrant, "refresh_token 已过期", nil)
+	}
+
+	user, err := s.Users.FindByID(ctx, current.UserID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, newError(ErrInvalidGrant, "refresh_token 所属用户无效", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询 refresh_token 所属用户失败", err)
+	}
+	if user.State == model.UserStateDeleted {
+		return nil, newError(ErrInvalidGrant, "账号已注销", nil)
+	}
+
+	// Scope narrowing (RFC 6749 §6) is not supported: the repository requires a
+	// rotated pair to carry exactly the current scopes, so the rotated tokens
+	// inherit them unchanged. A client wanting fewer scopes must start a new
+	// authorization.
+	scopes := []string(current.Scopes)
+	pair, err := s.issuer().Issue(tokenissue.Request{
+		User:       user,
+		Client:     client,
+		Sequence:   current.Sequence + 1,
+		FamilyID:   current.FamilyID,
+		Scopes:     scopes,
+		AccessTTL:  s.accessTTL(),
+		RefreshTTL: s.refreshTTL(),
+	})
+	if err != nil {
+		return nil, newError(ErrInternal, "签发 Token Pair 失败", err)
+	}
+	if rotateErr := s.Tokens.RotateRefreshToken(ctx, tokenHash, pair.Access, pair.Refresh); rotateErr != nil {
+		if errors.Is(rotateErr, repository.ErrTokenReplay) ||
+			errors.Is(rotateErr, repository.ErrTokenExpired) ||
+			errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) {
+			// The repository already revoked the family; re-invoke it to obtain the
+			// blacklist entries for synchronous delivery.
+			s.revokeFamily(ctx, current.FamilyID)
+			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
+			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
+		}
+		return nil, newError(ErrInternal, "轮换 refresh_token 失败", rotateErr)
+	}
+
+	// A rotation is not a fresh authentication, so auth_time stays the moment the
+	// user actually authorized this family — the family's first refresh token.
+	idToken, err := s.signIDToken(ctx, user, client, scopes, "", current.CreatedAt)
+	if err != nil {
+		s.revokeFamily(ctx, pair.FamilyID)
+		return nil, err
+	}
+
+	s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, true, 0, "rotated")
+	return s.tokenResult(pair, idToken), nil
+}
+
+// authenticateClient resolves and authenticates the requesting client.
+//
+// A public client (no stored secret) authenticates by PKCE alone, which the
+// caller verifies against the authorization code. A confidential client must
+// present a matching client_secret. A public client that sends a secret anyway is
+// rejected rather than ignored: it signals a client misconfigured about its own
+// type, and silently accepting it would hide that.
+func (s Service) authenticateClient(ctx context.Context, clientID, clientSecret string) (*model.OAuthClient, error) {
+	id := strings.TrimSpace(clientID)
+	if id == "" {
+		return nil, newError(ErrInvalidClient, "client_id 不能为空", nil)
+	}
+	client, err := s.Clients.FindActiveByClientID(ctx, id)
+	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
+		return nil, newError(ErrInvalidClient, "客户端认证失败", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+
+	presented := strings.TrimSpace(clientSecret)
+	if client.ClientSecretHash == nil {
+		if presented != "" {
+			return nil, newError(ErrInvalidClient, "公开客户端不得携带 client_secret", nil)
+		}
+		return client, nil
+	}
+	if presented == "" {
+		return nil, newError(ErrInvalidClient, "client_secret 不能为空", nil)
+	}
+	if err := auth.VerifyClientSecret(presented, *client.ClientSecretHash); err != nil {
+		return nil, newError(ErrInvalidClient, "客户端认证失败", err)
+	}
+	return client, nil
+}
+
+// matchRedirectURI enforces the RFC 6749 §4.1.3 redirect_uri check.
+func matchRedirectURI(authorized *string, presented string) error {
+	value := strings.TrimSpace(presented)
+	if authorized == nil || *authorized == "" {
+		// Every code this service issues stores its redirect_uri, so a missing one
+		// means the row was not written by Consent.
+		return newError(ErrInvalidGrant, "授权码缺少 redirect_uri", nil)
+	}
+	if value == "" {
+		return newError(ErrInvalidRequest, "redirect_uri 不能为空", nil)
+	}
+	if value != *authorized {
+		return newError(ErrInvalidGrant, "redirect_uri 与授权请求不一致", nil)
+	}
+	return nil
+}
+
+// signIDToken builds the ID Token for a granted scope set.
+func (s Service) signIDToken(
+	ctx context.Context,
+	user *model.User,
+	client *model.OAuthClient,
+	scopes []string,
+	nonce string,
+	authTime time.Time,
+) (string, error) {
+	claims, err := s.idTokenClaims(ctx, user, scopes)
+	if err != nil {
+		return "", err
+	}
+	idToken, err := s.JWT.SignIDToken(auth.IDTokenInput{
+		Subject:  userIDString(user.ID),
+		ClientID: client.ClientID,
+		Scopes:   scopes,
+		Nonce:    nonce,
+		AuthTime: authTime,
+		TTL:      s.accessTTL(),
+		Claims:   claims,
+	})
+	if err != nil {
+		return "", newError(ErrInternal, "签发 ID Token 失败", err)
+	}
+	return idToken, nil
+}
+
+func (s Service) tokenResult(pair *tokenissue.Pair, idToken string) *TokenResult {
+	return &TokenResult{
+		AccessToken:  pair.AccessToken,
+		RefreshToken: pair.RefreshToken,
+		TokenType:    BearerTokenType,
+		ExpiresIn:    int(s.accessTTL().Seconds()),
+		Scope:        pair.ScopeClaim,
+		IDToken:      idToken,
+	}
+}
+
+func (s Service) auditToken(
+	ctx context.Context,
+	userID *int64,
+	clientID, grantType string,
+	input TokenInput,
+	success bool,
+	errCode int,
+	outcome string,
+) {
+	resourceID := clientID
+	s.audit(ctx, userID, "oauth_token", &resourceID, success, errCode, input.ClientIP, input.UserAgent, map[string]any{
+		"client_id":  clientID,
+		"grant_type": grantType,
+		"outcome":    outcome,
+	})
+}
