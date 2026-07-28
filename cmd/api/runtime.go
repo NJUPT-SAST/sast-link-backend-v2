@@ -7,6 +7,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
+	oauthredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/oauth"
 	sessionredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
@@ -15,14 +16,17 @@ import (
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	sessionworker "github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session/worker"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
 )
 
 type sessionRuntime struct {
 	Handler sessionhandler.Handler
+	OAuth   oauthhandler.Handler
 	Auth    middleware.Authenticator
 	Workers []backgroundWorker
 }
@@ -131,9 +135,45 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Blacklist: blacklist,
 		Tokens:    tokens,
 	}
+
+	authorizeLimiter := oauthredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitAuthorizeRPM,
+			Window: cfg.RateLimitAuthorizeWindow,
+		},
+	}
+	oauthService := oauth.Service{
+		Users:            users,
+		Clients:          clients,
+		Authorizations:   repository.NewOAuthAuthorization(database),
+		Tokens:           tokens,
+		Audit:            audit,
+		Profiles:         users,
+		Requests:         oauthredis.AuthorizeRequestStore{Store: store},
+		Blacklist:        oauthredis.BlacklistStore{Store: store},
+		AuthorizeLimiter: authorizeLimiter,
+		JWT:              jwtManager,
+		RefreshTokens:    refreshManager,
+		AccessTTL:        cfg.JWTAccessTokenExpiry,
+		RefreshTTL:       cfg.JWTRefreshTokenExpiry,
+		CodeTTL:          cfg.OAuthCodeTTL,
+		RequestTTL:       cfg.OAuthAuthorizeRequestTTL,
+		CardBaseURL:      cfg.OAuthCardBaseURL,
+		// The discovery document's issuer must equal the iss claim of every issued
+		// token, so both read the same setting.
+		Issuer: cfg.JWTIssuer,
+	}
+
 	return &sessionRuntime{
 		Handler: sessionhandler.Handler{Service: service},
-		Auth:    authenticator,
+		OAuth: oauthhandler.Handler{
+			Service:    oauthService,
+			Auth:       authenticator,
+			ConsentURL: cfg.OAuthConsentURL,
+		},
+		Auth: authenticator,
 		Workers: []backgroundWorker{
 			sessionworker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist},
 			forgotPasswords,

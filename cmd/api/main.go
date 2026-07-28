@@ -17,6 +17,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/health"
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
 )
 
@@ -69,6 +70,7 @@ func run() error {
 		"redis": func() error { return pingRedis(rdb) },
 	}).Register(router)
 	sessionhandler.RegisterRoutes(router, runtime.Handler, runtime.Auth.RequireAuth())
+	oauthhandler.RegisterRoutes(router, runtime.OAuth, runtime.Auth.RequireAuth())
 
 	slog.Info("server starting", slog.String("port", cfg.AppPort))
 	return serve(ctx, ":"+cfg.AppPort, router, runtime.Workers)
