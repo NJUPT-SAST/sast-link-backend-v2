@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -47,6 +48,20 @@ type Config struct {
 	JWTRefreshTokenExpiry  time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
 	RefreshTokenHMACSecret string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
 
+	// OAuthConsentURL is the front-end page that collects the user's authorization
+	// decision. GET /oauth/authorize validates the request and redirects here; the
+	// page then calls POST /oauth/authorize/consent with the caller's access token.
+	OAuthConsentURL string `env:"OAUTH_CONSENT_URL"`
+	// OAuthCardBaseURL prefixes the OIDC profile claim, which points at a user's
+	// public display card. It is not derived from JWT_ISSUER: the issuer carries the
+	// API's /v2 base path while the card is a front-end route without it.
+	OAuthCardBaseURL string `env:"OAUTH_CARD_BASE_URL" envDefault:"https://link.sast.fun/card"`
+	// OAuthCodeTTL bounds an authorization code's lifetime (PRD §4.10: 5min).
+	OAuthCodeTTL time.Duration `env:"OAUTH_CODE_TTL" envDefault:"5m"`
+	// OAuthAuthorizeRequestTTL bounds how long a validated authorize request waits
+	// in Redis for the user's consent decision.
+	OAuthAuthorizeRequestTTL time.Duration `env:"OAUTH_AUTHORIZE_REQUEST_TTL" envDefault:"10m"`
+
 	InternalOAuthClientID    string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
 	CORSAllowedOrigins       []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
 	TrustedProxies           []string      `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
@@ -64,6 +79,11 @@ type Config struct {
 	// serialization point for concurrent deletes of one record.
 	RateLimitUnbindRPM    int           `env:"RATE_LIMIT_UNBIND_RPM" envDefault:"3"`
 	RateLimitUnbindWindow time.Duration `env:"RATE_LIMIT_UNBIND_WINDOW" envDefault:"60s"`
+	// Throttles GET /oauth/authorize per caller IP. The endpoint is
+	// unauthenticated and writes a Redis stash per call, so without a limit anyone
+	// could fill the keyspace. Fail-open, per PRD §6.0.
+	RateLimitAuthorizeRPM    int           `env:"RATE_LIMIT_AUTHORIZE_RPM" envDefault:"20"`
+	RateLimitAuthorizeWindow time.Duration `env:"RATE_LIMIT_AUTHORIZE_WINDOW" envDefault:"60s"`
 
 	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
 	// beyond this queues at the hasher instead of saturating every CPU core.
@@ -142,6 +162,23 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_UNBIND_RPM must be positive")
 	case c.RateLimitUnbindWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_UNBIND_WINDOW must be at least 1s")
+	case c.RateLimitAuthorizeRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_AUTHORIZE_RPM must be positive")
+	case c.RateLimitAuthorizeWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_AUTHORIZE_WINDOW must be at least 1s")
+	// The consent URL has no default: guessing one would make a deployment that
+	// forgot it redirect every third-party authorization to a page that does not
+	// exist, and the failure would only surface for the end user mid-flow.
+	case strings.TrimSpace(c.OAuthConsentURL) == "":
+		return fmt.Errorf("OAUTH_CONSENT_URL is required")
+	case !isAbsoluteHTTPURL(c.OAuthConsentURL):
+		return fmt.Errorf("OAUTH_CONSENT_URL must be an absolute http(s) URL")
+	case !isAbsoluteHTTPURL(c.OAuthCardBaseURL):
+		return fmt.Errorf("OAUTH_CARD_BASE_URL must be an absolute http(s) URL")
+	case c.OAuthCodeTTL <= 0:
+		return fmt.Errorf("OAUTH_CODE_TTL must be positive")
+	case c.OAuthAuthorizeRequestTTL <= 0:
+		return fmt.Errorf("OAUTH_AUTHORIZE_REQUEST_TTL must be positive")
 	case c.PasswordHashMaxConcurrent <= 0:
 		return fmt.Errorf("PASSWORD_HASH_MAX_CONCURRENT must be positive")
 	// SMTP backs registration, password reset and email binding. Validating it
@@ -162,6 +199,24 @@ func (c *Config) ValidateAPIAuth() error {
 	}
 	c.TrustedProxies = normalizedProxies
 	return nil
+}
+
+// isAbsoluteHTTPURL reports whether value is an absolute http/https URL with a
+// host. Both URLs it guards end up in a Location header, so a scheme-less or
+// relative value would resolve against this API's own origin instead of the
+// front end, and a non-http scheme would let a misconfiguration redirect users
+// somewhere a browser should never follow.
+func isAbsoluteHTTPURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return false
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return false
+	}
+	return parsed.Host != ""
 }
 
 // normalizeTrustedProxies trims surrounding whitespace, drops empty entries and

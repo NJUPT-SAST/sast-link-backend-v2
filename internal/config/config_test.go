@@ -36,6 +36,7 @@ func setConfigEnv(t *testing.T, dbUser, dbPassword, dbName string) {
 	t.Setenv("SMTP_HOST", "smtp.example.test")
 	t.Setenv("SMTP_PORT", "587")
 	t.Setenv("SMTP_FROM", "noreply@example.test")
+	t.Setenv("OAUTH_CONSENT_URL", "https://link.example.test/oauth/consent")
 }
 
 func TestLoadMissingRequiredFields(t *testing.T) {
