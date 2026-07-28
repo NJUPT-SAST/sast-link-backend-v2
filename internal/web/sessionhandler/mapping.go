@@ -40,6 +40,11 @@ func mapServiceError(err error) error {
 		message = "密码长度不足"
 	case errcode.CodePasswordUnchanged:
 		message = "新旧密码相同"
+	case errcode.CodeUserNotFound:
+		// Without a case here the message falls back to the KindNotFound default
+		// ("资源不存在"), which contradicts the code's own meaning and the handler's
+		// malformed-ID path.
+		message = "用户不存在"
 	}
 	var status int
 	switch serviceErr.Kind {

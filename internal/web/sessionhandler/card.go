@@ -26,7 +26,7 @@ type cardDTO struct {
 func (h Handler) Card(c *gin.Context) {
 	userID, ok := parsePositiveID(c.Param("id"))
 	if !ok {
-		response.Error(c, notFound("用户不存在"))
+		response.Error(c, notFound(errcode.CodeUserNotFound, "用户不存在"))
 		return
 	}
 	result, err := h.Service.Card(c.Request.Context(), session.CardInput{UserID: userID})
@@ -71,6 +71,10 @@ func parsePositiveID(raw string) (int64, bool) {
 	return value, true
 }
 
-func notFound(message string) error {
-	return &response.BusinessError{HTTPStatus: http.StatusNotFound, Code: errcode.CodeNotFound, Message: message}
+// notFound builds a 404 for the paths that reject an ID before reaching the
+// service. The code is a parameter because the two callers differ: a missing user
+// is 40401, while a missing binding record is the generic 40400 so it cannot be
+// told apart from a record belonging to someone else.
+func notFound(code int, message string) error {
+	return &response.BusinessError{HTTPStatus: http.StatusNotFound, Code: code, Message: message}
 }

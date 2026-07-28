@@ -74,10 +74,34 @@ func TestCardRejectsMalformedID(t *testing.T) {
 	recorder := doJSON(router, http.MethodGet, "/card/abc", "")
 
 	body := decodeBody(t, recorder)
-	if recorder.Code != http.StatusNotFound || body.Code != errcode.CodeNotFound {
+	if recorder.Code != http.StatusNotFound || body.Code != errcode.CodeUserNotFound {
 		t.Fatalf("response = %d %#v", recorder.Code, body)
 	}
 	if service.cardCalls != 0 {
 		t.Fatalf("service called %d times, want 0", service.cardCalls)
+	}
+}
+
+// A malformed ID and a missing or soft-deleted user must be indistinguishable, so
+// a scraper cannot learn which IDs were once real. They previously disagreed on
+// both fields: the handler answered 40400/"用户不存在" while the service path
+// answered 40401 relabelled with the KindNotFound default "资源不存在".
+func TestCardUnknownUserMatchesMalformedID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	malformed := decodeBody(t, doJSON(authedRouter(&fakeService{}), http.MethodGet, "/card/abc", ""))
+	unknown := decodeBody(t, doJSON(
+		authedRouter(&fakeService{cardErr: session.ErrUserNotFound}),
+		http.MethodGet, "/card/999999", "",
+	))
+
+	if malformed.Code != unknown.Code || malformed.Message != unknown.Message {
+		t.Fatalf("malformed = %#v, unknown = %#v, want identical code and message", malformed, unknown)
+	}
+	if unknown.Code != errcode.CodeUserNotFound {
+		t.Fatalf("code = %d, want %d", unknown.Code, errcode.CodeUserNotFound)
+	}
+	if unknown.Message != "用户不存在" {
+		t.Fatalf("message = %q, want 用户不存在", unknown.Message)
 	}
 }

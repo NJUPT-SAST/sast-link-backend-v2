@@ -3,6 +3,7 @@ package sessionhandler
 import (
 	"github.com/gin-gonic/gin"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
@@ -47,7 +48,7 @@ func (h Handler) UnbindIdentity(c *gin.Context) {
 		// A non-numeric or non-positive path segment names no binding the caller
 		// could own, so it gets the same 404xx as somebody else's ID rather than a
 		// 400 that confirms the difference.
-		response.Error(c, notFound("绑定记录不存在"))
+		response.Error(c, notFound(errcode.CodeNotFound, "绑定记录不存在"))
 		return
 	}
 	var req unbindIdentityRequest
