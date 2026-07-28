@@ -441,7 +441,7 @@ is_deleted ──(恢复)──► njupter
 | 验证码失败计数 | `sastlink:verify:attempt:{purpose}:{email}` | 跟随验证码剩余 TTL | String（INCR） | 每个验证码最多 5 次尝试，用尽即连同验证码一并删除，避免 6 位码被无限爆破。重新发码时清零 |
 | 限流 | `sastlink:ratelimit:{ip}:{endpoint}` | 30s~15min | String（INCR 计数器 + EXPIRE） | 固定窗口计数器，按端点差异化配置（登录 15min/发验证码 60s 等） |
 | 设备管理 | `sastlink:devices:{user_id}` | 30d | Sorted Set（score=login_ts, member=device_id） | 最多 5 台同时登录，详情另存 Hash。淘汰/登出见 §6.1 |
-| 解绑限流 | `sastlink:ratelimit:user:{user_id}:unbind` | 60s | Fixed window（INCR + EXPIRE） | 限制单个用户的解绑频率。键按 `user_id` 而非 `provider_id`：后者会让 A 解绑某地址后，B 绑定同一地址再解绑时撞上 A 的窗口。在密码校验**之前**检查，否则爆破尝试不消耗配额——本端点没有独立的登录失败计数。并发解绑同一条记录由 PostgreSQL 串行化：输的一方匹配不到行，返回 `40400` |
+| 解绑限流 | `sastlink:ratelimit:user:{user_id}:unbind` | 60s | Fixed window（INCR + EXPIRE） | 限制单个用户的解绑频率。键按 `user_id` 而非 `provider_id`：后者会让 A 解绑某地址后，B 绑定同一地址再解绑时撞上 A 的窗口。在密码校验**之前**检查，否则爆破尝试不消耗配额。此处用限流而非复用登录失败计数：后者的键与密码登录共用，在本端点试错密码会连带锁死用户的登录入口，且其响应为「登录已被锁定」，在解绑上语义不符；若要改为累积锁定，需要独立的键命名空间与错误码。并发解绑同一条记录由 PostgreSQL 串行化：输的一方匹配不到行，返回 `40400` |
 | Token 黑名单 | `sastlink:token:blacklist:{jti}` | Token 剩余有效期 | String（SET EX，值任意） | 登出/改密后 Access Token 失效，利用 TTL 自动过期清理 |
 | 幂等性 | `sastlink:idempotency:{key}` | 24h | String（SET NX，存响应体） | 敏感写操作（注册、绑定等）。key 由客户端传入（`Idempotency-Key` header），同一 key 重复请求返回首次结果 |
 | OAuth State | `sastlink:oauth:state:{state}` | 10min | String（GetDel 消费） | OAuth 授权标准 state 参数，发起时写入，回调时 GetDel 校验防 CSRF |

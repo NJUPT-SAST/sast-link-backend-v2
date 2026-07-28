@@ -51,8 +51,15 @@ func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) 
 	}
 	// Throttled before the password check, so repeated wrong-password attempts
 	// consume the budget too. The old cooldown was claimed only after the password
-	// verified, which meant it did nothing against guessing; this endpoint has no
-	// login-failure counter of its own.
+	// verified, which meant it did nothing against guessing.
+	//
+	// Deliberately rate limiting rather than reusing Failures (LoginFailureStore):
+	// its keys are shared with password login, so guessing here would lock the
+	// victim's login — a token holder could deny them the front door. It also
+	// answers with "登录已被锁定", which is wrong on this endpoint. Slowing the
+	// endpoint to 3/min already leaves brute force with no practical value; an
+	// accumulating lockout would need its own key namespace and error code, at
+	// which point it is not a reuse.
 	if err := s.checkEndpointLimit(ctx, s.UnbindLimiter, "unbind", "user:"+strconv.FormatInt(input.UserID, 10)); err != nil {
 		return nil, err
 	}
