@@ -26,6 +26,18 @@ const (
 	DepartmentMedia    Department = "media"
 )
 
+// Valid reports whether d is a defined department_enum value. The column is
+// nullable, so an empty Department means "unset" and is not valid input here;
+// callers clear the field with a NULL instead.
+func (d Department) Valid() bool {
+	switch d {
+	case DepartmentSoftware, DepartmentMedia:
+		return true
+	default:
+		return false
+	}
+}
+
 // LoginMethod is a value from PostgreSQL's login_method_enum.
 type LoginMethod string
 
