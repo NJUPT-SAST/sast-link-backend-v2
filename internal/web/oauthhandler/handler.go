@@ -127,7 +127,7 @@ func (h Handler) Consent(c *gin.Context) {
 func (h Handler) Token(c *gin.Context) {
 	form, err := decodeStrictForm(c)
 	if err != nil {
-		writeError(c, invalidRequest(err.Error()))
+		writeError(c, invalidRequest(formErrorDescription(err)))
 		return
 	}
 	result, err := h.Service.Token(c.Request.Context(), oauth.TokenInput{
@@ -163,7 +163,7 @@ func (h Handler) Token(c *gin.Context) {
 func (h Handler) Revoke(c *gin.Context) {
 	form, err := decodeStrictForm(c)
 	if err != nil {
-		writeError(c, invalidRequest(err.Error()))
+		writeError(c, invalidRequest(formErrorDescription(err)))
 		return
 	}
 	if err := h.Service.Revoke(c.Request.Context(), oauth.RevokeInput{

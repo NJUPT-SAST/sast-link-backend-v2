@@ -13,11 +13,34 @@ import (
 // handful of short parameters, so anything larger is malformed or hostile.
 const maxFormRequestBodyBytes int64 = 16 << 10
 
+// The decode failures. These strings reach the client as error_description, so
+// each is a fixed, self-authored message: never a wrapped parser error, whose text
+// would echo request bytes into a response body and a WWW-Authenticate header.
+// formErrorDescription enforces that at the boundary.
 var (
 	errInvalidFormContentType = errors.New("request Content-Type must be application/x-www-form-urlencoded")
 	errMalformedForm          = errors.New("request body is not a valid urlencoded form")
 	errRepeatedFormParameter  = errors.New("request repeats a form parameter")
 )
+
+// formErrorDescription maps a decode failure to a description safe to return.
+//
+// An unrecognized error collapses to a generic message rather than its text: the
+// description is echoed in an RFC 6749 body and, on 401, inside a quoted
+// WWW-Authenticate parameter, so any request-derived bytes there would be both an
+// information leak and a header-injection vector.
+func formErrorDescription(err error) string {
+	switch {
+	case errors.Is(err, errInvalidFormContentType):
+		return "请求 Content-Type 必须为 application/x-www-form-urlencoded"
+	case errors.Is(err, errMalformedForm):
+		return "请求体不是合法的 urlencoded 表单"
+	case errors.Is(err, errRepeatedFormParameter):
+		return "请求包含重复的表单参数"
+	default:
+		return "请求参数无效"
+	}
+}
 
 // decodeStrictForm parses an RFC 6749 form body.
 //

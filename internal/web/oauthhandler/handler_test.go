@@ -760,3 +760,64 @@ func TestDiscoveryAndJWKSAreUnauthenticatedRawJSON(t *testing.T) {
 		}
 	}
 }
+
+// A decode failure's description must be one of this package's own messages. The
+// text is echoed into an RFC 6749 body and, on 401, into a quoted
+// WWW-Authenticate parameter, so a wrapped parser error would put request bytes
+// on the wire.
+func TestFormErrorDescriptionsAreSelfAuthored(t *testing.T) {
+	allowed := map[string]bool{
+		"请求 Content-Type 必须为 application/x-www-form-urlencoded": true,
+		"请求体不是合法的 urlencoded 表单":                                true,
+		"请求包含重复的表单参数":                                           true,
+		"请求参数无效":                                                true,
+	}
+	// A body whose bytes would be visible if any parser error text escaped.
+	probe := "grant_type=%zz\"injected"
+	for _, target := range []string{"/oauth/token", "/oauth/revoke"} {
+		service := &fakeService{}
+		router := newRouter(t, service, &fakeAuthenticator{})
+
+		recorder := doRequest(t, router, http.MethodPost, target,
+			"application/x-www-form-urlencoded", probe)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", target, recorder.Code)
+		}
+		var body errorResponse
+		decodeJSON(t, recorder, &body)
+		if !allowed[body.ErrorDescription] {
+			t.Fatalf("%s description = %q, want one of this package's fixed messages",
+				target, body.ErrorDescription)
+		}
+	}
+}
+
+// quotedHeaderValue is the structural guard against header injection: a value
+// carrying a quote, backslash or CR/LF must not be able to forge another challenge
+// parameter or split the header.
+func TestBearerChallengeCannotBeInjected(t *testing.T) {
+	challenge := bearerChallenge(&oauth.Error{
+		Code:        oauth.ErrorInvalidToken,
+		Description: "bad\"token\\, error=\"insufficient_scope\"\r\nX-Injected: yes",
+	})
+	if strings.ContainsAny(challenge, "\r\n") {
+		t.Fatalf("challenge %q contains a line break", challenge)
+	}
+	// Three quoted parameters — realm, error, error_description — so exactly six
+	// quotes, all of them ours. A surviving quote from the payload would raise the
+	// count and let it forge a fourth parameter.
+	if got := strings.Count(challenge, `"`); got != 6 {
+		t.Fatalf("challenge %q has %d quotes, want 6", challenge, got)
+	}
+	if strings.Contains(challenge, `\`) {
+		t.Fatalf("challenge %q kept a backslash escape", challenge)
+	}
+	// The payload's own error= text may survive as inert bytes, but it must not be
+	// parseable as a parameter, which requires a quote it no longer has.
+	if strings.Contains(challenge, `error="insufficient_scope"`) {
+		t.Fatalf("challenge %q let the payload forge a parameter", challenge)
+	}
+	if !strings.HasPrefix(challenge, `Bearer realm="sast-link", error="invalid_token"`) {
+		t.Fatalf("challenge %q lost its well-formed prefix", challenge)
+	}
+}

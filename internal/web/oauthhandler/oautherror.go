@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -81,15 +82,35 @@ func writeBearerError(c *gin.Context, err error) {
 	})
 }
 
-// bearerChallenge builds an RFC 6750 §3 challenge. Quoted values are escaped by
-// construction: the code comes from a fixed set of constants and the description
-// is service-authored, so neither can contain a quote.
+// bearerChallenge builds an RFC 6750 §3 challenge.
+//
+// Both quoted values are sanitized rather than merely assumed safe. Today every
+// code and description is a service-authored constant, but this string becomes a
+// response header: a stray quote would let a value escape its parameter and forge
+// another, and a CR or LF would split the header. Enforcing it here means a future
+// caller that passes request-derived text cannot turn it into header injection.
 func bearerChallenge(err *oauth.Error) string {
-	challenge := `Bearer realm="sast-link", error="` + err.Code + `"`
-	if err.Description != "" {
-		challenge += `, error_description="` + err.Description + `"`
+	challenge := `Bearer realm="sast-link", error="` + quotedHeaderValue(err.Code) + `"`
+	if description := quotedHeaderValue(err.Description); description != "" {
+		challenge += `, error_description="` + description + `"`
 	}
 	return challenge
+}
+
+// quotedHeaderValue strips the characters that would break out of an HTTP quoted
+// string: the delimiter itself, the escape character, and anything a header cannot
+// carry (CR, LF, NUL and other control bytes).
+func quotedHeaderValue(value string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '"' || r == '\\':
+			return -1
+		case r < 0x20 || r == 0x7f:
+			return -1
+		default:
+			return r
+		}
+	}, value)
 }
 
 // statusForKind maps a service failure to its HTTP status.
