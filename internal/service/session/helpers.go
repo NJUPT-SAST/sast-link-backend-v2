@@ -292,17 +292,21 @@ func profileDTO(user *model.User) UserProfileDTO {
 		}
 	}
 	for _, identity := range user.Identities {
-		dto.Identities = append(dto.Identities, IdentityDTO{
-			ID:             identity.ID,
-			Provider:       string(identity.Provider),
-			ProviderID:     identity.ProviderID,
-			IdentityData:   identity.IdentityData,
-			TokenExpiresAt: identity.TokenExpiresAt,
-			CreatedAt:      identity.CreatedAt,
-			UpdatedAt:      identity.UpdatedAt,
-		})
+		dto.Identities = append(dto.Identities, identityDTO(identity))
 	}
 	return dto
+}
+
+func identityDTO(identity model.Identity) IdentityDTO {
+	return IdentityDTO{
+		ID:             identity.ID,
+		Provider:       string(identity.Provider),
+		ProviderID:     identity.ProviderID,
+		IdentityData:   identity.IdentityData,
+		TokenExpiresAt: identity.TokenExpiresAt,
+		CreatedAt:      identity.CreatedAt,
+		UpdatedAt:      identity.UpdatedAt,
+	}
 }
 
 func (s Service) audit(ctx context.Context, userID *int64, action, resource string, resourceID *string, success bool, errCode int, clientIP, userAgent string, detail map[string]any) error {

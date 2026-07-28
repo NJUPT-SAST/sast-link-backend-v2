@@ -727,16 +727,8 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 		slog.Error("audit bind email", "user_id", input.UserID, "error", auditErr)
 	}
 	return &BindEmailVerifyResult{
-		Email: payload.Email,
-		Identity: IdentityDTO{
-			ID:             identity.ID,
-			Provider:       string(identity.Provider),
-			ProviderID:     identity.ProviderID,
-			IdentityData:   identity.IdentityData,
-			TokenExpiresAt: identity.TokenExpiresAt,
-			CreatedAt:      identity.CreatedAt,
-			UpdatedAt:      identity.UpdatedAt,
-		},
+		Email:    payload.Email,
+		Identity: identityDTO(*identity),
 	}, nil
 }
 
