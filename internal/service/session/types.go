@@ -59,6 +59,9 @@ type UserRepository interface {
 	// and revokes every live token of the user atomically, returning the
 	// access-token entries still pending blacklist delivery.
 	UpdatePasswordAndRevokeSessions(ctx context.Context, userID int64, passwordHash string, revokedAt time.Time) ([]model.BlacklistEntry, error)
+	// UpdateProfile applies a partial self-service field update across "user" and
+	// profile in one transaction and returns the reloaded aggregate.
+	UpdateProfile(ctx context.Context, userID int64, update repository.ProfileUpdate) (*model.User, error)
 }
 
 type ClientRepository interface {
@@ -305,6 +308,38 @@ type BindEmailVerifyInput struct {
 type BindEmailVerifyResult struct {
 	Email    string
 	Identity IdentityDTO
+}
+
+// UpdateProfileInput carries a partial self-service profile edit. Every field is
+// a pointer so "absent" is distinguishable from "set to empty": PUT
+// /user/profile leaves unsent fields untouched, while an explicit empty string
+// clears a nullable display field.
+type UpdateProfileInput struct {
+	UserID int64
+
+	Name        *string
+	PhoneNumber *string
+	QQNumber    *string
+	StudentID   *string
+	College     *string
+	Major       *string
+
+	Nickname   *string
+	Department *string
+	Intro      *string
+	Email      *string
+	BlogURL    *string
+	GitHubURL  *string
+
+	ClientIP  string
+	UserAgent string
+}
+
+type UpdateProfileResult struct {
+	Profile UserProfileDTO
+	// ChangedFields lists the request fields that were applied, in contract
+	// order. It feeds the update_profile audit detail defined in PRD §4.13.
+	ChangedFields []string
 }
 
 type UserProfileDTO struct {

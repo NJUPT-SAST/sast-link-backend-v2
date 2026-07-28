@@ -50,6 +50,10 @@ type fakeUsers struct {
 	// otherMailIdentities holds provider_id -> user_id for other_mail identities,
 	// so ExistsAsEmailAnywhere can mirror the cross-table uniqueness check.
 	otherMailIdentities map[string]int64
+	// updateProfileErr forces UpdateProfile to fail, for conflict scenarios the
+	// in-memory maps cannot reproduce.
+	updateProfileErr error
+	profileUpdates   []repository.ProfileUpdate
 }
 
 func (f *fakeUsers) FindByLoginIdentifier(_ context.Context, identifier string) (*model.User, error) {
@@ -212,6 +216,62 @@ func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
 	// Mirror the repository: the real implementation revokes sessions in the
 	// same transaction that rewrites the password.
 	return f.tokens.RevokeAllByUser(ctx, userID, revokedAt)
+}
+
+// UpdateProfile mirrors the repository's partial update: only non-nil fields are
+// applied, and the reloaded aggregate is returned.
+func (f *fakeUsers) UpdateProfile(_ context.Context, userID int64, update repository.ProfileUpdate) (*model.User, error) {
+	if f.updateProfileErr != nil {
+		return nil, f.updateProfileErr
+	}
+	user, ok := f.byID[userID]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	f.profileUpdates = append(f.profileUpdates, update)
+	applyString(&user.Name, update.Name)
+	applyString(&user.PhoneNumber, update.PhoneNumber)
+	applyString(&user.QQNumber, update.QQNumber)
+	applyString(&user.StudentID, update.StudentID)
+	applyString(&user.Major, update.Major)
+	if update.College != nil {
+		user.College = *update.College
+	}
+	if user.Profile == nil {
+		user.Profile = &model.Profile{UserID: userID}
+	}
+	applyNullable(&user.Profile.Nickname, update.Nickname)
+	applyNullable(&user.Profile.Intro, update.Intro)
+	applyNullable(&user.Profile.Email, update.Email)
+	applyNullable(&user.Profile.BlogURL, update.BlogURL)
+	applyNullable(&user.Profile.GitHubURL, update.GitHubURL)
+	if update.Department != nil {
+		if *update.Department == "" {
+			user.Profile.Department = nil
+		} else {
+			department := *update.Department
+			user.Profile.Department = &department
+		}
+	}
+	return user, nil
+}
+
+func applyString(target *string, value *string) {
+	if value != nil {
+		*target = *value
+	}
+}
+
+func applyNullable(target **string, value *string) {
+	if value == nil {
+		return
+	}
+	if *value == "" {
+		*target = nil
+		return
+	}
+	assigned := *value
+	*target = &assigned
 }
 
 type fakeClients struct {

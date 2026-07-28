@@ -27,6 +27,7 @@ type Service interface {
 	ChangePassword(ctx context.Context, input session.ChangePasswordInput) (*session.ChangePasswordResult, error)
 	BindEmailSendCode(ctx context.Context, input session.BindEmailSendCodeInput) (*session.BindEmailSendCodeResult, error)
 	BindEmailVerify(ctx context.Context, input session.BindEmailVerifyInput) (*session.BindEmailVerifyResult, error)
+	UpdateProfile(ctx context.Context, input session.UpdateProfileInput) (*session.UpdateProfileResult, error)
 }
 
 type Handler struct {
@@ -205,6 +206,7 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	protected.POST("/auth/logout", h.Logout)
 	protected.POST("/auth/change-password", h.ChangePassword)
 	protected.GET("/user/profile", h.Profile)
+	protected.PUT("/user/profile", h.UpdateProfile)
 	protected.POST("/user/identities/email", h.BindEmailSendCode)
 	protected.POST("/user/identities/email/verify", h.BindEmailVerify)
 }

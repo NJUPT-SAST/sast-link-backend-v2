@@ -36,6 +36,7 @@ type fakeService struct {
 	changePasswordResult     *session.ChangePasswordResult
 	bindEmailSendCodeResult  *session.BindEmailSendCodeResult
 	bindEmailVerifyResult    *session.BindEmailVerifyResult
+	updateProfileResult      *session.UpdateProfileResult
 	loginErr                 error
 	refreshErr               error
 	logoutErr                error
@@ -48,6 +49,7 @@ type fakeService struct {
 	changePasswordErr        error
 	bindEmailSendCodeErr     error
 	bindEmailVerifyErr       error
+	updateProfileErr         error
 	loginInput               session.LoginInput
 	refreshInput             session.RefreshInput
 	logoutInput              session.LogoutInput
@@ -60,6 +62,8 @@ type fakeService struct {
 	changePasswordInput      session.ChangePasswordInput
 	bindEmailSendCodeInput   session.BindEmailSendCodeInput
 	bindEmailVerifyInput     session.BindEmailVerifyInput
+	updateProfileInput       session.UpdateProfileInput
+	updateProfileCalls       int
 	loginCalls               int
 	refreshCalls             int
 	logoutCalls              int
@@ -132,6 +136,12 @@ func (s *fakeService) BindEmailSendCode(_ context.Context, input session.BindEma
 func (s *fakeService) BindEmailVerify(_ context.Context, input session.BindEmailVerifyInput) (*session.BindEmailVerifyResult, error) {
 	s.bindEmailVerifyInput = input
 	return s.bindEmailVerifyResult, s.bindEmailVerifyErr
+}
+
+func (s *fakeService) UpdateProfile(_ context.Context, input session.UpdateProfileInput) (*session.UpdateProfileResult, error) {
+	s.updateProfileCalls++
+	s.updateProfileInput = input
+	return s.updateProfileResult, s.updateProfileErr
 }
 
 func TestLoginReturnsEnvelopeDTOAndInput(t *testing.T) {
@@ -318,7 +328,14 @@ func TestProtectedRoutesRequireMiddleware(t *testing.T) {
 		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusUnauthorized, Code: errcode.CodeUnauthenticated, Message: "missing or invalid authorization header"})
 		c.Abort()
 	})
-	for _, test := range []struct{ method, path string }{{http.MethodPost, "/auth/logout"}, {http.MethodGet, "/user/profile"}, {http.MethodPost, "/auth/change-password"}, {http.MethodPost, "/user/identities/email"}, {http.MethodPost, "/user/identities/email/verify"}} {
+	for _, test := range []struct{ method, path string }{
+		{http.MethodPost, "/auth/logout"},
+		{http.MethodGet, "/user/profile"},
+		{http.MethodPut, "/user/profile"},
+		{http.MethodPost, "/auth/change-password"},
+		{http.MethodPost, "/user/identities/email"},
+		{http.MethodPost, "/user/identities/email/verify"},
+	} {
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), test.method, test.path, strings.NewReader(`{"refresh_token":"rt_x"}`))
 		req.Header.Set("Content-Type", "application/json")

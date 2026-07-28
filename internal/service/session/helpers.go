@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -165,6 +166,34 @@ func validEmailFormat(email string) bool {
 			return false
 		}
 		if unicode.IsSpace(symbol) {
+			return false
+		}
+	}
+	return true
+}
+
+// validHTTPURL reports whether value is an absolute http/https URL with a host.
+//
+// The scheme allowlist is the point: blog_url and github_url are rendered as
+// links on the public card, so accepting an arbitrary URL would let a user store
+// javascript: or data: and turn every viewer of their card into a target. A
+// relative or scheme-less value is rejected too, since it would resolve against
+// whichever site embeds the card.
+func validHTTPURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return false
+	}
+	if parsed.Host == "" {
+		return false
+	}
+	for _, symbol := range value {
+		if symbol < 0x20 || symbol == 0x7f || unicode.IsSpace(symbol) {
 			return false
 		}
 	}
