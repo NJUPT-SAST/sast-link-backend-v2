@@ -626,9 +626,10 @@ paths:
         （真实姓名、手机号、QQ 号、学院、专业、学号）以及 profile 表中的展示资料。
         登录邮箱、角色、状态、邮箱类型等身份与权限字段不可通过此接口修改，传入未知字段返回 40000。
 
-        未传的字段保持不变。profile 侧的可空展示字段（nickname、intro、email、
-        blog_url、github_url、department）传空字符串表示清空为 null；user 侧字段
-        NOT NULL，传空字符串或纯空白返回 40000。
+        未传的字段保持不变；传 null 等同于未传，不表示清空。profile 侧的可空展示字段
+        （nickname、intro、email、blog_url、github_url、department）传空字符串表示
+        清空为 null；user 侧字段 NOT NULL，传空字符串或纯空白返回 40000。
+        所有文本字段拒绝控制字符（含 NUL、CR、LF、Tab），返回 40000。
         blog_url / github_url 必须是 http/https 绝对 URL。
         college 必须是 college_enum 完整枚举值，department 必须是 software / media 或空字符串。
       operationId: userUpdateProfile
@@ -660,7 +661,7 @@ paths:
                 college:
                   $ref: '#/components/schemas/College'
                   description: 学院
-                  example: 计算机学院
+                  example: 计算机学院、软件学院、网络空间安全学院
                 major:
                   type: string
                   maxLength: 50
@@ -716,6 +717,9 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
           description: 参数错误、未知字段、枚举/长度/链接校验失败（40000）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 账号已注销（40301）
         '409':
           $ref: '#/components/responses/Conflict'
           description: 学号已被占用（40902）
@@ -778,10 +782,13 @@ paths:
       parameters:
         - name: id
           in: path
-          description: 用户 ID
+          description: 用户 ID，正整数；非正整数或含非数字字符返回 404
           required: true
+          example: 12
           schema:
             type: integer
+            format: int64
+            minimum: 1
       responses:
         '200':
           description: 个人卡片数据
@@ -814,6 +821,9 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 账号已注销（40301）
       security:
         - bearerAuth: []
   /user/identities/lark:
@@ -966,11 +976,13 @@ paths:
       parameters:
         - name: id
           in: path
-          description: 绑定记录 ID
+          description: 绑定记录 ID，正整数
           required: true
-          example: 0
+          example: 12
           schema:
             type: integer
+            format: int64
+            minimum: 1
       requestBody:
         content:
           application/json:
@@ -995,6 +1007,9 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 账号已注销（40301）
         '404':
           $ref: '#/components/responses/NotFound'
           description: 绑定记录不存在或不属于当前用户（40400）
