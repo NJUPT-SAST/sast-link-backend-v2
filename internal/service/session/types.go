@@ -132,6 +132,8 @@ type IdentityRepository interface {
 	// limit identities of the same provider, checked under a row lock so
 	// concurrent binds cannot exceed the limit.
 	CreateWithinLimit(ctx context.Context, identity *model.Identity, limit int64) error
+	// ListByUser returns every identity owned by the user, oldest first.
+	ListByUser(ctx context.Context, userID int64) ([]model.Identity, error)
 }
 
 type Mailer interface {
@@ -336,6 +338,14 @@ type UpdateProfileInput struct {
 
 	ClientIP  string
 	UserAgent string
+}
+
+type ListIdentitiesInput struct {
+	UserID int64
+}
+
+type ListIdentitiesResult struct {
+	Identities []IdentityDTO
 }
 
 type CardInput struct {

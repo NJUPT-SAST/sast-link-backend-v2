@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -710,6 +711,20 @@ func (f *fakeIdentities) CreateWithinLimit(_ context.Context, identity *model.Id
 	}
 	f.byProviderID[identity.ProviderID] = identity
 	return nil
+}
+
+func (f *fakeIdentities) ListByUser(_ context.Context, userID int64) ([]model.Identity, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	identities := make([]model.Identity, 0, len(f.byProviderID))
+	for _, identity := range f.byProviderID {
+		if identity.UserID == userID {
+			identities = append(identities, *identity)
+		}
+	}
+	sort.Slice(identities, func(i, j int) bool { return identities[i].ID < identities[j].ID })
+	return identities, nil
 }
 
 type fakeBindTicketStore struct {

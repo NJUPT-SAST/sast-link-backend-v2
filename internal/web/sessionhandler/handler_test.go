@@ -37,6 +37,7 @@ type fakeService struct {
 	bindEmailSendCodeResult  *session.BindEmailSendCodeResult
 	bindEmailVerifyResult    *session.BindEmailVerifyResult
 	updateProfileResult      *session.UpdateProfileResult
+	listIdentitiesResult     *session.ListIdentitiesResult
 	cardResult               *session.CardResult
 	loginErr                 error
 	refreshErr               error
@@ -51,6 +52,7 @@ type fakeService struct {
 	bindEmailSendCodeErr     error
 	bindEmailVerifyErr       error
 	updateProfileErr         error
+	listIdentitiesErr        error
 	cardErr                  error
 	loginInput               session.LoginInput
 	refreshInput             session.RefreshInput
@@ -65,6 +67,7 @@ type fakeService struct {
 	bindEmailSendCodeInput   session.BindEmailSendCodeInput
 	bindEmailVerifyInput     session.BindEmailVerifyInput
 	updateProfileInput       session.UpdateProfileInput
+	listIdentitiesInput      session.ListIdentitiesInput
 	cardInput                session.CardInput
 	updateProfileCalls       int
 	cardCalls                int
@@ -337,6 +340,7 @@ func TestProtectedRoutesRequireMiddleware(t *testing.T) {
 		{http.MethodGet, "/user/profile"},
 		{http.MethodPut, "/user/profile"},
 		{http.MethodPost, "/auth/change-password"},
+		{http.MethodGet, "/user/identities"},
 		{http.MethodPost, "/user/identities/email"},
 		{http.MethodPost, "/user/identities/email/verify"},
 	} {
@@ -746,4 +750,9 @@ func (s *fakeService) Card(_ context.Context, input session.CardInput) (*session
 	s.cardCalls++
 	s.cardInput = input
 	return s.cardResult, s.cardErr
+}
+
+func (s *fakeService) ListIdentities(_ context.Context, input session.ListIdentitiesInput) (*session.ListIdentitiesResult, error) {
+	s.listIdentitiesInput = input
+	return s.listIdentitiesResult, s.listIdentitiesErr
 }
