@@ -262,7 +262,7 @@ func (h Handler) Refresh(c *gin.Context) {
 func (h Handler) Logout(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	var req logoutRequest
@@ -286,7 +286,7 @@ func (h Handler) Logout(c *gin.Context) {
 func (h Handler) Profile(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	result, err := h.Service.Profile(c.Request.Context(), session.ProfileInput{UserID: principal.UserID})
@@ -409,7 +409,7 @@ func (h Handler) ResetPassword(c *gin.Context) {
 func (h Handler) ChangePassword(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	var req changePasswordRequest
@@ -433,7 +433,7 @@ func (h Handler) ChangePassword(c *gin.Context) {
 func (h Handler) BindEmailSendCode(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	var req bindEmailRequest
@@ -457,7 +457,7 @@ func (h Handler) BindEmailSendCode(c *gin.Context) {
 func (h Handler) BindEmailVerify(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
-		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"})
+		response.Error(c, internalError())
 		return
 	}
 	var req bindEmailVerifyRequest
@@ -496,4 +496,8 @@ func expiresIn(now, expiry time.Time) int64 {
 
 func badRequest() error {
 	return &response.BusinessError{HTTPStatus: http.StatusBadRequest, Code: errcode.CodeBadRequest, Message: "请求参数错误"}
+}
+
+func internalError() error {
+	return &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"}
 }
