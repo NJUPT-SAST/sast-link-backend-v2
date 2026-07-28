@@ -39,6 +39,9 @@ func TestKeys(t *testing.T) {
 	if got, want := keys.OAuthRegistration("state"), "sast-link:test:oauth:registration:state"; got != want {
 		t.Fatalf("OAuthRegistration key = %q, want %q", got, want)
 	}
+	if got, want := keys.AuthorizeRequest("ar_abc"), "sast-link:test:oauth:authorize_request:ar_abc"; got != want {
+		t.Fatalf("AuthorizeRequest key = %q, want %q", got, want)
+	}
 	if got, want := keys.JTIBlacklist("jti"), "sast-link:test:token:blacklist:jti"; got != want {
 		t.Fatalf("JTIBlacklist key = %q, want %q", got, want)
 	}
