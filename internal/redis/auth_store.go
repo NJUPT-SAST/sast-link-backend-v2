@@ -111,6 +111,14 @@ func (k Keys) LoginFailure(email string) string {
 	return k.join("auth", "login_failure", dynamicKeySegment(email))
 }
 
+// UnbindCooldown returns the identity-unbind cooldown key. The PRD names this
+// key by email because other_mail is the only provider a user can currently
+// unbind; keying it by provider_id keeps the same key for that case and extends
+// naturally to github/lark once those bindings exist.
+func (k Keys) UnbindCooldown(providerID string) string {
+	return k.join("unbind", "cooldown", dynamicKeySegment(providerID))
+}
+
 // Store provides typed Redis auth helpers.
 type Store struct {
 	Client Cmdable
@@ -472,6 +480,50 @@ func (s Store) ResetLoginFailures(ctx context.Context, email string) error {
 	}
 	if err := s.Client.Del(ctx, s.Keys.LoginFailure(email)).Err(); err != nil {
 		return fmt.Errorf("reset login failures: %w", err)
+	}
+	return nil
+}
+
+// AcquireUnbindCooldown claims the unbind cooldown for providerID with SET NX EX
+// and reports whether the caller won it, plus how long the existing claim has
+// left when it did not.
+//
+// The claim is taken before the delete, not after: acquiring it afterwards would
+// leave two concurrent unbind requests both passing the check and both deleting,
+// which is exactly the rapid repeat the cooldown exists to stop. A lost claim is
+// therefore a rejection, not a retry.
+func (s Store) AcquireUnbindCooldown(ctx context.Context, providerID string, ttl time.Duration) (bool, time.Duration, error) {
+	if s.Client == nil || providerID == "" || ttl <= 0 {
+		return false, 0, fmt.Errorf("acquire unbind cooldown: %w", ErrInvalidArgument)
+	}
+	key := s.Keys.UnbindCooldown(providerID)
+	acquired, err := s.Client.SetNX(ctx, key, "1", ttl).Result()
+	if err != nil {
+		return false, 0, fmt.Errorf("acquire unbind cooldown: %w", err)
+	}
+	if acquired {
+		return true, 0, nil
+	}
+	remaining, err := s.Client.PTTL(ctx, key).Result()
+	if err != nil {
+		// The claim is held; only the retry hint is missing. Reporting the rejection
+		// without a Retry-After beats failing a call that already has its answer.
+		return false, 0, nil
+	}
+	if remaining < 0 {
+		remaining = 0
+	}
+	return false, remaining, nil
+}
+
+// ReleaseUnbindCooldown drops a cooldown claim whose unbind did not go through,
+// so a failed attempt does not lock the address out for the full window.
+func (s Store) ReleaseUnbindCooldown(ctx context.Context, providerID string) error {
+	if s.Client == nil || providerID == "" {
+		return fmt.Errorf("release unbind cooldown: %w", ErrInvalidArgument)
+	}
+	if err := s.Client.Del(ctx, s.Keys.UnbindCooldown(providerID)).Err(); err != nil {
+		return fmt.Errorf("release unbind cooldown: %w", err)
 	}
 	return nil
 }

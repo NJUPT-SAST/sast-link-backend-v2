@@ -60,6 +60,92 @@ func TestKeys(t *testing.T) {
 	if empty, nonEmpty := keys.OneTime("oauth:state", ""), keys.OneTime("oauth", "state"); empty == nonEmpty {
 		t.Fatalf("OneTime keys collided for empty and non-empty tuples: %q", empty)
 	}
+	if got, want := keys.UnbindCooldown("me@qq.com"), "sast-link:test:unbind:cooldown:me@qq.com"; got != want {
+		t.Fatalf("UnbindCooldown key = %q, want %q", got, want)
+	}
+}
+
+// The cooldown is a claim, not a check-then-act: the first caller wins and later
+// ones are told how long is left, so two concurrent unbinds cannot both proceed.
+func TestUnbindCooldownClaimsAndReleases(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+
+	acquired, retryAfter, err := store.AcquireUnbindCooldown(ctx, "me@qq.com", 30*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireUnbindCooldown returned error: %v", err)
+	}
+	if !acquired || retryAfter != 0 {
+		t.Fatalf("first acquire = (%t, %v), want (true, 0)", acquired, retryAfter)
+	}
+
+	acquired, retryAfter, err = store.AcquireUnbindCooldown(ctx, "me@qq.com", 30*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireUnbindCooldown (held) returned error: %v", err)
+	}
+	if acquired {
+		t.Fatal("second acquire won the claim, want rejection while cooling down")
+	}
+	if retryAfter <= 0 || retryAfter > 30*time.Second {
+		t.Fatalf("retryAfter = %v, want a positive remainder <= 30s", retryAfter)
+	}
+
+	// A different address has its own claim.
+	if other, _, otherErr := store.AcquireUnbindCooldown(ctx, "you@qq.com", 30*time.Second); otherErr != nil || !other {
+		t.Fatalf("acquire for another subject = (%t, %v), want (true, nil)", other, otherErr)
+	}
+
+	if err = store.ReleaseUnbindCooldown(ctx, "me@qq.com"); err != nil {
+		t.Fatalf("ReleaseUnbindCooldown returned error: %v", err)
+	}
+	if acquired, _, err = store.AcquireUnbindCooldown(ctx, "me@qq.com", 30*time.Second); err != nil || !acquired {
+		t.Fatalf("acquire after release = (%t, %v), want (true, nil)", acquired, err)
+	}
+}
+
+// The claim must expire on its own, so a crash between claim and delete cannot
+// lock an address out permanently.
+func TestUnbindCooldownExpires(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+
+	if _, _, err := store.AcquireUnbindCooldown(ctx, "expiring@qq.com", 300*time.Millisecond); err != nil {
+		t.Fatalf("AcquireUnbindCooldown returned error: %v", err)
+	}
+	// PTTL, not TTL: TTL has one-second resolution and reports 0 for a 300ms key.
+	ttl, err := client.PTTL(ctx, store.Keys.UnbindCooldown("expiring@qq.com")).Result()
+	if err != nil {
+		t.Fatalf("PTTL returned error: %v", err)
+	}
+	if ttl <= 0 {
+		t.Fatalf("PTTL = %v, want a positive expiry", ttl)
+	}
+	time.Sleep(400 * time.Millisecond)
+	acquired, _, err := store.AcquireUnbindCooldown(ctx, "expiring@qq.com", time.Second)
+	if err != nil {
+		t.Fatalf("AcquireUnbindCooldown after expiry returned error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("claim survived its TTL")
+	}
+}
+
+func TestUnbindCooldownRejectsInvalidInput(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+
+	if _, _, err := store.AcquireUnbindCooldown(ctx, "", time.Second); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("AcquireUnbindCooldown(empty subject) error = %v, want ErrInvalidArgument", err)
+	}
+	if _, _, err := store.AcquireUnbindCooldown(ctx, "x@qq.com", 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("AcquireUnbindCooldown(zero ttl) error = %v, want ErrInvalidArgument", err)
+	}
+	if err := store.ReleaseUnbindCooldown(ctx, ""); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("ReleaseUnbindCooldown(empty subject) error = %v, want ErrInvalidArgument", err)
+	}
 }
 
 func TestStoreOneTimeTTLNXAndGetDel(t *testing.T) {
