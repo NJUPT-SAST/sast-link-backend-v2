@@ -664,6 +664,8 @@ type fakeIdentities struct {
 	byProviderID map[string]*model.Identity
 	err          error
 	createErr    error
+	deleteErr    error
+	deleted      []int64
 }
 
 func (f *fakeIdentities) CountByUserAndProvider(_ context.Context, userID int64, _ model.LoginMethod) (int64, error) {
@@ -725,6 +727,32 @@ func (f *fakeIdentities) ListByUser(_ context.Context, userID int64) ([]model.Id
 	}
 	sort.Slice(identities, func(i, j int) bool { return identities[i].ID < identities[j].ID })
 	return identities, nil
+}
+
+func (f *fakeIdentities) FindByIDAndUser(_ context.Context, identityID, userID int64) (*model.Identity, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	for _, identity := range f.byProviderID {
+		if identity.ID == identityID && identity.UserID == userID {
+			return identity, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
+
+func (f *fakeIdentities) DeleteByIDAndUser(_ context.Context, identityID, userID int64) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	for providerID, identity := range f.byProviderID {
+		if identity.ID == identityID && identity.UserID == userID {
+			delete(f.byProviderID, providerID)
+			f.deleted = append(f.deleted, identityID)
+			return nil
+		}
+	}
+	return repository.ErrNotFound
 }
 
 type fakeBindTicketStore struct {
@@ -1948,6 +1976,7 @@ func newRegisterService(t *testing.T) Service {
 		VerificationCode: &fakeVerificationCodeStore{},
 		RegisterTicket:   &fakeRegisterTicketStore{},
 		BindTicket:       &fakeBindTicketStore{},
+		UnbindCooldowns:  &fakeUnbindCooldowns{},
 		ForgotPasswords:  &fakeForgotPasswordDispatcher{accepted: true},
 		InternalClientID: "builtin",
 		JWT:              &auth.JWTManager{Issuer: "issuer", Audience: []string{"audience"}, Active: auth.JWTKeyPair{KID: "active", Private: key}, Clock: clock},
@@ -2406,4 +2435,35 @@ func TestRegisterReportsAbandonedHashingAsDependencyUnavailable(t *testing.T) {
 	if _, ok := tickets.tickets["reg_x"]; !ok {
 		t.Fatal("Register-Ticket was consumed by an abandoned request")
 	}
+}
+
+// fakeUnbindCooldowns mirrors the Redis SET NX claim: the first Acquire for a
+// subject wins, later ones are rejected until Release.
+type fakeUnbindCooldowns struct {
+	held       map[string]bool
+	err        error
+	retryAfter time.Duration
+	acquires   []string
+	releases   []string
+}
+
+func (f *fakeUnbindCooldowns) Acquire(_ context.Context, subject string) (bool, time.Duration, error) {
+	if f.err != nil {
+		return false, 0, f.err
+	}
+	f.acquires = append(f.acquires, subject)
+	if f.held[subject] {
+		return false, f.retryAfter, nil
+	}
+	if f.held == nil {
+		f.held = map[string]bool{}
+	}
+	f.held[subject] = true
+	return true, 0, nil
+}
+
+func (f *fakeUnbindCooldowns) Release(_ context.Context, subject string) error {
+	f.releases = append(f.releases, subject)
+	delete(f.held, subject)
+	return nil
 }

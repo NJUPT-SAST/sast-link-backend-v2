@@ -134,6 +134,24 @@ type IdentityRepository interface {
 	CreateWithinLimit(ctx context.Context, identity *model.Identity, limit int64) error
 	// ListByUser returns every identity owned by the user, oldest first.
 	ListByUser(ctx context.Context, userID int64) ([]model.Identity, error)
+	// FindByIDAndUser resolves an identity scoped to its owner, so a foreign ID is
+	// indistinguishable from a missing one.
+	FindByIDAndUser(ctx context.Context, identityID, userID int64) (*model.Identity, error)
+	// DeleteByIDAndUser removes an owned identity, reporting
+	// repository.ErrNotFound when nothing matched.
+	DeleteByIDAndUser(ctx context.Context, identityID, userID int64) error
+}
+
+// UnbindCooldownStore guards against rapid repeated unbind/rebind cycles of the
+// same address (PRD §4.8). It is fail-open per §6.0: PostgreSQL holds the
+// authoritative binding state, and losing the cooldown only widens a rate
+// window rather than allowing an unauthorized unbind.
+type UnbindCooldownStore interface {
+	// Acquire claims the cooldown for subject, reporting whether this caller won
+	// it and how long the existing claim has left when it did not.
+	Acquire(ctx context.Context, subject string) (acquired bool, retryAfter time.Duration, err error)
+	// Release drops a claim whose unbind did not complete.
+	Release(ctx context.Context, subject string) error
 }
 
 type Mailer interface {
@@ -346,6 +364,19 @@ type ListIdentitiesInput struct {
 
 type ListIdentitiesResult struct {
 	Identities []IdentityDTO
+}
+
+type UnbindIdentityInput struct {
+	UserID     int64
+	IdentityID int64
+	Password   string
+	ClientIP   string
+	UserAgent  string
+}
+
+type UnbindIdentityResult struct {
+	Provider   string
+	ProviderID string
 }
 
 type CardInput struct {

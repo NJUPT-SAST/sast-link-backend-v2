@@ -128,6 +128,9 @@ func TestLoadValidConfig(t *testing.T) {
 	if cfg.LoginFailureWindow != 15*time.Minute {
 		t.Errorf("LoginFailureWindow = %s, want 15m", cfg.LoginFailureWindow)
 	}
+	if cfg.UnbindCooldown != time.Minute {
+		t.Errorf("UnbindCooldown = %s, want 60s", cfg.UnbindCooldown)
+	}
 }
 
 func TestLoadAllowsMigrateWithoutCryptoMaterial(t *testing.T) {
@@ -210,6 +213,7 @@ func TestValidateAPIAuthRejectsNonPositiveRateSettings(t *testing.T) {
 		{name: "login window", envName: "RATE_LIMIT_LOGIN_WINDOW", value: "500ms", want: "RATE_LIMIT_LOGIN_WINDOW must be at least 1s"},
 		{name: "failure limit", envName: "LOGIN_FAILURE_LIMIT", value: "0", want: "LOGIN_FAILURE_LIMIT must be positive"},
 		{name: "failure window", envName: "LOGIN_FAILURE_WINDOW", value: "0", want: "LOGIN_FAILURE_WINDOW must be positive"},
+		{name: "unbind cooldown", envName: "UNBIND_COOLDOWN", value: "0", want: "UNBIND_COOLDOWN must be positive"},
 	}
 
 	for _, tc := range cases {

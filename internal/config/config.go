@@ -58,6 +58,9 @@ type Config struct {
 	RateLimitSendEmailWindow time.Duration `env:"RATE_LIMIT_SEND_EMAIL_WINDOW" envDefault:"60s"`
 	LoginFailureLimit        int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
 	LoginFailureWindow       time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
+	// UnbindCooldown throttles repeated unbind/rebind cycles of the same address
+	// (PRD §4.8). Fail-open: PostgreSQL owns the binding state.
+	UnbindCooldown time.Duration `env:"UNBIND_COOLDOWN" envDefault:"60s"`
 
 	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
 	// beyond this queues at the hasher instead of saturating every CPU core.
@@ -132,6 +135,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("LOGIN_FAILURE_LIMIT must be positive")
 	case c.LoginFailureWindow <= 0:
 		return fmt.Errorf("LOGIN_FAILURE_WINDOW must be positive")
+	case c.UnbindCooldown <= 0:
+		return fmt.Errorf("UNBIND_COOLDOWN must be positive")
 	case c.PasswordHashMaxConcurrent <= 0:
 		return fmt.Errorf("PASSWORD_HASH_MAX_CONCURRENT must be positive")
 	// SMTP backs registration, password reset and email binding. Validating it

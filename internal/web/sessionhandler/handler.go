@@ -29,6 +29,7 @@ type Service interface {
 	BindEmailVerify(ctx context.Context, input session.BindEmailVerifyInput) (*session.BindEmailVerifyResult, error)
 	UpdateProfile(ctx context.Context, input session.UpdateProfileInput) (*session.UpdateProfileResult, error)
 	ListIdentities(ctx context.Context, input session.ListIdentitiesInput) (*session.ListIdentitiesResult, error)
+	UnbindIdentity(ctx context.Context, input session.UnbindIdentityInput) (*session.UnbindIdentityResult, error)
 	Card(ctx context.Context, input session.CardInput) (*session.CardResult, error)
 }
 
@@ -217,6 +218,7 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	protected.GET("/user/identities", h.ListIdentities)
 	protected.POST("/user/identities/email", h.BindEmailSendCode)
 	protected.POST("/user/identities/email/verify", h.BindEmailVerify)
+	protected.DELETE("/user/identities/:id", h.UnbindIdentity)
 }
 
 func (h Handler) Login(c *gin.Context) {

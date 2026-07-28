@@ -44,6 +44,7 @@ type Service struct {
 	VerificationCode VerificationCodeStore
 	RegisterTicket   RegisterTicketStore
 	BindTicket       BindTicketStore
+	UnbindCooldowns  UnbindCooldownStore
 	ForgotPasswords  ForgotPasswordDispatcher
 	InternalClientID string
 	JWT              *auth.JWTManager

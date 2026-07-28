@@ -38,6 +38,7 @@ type fakeService struct {
 	bindEmailVerifyResult    *session.BindEmailVerifyResult
 	updateProfileResult      *session.UpdateProfileResult
 	listIdentitiesResult     *session.ListIdentitiesResult
+	unbindIdentityResult     *session.UnbindIdentityResult
 	cardResult               *session.CardResult
 	loginErr                 error
 	refreshErr               error
@@ -53,6 +54,7 @@ type fakeService struct {
 	bindEmailVerifyErr       error
 	updateProfileErr         error
 	listIdentitiesErr        error
+	unbindIdentityErr        error
 	cardErr                  error
 	loginInput               session.LoginInput
 	refreshInput             session.RefreshInput
@@ -68,8 +70,10 @@ type fakeService struct {
 	bindEmailVerifyInput     session.BindEmailVerifyInput
 	updateProfileInput       session.UpdateProfileInput
 	listIdentitiesInput      session.ListIdentitiesInput
+	unbindIdentityInput      session.UnbindIdentityInput
 	cardInput                session.CardInput
 	updateProfileCalls       int
+	unbindIdentityCalls      int
 	cardCalls                int
 	loginCalls               int
 	refreshCalls             int
@@ -343,6 +347,7 @@ func TestProtectedRoutesRequireMiddleware(t *testing.T) {
 		{http.MethodGet, "/user/identities"},
 		{http.MethodPost, "/user/identities/email"},
 		{http.MethodPost, "/user/identities/email/verify"},
+		{http.MethodDelete, "/user/identities/12"},
 	} {
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), test.method, test.path, strings.NewReader(`{"refresh_token":"rt_x"}`))
@@ -755,4 +760,10 @@ func (s *fakeService) Card(_ context.Context, input session.CardInput) (*session
 func (s *fakeService) ListIdentities(_ context.Context, input session.ListIdentitiesInput) (*session.ListIdentitiesResult, error) {
 	s.listIdentitiesInput = input
 	return s.listIdentitiesResult, s.listIdentitiesErr
+}
+
+func (s *fakeService) UnbindIdentity(_ context.Context, input session.UnbindIdentityInput) (*session.UnbindIdentityResult, error) {
+	s.unbindIdentityCalls++
+	s.unbindIdentityInput = input
+	return s.unbindIdentityResult, s.unbindIdentityErr
 }
