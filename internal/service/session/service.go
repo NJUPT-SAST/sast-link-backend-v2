@@ -19,6 +19,9 @@ const (
 	defaultAccessTTL         = time.Hour
 	defaultRefreshTTL        = 30 * 24 * time.Hour
 	loginCompensationTimeout = 5 * time.Second
+	// cooldownReleaseTimeout bounds the detached unbind-cooldown release, which
+	// runs after the caller's context is likely already cancelled.
+	cooldownReleaseTimeout = 5 * time.Second
 	// verificationTTL bounds email verification codes and the tickets derived
 	// from them (Register-Ticket / Bind-Ticket), per the API contract's 5-minute
 	// one-time semantics.

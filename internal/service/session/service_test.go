@@ -666,6 +666,7 @@ type fakeIdentities struct {
 	createErr    error
 	deleteErr    error
 	deleted      []int64
+	beforeDelete func()
 }
 
 func (f *fakeIdentities) CountByUserAndProvider(_ context.Context, userID int64, _ model.LoginMethod) (int64, error) {
@@ -742,6 +743,9 @@ func (f *fakeIdentities) FindByIDAndUser(_ context.Context, identityID, userID i
 }
 
 func (f *fakeIdentities) DeleteByIDAndUser(_ context.Context, identityID, userID int64) error {
+	if f.beforeDelete != nil {
+		f.beforeDelete()
+	}
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
@@ -2462,7 +2466,12 @@ func (f *fakeUnbindCooldowns) Acquire(_ context.Context, subject string) (bool, 
 	return true, 0, nil
 }
 
-func (f *fakeUnbindCooldowns) Release(_ context.Context, subject string) error {
+// Release mirrors go-redis: a cancelled context fails before the command is
+// issued, so a release that reuses the caller's cancelled context is a no-op.
+func (f *fakeUnbindCooldowns) Release(ctx context.Context, subject string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.releases = append(f.releases, subject)
 	delete(f.held, subject)
 	return nil

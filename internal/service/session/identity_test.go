@@ -189,6 +189,37 @@ func TestUnbindIdentityReleasesCooldownOnDeleteFailure(t *testing.T) {
 	}
 }
 
+// A cancelled caller is the most likely reason the delete failed, and it is the
+// case where holding the claim hurts most: nothing was unbound, yet the address
+// would stay locked for the rest of the window. The release must therefore not
+// ride on the caller's context.
+func TestUnbindIdentityReleasesCooldownWhenCallerCancelled(t *testing.T) {
+	service := bindableService(t)
+	service.Identities.(*fakeIdentities).deleteErr = context.Canceled
+
+	ctx, cancel := context.WithCancel(context.Background())
+	primed := make(chan struct{})
+	service.Identities.(*fakeIdentities).beforeDelete = func() {
+		close(primed)
+		cancel()
+	}
+
+	_, err := service.UnbindIdentity(ctx, UnbindIdentityInput{
+		UserID: 42, IdentityID: 12, Password: "secret",
+	})
+	if err == nil {
+		t.Fatal("UnbindIdentity() error = nil, want failure")
+	}
+	<-primed
+	cooldowns := service.UnbindCooldowns.(*fakeUnbindCooldowns)
+	if !slices.Equal(cooldowns.releases, []string{"extra@gmail.com"}) {
+		t.Fatalf("releases = %v, want the claim released despite cancellation", cooldowns.releases)
+	}
+	if cooldowns.held["extra@gmail.com"] {
+		t.Fatal("claim still held after a cancelled unbind failed")
+	}
+}
+
 // The cooldown is fail-open per PRD §6.0: PostgreSQL owns the binding state, so a
 // Redis outage must not block a password-confirmed unbind.
 func TestUnbindIdentityFailsOpenWhenCooldownUnavailable(t *testing.T) {

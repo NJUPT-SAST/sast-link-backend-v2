@@ -128,11 +128,21 @@ func hasOtherLoginMethod(user *model.User, excludeID int64) bool {
 	return false
 }
 
+// releaseUnbindCooldown drops a claim whose unbind did not land.
+//
+// It deliberately detaches from the caller's context. The most likely reason the
+// delete failed is that ctx was cancelled — a disconnected client or an expired
+// deadline — and go-redis refuses to acquire a connection on a cancelled context,
+// so reusing ctx here would make the release a no-op in exactly the case it
+// exists for, holding the address for the rest of the window over an unbind that
+// never happened. Same shape as the login compensation path.
 func (s Service) releaseUnbindCooldown(ctx context.Context, subject string) {
 	if s.UnbindCooldowns == nil {
 		return
 	}
-	if err := s.UnbindCooldowns.Release(ctx, subject); err != nil {
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cooldownReleaseTimeout)
+	defer cancel()
+	if err := s.UnbindCooldowns.Release(releaseCtx, subject); err != nil {
 		slog.WarnContext(ctx, "release unbind cooldown after failed unbind", "error", err)
 	}
 }
