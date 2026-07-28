@@ -37,6 +37,7 @@ type fakeService struct {
 	bindEmailSendCodeResult  *session.BindEmailSendCodeResult
 	bindEmailVerifyResult    *session.BindEmailVerifyResult
 	updateProfileResult      *session.UpdateProfileResult
+	cardResult               *session.CardResult
 	loginErr                 error
 	refreshErr               error
 	logoutErr                error
@@ -50,6 +51,7 @@ type fakeService struct {
 	bindEmailSendCodeErr     error
 	bindEmailVerifyErr       error
 	updateProfileErr         error
+	cardErr                  error
 	loginInput               session.LoginInput
 	refreshInput             session.RefreshInput
 	logoutInput              session.LogoutInput
@@ -63,7 +65,9 @@ type fakeService struct {
 	bindEmailSendCodeInput   session.BindEmailSendCodeInput
 	bindEmailVerifyInput     session.BindEmailVerifyInput
 	updateProfileInput       session.UpdateProfileInput
+	cardInput                session.CardInput
 	updateProfileCalls       int
+	cardCalls                int
 	loginCalls               int
 	refreshCalls             int
 	logoutCalls              int
@@ -736,4 +740,10 @@ func normalizeJSON(value any) any {
 	default:
 		return typed
 	}
+}
+
+func (s *fakeService) Card(_ context.Context, input session.CardInput) (*session.CardResult, error) {
+	s.cardCalls++
+	s.cardInput = input
+	return s.cardResult, s.cardErr
 }

@@ -256,6 +256,26 @@ func (f *fakeUsers) UpdateProfile(_ context.Context, userID int64, update reposi
 	return user, nil
 }
 
+func (f *fakeUsers) FindPublicCardByUserID(_ context.Context, userID int64) (*repository.PublicCard, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	user, ok := f.byID[userID]
+	if !ok || user.State == model.UserStateDeleted {
+		return nil, repository.ErrNotFound
+	}
+	card := &repository.PublicCard{ID: user.ID}
+	if user.Profile != nil {
+		card.Nickname = user.Profile.Nickname
+		card.Department = user.Profile.Department
+		card.Intro = user.Profile.Intro
+		card.Avatar = user.Profile.Avatar
+		card.BlogURL = user.Profile.BlogURL
+		card.GitHubURL = user.Profile.GitHubURL
+	}
+	return card, nil
+}
+
 func applyString(target *string, value *string) {
 	if value != nil {
 		*target = *value

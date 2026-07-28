@@ -62,6 +62,9 @@ type UserRepository interface {
 	// UpdateProfile applies a partial self-service field update across "user" and
 	// profile in one transaction and returns the reloaded aggregate.
 	UpdateProfile(ctx context.Context, userID int64, update repository.ProfileUpdate) (*model.User, error)
+	// FindPublicCardByUserID returns the public display card of a non-deleted
+	// user, or repository.ErrNotFound.
+	FindPublicCardByUserID(ctx context.Context, userID int64) (*repository.PublicCard, error)
 }
 
 type ClientRepository interface {
@@ -333,6 +336,26 @@ type UpdateProfileInput struct {
 
 	ClientIP  string
 	UserAgent string
+}
+
+type CardInput struct {
+	UserID int64
+}
+
+type CardResult struct {
+	Card CardDTO
+}
+
+// CardDTO is the public display card. Only PRD §4.14's public fields appear
+// here; nothing from the user's identity or permission columns is carried.
+type CardDTO struct {
+	ID         int64
+	Nickname   *string
+	Department *string
+	Intro      *string
+	Avatar     *string
+	BlogURL    *string
+	GitHubURL  *string
 }
 
 type UpdateProfileResult struct {

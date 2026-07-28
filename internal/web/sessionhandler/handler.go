@@ -28,6 +28,7 @@ type Service interface {
 	BindEmailSendCode(ctx context.Context, input session.BindEmailSendCodeInput) (*session.BindEmailSendCodeResult, error)
 	BindEmailVerify(ctx context.Context, input session.BindEmailVerifyInput) (*session.BindEmailVerifyResult, error)
 	UpdateProfile(ctx context.Context, input session.UpdateProfileInput) (*session.UpdateProfileResult, error)
+	Card(ctx context.Context, input session.CardInput) (*session.CardResult, error)
 }
 
 type Handler struct {
@@ -201,6 +202,11 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	r.POST("/auth/register", h.Register)
 	r.POST("/auth/forgot-password/send-code", h.ForgotPasswordSendCode)
 	r.POST("/auth/reset-password", h.ResetPassword)
+	// The card is a deliberately public read (PRD §4.14): it backs homepage friend
+	// links and the OIDC profile claim target, so it stays outside the JWT group.
+	// The repository projection filters soft-deleted users and exposes display
+	// columns only.
+	r.GET("/card/:id", h.Card)
 	protected := r.Group("")
 	protected.Use(authMiddleware)
 	protected.POST("/auth/logout", h.Logout)
