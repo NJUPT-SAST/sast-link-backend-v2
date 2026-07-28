@@ -645,59 +645,73 @@ paths:
               properties:
                 name:
                   type: string
+                  nullable: true
                   maxLength: 255
                   description: 真实姓名
                   example: 张三
                 phone_number:
                   type: string
+                  nullable: true
                   maxLength: 20
                   description: 手机号
                   example: '13800138000'
                 qq_number:
                   type: string
+                  nullable: true
                   maxLength: 20
                   description: QQ 号
                   example: '1234567890'
                 college:
-                  $ref: '#/components/schemas/College'
-                  description: 学院
-                  example: 计算机学院、软件学院、网络空间安全学院
+                  allOf:
+                    - $ref: '#/components/schemas/College'
+                  nullable: true
+                  description: 学院。NOT NULL 字段，传空字符串或空白返回 40000；传 null 表示不修改
                 major:
                   type: string
+                  nullable: true
                   maxLength: 50
                   description: 专业
                   example: 软件工程
                 student_id:
                   type: string
+                  nullable: true
                   maxLength: 50
                   description: 学号
                   example: B2404****
                 nickname:
                   type: string
+                  nullable: true
                   maxLength: 255
                   description: 昵称
                   example: 新昵称
                 department:
-                  $ref: '#/components/schemas/Department'
+                  type: string
+                  nullable: true
+                  enum: [software, media, '']
+                  description: 部门。传空字符串清空为 NULL，传 null 表示不修改
                 intro:
                   type: string
+                  nullable: true
                   maxLength: 255
                   description: 自我介绍
                   example: 新的自我介绍
                 email:
                   type: string
+                  nullable: true
                   format: email
                   maxLength: 255
                   description: 对外展示邮箱
                   example: display@example.com
                 blog_url:
                   type: string
+                  nullable: true
                   format: uri
                   maxLength: 512
                   description: 个人博客链接
                   example: https://blog.example.com
                 github_url:
                   type: string
+                  nullable: true
                   format: uri
                   maxLength: 512
                   description: GitHub 主页链接
@@ -723,9 +737,8 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
           description: 学号已被占用（40902）
-        '422':
-          $ref: '#/components/responses/Unprocessable'
-          description: 业务校验失败（422xx）
+        '500':
+          $ref: '#/components/responses/InternalError'
       security:
         - bearerAuth: []
   /user/avatar:
@@ -800,6 +813,8 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
           description: 用户不存在或已注销
+        '500':
+          $ref: '#/components/responses/InternalError'
       security: []
   /user/identities:
     get:
@@ -824,6 +839,8 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
           description: 账号已注销（40301）
+        '500':
+          $ref: '#/components/responses/InternalError'
       security:
         - bearerAuth: []
   /user/identities/lark:
@@ -969,7 +986,7 @@ paths:
       description: >-
         必须输入当前密码进行二次确认。主邮箱（user.login_email）不在 identities 中，不可通过此接口解绑。
         不属于当前用户的绑定 ID 与不存在的 ID 均返回 40400，不区分两者。
-        解绑后若无其他登录方式则拒绝（42200）。同一地址 60s 内不可重复解绑（42900，带 Retry-After）。
+        解绑后若无其他登录方式则拒绝（42200）。按调用者限流，60s 内最多 3 次（42900，带 Retry-After）；限流在密码校验之前生效，密码错误同样消耗配额。
       operationId: userUnbindIdentity
       tags:
         - Identities
@@ -1019,6 +1036,11 @@ paths:
         '429':
           $ref: '#/components/responses/TooManyRequests'
           description: 解绑过于频繁（42900），60s 内最多 3 次，按调用者限流
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: password 缺失、未知字段或 Content-Type 非 JSON（40000）
+        '500':
+          $ref: '#/components/responses/InternalError'
       security:
         - bearerAuth: []
   /oauth/authorize:
@@ -1918,7 +1940,8 @@ components:
           description: 昵称
           nullable: true
         department:
-          $ref: '#/components/schemas/Department'
+          allOf:
+            - $ref: '#/components/schemas/Department'
           nullable: true
         intro:
           type: string
@@ -2390,7 +2413,10 @@ components:
           type: string
           description: 专业
         profile:
-          $ref: '#/components/schemas/Profile'
+          allOf:
+            - $ref: '#/components/schemas/Profile'
+          nullable: true
+          description: 用户尚无 profile 行时为 null
         identities:
           type: array
           description: 第三方账号绑定列表
@@ -2687,26 +2713,33 @@ components:
           example: 1
         nickname:
           type: string
+          nullable: true
           description: 昵称
           example: 张三
         department:
-          $ref: '#/components/schemas/Department'
+          allOf:
+            - $ref: '#/components/schemas/Department'
+          nullable: true
         intro:
           type: string
+          nullable: true
           description: 自我介绍
           example: 自我介绍
         avatar:
           type: string
+          nullable: true
           format: uri
           description: 头像 URL
           example: https://cos.example.com/avatar/1.jpg
         blog_url:
           type: string
+          nullable: true
           format: uri
           description: 个人博客链接
           example: https://blog.example.com
         github_url:
           type: string
+          nullable: true
           format: uri
           description: GitHub 主页链接
           example: https://github.com/example

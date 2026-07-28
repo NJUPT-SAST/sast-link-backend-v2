@@ -45,6 +45,16 @@ func mapServiceError(err error) error {
 		// ("资源不存在"), which contradicts the code's own meaning and the handler's
 		// malformed-ID path.
 		message = "用户不存在"
+	case errcode.CodeNotFound:
+		// Only the unbind path raises this. The handler's malformed-ID branch already
+		// answers "绑定记录不存在"; without this case the service path answered the
+		// KindNotFound default instead, so the same 40400 had two messages.
+		message = "绑定记录不存在"
+	case errcode.CodeValidationFailed:
+		// Only ErrLastLoginMethod raises this. The KindValidationFailed default
+		// ("业务校验失败") drops the one thing the client needs to know: which rule
+		// it broke.
+		message = "不能解绑唯一的登录方式"
 	}
 	var status int
 	switch serviceErr.Kind {

@@ -124,3 +124,67 @@ func TestUnbindIdentityMapsNotFoundKind(t *testing.T) {
 		t.Fatalf("response = %d %#v, want 404/%d", recorder.Code, body, errcode.CodeNotFound)
 	}
 }
+
+// mapServiceError rebuilds the message from the code rather than forwarding
+// serviceErr.Message, which is deliberate — many service messages are internal
+// diagnostics. The cost is that a code with no case silently degrades to its Kind
+// default, so the reason the client needs is the thing that goes missing.
+func TestUnbindIdentityKeepsSpecificMessages(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for name, testCase := range map[string]struct {
+		err     *session.Error
+		status  int
+		code    int
+		message string
+	}{
+		"last login method": {
+			err:     &session.Error{Kind: session.KindValidationFailed, Code: errcode.CodeValidationFailed, Message: "不能解绑唯一的登录方式"},
+			status:  http.StatusUnprocessableEntity,
+			code:    errcode.CodeValidationFailed,
+			message: "不能解绑唯一的登录方式",
+		},
+		"missing binding": {
+			err:     &session.Error{Kind: session.KindNotFound, Code: errcode.CodeNotFound, Message: "绑定记录不存在"},
+			status:  http.StatusNotFound,
+			code:    errcode.CodeNotFound,
+			message: "绑定记录不存在",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			router := authedRouter(&fakeService{unbindIdentityErr: testCase.err})
+			recorder := doJSON(router, http.MethodDelete, "/user/identities/12", `{"password":"secret"}`)
+
+			body := decodeBody(t, recorder)
+			if recorder.Code != testCase.status || body.Code != testCase.code {
+				t.Fatalf("response = %d %#v, want %d/%d", recorder.Code, body, testCase.status, testCase.code)
+			}
+			if body.Message != testCase.message {
+				t.Fatalf("message = %q, want %q", body.Message, testCase.message)
+			}
+		})
+	}
+}
+
+// Both ways to get a 404 out of unbind must read the same, so a caller cannot
+// tell a malformed ID from a binding that is missing or owned by someone else.
+func TestUnbindIdentityNotFoundMessagesMatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	malformed := decodeBody(t, doJSON(
+		authedRouter(&fakeService{}),
+		http.MethodDelete, "/user/identities/abc", `{"password":"secret"}`,
+	))
+	fromService := decodeBody(t, doJSON(
+		authedRouter(&fakeService{unbindIdentityErr: &session.Error{
+			Kind: session.KindNotFound, Code: errcode.CodeNotFound, Message: "绑定记录不存在",
+		}}),
+		http.MethodDelete, "/user/identities/12", `{"password":"secret"}`,
+	))
+
+	if malformed.Code != fromService.Code || malformed.Message != fromService.Message {
+		t.Fatalf("malformed = %#v, service = %#v, want identical code and message", malformed, fromService)
+	}
+	if malformed.Message != "绑定记录不存在" {
+		t.Fatalf("message = %q, want 绑定记录不存在", malformed.Message)
+	}
+}
