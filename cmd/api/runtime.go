@@ -16,9 +16,11 @@ import (
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminclient"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	sessionworker "github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session/worker"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
@@ -27,6 +29,7 @@ import (
 type sessionRuntime struct {
 	Handler sessionhandler.Handler
 	OAuth   oauthhandler.Handler
+	Admin   adminhandler.Handler
 	Auth    middleware.Authenticator
 	Workers []backgroundWorker
 }
@@ -169,6 +172,15 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Issuer: cfg.JWTIssuer,
 	}
 
+	adminClientService := adminclient.Service{
+		Clients:   clients,
+		Blacklist: oauthredis.BlacklistStore{Store: store},
+		Audit:     audit,
+		// Default random source and hashing; no work factor is bought for a 32-byte
+		// random secret, see auth.ClientSecretHasher.
+		Secrets: auth.ClientSecretHasher{},
+	}
+
 	return &sessionRuntime{
 		Handler: sessionhandler.Handler{Service: service},
 		OAuth: oauthhandler.Handler{
@@ -176,7 +188,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Auth:       authenticator,
 			ConsentURL: cfg.OAuthConsentURL,
 		},
-		Auth: authenticator,
+		Admin: adminhandler.Handler{Clients: adminClientService},
+		Auth:  authenticator,
 		Workers: []backgroundWorker{
 			sessionworker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist},
 			forgotPasswords,

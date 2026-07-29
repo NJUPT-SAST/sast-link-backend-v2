@@ -8,12 +8,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
 )
 
-// The two handler packages mount onto one engine, so a path claimed by both would
+// The three handler packages mount onto one engine, so a path claimed by two would
 // panic at startup. Registering them together is the only place that shows up.
 func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -22,6 +24,7 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 
 	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{}, passthrough)
 	oauthhandler.RegisterRoutes(router, oauthhandler.Handler{}, passthrough)
+	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, passthrough, passthrough)
 
 	registered := make(map[string]bool)
 	for _, route := range router.Routes() {
@@ -42,6 +45,9 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 		http.MethodGet + " /.well-known/jwks.json",
 		http.MethodGet + " /userinfo",
 		http.MethodPost + " /userinfo",
+		http.MethodGet + " /admin/oauth-clients",
+		http.MethodPost + " /admin/oauth-clients",
+		http.MethodPut + " /admin/oauth-clients/:id",
 	}
 	for _, route := range want {
 		if !registered[route] {
@@ -81,5 +87,48 @@ func TestSetPrincipalRoundTrips(t *testing.T) {
 
 	if !found || seen.UserID != 7 || len(seen.Scopes) != 1 {
 		t.Fatalf("principal = %+v (found %v), want the value SetPrincipal stored", seen, found)
+	}
+}
+
+// The admin routes must be mounted behind both middlewares. Mounting them with only
+// authentication would let any logged-in freshman register OAuth clients, which is a
+// wiring mistake no unit test inside adminhandler can catch — it stubs its own
+// middleware. This asserts the composition root passes both, in order.
+func TestAdminRoutesAreGatedByAuthAndRole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	var order []string
+	authStep := func(c *gin.Context) { order = append(order, "auth"); c.Next() }
+	roleStep := func(c *gin.Context) {
+		order = append(order, "role")
+		c.AbortWithStatus(http.StatusForbidden)
+	}
+	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, authStep, roleStep)
+
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/admin/oauth-clients"},
+		{http.MethodPost, "/admin/oauth-clients"},
+		{http.MethodPut, "/admin/oauth-clients/5"},
+	} {
+		order = nil
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequestWithContext(
+			context.Background(), route.method, route.path, nil))
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("%s %s: status = %d, want the role gate to reject",
+				route.method, route.path, recorder.Code)
+		}
+		// Authentication must run first: the role check reads the principal it sets.
+		if len(order) != 2 || order[0] != "auth" || order[1] != "role" {
+			t.Fatalf("%s %s: middleware order = %v, want [auth role]", route.method, route.path, order)
+		}
+	}
+}
+
+// The role the composition root gates on must be admin. If AdminRole drifted to a
+// weaker role, every check above would still pass while the endpoints opened up.
+func TestAdminRoleIsAdmin(t *testing.T) {
+	if adminhandler.AdminRole != model.UserRoleAdmin {
+		t.Fatalf("AdminRole = %q, want admin", adminhandler.AdminRole)
 	}
 }
