@@ -2,7 +2,11 @@
 
 SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一身份认证中心与人员信息管理系统。
 
-当前仓库已完成 Go 服务骨架、数据基础层、认证基础设施、内部认证闭环与用户资料自助管理：HTTP API 入口、PostgreSQL/Redis 连接、健康检查、V001–V005 SQL migrations（含固定内置 `sast-link-web` first-party Client、token blacklist Outbox 与跨表邮箱唯一性触发器）、持久化实体与 Auth repositories、密码哈希、RS256 JWT/JWKS、opaque Refresh Token、PKCE-S256、统一 OAuth/OIDC scope、Redis 一次性状态/限流/登录失败计数，以及密码登录、Token 刷新、登出、JWT middleware、可靠黑名单投递 worker、SMTP 邮件、两步邮箱注册、改密/重置密码（含全量 Token 吊销）、第三方邮箱绑定、资料查询与编辑、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 按用户限流）和公开个人卡片。头像上传、第三方 OAuth 登录、OAuth/OIDC Provider endpoints、管理后台、设备管理与 pg_cron 运维任务仍待接入。
+当前仓库已完成 Go 服务骨架、数据基础层、认证基础设施、内部认证闭环、用户资料自助管理、OAuth 2.1/OIDC Provider 与 OAuth 客户端管理后台：HTTP API 入口、PostgreSQL/Redis 连接、健康检查、V001–V005 SQL migrations（含固定内置 `sast-link-web` first-party Client、token blacklist Outbox 与跨表邮箱唯一性触发器）、持久化实体与 Auth repositories、密码哈希、RS256 JWT/JWKS、opaque Refresh Token、PKCE-S256、统一 OAuth/OIDC scope、Redis 一次性状态/限流/登录失败计数，以及密码登录、Token 刷新、登出、JWT middleware、可靠黑名单投递 worker、SMTP 邮件、两步邮箱注册、改密/重置密码（含全量 Token 吊销与授权码作废）、第三方邮箱绑定、资料查询与编辑、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 按用户限流）和公开个人卡片。
+
+OAuth/OIDC Provider 部分已完成两段式授权端点（`GET /oauth/authorize` + `POST /oauth/authorize/consent`）、Token 端点（authorization_code 与 refresh_token 两种 grant、ID Token 签发）、RFC 7009 撤销端点、`/userinfo`、OIDC discovery 与 JWKS，以及 `/admin/oauth-clients` 客户端注册与更新（内置客户端受保护，不可停用或改写 redirect_uris）。
+
+头像上传、第三方 OAuth 登录、设备管理与 pg_cron 运维任务仍待接入。
 
 `cmd/api` 只负责运行 HTTP 服务，启动时不会执行 DDL 或 schema migration。数据库结构只能通过 `cmd/migrate` 显式管理。
 

@@ -179,6 +179,11 @@ func TestCreateClientReturnsSecretOnceForThirdParty(t *testing.T) {
 	if service.createInput.AdminUserID != 99 {
 		t.Fatalf("AdminUserID = %d, want the authenticated principal", service.createInput.AdminUserID)
 	}
+	// This is the only response in the service carrying a plaintext secret, so it must
+	// not be storable by an intermediary or browser cache.
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store on a response carrying a secret", got)
+	}
 }
 
 // A public client has no secret, so the field must be absent rather than empty:

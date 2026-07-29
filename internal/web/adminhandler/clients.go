@@ -64,6 +64,12 @@ func (h Handler) CreateClient(c *gin.Context) {
 		response.Error(c, mapServiceError(err))
 		return
 	}
+	// The only response in the service that carries a plaintext client_secret, which
+	// is shown once and never retrievable again. A 201 is already not cacheable by
+	// default, but no-store is what keeps the secret out of an intermediary or browser
+	// cache regardless of what a proxy decides the default is — the same reason
+	// /oauth/token and /userinfo set it.
+	c.Header("Cache-Control", "no-store")
 	response.Created(c, createdClientDTO{
 		clientDTO:    mapClient(result.Client),
 		ClientSecret: result.ClientSecret,

@@ -296,7 +296,7 @@ POST /oauth/authorize/consent  → Bearer 认证 → GetDel 消费暂存 → 建
 - PKCE-S256 强制，仅接受 `code_challenge_method=S256`。V001 数据库历史约束仍允许 `plain` 存量值，实际协议层由 V002 迁移收紧为 S256-only。
 - State 参数强制，回调时必须校验
 - Redirect URI 必须**精确字符串相等**于 `oauth_clients.redirect_uris` 之一。不做前缀匹配：前缀规则允许攻击者追加客户端从未注册的路径并在那里接收授权码
-- 第一方应用（`first_party`）：无 client_secret，PKCE 认证；可请求任意 scope
+- 第一方应用（`first_party`）：无 client_secret，PKCE 认证；可请求任意受支持的 scope，不受其注册 `scopes` 列的约束（该列对第一方客户端仅作记录用途）。因此新增 `first_party` 客户端等同于授予全量 scope，注册审批应按此对待
 - 第三方应用（`third_party`）：client_secret_post 认证；scope 受注册时声明范围限制
 - 公开客户端携带 `client_secret` 会被拒绝而非忽略——这说明客户端搞错了自己的类型
 - 授权码重放检测：`is_used=TRUE` 的同 code 再次出现 → 通过 `family_id` 级联撤销整条 token 链

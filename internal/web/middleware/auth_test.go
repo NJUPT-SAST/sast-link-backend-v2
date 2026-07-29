@@ -275,6 +275,27 @@ func TestStrictBearerRejectsWhitespaceInToken(t *testing.T) {
 	}
 }
 
+// The scheme name is matched exactly, which RFC 7235 §2.1 does not require — it
+// defines the scheme as case-insensitive, so "bearer" names the same scheme.
+//
+// Kept strict deliberately, and asserted here so the choice is visible rather than
+// incidental: every current caller is either this project's own frontend or a test.
+// Revisit if a third-party OIDC library ever fails against /userinfo, where the
+// header spelling is not ours to dictate and the rejection surfaces as a misleading
+// invalid_token. See the "not strict bearer" case in TestAuthenticatorRequireAuth.
+func TestStrictBearerSchemeIsCaseSensitive(t *testing.T) {
+	for _, header := range []string{"bearer t", "BEARER t", "BeArEr t"} {
+		if _, ok := strictBearerToken(header); ok {
+			t.Errorf("strictBearerToken(%q) accepted a non-canonical scheme spelling", header)
+		}
+	}
+	for _, header := range []string{"Basic t", "Bearerx t", "Bearer", "Bearer "} {
+		if _, ok := strictBearerToken(header); ok {
+			t.Errorf("strictBearerToken(%q) accepted a non-Bearer or empty credential", header)
+		}
+	}
+}
+
 func TestPrincipalFromMissing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())

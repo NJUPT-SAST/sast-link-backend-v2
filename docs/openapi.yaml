@@ -1051,7 +1051,7 @@ paths:
         授权流程的第一段，**无需认证**——从第三方跳转来的浏览器不携带 Authorization header。
 
         校验参数后将请求暂存 10 分钟，302 重定向至前端授权页
-        `{OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..`。
+        `{OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..&expires_in=600`。
         用户决定由第二段 `POST /oauth/authorize/consent` 提交。
 
         使用 PKCE-S256，仅接受 code_challenge_method=S256。
@@ -1127,9 +1127,11 @@ paths:
       responses:
         '302':
           description: >-
-            成功时重定向至前端授权页，携带 request_id / client_name / scope。
+            成功时重定向至前端授权页，携带 request_id / client_name / scope /
+            expires_in（暂存剩余秒数，供页面显示截止时间）。
             错误时按可重定向性重定向至授权页或客户端 redirect_uri，携带
-            error / error_description。
+            error / error_description。除参数校验类错误外，限流与 Redis 暂存失败
+            会以 temporarily_unavailable、查库失败会以 server_error 重定向回授权页。
           headers:
             Location:
               description: 授权页或客户端回调地址
@@ -1257,7 +1259,7 @@ paths:
                   grant_type: authorization_code
                   code: auth_code_abc123...
                   redirect_uri: https://app.example.com/callback
-                  client_id: 381c34b9-14a4-4df9-a9db-40c2455be09f
+                  client_id: 9f3a1c7d2e5b40a8c6d1f4b7a2e9c3d5
                   code_verifier: pkce_verifier_raw_string...
                 summary: 第一方应用 - 授权码模式
               auth_code_third_party:
@@ -1265,7 +1267,7 @@ paths:
                   grant_type: authorization_code
                   code: auth_code_abc123...
                   redirect_uri: https://app.example.com/callback
-                  client_id: 381c34b9-14a4-4df9-a9db-40c2455be09f
+                  client_id: 9f3a1c7d2e5b40a8c6d1f4b7a2e9c3d5
                   client_secret: 3K7mDzX434GbFm9YAePJ9FXQNjT6MF0U
                   code_verifier: pkce_verifier_raw_string...
                 summary: 第三方应用 - 授权码模式
@@ -1273,13 +1275,13 @@ paths:
                 value:
                   grant_type: refresh_token
                   refresh_token: rt_abc123...
-                  client_id: 381c34b9-14a4-4df9-a9db-40c2455be09f
+                  client_id: 9f3a1c7d2e5b40a8c6d1f4b7a2e9c3d5
                 summary: 第一方应用 - 刷新 Token
               refresh_token_third_party:
                 value:
                   grant_type: refresh_token
                   refresh_token: rt_abc123...
-                  client_id: 381c34b9-14a4-4df9-a9db-40c2455be09f
+                  client_id: 9f3a1c7d2e5b40a8c6d1f4b7a2e9c3d5
                   client_secret: 3K7mDzX434GbFm9YAePJ9FXQNjT6MF0U
                 summary: 第三方应用 - 刷新 Token
         required: true
@@ -1292,7 +1294,36 @@ paths:
                 $ref: '#/components/schemas/OAuthTokenResponse'
           headers: {}
         '400':
-          description: OAuth 错误（RFC 6749 格式）
+          description: |
+            OAuth 错误（RFC 6749 格式）：invalid_request / invalid_grant /
+            unsupported_grant_type / unauthorized_client。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthError'
+          headers: {}
+        '401':
+          description: |
+            `invalid_client` —— 客户端认证失败。RFC 6749 §5.2 单独规定此项为 401，
+            其余皆为 400。不携带 `WWW-Authenticate`：本服务只从表单体读取
+            `client_secret`（discovery 通告 `none` 与 `client_secret_post`），
+            通告一个未实现的认证方案会让客户端反复用 Basic 重试并始终失败。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthError'
+          headers: {}
+        '429':
+          description: |
+            `temporarily_unavailable` —— 按调用方 IP 限流
+            （`RATE_LIMIT_TOKEN_RPM`，默认 60 次/60s），附带 `Retry-After`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthError'
+          headers: {}
+        '500':
+          description: '`server_error` —— 服务器内部错误'
           content:
             application/json:
               schema:
@@ -1332,13 +1363,50 @@ paths:
                 client_id:
                   type: string
                   description: 客户端标识
+                client_secret:
+                  type: string
+                  description: |
+                    机密客户端（`third_party`）必填；公开客户端不得携带，
+                    携带则返回 `invalid_client`。
         required: true
       responses:
         '200':
-          description: 撤销成功，RFC 7009 要求返回 200 OK 且响应体为空
+          description: |
+            撤销成功，RFC 7009 要求返回 200 OK 且响应体为空。未知 token 同样返回 200。
+            注意：仅在撤销确实提交后才返回 200；撤销事务失败返回 500，
+            以免客户端以为会话已终止而不再重试。
+            撤销为 family 级：已过期的 access token 也会被解析并撤销其整条 family，
+            因为它自身失效不代表同族 refresh token 失效（默认可存活 720h）。
+            此时只放宽 exp 校验，签名 / kid / iss / aud / nbf 仍全部强制，
+            归属以数据库行的 client_id 判定。
           headers: {}
         '400':
           description: OAuth 错误（RFC 6749 / RFC 7009 格式）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthError'
+          headers: {}
+        '401':
+          description: |
+            `invalid_client` —— 客户端认证失败。不携带 `WWW-Authenticate`，
+            理由同 `/oauth/token`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthError'
+          headers: {}
+        '429':
+          description: |
+            `temporarily_unavailable` —— 与 `/oauth/token` 共用同一个按 IP 限流器，
+            附带 `Retry-After`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthError'
+          headers: {}
+        '500':
+          description: '`server_error` —— 撤销事务失败，会话仍然有效，客户端应重试'
           content:
             application/json:
               schema:
@@ -1803,12 +1871,34 @@ paths:
               schema:
                 $ref: '#/components/schemas/OAuthClientCreateResponse'
           headers: {}
+        '400':
+          description: |
+            校验失败（40000）。包括：`redirect_uris` 违反注册规则（非 https 且非
+            loopback、含 fragment 或 userinfo、非绝对 URI、含首尾空白、超过 10 条、
+            单条超 2048 字符、重复）；`grant_types` 含不支持的值或缺少
+            `authorization_code`；`scopes` 为空、缺少 `openid` 或含不支持的值；
+            `client_type` 非法；请求体传入 `client_id` / `client_secret` / `id`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardEnvelope'
+          headers: {}
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
         '403':
           $ref: '#/components/responses/Forbidden'
           description: 无权限（403xx）
+        '500':
+          description: |
+            服务器内部错误（50000）。`client_id` 由服务端以 16 随机字节生成，因此
+            唯一键冲突不是调用方可修正的冲突，不返回 409：要么是不会复现的碰撞，
+            要么是真实故障，两种情况下管理员都应重试而非改名。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardEnvelope'
+          headers: {}
       security:
         - bearerAuth: []
   /admin/oauth-clients/{id}:
@@ -1848,18 +1938,38 @@ paths:
         required: true
       responses:
         '200':
-          description: 更新成功
+          description: |
+            更新成功。停用客户端（`is_active` 由 true 改为 false）会在同一事务内
+            撤销该客户端的全部活跃 token。
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MessageResponse'
           headers: {}
+        '400':
+          description: |
+            校验失败（40000）：请求体为空（未提交任何可更新字段）、未知字段，
+            或 `redirect_uris` 违反注册规则（与创建时同一套校验）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardEnvelope'
+          headers: {}
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
         '403':
-          $ref: '#/components/responses/Forbidden'
-          description: 无权限（403xx）
+          description: |
+            无权限（403xx）。除角色不足外，还包括针对内置客户端
+            （`INTERNAL_OAUTH_CLIENT_ID`，默认 `sast-link-web`）的受保护操作：
+            停用它会使 `findInternalClient` 解析失败，令全站登录/刷新/注册立即中断
+            且管理员自己也无法登录回来恢复，因此一律拒绝；改写它的 `redirect_uris`
+            同样拒绝。改名允许。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardEnvelope'
+          headers: {}
         '404':
           $ref: '#/components/responses/NotFound'
           description: 资源不存在（404xx）
@@ -2180,7 +2290,10 @@ components:
           description: 内部主键
         client_id:
           type: string
-          description: 公开客户端标识符（UUID）
+          description: |
+            公开客户端标识符：服务端生成的 32 位小写十六进制字符串（16 随机字节），
+            不是 UUID，不含连字符。内置客户端为固定值 `sast-link-web`。
+            请勿按 UUID 格式校验。
         client_name:
           type: string
           description: 应用名称
@@ -2221,7 +2334,10 @@ components:
           description: 内部主键
         client_id:
           type: string
-          description: 公开客户端标识符（UUID）
+          description: |
+            公开客户端标识符：服务端生成的 32 位小写十六进制字符串（16 随机字节），
+            不是 UUID，不含连字符。内置客户端为固定值 `sast-link-web`。
+            请勿按 UUID 格式校验。
         client_secret:
           type: string
           description: 密钥（第三方应用返回，第一方应用不返回）
@@ -2351,7 +2467,8 @@ components:
             - server_error
           description: >-
             RFC 6749 §4.1.2.1 / §5.2、RFC 6750 §3.1 错误代码。
-            invalid_client 对应 401 并附带 WWW-Authenticate；
+            invalid_client 对应 401，但**不附带** WWW-Authenticate（本服务只从表单体
+            读取 client_secret，通告未实现的 Basic 方案会让客户端反复重试并始终失败）；
             invalid_token 仅出现在 /userinfo，附带 Bearer 挑战头；
             temporarily_unavailable 用于限流（429）与依赖不可用（503）。
         error_description:
@@ -2786,7 +2903,8 @@ components:
       type: object
       description: |
         OAuth 2.1 Token 响应（RFC 6749 格式，不使用 SAST Link 标准响应信封）。
-        scope 包含 `openid` 时，额外返回 OIDC ID Token。
+        固定额外返回 OIDC ID Token：本服务强制所有 scope 均包含 `openid`，
+        不支持纯 OAuth2（非 OIDC）模式。
         字段名 `scope` 为 OAuth 线协议标准单数字段；数据库列仍保留 `scopes`。
       properties:
         access_token:
@@ -2960,14 +3078,17 @@ components:
           type: array
           items:
             type: string
-          description: 支持的 claims
+          description: |
+            支持的 claims。注意 `auth_time` **会在 ID Token 中签发但不在此列表中**：
+            当前可得的值是授权确认时刻而非真实认证时刻，会高报认证新鲜度，
+            通告它等于邀请 RP 依赖一个本服务尚无法正确产出的值。
+            待持久化真实认证时刻后再加回。
           example:
             - sub
             - iss
             - aud
             - exp
             - iat
-            - auth_time
             - nonce
             - name
             - picture
@@ -3053,6 +3174,10 @@ components:
         - `openid` → sub（必返）
         - `profile` → name, picture, preferred_username, profile, updated_at
         - `email` → email, email_verified
+
+        未授权或用户未填写的 claim 一律**不出现在响应中**，而不是返回 `null`
+        或空值——所有字段均为 `omitempty`。客户端应按「键是否存在」判断，
+        不要依赖 `null`。
       properties:
         sub:
           type: string
@@ -3067,18 +3192,15 @@ components:
           format: uri
           description: 头像 URL。需 profile scope
           example: https://cos.example.com/avatar/1.jpg
-          nullable: true
         preferred_username:
           type: string
           description: 昵称（fallback 至姓名）。需 profile scope
           example: 张三
-          nullable: true
         profile:
           type: string
           format: uri
           description: 用户主页（SAST Link 个人卡片）。需 profile scope
           example: https://link.sast.fun/card/1
-          nullable: true
         email:
           type: string
           format: email
@@ -3092,7 +3214,6 @@ components:
           type: integer
           description: 用户信息最后修改时间（Unix timestamp）。需 profile scope
           example: 1717396400
-          nullable: true
     IDTokenClaims:
       type: object
       description: |
@@ -3111,7 +3232,7 @@ components:
         aud:
           type: string
           description: Audience，客户端 client_id
-          example: 381c34b9-14a4-4df9-a9db-40c2455be09f
+          example: 9f3a1c7d2e5b40a8c6d1f4b7a2e9c3d5
         exp:
           type: integer
           description: 过期时间（Unix timestamp）
@@ -3122,7 +3243,11 @@ components:
           example: 1717396400
         auth_time:
           type: integer
-          description: 用户完成认证的时间（Unix timestamp）。授权码模式下为授权确认时间
+          description: |
+            **授权确认时间，不是 OIDC 定义的认证时间**（Unix timestamp）。服务端尚未持久化
+            真实认证时刻，因此闲置多日后再授权会把该值报成今天，高报认证新鲜度。
+            该 claim 因此不在 `claims_supported` 中通告，`max_age` / `prompt` 也未实现，
+            请勿依赖它判断认证新鲜度。
           example: 1717396400
         nonce:
           type: string
