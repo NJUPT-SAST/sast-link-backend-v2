@@ -15,6 +15,11 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
 )
 
+// clientAuthFailed is the single description every client authentication failure
+// returns. Shared as a constant so a future branch cannot reintroduce a
+// distinguishable message; see authenticateClient for why they must not differ.
+const clientAuthFailed = "客户端认证失败"
+
 // Token implements RFC 6749 §4.1.3 and §6 for the two supported grants.
 func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, error) {
 	// Throttled before the grant is dispatched, so a caller cannot spend an unlimited
@@ -270,6 +275,16 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 // present a matching client_secret. A public client that sends a secret anyway is
 // rejected rather than ignored: it signals a client misconfigured about its own
 // type, and silently accepting it would hide that.
+//
+// Every rejection below answers with the same description, on purpose. Distinct
+// wording would make this endpoint an oracle for a known client_id: a caller could
+// send one request with a secret and one without, and learn from which message came
+// back whether that client exists and whether it is public or confidential. client_id
+// is public by design — it travels in authorize URLs and front-end code — so the thing
+// worth protecting is not its existence but the client's configuration, and knowing a
+// target is public (no secret, PKCE only) is useful to an attacker. Authorize already
+// holds this line for the same reason; the two endpoints must not disagree. The
+// specific cause is preserved for operators via the wrapped error and the audit log.
 func (s Service) authenticateClient(ctx context.Context, clientID, clientSecret string) (*model.OAuthClient, error) {
 	id := strings.TrimSpace(clientID)
 	if id == "" {
@@ -277,7 +292,7 @@ func (s Service) authenticateClient(ctx context.Context, clientID, clientSecret 
 	}
 	client, err := s.Clients.FindActiveByClientID(ctx, id)
 	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
-		return nil, newError(ErrInvalidClient, "客户端认证失败", nil)
+		return nil, newError(ErrInvalidClient, clientAuthFailed, err)
 	}
 	if err != nil {
 		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
@@ -286,15 +301,17 @@ func (s Service) authenticateClient(ctx context.Context, clientID, clientSecret 
 	presented := strings.TrimSpace(clientSecret)
 	if client.ClientSecretHash == nil {
 		if presented != "" {
-			return nil, newError(ErrInvalidClient, "公开客户端不得携带 client_secret", nil)
+			return nil, newError(ErrInvalidClient, clientAuthFailed,
+				errors.New("public client presented a client_secret"))
 		}
 		return client, nil
 	}
 	if presented == "" {
-		return nil, newError(ErrInvalidClient, "client_secret 不能为空", nil)
+		return nil, newError(ErrInvalidClient, clientAuthFailed,
+			errors.New("confidential client omitted its client_secret"))
 	}
 	if err := auth.VerifyClientSecret(presented, *client.ClientSecretHash); err != nil {
-		return nil, newError(ErrInvalidClient, "客户端认证失败", err)
+		return nil, newError(ErrInvalidClient, clientAuthFailed, err)
 	}
 	return client, nil
 }
@@ -317,6 +334,16 @@ func matchRedirectURI(authorized *string, presented string) error {
 }
 
 // signIDToken builds the ID Token for a granted scope set.
+//
+// authTime is the instant the user approved this authorization, which is NOT what
+// OIDC means by auth_time: that is when the end user authenticated. Nothing in this
+// service records an authentication instant yet, so a user who signed in days ago and
+// authorizes today yields today's value — overstating recency, the opposite of what a
+// relying party enforcing max_age needs. The claim is therefore kept out of
+// claims_supported (see Discovery) so nothing is invited to depend on it, and neither
+// max_age nor prompt is implemented. Making this correct means persisting a real
+// authentication timestamp at login and carrying it through consent into the code and
+// the token family; until then the value stays deliberately unadvertised.
 func (s Service) signIDToken(
 	ctx context.Context,
 	user *model.User,

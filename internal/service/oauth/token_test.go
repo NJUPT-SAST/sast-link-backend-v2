@@ -401,6 +401,53 @@ func TestTokenClientAuthentication(t *testing.T) {
 	})
 }
 
+// Client authentication must not reveal whether a client exists, nor how it is
+// configured. client_id is public by design, so the risk is not enumeration: it is
+// that two requests for a known client_id — one with a secret, one without — would
+// otherwise report back whether it exists and whether it is public or confidential,
+// and knowing a target is public (PKCE only, no secret) is useful to an attacker.
+// Authorize already refuses to distinguish for the same reason.
+func TestTokenClientAuthenticationFailuresAreIndistinguishable(t *testing.T) {
+	cases := []struct {
+		name     string
+		clientID string
+		secret   string
+	}{
+		{"unknown client", "no-such-client", ""},
+		{"unknown client with a secret", "no-such-client", "guess"},
+		{"public client sending a secret", testPublicClientID, "unexpected"},
+		{"confidential client omitting its secret", testConfidentialClientID, ""},
+		{"confidential client with a wrong secret", testConfidentialClientID, "wrong-secret"},
+	}
+	descriptions := make(map[string]string, len(cases))
+	for _, test := range cases {
+		h := newHarness(t)
+		code := issueCode(t, h, testPublicClientID, "openid")
+		input := validCodeTokenInput(code)
+		input.ClientID = test.clientID
+		input.ClientSecret = test.secret
+
+		_, err := h.service.Token(context.Background(), input)
+
+		var oauthErr *Error
+		if !errors.As(err, &oauthErr) {
+			t.Fatalf("%s: error = %v, want a typed *Error", test.name, err)
+		}
+		if oauthErr.Code != ErrorInvalidClient {
+			t.Fatalf("%s: code = %q, want %q", test.name, oauthErr.Code, ErrorInvalidClient)
+		}
+		descriptions[test.name] = oauthErr.Description
+	}
+	// Every case must have produced the identical description.
+	for name, description := range descriptions {
+		if description != clientAuthFailed {
+			t.Errorf("%s: description = %q, want the shared %q — a distinct message here "+
+				"tells the caller whether the client exists and how it is configured",
+				name, description, clientAuthFailed)
+		}
+	}
+}
+
 func TestTokenRejectsUnsupportedGrantType(t *testing.T) {
 	h := newHarness(t)
 
