@@ -73,10 +73,15 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	if strings.TrimSpace(input.ResponseType) != responseTypeCode {
 		return nil, redirectableError(ErrUnsupportedResponse, "response_type 必须为 code", nil)
 	}
-	state := strings.TrimSpace(input.State)
-	if state == "" {
+	// Presence is checked on the trimmed value so whitespace alone is not a state,
+	// but the original is what gets stashed and echoed back. RFC 6749 §4.1.2 requires
+	// state to be returned exactly as received: it is the client's CSRF token and the
+	// client compares it byte for byte, so trimming it would break that comparison
+	// for any client whose state carries surrounding whitespace.
+	if strings.TrimSpace(input.State) == "" {
 		return nil, redirectableError(ErrInvalidRequest, "state 不能为空", nil)
 	}
+	state := input.State
 	if strings.TrimSpace(input.CodeChallengeMethod) != pkceMethodS256 {
 		return nil, redirectableError(ErrInvalidRequest, "code_challenge_method 必须为 S256", nil)
 	}

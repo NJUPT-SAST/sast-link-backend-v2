@@ -460,3 +460,38 @@ func mustQuery(t *testing.T, rawURL string) url.Values {
 	}
 	return parsed.Query()
 }
+
+// state must survive byte for byte. It is the client's CSRF token and the client
+// compares the echoed value against what it sent, so normalizing it — even just
+// trimming whitespace — silently breaks login for that client. RFC 6749 §4.1.2.
+func TestAuthorizePreservesStateExactly(t *testing.T) {
+	h := newHarness(t)
+	input := validAuthorizeInput(t)
+	input.State = "  state with spaces\tand a tab  "
+
+	result, err := h.service.Authorize(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	stashed, found, err := h.requests.ConsumeAuthorizeRequest(context.Background(), result.RequestID)
+	if err != nil || !found {
+		t.Fatalf("stash lookup = %v, found %v", err, found)
+	}
+	if stashed.State != input.State {
+		t.Fatalf("stashed state = %q, want the original %q", stashed.State, input.State)
+	}
+}
+
+// Whitespace alone is still not a state, so presence is checked on the trimmed
+// value even though the original is what gets echoed.
+func TestAuthorizeRejectsWhitespaceOnlyState(t *testing.T) {
+	h := newHarness(t)
+	input := validAuthorizeInput(t)
+	input.State = " \t "
+
+	_, err := h.service.Authorize(context.Background(), input)
+	var oauthErr *Error
+	if !errors.As(err, &oauthErr) || oauthErr.Code != ErrorInvalidRequest {
+		t.Fatalf("error = %v, want invalid_request", err)
+	}
+}
