@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -96,6 +97,9 @@ func (h Handler) Authorize(c *gin.Context) {
 		"request_id":  result.RequestID,
 		"client_name": result.ClientName,
 		"scope":       strings.Join(result.Scopes, " "),
+		// The stash lifetime, so the page can show the deadline and stop a user who
+		// left the tab open from submitting into a 400 with no prior warning.
+		"expires_in": strconv.Itoa(result.ExpiresIn),
 	}))
 }
 
@@ -233,7 +237,13 @@ func (h Handler) JWKS(c *gin.Context) {
 func (h Handler) redirectAuthorizeError(c *gin.Context, input oauth.AuthorizeInput, err error) {
 	code, description, redirectable := authorizeErrorParts(err)
 	if redirectable {
-		c.Redirect(http.StatusFound, appendQuery(input.RedirectURI, map[string]string{
+		// Trimmed to match what the service compared against the registration. It
+		// validates strings.TrimSpace(redirect_uri) but the raw query value is what
+		// arrives here, so " https://app.example.com/cb" would pass the registry check
+		// and then be handed to url.Parse as a value it reads as a relative path —
+		// turning the error redirect into a path on this API's own host, where the client
+		// never learns why its request failed.
+		c.Redirect(http.StatusFound, appendQuery(strings.TrimSpace(input.RedirectURI), map[string]string{
 			"error":             code,
 			"error_description": description,
 			"state":             input.State,

@@ -3,6 +3,7 @@ package oauthhandler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -313,9 +314,13 @@ func TestConsentMapsErrorsToBusinessCodes(t *testing.T) {
 			wantCode:   errcode.CodeBadRequest,
 		},
 		{
+			// 404, not the 401 the RFC endpoints give invalid_client: the consent caller is
+			// an authenticated human, and it is the third-party client that vanished. 401
+			// would send them to re-login, which cannot fix a disabled client. Keeps
+			// 40402's {HTTP status}{sequence} convention consistent too.
 			name:       "client disabled",
 			err:        &oauth.Error{Kind: oauth.KindInvalidClient, Code: oauth.ErrorInvalidClient, Description: "客户端已停用"},
-			wantStatus: http.StatusUnauthorized,
+			wantStatus: http.StatusNotFound,
 			wantCode:   errcode.CodeClientNotFound,
 		},
 		{
@@ -482,11 +487,15 @@ func TestTokenErrorStatusesFollowRFC6749(t *testing.T) {
 		wantRetryAfter string
 	}{
 		{
-			// RFC 6749 §5.2 singles out invalid_client as a 401.
-			name:          "invalid client is 401 with a challenge",
+			// RFC 6749 §5.2 singles out invalid_client as a 401, but requires a
+			// WWW-Authenticate header only when the client authenticated via the
+			// Authorization header. This server reads credentials from the form body
+			// only and advertises none/client_secret_post, so it must not send a
+			// challenge naming an auth scheme it does not implement.
+			name:          "invalid client is 401 without a challenge",
 			err:           &oauth.Error{Kind: oauth.KindInvalidClient, Code: oauth.ErrorInvalidClient, Description: "客户端认证失败"},
 			wantStatus:    http.StatusUnauthorized,
-			wantChallenge: true,
+			wantChallenge: false,
 		},
 		{
 			name:       "invalid grant is 400",
@@ -795,6 +804,10 @@ func TestFormErrorDescriptionsAreSelfAuthored(t *testing.T) {
 // quotedHeaderValue is the structural guard against header injection: a value
 // carrying a quote, backslash or CR/LF must not be able to forge another challenge
 // parameter or split the header.
+//
+// A non-conforming description is now dropped rather than emitted in sanitized
+// form, so this payload contributes nothing at all — two quoted parameters remain,
+// realm and error.
 func TestBearerChallengeCannotBeInjected(t *testing.T) {
 	challenge := bearerChallenge(&oauth.Error{
 		Code:        oauth.ErrorInvalidToken,
@@ -803,22 +816,65 @@ func TestBearerChallengeCannotBeInjected(t *testing.T) {
 	if strings.ContainsAny(challenge, "\r\n") {
 		t.Fatalf("challenge %q contains a line break", challenge)
 	}
-	// Three quoted parameters — realm, error, error_description — so exactly six
-	// quotes, all of them ours. A surviving quote from the payload would raise the
-	// count and let it forge a fourth parameter.
-	if got := strings.Count(challenge, `"`); got != 6 {
-		t.Fatalf("challenge %q has %d quotes, want 6", challenge, got)
+	// realm and error only — exactly four quotes, all of them ours.
+	if got := strings.Count(challenge, `"`); got != 4 {
+		t.Fatalf("challenge %q has %d quotes, want 4", challenge, got)
 	}
 	if strings.Contains(challenge, `\`) {
 		t.Fatalf("challenge %q kept a backslash escape", challenge)
 	}
-	// The payload's own error= text may survive as inert bytes, but it must not be
-	// parseable as a parameter, which requires a quote it no longer has.
-	if strings.Contains(challenge, `error="insufficient_scope"`) {
-		t.Fatalf("challenge %q let the payload forge a parameter", challenge)
+	if strings.Contains(challenge, "X-Injected") || strings.Contains(challenge, "insufficient_scope") {
+		t.Fatalf("challenge %q leaked payload bytes", challenge)
 	}
 	if !strings.HasPrefix(challenge, `Bearer realm="sast-link", error="invalid_token"`) {
 		t.Fatalf("challenge %q lost its well-formed prefix", challenge)
+	}
+}
+
+// RFC 6750 §3 limits a quoted challenge value to printable US-ASCII. This
+// service's descriptions are Chinese, so they must not reach the header — a client
+// validating against the grammar could discard it and lose the error code it needs
+// to decide whether to refresh. The body still carries the full message.
+func TestBearerChallengeStaysASCII(t *testing.T) {
+	service := &fakeService{}
+	router := newRouter(t, service, &fakeAuthenticator{err: errors.New("rejected")})
+
+	recorder := doRequest(t, router, http.MethodGet, "/userinfo", "", "")
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", recorder.Code)
+	}
+	challenge := recorder.Header().Get("WWW-Authenticate")
+	if challenge == "" {
+		t.Fatal("401 from UserInfo carries no WWW-Authenticate challenge")
+	}
+	for i := range len(challenge) {
+		if challenge[i] < 0x20 || challenge[i] >= 0x7f {
+			t.Fatalf("challenge %q carries a non-ASCII or control byte at %d", challenge, i)
+		}
+	}
+	// The error code is the part a client acts on, so it must survive.
+	if !strings.Contains(challenge, `error="invalid_token"`) {
+		t.Fatalf("challenge %q lost the error code", challenge)
+	}
+	// The Chinese message still reaches the client, in the body.
+	var body errorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.ErrorDescription == "" {
+		t.Fatal("body dropped the error description along with the header")
+	}
+}
+
+// An ASCII description is conforming, so it is emitted rather than dropped.
+func TestBearerChallengeKeepsASCIIDescription(t *testing.T) {
+	challenge := bearerChallenge(&oauth.Error{
+		Code:        oauth.ErrorInvalidToken,
+		Description: "token expired",
+	})
+	if !strings.Contains(challenge, `error_description="token expired"`) {
+		t.Fatalf("challenge %q dropped a conforming description", challenge)
 	}
 }
 

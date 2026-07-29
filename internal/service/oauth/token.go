@@ -17,6 +17,11 @@ import (
 
 // Token implements RFC 6749 §4.1.3 and §6 for the two supported grants.
 func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, error) {
+	// Throttled before the grant is dispatched, so a caller cannot spend an unlimited
+	// number of client_secret or refresh_token guesses, each costing a DB round trip.
+	if err := s.checkTokenLimit(ctx, input.ClientIP); err != nil {
+		return nil, err
+	}
 	switch strings.TrimSpace(input.GrantType) {
 	case grantTypeAuthorizationCode:
 		return s.tokenByAuthorizationCode(ctx, input)
@@ -58,16 +63,24 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	case errors.Is(consumeErr, repository.ErrNotFound):
 		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
 	case errors.Is(consumeErr, repository.ErrAuthorizationReplayed):
+		// The code must belong to the authenticated client before its family is cut.
+		// Without this, any client that can authenticate and has obtained another
+		// client's spent code can revoke that client's family — a cross-client
+		// revocation primitive. A mismatch is reported as a plain invalid_grant, the
+		// same answer an unknown code gets, so it reveals nothing either way.
+		if authorization == nil || authorization.ClientID != client.ID {
+			return nil, newError(ErrInvalidGrant, "授权码无效", nil)
+		}
 		// PRD §4.10: a replayed code means the code leaked, and whatever tokens were
 		// already minted from it are suspect. Cut the whole family.
-		if authorization != nil && authorization.FamilyID != nil {
+		if authorization.FamilyID != nil {
 			s.revokeFamily(ctx, *authorization.FamilyID)
 		} else {
 			// family_id is nullable and Consent always sets it, so this means a row this
 			// service did not mint. The replay is real but there is nothing to revoke,
 			// which must not pass silently: whatever tokens exist stay live.
 			slog.ErrorContext(ctx, "replayed authorization code has no family to revoke",
-				"code_present", authorization != nil)
+				"client_id", client.ClientID)
 		}
 		s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_replayed")
 		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
@@ -227,8 +240,20 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	}
 
 	// A rotation is not a fresh authentication, so auth_time stays the moment the
-	// user actually authorized this family — the family's first refresh token.
-	idToken, err := s.signIDToken(ctx, user, client, scopes, "", current.CreatedAt)
+	// user actually authorized this family: the creation time of its first refresh
+	// token, looked up by sequence. Reading current.CreatedAt instead would be right
+	// only for the first rotation and would then advance by one rotation interval on
+	// every subsequent one, overstating how recently the user authenticated to any
+	// relying party enforcing max_age.
+	authTime, err := s.Tokens.FindFamilyOriginCreatedAt(ctx, current.FamilyID)
+	if err != nil {
+		// The family always has a sequence-0 row — the one this rotation descends from —
+		// so a miss here means the metadata is inconsistent, not that the user never
+		// authorized. Signing an ID Token with a guessed auth_time would be worse.
+		s.revokeFamily(ctx, pair.FamilyID)
+		return nil, newError(ErrInternal, "查询 Token 家族授权时间失败", err)
+	}
+	idToken, err := s.signIDToken(ctx, user, client, scopes, "", authTime)
 	if err != nil {
 		s.revokeFamily(ctx, pair.FamilyID)
 		return nil, err

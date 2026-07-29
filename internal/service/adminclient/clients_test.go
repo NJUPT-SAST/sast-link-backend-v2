@@ -131,6 +131,91 @@ func TestUpdateClientDisablingRevokesTokens(t *testing.T) {
 	}
 }
 
+// Disabling the built-in client is an unrecoverable lockout: session
+// .findInternalClient resolves it through an is_active filter, so login, refresh
+// and registration all fail afterwards — including for the administrator who would
+// undo it — and the same call revokes every internal session token. Rewriting its
+// redirect_uris would redirect first-party authorization codes elsewhere. Both must
+// be refused, and neither may reach the repository.
+func TestUpdateClientRefusesToBreakTheBuiltinClient(t *testing.T) {
+	disabled := false
+	for _, test := range []struct {
+		name  string
+		input UpdateClientInput
+	}{
+		{
+			name:  "disable",
+			input: UpdateClientInput{ClientPK: 1, IsActive: &disabled, AdminUserID: 99},
+		},
+		{
+			name: "rewrite redirect_uris",
+			input: UpdateClientInput{
+				ClientPK:     1,
+				RedirectURIs: &[]string{"https://attacker.test/cb"},
+				AdminUserID:  99,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.clients.findResult = protectedClient(1)
+
+			_, err := h.service.UpdateClient(context.Background(), test.input)
+
+			assertKind(t, err, KindProtected)
+			if h.clients.updateCalls != 0 {
+				t.Fatalf("update reached the repository %d times, want 0", h.clients.updateCalls)
+			}
+			// The refusal is audited: an attempt to disable authentication for everyone is
+			// exactly what an operator needs to see afterwards.
+			if len(h.audit.entries) != 1 || h.audit.entries[0].Success == nil || *h.audit.entries[0].Success {
+				t.Fatalf("audit entries = %+v, want one failed entry", h.audit.entries)
+			}
+		})
+	}
+}
+
+// The guard keys on client_id, not the primary key, so ordinary clients are
+// untouched — and renaming the built-in one is still allowed, since client_name is
+// cosmetic.
+func TestUpdateClientGuardIsScopedToTheBuiltinClient(t *testing.T) {
+	h := newHarness(t)
+	h.clients.findResult = activeClient(5)
+	disabled := false
+
+	if _, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 5, IsActive: &disabled, AdminUserID: 99,
+	}); err != nil {
+		t.Fatalf("disabling an ordinary client failed: %v", err)
+	}
+
+	renamed := newHarness(t)
+	renamed.clients.findResult = protectedClient(1)
+	name := "SAST Link Web (renamed)"
+	if _, err := renamed.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 1, ClientName: &name, AdminUserID: 99,
+	}); err != nil {
+		t.Fatalf("renaming the built-in client failed: %v", err)
+	}
+}
+
+// A missing client must still leave an audit trail, or walking primary keys to
+// discover which ones exist is invisible afterwards.
+func TestUpdateClientAuditsUnknownClient(t *testing.T) {
+	h := newHarness(t)
+	h.clients.findResult = nil
+	name := "whatever"
+
+	_, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 999999, ClientName: &name, AdminUserID: 99,
+	})
+
+	assertKind(t, err, KindNotFound)
+	if len(h.audit.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1 for a probed primary key", len(h.audit.entries))
+	}
+}
+
 // Revocation follows the true -> false transition, not the submitted value.
 // Re-sending is_active=false for an already disabled client must not re-revoke.
 func TestUpdateClientDoesNotRevokeWhenAlreadyDisabled(t *testing.T) {

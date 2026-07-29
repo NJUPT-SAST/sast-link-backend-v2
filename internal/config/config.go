@@ -17,6 +17,12 @@ const (
 	// Smaller values leave the header present but effectively unenforced.
 	minimumHSTSMaxAge = 31536000
 	maximumTCPPort    = 65535
+	// maxOAuthCodeTTL caps the authorization code lifetime. PRD §4.10 specifies 5
+	// minutes; the ceiling is deliberately loose enough for staging experiments and
+	// still far short of turning a code into a long-lived credential.
+	maxOAuthCodeTTL = 15 * time.Minute
+	// maxOAuthAuthorizeRequestTTL caps how long a pending consent decision waits.
+	maxOAuthAuthorizeRequestTTL = time.Hour
 )
 
 // Config holds all runtime configuration for the service.
@@ -84,6 +90,13 @@ type Config struct {
 	// could fill the keyspace. Fail-open, per PRD §6.0.
 	RateLimitAuthorizeRPM    int           `env:"RATE_LIMIT_AUTHORIZE_RPM" envDefault:"20"`
 	RateLimitAuthorizeWindow time.Duration `env:"RATE_LIMIT_AUTHORIZE_WINDOW" envDefault:"60s"`
+	// Throttles POST /oauth/token and POST /oauth/revoke per caller IP. Both check
+	// client credentials and presented tokens, so an unlimited rate means unlimited
+	// credential attempts. Set higher than the authorize limit: one authorization
+	// legitimately produces a token request plus periodic refreshes, and several
+	// clients can share an egress IP. Fail-open, per PRD §6.0.
+	RateLimitTokenRPM    int           `env:"RATE_LIMIT_TOKEN_RPM" envDefault:"60"`
+	RateLimitTokenWindow time.Duration `env:"RATE_LIMIT_TOKEN_WINDOW" envDefault:"60s"`
 
 	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
 	// beyond this queues at the hasher instead of saturating every CPU core.
@@ -134,6 +147,13 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("JWT_SECRET_KEY is required")
 	case strings.TrimSpace(c.JWTActiveKID) == "":
 		return fmt.Errorf("JWT_ACTIVE_KID is required")
+	// JWT_ISSUER is both the iss claim of every token and the base every OIDC
+	// discovery endpoint URL is concatenated onto, so it carries more weight than the
+	// two OAUTH_* URLs below that were already checked this way. A scheme-less value
+	// like "link.sast.fun" boots cleanly and publishes relative endpoint URLs that no
+	// relying party can resolve — a failure visible only to third-party integrators.
+	case !isAbsoluteHTTPURL(c.JWTIssuer):
+		return fmt.Errorf("JWT_ISSUER must be an absolute http(s) URL")
 	case len(c.RefreshTokenHMACSecret) < minimumRefreshHMACSecretLen:
 		return fmt.Errorf("REFRESH_TOKEN_HMAC_SECRET must be at least %d bytes", minimumRefreshHMACSecretLen)
 	case c.JWTAccessTokenExpiry <= 0:
@@ -166,6 +186,10 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_AUTHORIZE_RPM must be positive")
 	case c.RateLimitAuthorizeWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_AUTHORIZE_WINDOW must be at least 1s")
+	case c.RateLimitTokenRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_TOKEN_RPM must be positive")
+	case c.RateLimitTokenWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_TOKEN_WINDOW must be at least 1s")
 	// The consent URL has no default: guessing one would make a deployment that
 	// forgot it redirect every third-party authorization to a page that does not
 	// exist, and the failure would only surface for the end user mid-flow.
@@ -177,8 +201,20 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("OAUTH_CARD_BASE_URL must be an absolute http(s) URL")
 	case c.OAuthCodeTTL <= 0:
 		return fmt.Errorf("OAUTH_CODE_TTL must be positive")
+	// Upper-bounded, unlike most durations here. An authorization code is a bearer
+	// credential that travels through a browser redirect and lands in referrer
+	// headers and access logs; PRD §4.10 fixes it at 5 minutes. Single use plus
+	// family revocation on replay are what contain a leaked code, and both defenses
+	// are only as tight as this window, so a value like 720h would validate today and
+	// quietly widen the one interval they exist to bound.
+	case c.OAuthCodeTTL > maxOAuthCodeTTL:
+		return fmt.Errorf("OAUTH_CODE_TTL must not exceed %s", maxOAuthCodeTTL)
 	case c.OAuthAuthorizeRequestTTL <= 0:
 		return fmt.Errorf("OAUTH_AUTHORIZE_REQUEST_TTL must be positive")
+	// The consent stash holds a pending authorization; it only needs to outlive a
+	// human reading a consent screen.
+	case c.OAuthAuthorizeRequestTTL > maxOAuthAuthorizeRequestTTL:
+		return fmt.Errorf("OAUTH_AUTHORIZE_REQUEST_TTL must not exceed %s", maxOAuthAuthorizeRequestTTL)
 	case c.PasswordHashMaxConcurrent <= 0:
 		return fmt.Errorf("PASSWORD_HASH_MAX_CONCURRENT must be positive")
 	// SMTP backs registration, password reset and email binding. Validating it

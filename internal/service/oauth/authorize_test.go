@@ -495,3 +495,59 @@ func TestAuthorizeRejectsWhitespaceOnlyState(t *testing.T) {
 		t.Fatalf("error = %v, want invalid_request", err)
 	}
 }
+
+// The registration can change between the two legs. An administrator who removes a
+// compromised callback expects codes to stop going there at once; reading the
+// redirect_uri from the stash alone kept delivering to it for the rest of the TTL.
+func TestConsentRejectsRedirectURIRemovedBetweenLegs(t *testing.T) {
+	h := newHarness(t)
+	result, err := h.service.Authorize(context.Background(), validAuthorizeInput(t))
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	h.clients.byClientID[testPublicClientID].RedirectURIs = model.StringArray{"https://new.test/cb"}
+
+	_, err = h.service.Consent(context.Background(), ConsentInput{
+		RequestID: result.RequestID, Approve: true, UserID: 1,
+	})
+
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Consent() error = %v, want ErrInvalidRequest", err)
+	}
+	if len(h.authorizations.created) != 0 {
+		t.Fatalf("created %d codes, want none for a de-registered redirect_uri",
+			len(h.authorizations.created))
+	}
+}
+
+// code_challenge and nonce are persisted in VARCHAR(255) columns, so an oversized
+// value has to be refused on the first leg — as a redirectable invalid_request the
+// client can act on — rather than becoming a 500 at consent time, after the
+// single-use stash has been spent and the user has to restart.
+func TestAuthorizeBoundsPersistedParameters(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*AuthorizeInput)
+	}{
+		{"oversized nonce", func(i *AuthorizeInput) { i.Nonce = strings.Repeat("n", 256) }},
+		{"oversized state", func(i *AuthorizeInput) { i.State = strings.Repeat("s", 513) }},
+		{"short code_challenge", func(i *AuthorizeInput) { i.CodeChallenge = "too-short" }},
+		{"oversized code_challenge", func(i *AuthorizeInput) { i.CodeChallenge = strings.Repeat("c", 256) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			input := validAuthorizeInput(t)
+			test.mutate(&input)
+
+			_, err := h.service.Authorize(context.Background(), input)
+
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("Authorize() error = %v, want ErrInvalidRequest", err)
+			}
+			// Rejected before anything is stashed, so a flood cannot fill the keyspace.
+			if h.requests.saveCalls != 0 {
+				t.Fatalf("stashed %d requests, want none", h.requests.saveCalls)
+			}
+		})
+	}
+}

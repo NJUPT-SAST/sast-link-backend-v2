@@ -495,3 +495,48 @@ func assertUniqueViolation(t *testing.T, err error, wantConstraint string) {
 		t.Fatalf("constraint = %q, want %q", pgErr.ConstraintName, wantConstraint)
 	}
 }
+
+// A password reset must also burn the user's unredeemed authorization codes, not
+// only the tokens already minted.
+//
+// The token endpoint reads token_version fresh from the user row when it signs, so a
+// code held across a reset would redeem into a session carrying the *new*
+// token_version — one the auth middleware accepts. Revoking tokens while leaving the
+// codes alive therefore leaves a hole exactly as wide as the code TTL, in the one
+// flow (reset after suspected compromise) where that matters most.
+func TestUserRepositoryUpdatePasswordBurnsAuthorizationCodes(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	user := createUserWithProfile(t, userRepository, "burn-codes@njupt.edu.cn")
+	other := createUserWithProfile(t, userRepository, "other-codes@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	authorizations := repository.NewOAuthAuthorization(database)
+
+	live := testAuthorization("code-live", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	untouched := testAuthorization("code-other-user", client.ID, other.ID, time.Now().Add(5*time.Minute))
+	for _, authorization := range []*model.OAuthAuthorization{live, untouched} {
+		if err := authorizations.Create(context.Background(), authorization); err != nil {
+			t.Fatalf("Create(%s) error = %v", authorization.Code, err)
+		}
+	}
+
+	revokedAt := time.Now().UTC().Truncate(time.Millisecond)
+	if _, err := userRepository.UpdatePasswordAndRevokeSessions(
+		context.Background(), user.ID, "new-hash", revokedAt,
+	); err != nil {
+		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", err)
+	}
+
+	// The victim's code is spent, so redeeming it now reports a replay rather than
+	// minting a post-reset session.
+	if _, err := authorizations.Consume(context.Background(), "code-live", revokedAt); !errors.Is(
+		err, repository.ErrAuthorizationReplayed,
+	) {
+		t.Fatalf("Consume(code-live) error = %v, want ErrAuthorizationReplayed", err)
+	}
+	// Another user's pending authorization must survive: the reset is scoped to one
+	// account, and burning everyone's codes would log out unrelated users mid-flow.
+	if _, err := authorizations.Consume(context.Background(), "code-other-user", revokedAt); err != nil {
+		t.Fatalf("Consume(code-other-user) error = %v, want the code to survive", err)
+	}
+}

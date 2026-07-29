@@ -105,6 +105,12 @@ func mapServiceError(err error) error {
 	case adminclient.KindConflict:
 		status = http.StatusConflict
 		message = "OAuth 客户端已存在"
+	case adminclient.KindProtected:
+		// 403 rather than 400: the request is well formed and the administrator is
+		// authorized, but the built-in client is not theirs to disable. The message
+		// names the rule, since a bare "forbidden" would look like a role problem.
+		status = http.StatusForbidden
+		message = serviceErr.Message
 	case adminclient.KindInternal:
 	}
 	code := serviceErr.Code

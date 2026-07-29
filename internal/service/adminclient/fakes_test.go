@@ -118,12 +118,13 @@ func newHarness(t *testing.T) *harness {
 	auditLog := &fakeAudit{}
 	return &harness{
 		service: Service{
-			Clients:     clients,
-			Blacklist:   blacklist,
-			Audit:       auditLog,
-			Secrets:     auth.ClientSecretHasher{},
-			NewClientID: func() (string, error) { return "generated-client-id", nil },
-			Clock:       testClock{value: testNow},
+			Clients:           clients,
+			Blacklist:         blacklist,
+			Audit:             auditLog,
+			Secrets:           auth.ClientSecretHasher{},
+			NewClientID:       func() (string, error) { return "generated-client-id", nil },
+			Clock:             testClock{value: testNow},
+			ProtectedClientID: testProtectedClientID,
 		},
 		clients:   clients,
 		blacklist: blacklist,
@@ -142,6 +143,18 @@ func validCreateInput() CreateClientInput {
 		ClientIP:     "203.0.113.7",
 		UserAgent:    "console",
 	}
+}
+
+// testProtectedClientID stands in for INTERNAL_OAUTH_CLIENT_ID: the built-in
+// client the internal session flow resolves through an is_active filter.
+const testProtectedClientID = "sast-link-web"
+
+// protectedClient is the built-in registration, which must survive the admin API.
+func protectedClient(id int64) *model.OAuthClient {
+	client := activeClient(id)
+	client.ClientID = testProtectedClientID
+	client.ClientType = model.ClientTypeFirstParty
+	return client
 }
 
 func activeClient(id int64) *model.OAuthClient {

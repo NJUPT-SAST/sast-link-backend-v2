@@ -91,6 +91,10 @@ type TokenRepository interface {
 	RotateRefreshToken(ctx context.Context, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
+	// FindFamilyOriginCreatedAt returns when a family's first refresh token was
+	// created, i.e. when the user actually authorized. Rotation must not advance the
+	// ID Token's auth_time, so it cannot be read from the rotated row itself.
+	FindFamilyOriginCreatedAt(ctx context.Context, familyID string) (time.Time, error)
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
 }
 

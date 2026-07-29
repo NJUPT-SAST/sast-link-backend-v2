@@ -22,7 +22,11 @@ const (
 	KindInvalidInput Kind = "invalid_input"
 	KindNotFound     Kind = "not_found"
 	KindConflict     Kind = "conflict"
-	KindInternal     Kind = "internal"
+	// KindProtected is an attempt to change the built-in client in a way that would
+	// break authentication for everyone. HTTP 403: the request is understood and
+	// well formed, the target is simply not the caller's to change.
+	KindProtected Kind = "protected"
+	KindInternal  Kind = "internal"
 )
 
 // Error is a typed admin-client service error.
@@ -64,7 +68,12 @@ var (
 	ErrInvalidInput = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
 	ErrNotFound     = &Error{Kind: KindNotFound, Code: errcode.CodeClientNotFound}
 	ErrConflict     = &Error{Kind: KindConflict, Code: errcode.CodeConflict}
-	ErrInternal     = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	// ErrProtectedClient refuses a change to the built-in client that would break
+	// the internal session flow. Distinct from ErrInvalidInput because the input is
+	// well formed — it is the target that is off limits — and the console needs to
+	// tell the two apart to explain why.
+	ErrProtectedClient = &Error{Kind: KindProtected, Code: errcode.CodeForbidden}
+	ErrInternal        = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 )
 
 // newError builds a typed error carrying sentinel's Kind and Code.

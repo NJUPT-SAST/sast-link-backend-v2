@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -119,6 +120,77 @@ func TestTokenIDTokenAuthTimeIsConsentInstant(t *testing.T) {
 	// openid alone must not leak profile or email claims.
 	if claims.Name != "" || claims.Email != "" {
 		t.Fatalf("id_token = %+v, want no profile/email claims for scope openid", claims)
+	}
+}
+
+// movingClock advances between calls, so a test can observe what a value is read
+// from rather than only that it is plausible at one instant.
+type movingClock struct{ now *time.Time }
+
+func (c movingClock) Now() time.Time { return *c.now }
+
+// Rotation is not a re-authentication, so auth_time must stay the instant the user
+// authorized (PRD §4.10, API 文档 §5.3).
+//
+// Three rotations, not one: reading the *current* refresh row's created_at is
+// correct for the first rotation and only starts drifting on the second, so a
+// single-rotation test passes against the bug.
+func TestTokenIDTokenAuthTimeSurvivesRepeatedRotation(t *testing.T) {
+	h := newHarness(t)
+	base := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	current := base
+	h.service.Clock = movingClock{now: &current}
+
+	code := issueCode(t, h, testPublicClientID, "openid")
+	consentedAt := h.authorizations.created[0].CreatedAt
+
+	issued, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+	tokens := map[string]string{"code grant": issued.IDToken}
+	refreshToken := issued.RefreshToken
+	for i, elapsed := range []time.Duration{2 * time.Hour, 10 * time.Hour, 30 * time.Hour} {
+		current = base.Add(elapsed)
+		rotated, rotateErr := h.service.Token(context.Background(), TokenInput{
+			GrantType:    grantTypeRefreshToken,
+			RefreshToken: refreshToken,
+			ClientID:     testPublicClientID,
+		})
+		if rotateErr != nil {
+			t.Fatalf("rotation %d error = %v", i+1, rotateErr)
+		}
+		tokens[fmt.Sprintf("rotation %d", i+1)] = rotated.IDToken
+		refreshToken = rotated.RefreshToken
+	}
+
+	for name, token := range tokens {
+		got := parseIDTokenClaims(t, h, token).AuthTime
+		if got != consentedAt.Unix() {
+			t.Errorf("%s auth_time = %v, want the authorization instant %v",
+				name, time.Unix(got, 0).UTC(), consentedAt.UTC())
+		}
+	}
+}
+
+// The family always has a sequence-0 row, so a lookup failure means inconsistent
+// metadata: refuse rather than sign an ID Token with a guessed auth_time.
+func TestTokenRefreshFailsWhenFamilyOriginUnreadable(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid")
+	issued, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+
+	h.tokens.originErr = errors.New("database unavailable")
+	_, err = h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: issued.RefreshToken,
+		ClientID:     testPublicClientID,
+	})
+	if !errors.Is(err, ErrInternal) {
+		t.Fatalf("Token() error = %v, want ErrInternal", err)
 	}
 }
 

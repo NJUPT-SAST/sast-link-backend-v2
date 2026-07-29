@@ -61,6 +61,17 @@ func (s AuthorizeRequestStore) SaveAuthorizeRequest(
 // payload. A missing key is reported as not-found rather than as an error, since
 // an expired or already-spent request is an ordinary outcome the caller answers
 // by asking the user to restart.
+//
+// The stash is keyed by request ID alone and is not bound to a user, because the
+// first leg of the flow is unauthenticated by design — there is no subject to bind
+// to when it is written. Anyone who learns a live request_id can therefore consume
+// it and cancel that pending authorization. The consequence is bounded to denial of
+// service on one in-flight request: the consumer's own consent would mint a code
+// for their own subject, not the victim's. Containment rests on the ID being 16
+// random bytes, the 10-minute TTL, and Referrer-Policy
+// strict-origin-when-cross-origin keeping the query string out of cross-origin
+// referrers. Binding a subject here would require authenticating leg one, which
+// would break arriving from a third party with no Authorization header.
 func (s AuthorizeRequestStore) ConsumeAuthorizeRequest(
 	ctx context.Context,
 	requestID string,

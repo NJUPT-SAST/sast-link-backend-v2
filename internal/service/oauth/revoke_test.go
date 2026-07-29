@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -174,5 +175,50 @@ func TestRevokeSucceedsForExpiredAccessToken(t *testing.T) {
 		ClientID: testPublicClientID,
 	}); err != nil {
 		t.Fatalf("Revoke(expired access token) error = %v, want success", err)
+	}
+}
+
+// RFC 7009's success contract is that the token no longer works. Reporting 200 for
+// a revocation that did not commit tells the client the session is gone while it
+// stays live for its full TTL, and the client has no reason to retry.
+func TestRevokeSurfacesRevocationFailure(t *testing.T) {
+	h := newHarness(t)
+	pair := issuePair(t, h)
+	h.tokens.revokeErr = errors.New("database unavailable")
+
+	err := h.service.Revoke(context.Background(), RevokeInput{
+		Token:    pair.RefreshToken,
+		ClientID: testPublicClientID,
+		ClientIP: "203.0.113.10",
+	})
+
+	if !errors.Is(err, ErrInternal) {
+		t.Fatalf("Revoke() error = %v, want ErrInternal", err)
+	}
+	// The audit trail must not claim a revocation that did not happen.
+	if len(h.audit.entries) == 0 {
+		t.Fatal("no audit entry for a failed revocation")
+	}
+	last := h.audit.entries[len(h.audit.entries)-1]
+	if last.Success == nil || *last.Success {
+		t.Fatalf("audit success = %v, want false for a failed revocation", last.Success)
+	}
+}
+
+// Both endpoints that authenticate a client and resolve a presented token share one
+// per-IP limiter, so neither offers an unlimited number of credential attempts.
+func TestRevokeThrottlesByIP(t *testing.T) {
+	h := newHarness(t)
+	pair := issuePair(t, h)
+	h.limiter.result = LimitResult{Allowed: false, RetryAfter: 30 * time.Second}
+
+	err := h.service.Revoke(context.Background(), RevokeInput{
+		Token:    pair.RefreshToken,
+		ClientID: testPublicClientID,
+		ClientIP: "203.0.113.10",
+	})
+
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("Revoke() error = %v, want ErrRateLimited", err)
 	}
 }

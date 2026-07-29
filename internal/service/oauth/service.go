@@ -39,13 +39,17 @@ type Service struct {
 	Blacklist      TokenBlacklist
 	// AuthorizeLimiter throttles the unauthenticated authorize endpoint per IP.
 	AuthorizeLimiter EndpointLimiter
-	JWT              *auth.JWTManager
-	RefreshTokens    *auth.RefreshTokenManager
-	Clock            Clock
-	AccessTTL        time.Duration
-	RefreshTTL       time.Duration
-	CodeTTL          time.Duration
-	RequestTTL       time.Duration
+	// TokenLimiter throttles the token and revocation endpoints per IP. Both accept
+	// client credentials and refresh tokens, so an unlimited rate is an unlimited
+	// number of credential attempts and DB round trips.
+	TokenLimiter  EndpointLimiter
+	JWT           *auth.JWTManager
+	RefreshTokens *auth.RefreshTokenManager
+	Clock         Clock
+	AccessTTL     time.Duration
+	RefreshTTL    time.Duration
+	CodeTTL       time.Duration
+	RequestTTL    time.Duration
 	// CardBaseURL prefixes the OIDC profile claim; a user's card lives at
 	// CardBaseURL + "/" + user ID.
 	CardBaseURL string
@@ -99,13 +103,33 @@ func (s Service) issuer() tokenissue.Issuer {
 // the limiter guards against stash flooding, and refusing every authorization
 // during a Redis blip would take third-party login down entirely.
 func (s Service) checkAuthorizeLimit(ctx context.Context, clientIP string) error {
+	return s.checkLimit(ctx, s.AuthorizeLimiter, "authorize", clientIP)
+}
+
+// checkTokenLimit throttles the token and revocation endpoints per caller IP.
+//
+// Also fail-open, and for the same reason as authorize: PostgreSQL is
+// authoritative for every credential these endpoints check, so a lost counter
+// only widens the rate window, while refusing every token request during a Redis
+// outage would break refresh for every client at once.
+//
+// The cap is per IP rather than per client_id, because the unauthenticated
+// failure modes — guessing a client_secret, replaying refresh tokens — are exactly
+// the ones where the client_id is attacker-chosen and therefore worthless as a
+// throttling key.
+func (s Service) checkTokenLimit(ctx context.Context, clientIP string) error {
+	return s.checkLimit(ctx, s.TokenLimiter, "oauth_token", clientIP)
+}
+
+func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, clientIP string) error {
 	subject := strings.TrimSpace(clientIP)
-	if s.AuthorizeLimiter == nil || subject == "" {
+	if limiter == nil || subject == "" {
 		return nil
 	}
-	result, err := s.AuthorizeLimiter.Allow(ctx, "authorize", "ip:"+subject)
+	result, err := limiter.Allow(ctx, endpoint, "ip:"+subject)
 	if err != nil {
-		slog.WarnContext(ctx, "authorize limiter unavailable, allowing request", "error", err)
+		slog.WarnContext(ctx, "oauth limiter unavailable, allowing request",
+			"endpoint", endpoint, "error", err)
 		return nil
 	}
 	if !result.Allowed {
@@ -138,35 +162,47 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 	}
 }
 
-// revokeFamily revokes a token family and delivers its blacklist entries.
+// revokeFamily revokes a token family, discarding the outcome.
 //
-// It runs on a context detached from the caller: the two callers are replay
-// defenses, and a client that disconnects right after replaying a code must not
-// be able to leave the compromised family alive by hanging up.
+// For callers where the failure changes no response: a replay defense, whose
+// request already fails and whose requester is the suspected attacker, or a
+// compensating cleanup that is already returning an error of its own. Propagating
+// here would revoke nothing extra — the database is what is unavailable.
+//
+// A failure is still a security event to alert on rather than noise: until the
+// revocation succeeds the suspect family stays valid for up to its full refresh
+// TTL. Alert on security_event.
+//
+// Callers that report the revocation to the requester must use revokeFamilyErr
+// instead; answering "revoked" for a revocation that did not happen is worse than
+// answering with an error.
 func (s Service) revokeFamily(ctx context.Context, familyID string) {
+	if err := s.revokeFamilyErr(ctx, familyID); err != nil {
+		slog.ErrorContext(ctx, "revoke oauth token family",
+			"security_event", "token_family_revocation_failed",
+			"family_id", familyID, "error", err)
+	}
+}
+
+// revokeFamilyErr revokes a token family and delivers its blacklist entries,
+// returning whether the revocation actually committed.
+//
+// It runs on a context detached from the caller: several callers are replay
+// defenses, and a client that disconnects right after replaying a code must not be
+// able to leave the compromised family alive by hanging up.
+func (s Service) revokeFamilyErr(ctx context.Context, familyID string) error {
 	if strings.TrimSpace(familyID) == "" {
-		return
+		return nil
 	}
 	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revocationTimeout)
 	defer cancel()
 	now := s.now()
 	entries, err := s.Tokens.RevokeFamily(revokeCtx, familyID, now)
 	if err != nil {
-		// The outcome is deliberately not returned to the caller. Every caller is
-		// either a replay defense — where the request already fails and the requester
-		// is the suspected attacker — or a compensating cleanup whose own error is
-		// already being returned. Propagating this would change no response and
-		// revoke nothing; the DB is what is unavailable.
-		//
-		// It is therefore a security event to alert on, not an error to handle: until
-		// it succeeds the suspect family stays valid for up to its full refresh TTL.
-		// security_event is the field to alert on.
-		slog.ErrorContext(revokeCtx, "revoke oauth token family",
-			"security_event", "token_family_revocation_failed",
-			"family_id", familyID, "error", err)
-		return
+		return err
 	}
 	s.deliverBlacklist(revokeCtx, entries, now)
+	return nil
 }
 
 // audit records an OAuth audit event. Audit failures are logged, never returned:

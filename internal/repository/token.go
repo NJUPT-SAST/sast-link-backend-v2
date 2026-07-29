@@ -332,6 +332,35 @@ func (r *TokenRepository) FindRefreshToken(
 	return nil, fmt.Errorf("find refresh token: %w", err)
 }
 
+// FindFamilyOriginCreatedAt returns the creation time of a family's first refresh
+// token, which is the instant the user authorized this family.
+//
+// It reads the lowest sequence rather than min(created_at): sequence is the
+// family's monotonic ordering and is uniquely constrained with family_id, so it
+// identifies the origin row exactly, whereas two rows could in principle share a
+// timestamp. This is what lets the ID Token's auth_time survive rotation — the
+// rotated row's own created_at is the rotation instant, not an authentication.
+func (r *TokenRepository) FindFamilyOriginCreatedAt(
+	ctx context.Context,
+	familyID string,
+) (time.Time, error) {
+	if strings.TrimSpace(familyID) == "" {
+		return time.Time{}, fmt.Errorf("find token family origin: %w", ErrInvalidArgument)
+	}
+	var origin model.OAuthRefreshToken
+	err := r.database.WithContext(ctx).
+		Where("family_id = ?", familyID).
+		Order("sequence ASC").
+		First(&origin).Error
+	if err == nil {
+		return origin.CreatedAt, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return time.Time{}, ErrNotFound
+	}
+	return time.Time{}, fmt.Errorf("find token family origin: %w", err)
+}
+
 // FindAccessAuthStateByJTI reads the DB-authoritative state for one access JTI,
 // including the token record and its associated user state in a single query.
 func (r *TokenRepository) FindAccessAuthStateByJTI(ctx context.Context, jti string) (*AccessAuthState, error) {
@@ -522,6 +551,18 @@ func revokeAllByUserInTransaction(
 		Where("user_id = ? AND revoked_at IS NULL", userID).
 		Update("revoked_at", revokedAt).Error; err != nil {
 		return nil, fmt.Errorf("revoke refresh tokens by user: %w", err)
+	}
+	// Outstanding authorization codes are burned too, not just the tokens already
+	// minted. A code is a bearer credential that has not been spent yet: the token
+	// endpoint reads token_version fresh from the user row when it signs, so a code
+	// held across a password reset would redeem into a session carrying the *new*
+	// token_version — one the auth middleware accepts. Revoking tokens while leaving
+	// the codes alive therefore leaves a hole exactly as wide as the code TTL, in
+	// the one flow (reset after suspected compromise) where that matters most.
+	if err := transaction.Model(&model.OAuthAuthorization{}).
+		Where("user_id = ? AND is_used = FALSE AND expires_at > ?", userID, revokedAt).
+		Update("is_used", true).Error; err != nil {
+		return nil, fmt.Errorf("burn authorization codes by user: %w", err)
 	}
 	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
 }

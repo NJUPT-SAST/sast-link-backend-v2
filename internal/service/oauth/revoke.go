@@ -3,8 +3,10 @@ package oauth
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
@@ -22,6 +24,11 @@ const tokenTypeHintAccess = "access_token"
 // token of a family is ending that session, and leaving the sibling access token
 // live for up to its full TTL would contradict that.
 func (s Service) Revoke(ctx context.Context, input RevokeInput) error {
+	// Shares the token endpoint's limiter: this endpoint also authenticates a client
+	// and resolves a presented token, so it offers the same guessing surface.
+	if err := s.checkTokenLimit(ctx, input.ClientIP); err != nil {
+		return err
+	}
 	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
 	if err != nil {
 		return err
@@ -41,7 +48,17 @@ func (s Service) Revoke(ctx context.Context, input RevokeInput) error {
 		return nil
 	}
 
-	s.revokeFamily(ctx, familyID)
+	// Unlike the replay defenses, this caller reports the outcome to the requester.
+	// RFC 7009's success contract is that the token no longer works; answering 200
+	// for a revocation that did not commit tells the client the session is gone when
+	// it is live for its full TTL, and the client has no reason to retry.
+	if revokeErr := s.revokeFamilyErr(ctx, familyID); revokeErr != nil {
+		slog.ErrorContext(ctx, "revoke oauth token family",
+			"security_event", "token_family_revocation_failed",
+			"family_id", familyID, "error", revokeErr)
+		s.auditRevoke(ctx, userID, client.ClientID, input, false, "revocation_failed")
+		return newError(ErrInternal, "撤销 Token 失败，请重试", revokeErr)
+	}
 	s.auditRevoke(ctx, userID, client.ClientID, input, true, "revoked")
 	return nil
 }
@@ -126,7 +143,11 @@ func (s Service) auditRevoke(
 	outcome string,
 ) {
 	resourceID := clientID
-	s.audit(ctx, userID, "oauth_revoke", &resourceID, success, 0, input.ClientIP, input.UserAgent, map[string]any{
+	errCode := 0
+	if !success {
+		errCode = errcode.CodeInternal
+	}
+	s.audit(ctx, userID, "oauth_revoke", &resourceID, success, errCode, input.ClientIP, input.UserAgent, map[string]any{
 		"client_id":       clientID,
 		"token_type_hint": strings.TrimSpace(input.TokenTypeHint),
 		"outcome":         outcome,

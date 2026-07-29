@@ -43,11 +43,14 @@ func writeError(c *gin.Context, err error) {
 	if oauthErr.RetryAfter > 0 {
 		c.Header("Retry-After", retryAfterSeconds(oauthErr.RetryAfter))
 	}
-	// RFC 6749 §5.2: a 401 from the token endpoint must carry a challenge so the
-	// client knows the failure was about its own credentials.
-	if status == http.StatusUnauthorized {
-		c.Header("WWW-Authenticate", `Basic realm="oauth", charset="UTF-8"`)
-	}
+	// No WWW-Authenticate on a 401 here. RFC 6749 §5.2 requires the header only "if
+	// the client attempted to authenticate via the Authorization request header
+	// field", and this server never reads that header on the token or revocation
+	// endpoints: credentials arrive as form parameters, and the discovery document
+	// advertises exactly none and client_secret_post. Emitting a Basic challenge told
+	// a conforming client to retry with an auth method that does not exist here — it
+	// would resend the secret over Basic, omit the form client_id, and then fail with
+	// "client_id 不能为空" on every attempt.
 	c.JSON(status, errorResponse{
 		Error:            oauthErr.Code,
 		ErrorDescription: oauthErr.Description,
@@ -89,23 +92,35 @@ func writeBearerError(c *gin.Context, err error) {
 // response header: a stray quote would let a value escape its parameter and forge
 // another, and a CR or LF would split the header. Enforcing it here means a future
 // caller that passes request-derived text cannot turn it into header injection.
+//
+// error_description is dropped entirely when sanitizing leaves nothing usable,
+// which is what happens to this service's Chinese messages: RFC 6750 §3 restricts
+// a quoted challenge value to %x20-21 / %x23-5B / %x5D-7E, so a client validating
+// against that grammar may discard the whole header — including the error code it
+// needs to decide whether to refresh. The full message still travels in the JSON
+// body, where UTF-8 is fine.
 func bearerChallenge(err *oauth.Error) string {
 	challenge := `Bearer realm="sast-link", error="` + quotedHeaderValue(err.Code) + `"`
-	if description := quotedHeaderValue(err.Description); description != "" {
+	// Included only when the description was already conforming, rather than in
+	// sanitized form. Stripping the non-ASCII bytes out of "Access Token 无效或已过期"
+	// would emit "Access Token " — a truncated fragment that reads like a different
+	// message. An absent optional parameter is honest; a mangled one is not.
+	if description := quotedHeaderValue(err.Description); description == err.Description && description != "" {
 		challenge += `, error_description="` + description + `"`
 	}
 	return challenge
 }
 
-// quotedHeaderValue strips the characters that would break out of an HTTP quoted
-// string: the delimiter itself, the escape character, and anything a header cannot
-// carry (CR, LF, NUL and other control bytes).
+// quotedHeaderValue reduces a value to the characters RFC 6750 §3 permits inside a
+// challenge's quoted string: printable US-ASCII minus the quote and backslash
+// delimiters. Anything else — control bytes that would split the header, and
+// non-ASCII that would violate the grammar — is dropped.
 func quotedHeaderValue(value string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
 		case r == '"' || r == '\\':
 			return -1
-		case r < 0x20 || r == 0x7f:
+		case r < 0x20 || r >= 0x7f:
 			return -1
 		default:
 			return r

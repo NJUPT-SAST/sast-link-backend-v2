@@ -150,6 +150,14 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Window: cfg.RateLimitAuthorizeWindow,
 		},
 	}
+	tokenLimiter := oauthredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitTokenRPM,
+			Window: cfg.RateLimitTokenWindow,
+		},
+	}
 	oauthService := oauth.Service{
 		Users:            users,
 		Clients:          clients,
@@ -160,6 +168,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Requests:         oauthredis.AuthorizeRequestStore{Store: store},
 		Blacklist:        oauthredis.BlacklistStore{Store: store},
 		AuthorizeLimiter: authorizeLimiter,
+		TokenLimiter:     tokenLimiter,
 		JWT:              jwtManager,
 		RefreshTokens:    refreshManager,
 		AccessTTL:        cfg.JWTAccessTokenExpiry,
@@ -179,6 +188,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		// Default random source and hashing; no work factor is bought for a 32-byte
 		// random secret, see auth.ClientSecretHasher.
 		Secrets: auth.ClientSecretHasher{},
+		// The same client the internal API pins its azp gate to. Disabling it would
+		// lock every user out of login with no in-band way back.
+		ProtectedClientID: cfg.InternalOAuthClientID,
 	}
 
 	return &sessionRuntime{

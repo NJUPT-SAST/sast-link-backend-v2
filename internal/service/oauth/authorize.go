@@ -21,6 +21,21 @@ const (
 	grantTypeAuthorizationCode = "authorization_code"
 	grantTypeRefreshToken      = "refresh_token"
 	pkceMethodS256             = "S256"
+
+	// maxAuthorizeParameterLength bounds the free-form authorize parameters that are
+	// persisted with the code. It matches the VARCHAR(255) width of
+	// oauth_authorizations.code_challenge and .nonce (V001): validating here turns an
+	// oversized value into a redirectable invalid_request on the first leg, instead of
+	// an opaque 500 at consent time — after the single-use stash has already been
+	// spent and the user has to restart.
+	maxAuthorizeParameterLength = 255
+	// maxStateLength bounds the state echoed back to the client. state is not stored
+	// in a column but is held in the Redis stash and reflected into a Location
+	// header, so it needs a cap of its own.
+	maxStateLength = 512
+	// An S256 challenge is always 43 base64url characters. A shorter value cannot be
+	// a SHA-256 digest, so it is rejected up front rather than at redemption.
+	pkceS256ChallengeLength = 43
 )
 
 // Authorize validates an authorization request and stashes it for the consent page.
@@ -81,6 +96,9 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	if strings.TrimSpace(input.State) == "" {
 		return nil, redirectableError(ErrInvalidRequest, "state 不能为空", nil)
 	}
+	if len(input.State) > maxStateLength {
+		return nil, redirectableError(ErrInvalidRequest, "state 长度超出限制", nil)
+	}
 	state := input.State
 	if strings.TrimSpace(input.CodeChallengeMethod) != pkceMethodS256 {
 		return nil, redirectableError(ErrInvalidRequest, "code_challenge_method 必须为 S256", nil)
@@ -88,6 +106,17 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	challenge := strings.TrimSpace(input.CodeChallenge)
 	if challenge == "" {
 		return nil, redirectableError(ErrInvalidRequest, "code_challenge 不能为空", nil)
+	}
+	// An S256 challenge is a fixed-width base64url digest, so anything else is
+	// malformed. Checked here rather than only at redemption: the code is minted from
+	// this value, and a challenge no verifier could ever match yields a code that is
+	// guaranteed to fail — better to refuse the request the client can still fix.
+	if len(challenge) != pkceS256ChallengeLength {
+		return nil, redirectableError(ErrInvalidRequest, "code_challenge 必须为 43 位 base64url S256 摘要", nil)
+	}
+	nonce := strings.TrimSpace(input.Nonce)
+	if len(nonce) > maxAuthorizeParameterLength {
+		return nil, redirectableError(ErrInvalidRequest, "nonce 长度超出限制", nil)
 	}
 
 	requested, err := parseRequestedScopes(input.Scope)
@@ -109,7 +138,7 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 		State:               state,
 		CodeChallenge:       challenge,
 		CodeChallengeMethod: pkceMethodS256,
-		Nonce:               strings.TrimSpace(input.Nonce),
+		Nonce:               nonce,
 	}
 	ttl := s.requestTTL()
 	if err := s.Requests.SaveAuthorizeRequest(ctx, requestID, payload, ttl); err != nil {
@@ -168,6 +197,14 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	}
 	if err != nil {
 		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+	// The redirect_uri is re-matched against the registration as it stands now, not
+	// only as it stood on the first leg. An administrator who removes a compromised
+	// callback expects codes to stop going there immediately; without this the stash
+	// keeps delivering to the removed URI for the rest of its TTL. Same reasoning as
+	// the disabled-client check above — the registration can change between legs.
+	if !slices.Contains([]string(client.RedirectURIs), payload.RedirectURI) {
+		return nil, newError(ErrInvalidRequest, "redirect_uri 已不在客户端注册值中，请重新发起授权", nil)
 	}
 
 	user, err := s.Users.FindByID(ctx, input.UserID)

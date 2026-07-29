@@ -136,10 +136,20 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	}
 	current, err := s.Clients.FindByID(ctx, input.ClientPK)
 	if errors.Is(err, repository.ErrNotFound) {
+		// Audited like every other rejection on this path: without it, walking primary
+		// keys to see which ones exist leaves no trace.
+		s.auditUpdate(ctx, input, false, ErrNotFound.Code, 0, nil)
 		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
 	}
 	if err != nil {
+		s.auditUpdate(ctx, input, false, ErrInternal.Code, 0, nil)
 		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+	// Checked after the row is loaded, because the guard keys on the stored
+	// client_id rather than the primary key the caller supplied.
+	if protectedErr := s.checkProtected(current, input); protectedErr != nil {
+		s.auditUpdate(ctx, input, false, errorCode(protectedErr), 0, &current.ClientID)
+		return nil, protectedErr
 	}
 	// Revocation follows the transition, not the submitted value. Re-sending
 	// is_active=false for an already disabled client must not re-revoke, and must not

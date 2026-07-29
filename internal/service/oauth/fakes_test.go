@@ -109,6 +109,7 @@ type fakeTokens struct {
 	createErr       error
 	rotateErr       error
 	revokeErr       error
+	originErr       error
 }
 
 func newFakeTokens() *fakeTokens {
@@ -157,6 +158,27 @@ func (f *fakeTokens) FindRefreshToken(_ context.Context, tokenHash string) (*mod
 		return nil, repository.ErrNotFound
 	}
 	return refresh, nil
+}
+
+// FindFamilyOriginCreatedAt mirrors the repository: the lowest-sequence row of the
+// family, so tests observe the same auth_time semantics as production.
+func (f *fakeTokens) FindFamilyOriginCreatedAt(_ context.Context, familyID string) (time.Time, error) {
+	if f.originErr != nil {
+		return time.Time{}, f.originErr
+	}
+	var origin *model.OAuthRefreshToken
+	for _, refresh := range f.refreshByHash {
+		if refresh.FamilyID != familyID {
+			continue
+		}
+		if origin == nil || refresh.Sequence < origin.Sequence {
+			origin = refresh
+		}
+	}
+	if origin == nil {
+		return time.Time{}, repository.ErrNotFound
+	}
+	return origin.CreatedAt, nil
 }
 
 func (f *fakeTokens) FindAccessTokenByJTI(_ context.Context, jti string) (*model.OAuthAccessToken, error) {
@@ -444,15 +466,18 @@ func newHarness(t *testing.T) *harness {
 		Requests:         h.requests,
 		Blacklist:        h.blacklist,
 		AuthorizeLimiter: h.limiter,
-		JWT:              jwtManager,
-		RefreshTokens:    refreshManager,
-		Clock:            clock,
-		AccessTTL:        time.Hour,
-		RefreshTTL:       30 * 24 * time.Hour,
-		CodeTTL:          5 * time.Minute,
-		RequestTTL:       10 * time.Minute,
-		CardBaseURL:      "https://link.sast.fun/card",
-		Issuer:           "https://link.sast.fun/v2",
+		// Same fake behind both, so a test can throttle either endpoint; the recorded
+		// endpoint name in fakeLimiter.calls distinguishes them.
+		TokenLimiter:  h.limiter,
+		JWT:           jwtManager,
+		RefreshTokens: refreshManager,
+		Clock:         clock,
+		AccessTTL:     time.Hour,
+		RefreshTTL:    30 * 24 * time.Hour,
+		CodeTTL:       5 * time.Minute,
+		RequestTTL:    10 * time.Minute,
+		CardBaseURL:   "https://link.sast.fun/card",
+		Issuer:        "https://link.sast.fun/v2",
 	}
 	return h
 }
