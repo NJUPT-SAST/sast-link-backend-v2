@@ -821,3 +821,28 @@ func TestBearerChallengeCannotBeInjected(t *testing.T) {
 		t.Fatalf("challenge %q lost its well-formed prefix", challenge)
 	}
 }
+
+// An oversized body must produce a clean 400, not a 500 or a hang.
+// MaxBytesReader is handed the ResponseWriter and can mark the connection, so this
+// checks ParseForm's failure stays an ordinary decode error.
+func TestTokenRejectsOversizedBody(t *testing.T) {
+	service := &fakeService{}
+	router := newRouter(t, service, &fakeAuthenticator{})
+	body := "grant_type=refresh_token&refresh_token=" + strings.Repeat("a", 32<<10)
+
+	recorder := doRequest(t, router, http.MethodPost, "/oauth/token",
+		"application/x-www-form-urlencoded", body)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+	var response errorResponse
+	decodeJSON(t, recorder, &response)
+	if response.Error != "invalid_request" {
+		t.Fatalf("error = %q, want invalid_request", response.Error)
+	}
+	// The service must not have been reached at all.
+	if service.tokenInput != (oauth.TokenInput{}) {
+		t.Fatalf("service received %+v for an oversized body", service.tokenInput)
+	}
+}
