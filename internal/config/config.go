@@ -234,6 +234,14 @@ func (c *Config) ValidateAPIAuth() error {
 		return err
 	}
 	c.TrustedProxies = normalizedProxies
+	// Canonicalized here so both consumers of this one value agree. It is read twice:
+	// as the JWT manager's iss claim and as the base the discovery document
+	// concatenates endpoint URLs onto. Discovery already strips a trailing slash while
+	// the signer does not, so "https://link.sast.fun/v2/" would advertise issuer
+	// ".../v2" and then sign ".../v2/" — and OIDC Discovery 1.0 requires the two to be
+	// byte-identical, so a conforming relying party rejects every ID Token. Trimming
+	// once at the boundary keeps that impossible instead of relying on each consumer.
+	c.JWTIssuer = strings.TrimRight(strings.TrimSpace(c.JWTIssuer), "/")
 	return nil
 }
 

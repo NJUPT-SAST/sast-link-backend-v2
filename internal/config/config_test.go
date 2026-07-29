@@ -446,6 +446,37 @@ func TestValidateAPIAuthRejectsRelativeJWTIssuer(t *testing.T) {
 	}
 }
 
+// JWT_ISSUER is canonicalized without its trailing slash, because the value is read
+// twice: as the iss claim the JWT manager signs, and as the base the discovery
+// document builds endpoint URLs from. Discovery strips a trailing slash and the
+// signer does not, so an untrimmed "…/v2/" would advertise issuer "…/v2" and sign
+// "…/v2/" — OIDC Discovery 1.0 requires them byte-identical, so a conforming relying
+// party would reject every ID Token this service issues.
+func TestValidateAPIAuthCanonicalizesJWTIssuer(t *testing.T) {
+	for _, test := range []struct{ given, want string }{
+		{"https://link.sast.fun/v2/", "https://link.sast.fun/v2"},
+		{"https://link.sast.fun/v2///", "https://link.sast.fun/v2"},
+		{"  https://link.sast.fun/v2  ", "https://link.sast.fun/v2"},
+		{"https://link.sast.fun/v2", "https://link.sast.fun/v2"},
+	} {
+		t.Run(test.given, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("JWT_ISSUER", test.given)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err != nil {
+				t.Fatalf("ValidateAPIAuth() error = %v", err)
+			}
+			if cfg.JWTIssuer != test.want {
+				t.Fatalf("JWTIssuer = %q, want %q", cfg.JWTIssuer, test.want)
+			}
+		})
+	}
+}
+
 // An authorization code is a bearer credential that travels through a browser
 // redirect. Single use plus family revocation on replay are only as tight as this
 // window, so an unbounded TTL would quietly widen the interval they exist to bound.
