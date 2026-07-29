@@ -197,9 +197,16 @@ func (a Authenticator) authenticate(ctx context.Context, header string) (Princip
 		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
 	}
 	return Principal{
-		UserID:    userID,
-		JTI:       claims.ID,
-		Role:      claims.Role,
+		UserID: userID,
+		JTI:    claims.ID,
+		// The role comes from the database row, not from claims.Role. A JWT carries the
+		// role as it stood at signing time, so an administrator who has just been
+		// demoted would keep administrative access until that token expired. The state
+		// query already joins "user" for state and token_version, so reading role from
+		// the same row costs no extra round trip and makes a demotion effective on the
+		// next request. claims.Role is still validated for presence but is not what
+		// authorization decisions are made on.
+		Role:      string(state.UserRole),
 		State:     string(state.UserState),
 		Scopes:    scopes,
 		ClientID:  strings.TrimSpace(claims.AZP),

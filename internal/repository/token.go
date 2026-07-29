@@ -33,9 +33,13 @@ type TokenRepository struct {
 
 // AccessAuthState is the DB-authoritative state required to authenticate one access token.
 type AccessAuthState struct {
-	TokenID      string
-	UserID       int64
-	UserState    model.UserState
+	TokenID   string
+	UserID    int64
+	UserState model.UserState
+	// UserRole is the role as it stands in the database right now, not the role the
+	// token was signed with. Authorization reads this so a demotion takes effect on
+	// the next request instead of waiting for the old token to expire.
+	UserRole     model.UserRole
 	TokenVersion int
 	RevokedAt    *time.Time
 	ExpiresAt    time.Time
@@ -337,7 +341,7 @@ func (r *TokenRepository) FindAccessAuthStateByJTI(ctx context.Context, jti stri
 	var state AccessAuthState
 	err := r.database.WithContext(ctx).
 		Table("oauth_access_tokens AS access").
-		Select("access.token_id, access.user_id, \"user\".state AS user_state, \"user\".token_version, access.revoked_at, access.expires_at").
+		Select("access.token_id, access.user_id, \"user\".state AS user_state, \"user\".role AS user_role, \"user\".token_version, access.revoked_at, access.expires_at").
 		Joins("JOIN \"user\" ON \"user\".id = access.user_id").
 		Where("access.token_id = ?", jti).
 		Take(&state).Error
