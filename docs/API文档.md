@@ -1113,6 +1113,8 @@ grant_type=authorization_code&code=auth_code_abc123...&redirect_uri=https%3A%2F%
 
 **说明**：scope 包含 `openid` 时响应体额外返回 `id_token`（RS256 签名 JWT），详见 [8.4 ID Token](#84-id-token)。scope 不含 `openid` 时不返回 `id_token` 字段。
 
+**Access Token 的适用范围**：此处签发的 `access_token` 用于 `/userinfo` 及其他以本服务为 resource server 的 OAuth 受保护资源，**不可**用于 SAST Link 的内部接口（`/user/*`、`/auth/*` 等）。token 的 `azp` claim 记录签发对象，内部接口只接受内置 first-party 客户端签发的 token，第三方 token 会得到 `403`（业务码 `40300`）。这不是限流或临时限制，而是权限边界：第三方获得用户授权意味着可以读取被授权的 claims，不意味着可以代替用户修改账号。
+
 **Refresh Token 模式**（第一方应用，`application/x-www-form-urlencoded`）:
 
 ```http

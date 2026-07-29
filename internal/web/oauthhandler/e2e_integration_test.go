@@ -576,3 +576,43 @@ func (h *e2eHarness) databaseHandle(t *testing.T) *gorm.DB {
 	}
 	return h.database
 }
+
+// A third-party access token must not authenticate on the internal API.
+//
+// This is the regression test for a real defect: both token kinds carry this
+// service as their audience, so before the azp gate an openid-only third-party
+// grant authenticated against the internal middleware and yielded a full
+// principal — enough to rewrite the profile or bind an attacker's email as a
+// login method. The token must still work on /userinfo, which exists to serve it.
+func TestE2EThirdPartyTokenIsNotAnInternalSessionCredential(t *testing.T) {
+	testutil.RequireProvider(t)
+	h := setupE2E(t)
+
+	code := h.authorizeAndConsent(t, "openid")
+	pair, recorder := h.redeem(t, code)
+	if pair == nil {
+		t.Fatalf("redemption failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	// The internal middleware, configured exactly as cmd/api does.
+	internal := gin.New()
+	authenticator := middleware.Authenticator{
+		JWT: h.jwt, Tokens: h.tokens, InternalClientID: "sast-link-web",
+	}
+	internal.GET("/user/profile", authenticator.RequireAuth(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+	rejected := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/user/profile", nil)
+	request.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+	internal.ServeHTTP(rejected, request)
+	if rejected.Code != http.StatusForbidden {
+		t.Fatalf("internal endpoint accepted a third-party token: status %d, want 403", rejected.Code)
+	}
+
+	// The same token must still be good at /userinfo.
+	claims := h.getUserInfo(t, pair.AccessToken)
+	if claims["sub"] != mustSubject(h.user.ID) {
+		t.Fatalf("userinfo sub = %v, want %q", claims["sub"], mustSubject(h.user.ID))
+	}
+}

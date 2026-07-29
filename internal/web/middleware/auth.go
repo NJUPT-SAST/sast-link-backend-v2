@@ -23,11 +23,14 @@ const principalContextKey = "principal"
 
 // Principal is the authenticated user context derived from a validated JWT.
 type Principal struct {
-	UserID    int64
-	JTI       string
-	Role      string
-	State     string
-	Scopes    []string
+	UserID int64
+	JTI    string
+	Role   string
+	State  string
+	Scopes []string
+	// ClientID is the azp claim: the client this token was issued to. Empty means a
+	// first-party session token.
+	ClientID  string
 	ExpiresAt time.Time
 }
 
@@ -49,6 +52,20 @@ type Authenticator struct {
 	Blacklist JTIBlacklist
 	Tokens    AccessAuthStateRepository
 	Clock     auth.Clock
+	// InternalClientID is the built-in first-party client. Only tokens issued to it
+	// may authenticate on the internal API.
+	//
+	// Every access token carries this service as its audience, because the internal
+	// API is the resource server for first-party sessions and third-party grants
+	// alike. The audience therefore cannot tell them apart, and a third-party token
+	// would otherwise be a full session credential: an openid-only grant reaching
+	// PUT /user/profile or the email-binding endpoints is account takeover. The azp
+	// claim carries the issuing client and this field is what it is pinned to.
+	//
+	// Required. An empty value rejects every request rather than admitting all of
+	// them, so a deployment that forgets to set it fails loudly instead of silently
+	// dropping the check.
+	InternalClientID string
 }
 
 func (a Authenticator) RequireAuth() gin.HandlerFunc {
@@ -64,19 +81,50 @@ func (a Authenticator) RequireAuth() gin.HandlerFunc {
 	}
 }
 
-// Authenticate validates an Authorization header and returns its principal.
+// Authenticate validates an Authorization header for the internal API and returns
+// its principal. Tokens issued to any client other than InternalClientID are
+// rejected.
 //
 // Exported so endpoints that answer in a non-standard error format can reuse the
-// exact same validation instead of reimplementing it. OIDC UserInfo is the case:
-// RFC 6750 requires a WWW-Authenticate challenge and an {error, error_description}
-// body, which this middleware's envelope cannot produce, but the token checks
-// themselves — signature, blacklist, DB revocation, token_version, account state —
-// must not diverge between the two paths.
+// exact same validation instead of reimplementing it. The token checks — signature,
+// blacklist, DB revocation, token_version, account state — must not diverge
+// between paths.
 //
 // The returned error is a *response.BusinessError, so a caller that wants the
 // standard envelope can pass it straight to response.Error.
 func (a Authenticator) Authenticate(ctx context.Context, header string) (Principal, error) {
+	principal, err := a.authenticate(ctx, header)
+	if err != nil {
+		return Principal{}, err
+	}
+	if err := a.requireInternalClient(principal); err != nil {
+		return Principal{}, err
+	}
+	return principal, nil
+}
+
+// AuthenticateAnyClient validates a token regardless of which client it was issued
+// to. It is for OAuth-facing endpoints that must serve third-party tokens by
+// design — OIDC UserInfo is the only one — and must never back an internal
+// endpoint, where a third-party token acting as a session credential is account
+// takeover. Prefer Authenticate.
+func (a Authenticator) AuthenticateAnyClient(ctx context.Context, header string) (Principal, error) {
 	return a.authenticate(ctx, header)
+}
+
+// requireInternalClient pins a principal to the built-in first-party client.
+func (a Authenticator) requireInternalClient(principal Principal) error {
+	// Fail closed on a missing configuration rather than admitting every client.
+	if strings.TrimSpace(a.InternalClientID) == "" {
+		return backendError()
+	}
+	// An absent azp means a first-party session token predating the claim; those are
+	// only ever issued to the built-in client.
+	if principal.ClientID != "" && principal.ClientID != a.InternalClientID {
+		return authBusinessError(http.StatusForbidden, errcode.CodeForbidden,
+			"该 Access Token 由第三方客户端签发，不可用于内部接口")
+	}
+	return nil
 }
 
 // SetPrincipal stores an already-validated principal on the request context, so a
@@ -154,6 +202,7 @@ func (a Authenticator) authenticate(ctx context.Context, header string) (Princip
 		Role:      claims.Role,
 		State:     string(state.UserState),
 		Scopes:    scopes,
+		ClientID:  strings.TrimSpace(claims.AZP),
 		ExpiresAt: claims.ExpiresAt.UTC(),
 	}, nil
 }

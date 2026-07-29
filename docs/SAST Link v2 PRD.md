@@ -77,9 +77,9 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 
 SAST Link 内部使用 JWT RS256 签名 Access Token + opaque Refresh Token：
 
-- **Access Token**：RS256 签名 JWT，有效期 1 小时，含 `jti`（撤销）、`sub`（user.id）、`role`、`state`、`token_version`、`scope` 等 claims。自包含，业务服务可离线验签
+- **Access Token**：RS256 签名 JWT，有效期 1 小时，含 `jti`（撤销）、`sub`（user.id）、`role`、`state`、`token_version`、`scope`、`azp`（签发对象 client_id）等 claims。自包含，业务服务可离线验签
 - **Refresh Token**：opaque 随机字符串，有效期 30 天，HMAC-SHA256 hash 后存 DB。采用 **rotation + family 链** 机制（见 4.6）
-- **登录态校验**：每次请求校验 Access Token 签名 → 检查 jti 是否在黑名单（Redis）→ 单条 SQL join `oauth_access_tokens` 与 `user`，一次取回 `revoked_at`/`expires_at`/`state`/`token_version`，校验 token 未撤销未过期、账号非 is_deleted、`token_version` 与 claims 一致
+- **登录态校验**：每次请求校验 Access Token 签名 → 检查 jti 是否在黑名单（Redis）→ 单条 SQL join `oauth_access_tokens` 与 `user`，一次取回 `revoked_at`/`expires_at`/`state`/`token_version`，校验 token 未撤销未过期、账号非 is_deleted、`token_version` 与 claims 一致 → 校验 `azp` 为内置 first-party 客户端（见 §7.1「第三方 Token 隔离」）
 - **登出**：Access Token 的 jti 写入 Redis 黑名单（TTL = 剩余有效期）；Refresh Token family 链全部撤销（`revoked_at` = NOW）
 - **改密**：`user.token_version` 自增，拦截所有旧 token
 
@@ -158,7 +158,7 @@ GET /oauth/lark/callback?code=...&state=...
 
 | Token 类型 | 格式 | 有效期 | 说明 |
 |------------|------|--------|------|
-| Access Token | RS256 JWT | 1h | 自包含，含 jti/sub/role/state/token_version/scope；kid 支持密钥轮换 |
+| Access Token | RS256 JWT | 1h | 自包含，含 jti/sub/role/state/token_version/scope/azp；kid 支持密钥轮换 |
 | Refresh Token | opaque string | 30d | HMAC-SHA256 hash 存 DB（`oauth_refresh_tokens.token_hash`） |
 | Register-Ticket | opaque string (`reg_` 前缀) | 5min | Redis 存储，一次性使用 |
 | login_code | opaque string (`lc_` 前缀) | 60s | Redis 存储，一次性使用，OAuth 回调交换用 |
@@ -538,9 +538,18 @@ sastlink:device:{device_id}   Hash          {ua, ip, login_time, last_seen}
 | CSRF | OAuth state 参数强制；JWT 不存 cookie，不存在 CSRF 攻击面。授权确认走两段式 + Bearer 认证（§4.10）而非 cookie session，正是为了维持这一前提 |
 | Open redirect | `/oauth/authorize` 的错误只在 `client_id` 与 `redirect_uri` 均校验通过后才允许重定向到客户端；`redirect_uri` 精确字符串匹配注册值（§4.10） |
 | Token 泄露 | refresh_token rotation + 重放检测 + 全链撤销；token_version 改密全局失效 |
+| 第三方 Token 越权访问内部接口 | Access Token 携带 `azp`（签发对象 client_id）；内部 API 中间件只接受 `azp` 等于内置 first-party 客户端的 token，第三方 token 一律 403。见下方「第三方 Token 隔离」 |
 | 账号接管 | OAuth 绑定需登录态；registration_state 仅用于新建用户 + OAuth state 双重绑定，registration_state 泄露者无法单独滥用 |
 | SQL 注入 | GORM 参数化查询 |
 | 重放攻击 | 授权码/Register-Ticket/Bind-Ticket/login_code 均为一次性使用；幂等性 key 防敏感写操作重放 |
+
+**第三方 Token 隔离**：内部会话 Token 与第三方 OAuth Access Token 共用同一个 `aud`（本服务），因为两种场景下内部 API 都是 resource server，`aud` 因此无法区分二者。若不加区分，一个仅获得 `openid` scope 的第三方 token 就能通过内部认证中间件拿到完整 principal，进而调用 `PUT /user/profile` 改资料、或走 `POST /user/identities/email` 绑定攻击者邮箱为登录方式——即账号接管。
+
+因此 Access Token 增加 `azp` claim 记录签发对象，内部中间件（`middleware.Authenticate`）只接受 `azp` 等于 `INTERNAL_OAUTH_CLIENT_ID` 的 token，其余返回 403。`azp` 缺失视为内部会话 token（该 claim 引入前签发的 token 仅发给内置客户端）。
+
+`/userinfo` 是唯一例外：它的存在意义就是服务第三方 token，因此走 `middleware.AuthenticateAnyClient`，不施加此限制，claims 仍按 token 自身 scope 过滤。该方法命名上即标注了适用范围，内部端点不得使用。
+
+`INTERNAL_OAUTH_CLIENT_ID` 未配置时中间件拒绝所有请求而非放行所有客户端：配置缺失应当显式失败，而不是静默关闭这道检查。
 
 ### 7.2 安全响应头
 

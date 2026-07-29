@@ -25,8 +25,14 @@ type Service interface {
 }
 
 // Authenticator validates bearer tokens for the endpoints that need a principal.
+// Authenticator validates bearer tokens for the OAuth-facing endpoints.
+//
+// UserInfo deliberately uses the any-client variant: it exists to serve the
+// third-party access tokens this provider issues, so pinning it to the built-in
+// client would break the endpoint's whole purpose. Internal endpoints must use
+// middleware.Authenticate instead, which rejects third-party tokens.
 type Authenticator interface {
-	Authenticate(ctx context.Context, header string) (middleware.Principal, error)
+	AuthenticateAnyClient(ctx context.Context, header string) (middleware.Principal, error)
 }
 
 // Handler serves the OAuth 2.1 and OIDC endpoints.
@@ -192,7 +198,7 @@ func (h Handler) UserInfo(c *gin.Context) {
 		writeBearerError(c, oauth.ErrInternal)
 		return
 	}
-	principal, err := h.Auth.Authenticate(c.Request.Context(), c.GetHeader("Authorization"))
+	principal, err := h.Auth.AuthenticateAnyClient(c.Request.Context(), c.GetHeader("Authorization"))
 	if err != nil {
 		// The middleware's typed error carries the reason, but its wording belongs to
 		// the standard envelope. RFC 6750 has exactly one code for every rejected

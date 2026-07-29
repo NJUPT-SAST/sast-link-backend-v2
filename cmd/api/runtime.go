@@ -134,6 +134,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		JWT:       jwtManager,
 		Blacklist: blacklist,
 		Tokens:    tokens,
+		// Pins the internal API to the built-in client, so a third-party OAuth access
+		// token cannot be used as a session credential.
+		InternalClientID: cfg.InternalOAuthClientID,
 	}
 
 	authorizeLimiter := oauthredis.EndpointLimiter{

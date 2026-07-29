@@ -25,11 +25,24 @@ type JWTKeyPair struct {
 }
 
 // TokenClaims are access-token claims used by SAST Link.
+//
+// AZP (OIDC "authorized party") names the client the token was issued to. Every
+// access token shares one audience — this service — because the internal API is
+// the resource server in both cases. The audience therefore cannot distinguish a
+// token minted for a third-party client from a first-party session token, and
+// without that distinction a third-party token authenticates on the internal
+// surface: an openid-only grant would reach PUT /user/profile and the email
+// binding endpoints, which is account takeover. AZP is what the internal
+// middleware pins so only the built-in client's tokens are accepted there.
+//
+// Omitted (empty) means a first-party session token, so tokens signed before this
+// claim existed keep working; those are only ever issued to the built-in client.
 type TokenClaims struct {
 	Role         string `json:"role"`
 	State        string `json:"state"`
 	TokenVersion int    `json:"token_version"`
 	Scope        string `json:"scope"`
+	AZP          string `json:"azp,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -61,6 +74,9 @@ type TokenInput struct {
 	Scopes       []string
 	TTL          time.Duration
 	NotBefore    time.Time
+	// AuthorizedParty becomes the azp claim: the client_id this token was issued
+	// to. Leave empty only for first-party session tokens.
+	AuthorizedParty string
 }
 
 // JWTManager signs with the active key and verifies with active plus previous keys.
@@ -92,6 +108,7 @@ func (m JWTManager) SignAccessToken(input TokenInput) (string, error) {
 		State:        input.State,
 		TokenVersion: input.TokenVersion,
 		Scope:        scopeClaim,
+		AZP:          strings.TrimSpace(input.AuthorizedParty),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    m.Issuer,
 			Subject:   input.Subject,

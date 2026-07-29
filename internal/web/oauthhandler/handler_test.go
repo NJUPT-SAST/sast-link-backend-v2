@@ -77,7 +77,7 @@ type fakeAuthenticator struct {
 	header    string
 }
 
-func (a *fakeAuthenticator) Authenticate(_ context.Context, header string) (middleware.Principal, error) {
+func (a *fakeAuthenticator) AuthenticateAnyClient(_ context.Context, header string) (middleware.Principal, error) {
 	a.header = header
 	if a.err != nil {
 		return middleware.Principal{}, a.err

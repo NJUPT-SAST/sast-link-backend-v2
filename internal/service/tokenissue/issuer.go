@@ -88,15 +88,20 @@ func (i Issuer) Issue(request Request) (*Pair, error) {
 	}
 	jti := i.newJTI()
 
+	// azp is derived from the client on the request rather than passed in, so no
+	// call site can issue a token that fails to name its authorized party. The
+	// internal middleware rejects any azp other than the built-in client, which is
+	// what stops a third-party token from acting as a session credential.
 	accessToken, err := i.JWT.SignAccessToken(auth.TokenInput{
-		Subject:      strconv.FormatInt(request.User.ID, 10),
-		JTI:          jti,
-		Role:         string(request.User.Role),
-		State:        string(request.User.State),
-		TokenVersion: request.User.TokenVersion,
-		Scopes:       scopes,
-		TTL:          request.AccessTTL,
-		NotBefore:    now,
+		Subject:         strconv.FormatInt(request.User.ID, 10),
+		JTI:             jti,
+		Role:            string(request.User.Role),
+		State:           string(request.User.State),
+		TokenVersion:    request.User.TokenVersion,
+		Scopes:          scopes,
+		TTL:             request.AccessTTL,
+		NotBefore:       now,
+		AuthorizedParty: request.Client.ClientID,
 	})
 	if err != nil {
 		return nil, err
