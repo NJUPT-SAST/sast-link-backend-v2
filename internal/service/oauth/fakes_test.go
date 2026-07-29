@@ -51,17 +51,6 @@ func (f *fakeClients) FindActiveByClientID(_ context.Context, clientID string) (
 	return client, nil
 }
 
-func (f *fakeClients) FindByID(_ context.Context, id int64) (*model.OAuthClient, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	client, ok := f.byID[id]
-	if !ok {
-		return nil, repository.ErrNotFound
-	}
-	return client, nil
-}
-
 type fakeAuthorizations struct {
 	mutex     sync.Mutex
 	byCode    map[string]*model.OAuthAuthorization

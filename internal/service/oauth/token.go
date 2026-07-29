@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -61,6 +62,12 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		// already minted from it are suspect. Cut the whole family.
 		if authorization != nil && authorization.FamilyID != nil {
 			s.revokeFamily(ctx, *authorization.FamilyID)
+		} else {
+			// family_id is nullable and Consent always sets it, so this means a row this
+			// service did not mint. The replay is real but there is nothing to revoke,
+			// which must not pass silently: whatever tokens exist stay live.
+			slog.ErrorContext(ctx, "replayed authorization code has no family to revoke",
+				"code_present", authorization != nil)
 		}
 		s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_replayed")
 		return nil, newError(ErrInvalidGrant, "授权码无效", nil)

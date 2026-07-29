@@ -66,11 +66,14 @@ type UserRepository interface {
 }
 
 // ClientRepository resolves OAuth clients.
+//
+// Only the active-client lookup is needed: every OAuth request authenticates its
+// caller, and a deactivated client must not authenticate. Resolving a client by
+// primary key would be for reading an existing token row's owner, which no flow
+// here does — the token endpoints compare the row's client_id against the
+// authenticated client rather than looking it up.
 type ClientRepository interface {
 	FindActiveByClientID(ctx context.Context, clientID string) (*model.OAuthClient, error)
-	// FindByID resolves a client by primary key regardless of active state, so a
-	// token row's owner stays resolvable after the client is disabled.
-	FindByID(ctx context.Context, id int64) (*model.OAuthClient, error)
 }
 
 // AuthorizationRepository persists single-use authorization codes.

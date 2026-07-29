@@ -152,7 +152,18 @@ func (s Service) revokeFamily(ctx context.Context, familyID string) {
 	now := s.now()
 	entries, err := s.Tokens.RevokeFamily(revokeCtx, familyID, now)
 	if err != nil {
-		slog.ErrorContext(revokeCtx, "revoke oauth token family", "family_id", familyID, "error", err)
+		// The outcome is deliberately not returned to the caller. Every caller is
+		// either a replay defense — where the request already fails and the requester
+		// is the suspected attacker — or a compensating cleanup whose own error is
+		// already being returned. Propagating this would change no response and
+		// revoke nothing; the DB is what is unavailable.
+		//
+		// It is therefore a security event to alert on, not an error to handle: until
+		// it succeeds the suspect family stays valid for up to its full refresh TTL.
+		// security_event is the field to alert on.
+		slog.ErrorContext(revokeCtx, "revoke oauth token family",
+			"security_event", "token_family_revocation_failed",
+			"family_id", familyID, "error", err)
 		return
 	}
 	s.deliverBlacklist(revokeCtx, entries, now)
