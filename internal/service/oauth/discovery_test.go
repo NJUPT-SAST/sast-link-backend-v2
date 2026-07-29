@@ -78,7 +78,8 @@ func TestDiscoveryAdvertisesOnlySupportedCapabilities(t *testing.T) {
 	}
 }
 
-// Every claim the document lists must be one the ID Token or UserInfo can emit.
+// Every claim the document lists must be one the ID Token or UserInfo can emit, and
+// every emitted claim must be listed — except the ones deliberately withheld below.
 func TestDiscoveryClaimsMatchIssuedClaims(t *testing.T) {
 	h := newHarness(t)
 	claims, ok := h.service.Discovery()["claims_supported"].([]string)
@@ -91,13 +92,24 @@ func TestDiscoveryClaimsMatchIssuedClaims(t *testing.T) {
 		"preferred_username": true, "profile": true, "email": true,
 		"email_verified": true, "updated_at": true,
 	}
+	// auth_time is issued but not advertised: the value available today is the consent
+	// instant rather than the authentication instant, which overstates how recently the
+	// user authenticated. Advertising it would invite a relying party to depend on a
+	// value this service cannot yet produce correctly. Remove the exception once a real
+	// authentication timestamp exists — see signIDToken.
+	withheld := map[string]bool{"auth_time": true}
+
 	for _, claim := range claims {
 		if !emitted[claim] {
 			t.Fatalf("claims_supported advertises %q, which nothing issues", claim)
 		}
+		if withheld[claim] {
+			t.Fatalf("claims_supported advertises %q, which is deliberately withheld", claim)
+		}
 	}
-	if len(claims) != len(emitted) {
-		t.Fatalf("claims_supported has %d entries, want all %d issued claims", len(claims), len(emitted))
+	if len(claims) != len(emitted)-len(withheld) {
+		t.Fatalf("claims_supported has %d entries, want %d (%d issued less %d withheld)",
+			len(claims), len(emitted)-len(withheld), len(emitted), len(withheld))
 	}
 }
 

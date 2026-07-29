@@ -34,8 +34,17 @@ func (s Service) Discovery() map[string]any {
 		// "none" covers public clients authenticating by PKCE alone; confidential
 		// clients post their secret. There is no Basic support, matching the contract.
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
+		// auth_time is deliberately absent even though the ID Token carries it. The value
+		// this service can currently produce is the moment the user approved the
+		// authorization, not the moment they authenticated: nothing records the latter, so
+		// a user who signed in days ago and authorizes today gets today's timestamp. That
+		// overstates how recently they authenticated, which is the one thing the claim
+		// exists to report. Advertising it would invite a relying party to depend on it;
+		// omitting an optional claim is honest, publishing a wrong one is not. Restore this
+		// entry together with a real authentication timestamp — see the note on
+		// signIDToken's authTime parameter.
 		"claims_supported": []string{
-			"sub", "iss", "aud", "exp", "iat", "auth_time", "nonce",
+			"sub", "iss", "aud", "exp", "iat", "nonce",
 			"name", "picture", "preferred_username", "profile",
 			"email", "email_verified", "updated_at",
 		},
