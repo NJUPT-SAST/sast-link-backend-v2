@@ -116,11 +116,34 @@ func validateRedirectURI(raw string) (string, error) {
 }
 
 func isLoopbackHost(hostname string) bool {
-	if hostname == "localhost" {
+	// Case-insensitive because DNS is: "LOCALHOST" names the same host, and rejecting
+	// it would be a false refusal of a valid loopback registration.
+	//
+	// Folded as ASCII rather than with strings.EqualFold, which applies Unicode simple
+	// folding: U+017F (ſ, long s) folds to "s", so EqualFold accepts "localhoſt" — a
+	// distinct name url.Parse preserves verbatim, which would register a plaintext http
+	// URI for a host this provider never vetted. Only the ASCII spelling names loopback;
+	// net.ParseIP handles the numeric forms, and 127.0.0.1.evil.com and 0.0.0.0 still fail.
+	if asciiLower(hostname) == "localhost" {
 		return true
 	}
 	address := net.ParseIP(hostname)
 	return address != nil && address.IsLoopback()
+}
+
+// asciiLower lowercases only A-Z, leaving every other byte untouched.
+//
+// Deliberately not strings.ToLower, which is Unicode-aware: folding a hostname with
+// case mappings outside ASCII would let a name that merely folds to "localhost"
+// answer to it. A host comparison wants byte equality after ASCII case folding, which
+// is also what DNS itself specifies (RFC 4343).
+func asciiLower(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, value)
 }
 
 // validateGrantTypes confines grants to what the token endpoint implements.

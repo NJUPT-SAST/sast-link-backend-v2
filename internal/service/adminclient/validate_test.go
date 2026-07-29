@@ -67,6 +67,52 @@ func TestCreateClientAllowsLoopbackHTTP(t *testing.T) {
 	}
 }
 
+// Only the ASCII spelling of "localhost" names loopback.
+//
+// strings.EqualFold applies Unicode simple folding, under which U+017F (ſ, long s)
+// folds to "s" — so it accepts "localhoſt", a name url.Parse preserves verbatim and
+// DNS treats as distinct. That would register a plaintext http redirect_uri for a
+// host this provider never vetted, defeating the https requirement. ASCII-only
+// folding is also what DNS specifies (RFC 4343).
+func TestCreateClientRejectsUnicodeFoldedLocalhost(t *testing.T) {
+	for _, uri := range []string{
+		"http://localhoſt/cb",
+		"http://LOCALHOſT/cb",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			h := newHarness(t)
+			input := validCreateInput()
+			input.RedirectURIs = []string{uri}
+
+			_, err := h.service.CreateClient(context.Background(), input)
+
+			assertKind(t, err, KindInvalidInput)
+			if h.clients.created != nil {
+				t.Fatalf("persisted %q, want the registration refused", h.clients.created.ClientID)
+			}
+		})
+	}
+}
+
+// The ASCII spellings must still register, or the fix above would be a false refusal
+// of the loopback case it exists to permit.
+func TestCreateClientAllowsMixedCaseLocalhost(t *testing.T) {
+	for _, uri := range []string{
+		"http://LOCALHOST:3000/cb",
+		"http://LocalHost:3000/cb",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			h := newHarness(t)
+			input := validCreateInput()
+			input.RedirectURIs = []string{uri}
+
+			if _, err := h.service.CreateClient(context.Background(), input); err != nil {
+				t.Fatalf("CreateClient(%q) error = %v, want success", uri, err)
+			}
+		})
+	}
+}
+
 // A registration must not hold a scope set /oauth/authorize would reject, so the
 // same normalizer gates both.
 func TestCreateClientRejectsInvalidScopes(t *testing.T) {
