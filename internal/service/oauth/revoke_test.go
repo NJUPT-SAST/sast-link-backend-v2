@@ -163,18 +163,68 @@ func TestRevokeRequiresClientAuthenticationAndToken(t *testing.T) {
 	}
 }
 
-// An expired access token is already ineffective, so RFC 7009 wants success and
-// nothing to revoke.
-func TestRevokeSucceedsForExpiredAccessToken(t *testing.T) {
+// An expired access token still names a live family, so revoking it must cut the
+// family rather than report success and do nothing.
+//
+// Revocation here is family-wide (see Revoke's doc comment): the presented token
+// being useless does not make its sibling refresh token useless, and that one lives
+// for the full refresh TTL — 30 days by default. An expired access token is also the
+// ordinary state of an idle client that now wants to log out, so this is the common
+// path, not an edge case.
+//
+// Both clocks have to move. JWTManager carries its own Clock, so advancing only
+// s.Clock leaves VerifyAccessToken believing the token is still valid and the test
+// silently exercises the unexpired path instead — which is what the earlier version
+// of this test did while claiming to cover expiry.
+func TestRevokeExpiredAccessTokenStillRevokesFamily(t *testing.T) {
 	h := newHarness(t)
 	pair := issuePair(t, h)
-	h.service.Clock = fixedClock{value: h.clock.value.Add(2 * time.Hour)}
+	familyID := h.tokens.createdRefresh.FamilyID
+	later := fixedClock{value: h.clock.value.Add(2 * time.Hour)}
+	h.service.Clock = later
+	h.service.JWT.Clock = later
+
+	// Guard the setup: if this still verifies, the test is not testing expiry.
+	if _, err := h.service.JWT.VerifyAccessToken(pair.AccessToken); err == nil {
+		t.Fatal("access token still verifies; the expired path is not under test")
+	}
 
 	if err := h.service.Revoke(context.Background(), RevokeInput{
 		Token:    pair.AccessToken,
 		ClientID: testPublicClientID,
 	}); err != nil {
 		t.Fatalf("Revoke(expired access token) error = %v, want success", err)
+	}
+
+	if len(h.tokens.revokedFamilies) != 1 || h.tokens.revokedFamilies[0] != familyID {
+		t.Fatalf("revoked families = %v, want %q: the sibling refresh token would "+
+			"otherwise stay live for its full TTL", h.tokens.revokedFamilies, familyID)
+	}
+}
+
+// The relaxed expiry check must not become a way to revoke someone else's family.
+// Ownership is decided against the database row, not the token, so a token belonging
+// to another client reads as not-found even though it verifies.
+func TestRevokeExpiredAccessTokenStillChecksClientOwnership(t *testing.T) {
+	h := newHarness(t)
+	pair := issuePair(t, h)
+	later := fixedClock{value: h.clock.value.Add(2 * time.Hour)}
+	h.service.Clock = later
+	h.service.JWT.Clock = later
+
+	// A different client presents the expired token.
+	err := h.service.Revoke(context.Background(), RevokeInput{
+		Token:        pair.AccessToken,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+	})
+
+	if err != nil {
+		t.Fatalf("Revoke() error = %v, want RFC 7009 success for a foreign token", err)
+	}
+	if len(h.tokens.revokedFamilies) != 0 {
+		t.Fatalf("revoked families = %v, want none: the token belongs to another client",
+			h.tokens.revokedFamilies)
 	}
 }
 

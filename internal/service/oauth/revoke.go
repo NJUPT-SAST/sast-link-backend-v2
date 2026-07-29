@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -115,10 +116,21 @@ func (s Service) familyByRefreshToken(ctx context.Context, token string, clientI
 // JTI. The signature is verified rather than the JWT merely decoded: an
 // unverified token's claims are attacker-controlled, and trusting its jti would
 // let anyone revoke an arbitrary family by forging one.
+//
+// An expired token is still resolved, because revocation here is family-wide: the
+// presented access token being useless does not make its family useless, and its
+// sibling refresh token can stay live for weeks. Treating expiry as not-found made
+// the endpoint answer 200 while revoking nothing — and an expired access token is
+// the ordinary state of a client that has been idle and now wants to log out.
+// VerifyExpiredAccessToken forgives only the expiry; issuer, audience, kid and
+// signature are still enforced, and ownership is decided below against the database
+// row rather than anything the token asserts.
 func (s Service) familyByAccessJTI(ctx context.Context, token string, clientID int64) (string, *int64, bool, error) {
 	claims, err := s.JWT.VerifyAccessToken(token)
+	if errors.Is(err, auth.ErrExpiredToken) {
+		claims, err = s.JWT.VerifyExpiredAccessToken(token)
+	}
 	if err != nil {
-		// Includes an expired token, which RFC 7009 treats as already revoked.
 		return "", nil, false, nil
 	}
 	access, err := s.Tokens.FindAccessTokenByJTI(ctx, claims.ID)
