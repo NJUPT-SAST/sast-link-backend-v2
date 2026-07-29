@@ -406,8 +406,20 @@ func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt 
 		Update("revoked_at", revokedAt).Error; err != nil {
 		return nil, fmt.Errorf("revoke refresh token family: %w", err)
 	}
+	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
+}
+
+// enqueueBlacklistInTransaction writes the durable outbox rows for revoked access
+// tokens. Every revocation path funnels through here so the blacklist fast-reject
+// path cannot be forgotten for one of them; the rows are written in the revoking
+// transaction, which is what lets a later Redis delivery failure be harmless.
+func enqueueBlacklistInTransaction(
+	transaction *gorm.DB,
+	entries []model.BlacklistEntry,
+	revokedAt time.Time,
+) error {
 	if len(entries) == 0 {
-		return nil, nil
+		return nil
 	}
 	rows := make([]model.TokenBlacklistOutbox, 0, len(entries))
 	for _, entry := range entries {
@@ -421,9 +433,40 @@ func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt 
 		Columns:   []clause.Column{{Name: "token_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"expires_at", "next_delivery_at"}),
 	}).Create(&rows).Error; err != nil {
-		return nil, fmt.Errorf("enqueue access token blacklist: %w", err)
+		return fmt.Errorf("enqueue access token blacklist: %w", err)
 	}
-	return entries, nil
+	return nil
+}
+
+// revokeAllByClientInTransaction revokes every live token issued to one OAuth
+// client inside an existing transaction, so the revocation can be made atomic with
+// the registration change that triggered it (disabling the client).
+//
+// clientPK is oauth_clients.id, the foreign key the token tables carry — not the
+// public client_id string.
+func revokeAllByClientInTransaction(
+	transaction *gorm.DB,
+	clientPK int64,
+	revokedAt time.Time,
+) ([]model.BlacklistEntry, error) {
+	var entries []model.BlacklistEntry
+	if err := transaction.Model(&model.OAuthAccessToken{}).
+		Select("token_id", "expires_at").
+		Where("client_id = ? AND expires_at > ? AND revoked_at IS NULL", clientPK, revokedAt).
+		Find(&entries).Error; err != nil {
+		return nil, fmt.Errorf("select live access tokens by client: %w", err)
+	}
+	if err := transaction.Model(&model.OAuthAccessToken{}).
+		Where("client_id = ? AND revoked_at IS NULL", clientPK).
+		Update("revoked_at", revokedAt).Error; err != nil {
+		return nil, fmt.Errorf("revoke access tokens by client: %w", err)
+	}
+	if err := transaction.Model(&model.OAuthRefreshToken{}).
+		Where("client_id = ? AND revoked_at IS NULL", clientPK).
+		Update("revoked_at", revokedAt).Error; err != nil {
+		return nil, fmt.Errorf("revoke refresh tokens by client: %w", err)
+	}
+	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
 }
 
 // RevokeAllByUser revokes every non-revoked access and refresh token owned by
@@ -476,22 +519,5 @@ func revokeAllByUserInTransaction(
 		Update("revoked_at", revokedAt).Error; err != nil {
 		return nil, fmt.Errorf("revoke refresh tokens by user: %w", err)
 	}
-	if len(entries) == 0 {
-		return nil, nil
-	}
-	rows := make([]model.TokenBlacklistOutbox, 0, len(entries))
-	for _, entry := range entries {
-		rows = append(rows, model.TokenBlacklistOutbox{
-			TokenID:        entry.TokenID,
-			ExpiresAt:      entry.ExpiresAt,
-			NextDeliveryAt: revokedAt,
-		})
-	}
-	if err := transaction.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "token_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"expires_at", "next_delivery_at"}),
-	}).Create(&rows).Error; err != nil {
-		return nil, fmt.Errorf("enqueue access token blacklist: %w", err)
-	}
-	return entries, nil
+	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
 }
