@@ -1430,7 +1430,19 @@ POST /admin/oauth-clients
 }
 ```
 
-**说明**: 第一方应用（`first_party`）不返回 `client_secret`，使用 PKCE 即可。
+**说明**:
+
+- 第一方应用（`first_party`）不返回 `client_secret`，使用 PKCE 即可。
+- `client_secret` 只在本次响应中出现一次，服务端仅存哈希，事后无法再取回。丢失只能重新注册客户端。
+- `client_id` 由服务端生成，请求中不接受该字段。传入 `client_id`、`client_secret` 或 `id` 会返回 `400`，而非被忽略。
+- `redirect_uris` 校验规则（注册阶段拒绝，返回 `400`）：
+  - 仅允许 `https`；`http` 只允许 loopback 主机（`localhost`、`127.0.0.1`、`[::1]`），供本地开发使用
+  - 不得包含 fragment（`#...`）、userinfo（`user:pass@`）
+  - 必须是绝对 URI，不允许相对路径或 `//host/path` 形式
+  - 不得有首尾空白：`/oauth/authorize` 按字节精确匹配，带空白的注册值永远匹配不上
+  - 最多 10 条，单条最长 2048 字符，不允许重复
+- `grant_types` 只允许 `authorization_code` 与 `refresh_token`，且必须包含 `authorization_code`。
+- `scopes` 必须包含 `openid`，且仅含受支持的值，与 `/oauth/authorize` 使用同一套校验。
 
 ---
 
@@ -1457,6 +1469,23 @@ PUT /admin/oauth-clients/:id
   "message": "客户端信息更新成功"
 }
 ```
+
+停用（`is_active` 由 `true` 改为 `false`）时，会在同一事务内撤销该客户端已签发的全部 Access / Refresh Token，此时 message 为：
+
+```json
+{
+  "message": "客户端信息更新成功，已撤销该客户端的全部 Token"
+}
+```
+
+**说明**:
+
+- 仅 `client_name`、`redirect_uris`、`is_active` 三个字段可改，均为可选；未出现的字段保持不变。
+- `client_id`、`client_type`、`scopes`、`grant_types` **不可修改**，请求中出现这些字段返回 `400`。改 `client_type` 会把机密客户端变成公开客户端（或反之），属于权限变更而非资料修改；收窄 `scopes` 应通过停用并重新注册完成。
+- `redirect_uris` 的校验规则与注册时一致。
+- 停用是安全动作，语义是「立即断开」：已签发的 Access Token 立刻失效（写入黑名单 + DB 撤销），Refresh Token 无法再续期，该客户端也无法再发起新的授权请求。
+- 重复对已停用的客户端提交 `is_active: false` 不会重复撤销。
+- `:id` 为客户端主键（列表接口返回的 `id`，非 `client_id`）。非数字或非正整数返回 `404`。
 
 ---
 

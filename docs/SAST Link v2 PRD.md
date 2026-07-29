@@ -79,7 +79,8 @@ SAST Link 内部使用 JWT RS256 签名 Access Token + opaque Refresh Token：
 
 - **Access Token**：RS256 签名 JWT，有效期 1 小时，含 `jti`（撤销）、`sub`（user.id）、`role`、`state`、`token_version`、`scope`、`azp`（签发对象 client_id）等 claims。自包含，业务服务可离线验签
 - **Refresh Token**：opaque 随机字符串，有效期 30 天，HMAC-SHA256 hash 后存 DB。采用 **rotation + family 链** 机制（见 4.6）
-- **登录态校验**：每次请求校验 Access Token 签名 → 检查 jti 是否在黑名单（Redis）→ 单条 SQL join `oauth_access_tokens` 与 `user`，一次取回 `revoked_at`/`expires_at`/`state`/`token_version`，校验 token 未撤销未过期、账号非 is_deleted、`token_version` 与 claims 一致 → 校验 `azp` 为内置 first-party 客户端（见 §7.1「第三方 Token 隔离」）
+- **登录态校验**：每次请求校验 Access Token 签名 → 检查 jti 是否在黑名单（Redis）→ 单条 SQL join `oauth_access_tokens` 与 `user`，一次取回 `revoked_at`/`expires_at`/`state`/`role`/`token_version`，校验 token 未撤销未过期、账号非 is_deleted、`token_version` 与 claims 一致 → 校验 `azp` 为内置 first-party 客户端（见 §7.1「第三方 Token 隔离」）
+- **角色鉴权**：角色判定读上述查询取回的 DB `role`，而非 Access Token 里的 `role` claim。claim 是签发时快照，降权后旧 token 仍带原角色；读 DB 使降权在下一个请求即生效，与 `token_version` 机制正交（后者依赖改 role 时同事务递增，见 §4.12）。`role` claim 仍参与非空校验，但不用于授权决策
 - **登出**：Access Token 的 jti 写入 Redis 黑名单（TTL = 剩余有效期）；Refresh Token family 链全部撤销（`revoked_at` = NOW）
 - **改密**：`user.token_version` 自增，拦截所有旧 token
 
@@ -409,7 +410,11 @@ Payload: {
 | 管理 OAuth 客户端 | — | — | — | ✓ |
 | 查看审计日志 | — | — | — | ✓ |
 
-**角色变更**：`PUT /admin/users/:id` 实际修改 `role` 时，必须在同一事务内递增 `user.token_version` 并撤销该用户的全部 token family。`role` 未变化或仅修改普通资料时，不递增 `token_version`。旧 Access Token 继续携带签发时的 `role`，但会因版本不匹配在认证阶段失效。
+**角色变更**：`PUT /admin/users/:id` 实际修改 `role` 时，必须在同一事务内递增 `user.token_version` 并撤销该用户的全部 token family。`role` 未变化或仅修改普通资料时，不递增 `token_version`。旧 Access Token 继续携带签发时的 `role`，但会因版本不匹配在认证阶段失效。另外角色鉴权本身读 DB `role`（见 §4.1「角色鉴权」），因此即使未递增 `token_version`，降权也在下一个请求立即生效。
+
+**客户端注册**：`client_id` 由服务端生成，不接受请求指定 —— 否则可注册为内置 first-party 客户端的 ID 并绕过 §7.1 的 `azp` 隔离。`redirect_uris` 在注册阶段即校验（仅 https，http 限 loopback；禁 fragment/userinfo/相对路径/首尾空白），这是开放重定向的第一道闸门：`/oauth/authorize` 做字节精确匹配，但精确匹配无法保护一个本身就危险的注册值。
+
+**客户端停用**：`is_active` 由 `true` 改为 `false` 时，在同一事务内撤销该客户端全部 Access / Refresh Token。停用是安全动作，语义为「立即断开」而非「一小时后随 Access Token 自然过期」。`client_type`、`scopes`、`grant_types` 注册后不可修改。
 
 ### 4.13 审计日志
 
