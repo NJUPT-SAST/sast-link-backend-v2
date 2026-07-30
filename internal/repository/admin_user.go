@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
@@ -22,9 +23,13 @@ import (
 // this one advisory lock first, so those transactions serialize. The V005
 // migration uses the same technique for the cross-table email invariant.
 //
-// The value is arbitrary but must never collide with another advisory key in the
-// codebase; V005 derives its keys from hashtextextended over an email address,
-// which cannot produce this constant.
+// The value is arbitrary. It shares the single-argument bigint advisory keyspace
+// with V005, whose keys are hashtextextended over an email address and so could in
+// principle land on this constant — nothing rules that out. A collision would only
+// make an email write and an admin write wait for each other, never corrupt either,
+// since both are transaction-scoped mutexes. Deadlock is separately impossible:
+// this lock is only ever taken as the first statement of its transaction, so it
+// cannot be acquired after an email key.
 const adminLockKey int64 = 0x5A5701AD
 
 // AdminUserFilter narrows the administrative user list. Zero values mean "no
@@ -191,12 +196,20 @@ func (u AdminUserUpdate) columns() map[string]any {
 
 // UpdateAdminUser applies an administrative edit in one transaction.
 //
-// guardLastAdmin refuses the write when it would leave no active administrator.
-// revokeSessions increments token_version and revokes every live token of the
-// user; the caller sets it when the role actually changed, so the two happen in
-// the transaction that rewrites the role rather than after it. Splitting them
-// would leave a window where a demoted account still holds refresh tokens able
-// to mint access tokens, since the refresh flow does not compare token_version.
+// Whether the write demotes an administrator, and therefore whether it needs the
+// last-admin guard and a session revocation, is decided here from the row as it
+// exists inside the transaction. It is deliberately not a caller-supplied flag: a
+// caller compares against a read taken before the transaction opened, so by the time
+// the write lands the stored role may have changed underneath it. Since the update
+// writes the role column whenever one was submitted, trusting that comparison let a
+// demotion commit with no guard, no token_version bump and no revocation — the
+// combination that empties the administrator set and leaves a demoted account still
+// able to mint access tokens.
+//
+// A role change increments token_version and revokes every live token of the user in
+// this same transaction rather than after it. Splitting them would leave a window
+// where a demoted account still holds refresh tokens able to mint access tokens,
+// since the refresh flow does not compare token_version.
 //
 // Soft-deleted accounts are excluded by predicate: closing an account is
 // DELETE's job and reopening it is restore's, so this path never edits one and
@@ -205,12 +218,18 @@ func (r *UserRepository) UpdateAdminUser(
 	ctx context.Context,
 	userID int64,
 	update AdminUserUpdate,
-	guardLastAdmin bool,
-	revokeSessions bool,
 	revokedAt time.Time,
 ) ([]model.BlacklistEntry, error) {
 	if userID <= 0 {
 		return nil, fmt.Errorf("%w: user id must be positive", ErrInvalidArgument)
+	}
+	// email_type is derived from login_email, and the V001 trigger only recomputes it
+	// when login_email is in the SET list. Writing it alone would therefore store a type
+	// contradicting the address, with nothing downstream to correct it. Refusing here
+	// keeps that unrepresentable at the layer that owns the column rather than resting
+	// on every caller validating it first.
+	if update.EmailType != nil && update.LoginEmail == nil {
+		return nil, fmt.Errorf("%w: email_type cannot be set without login_email", ErrInvalidArgument)
 	}
 	columns := update.columns()
 	if len(columns) == 0 {
@@ -219,7 +238,22 @@ func (r *UserRepository) UpdateAdminUser(
 
 	var entries []model.BlacklistEntry
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		if guardLastAdmin {
+		// Lock the row before reading the role it is being compared against, so the
+		// decision below cannot be made against a value another writer is replacing.
+		var stored model.User
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "role", "state").
+			Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
+			First(&stored).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return classifyMissingUser(transaction, userID)
+			}
+			return fmt.Errorf("load user for update: %w", err)
+		}
+		demotesAdmin := update.Role != nil &&
+			*update.Role != model.UserRoleAdmin && stored.Role == model.UserRoleAdmin
+		roleChanged := update.Role != nil && *update.Role != stored.Role
+		if demotesAdmin {
 			if err := ensureAnotherAdminRemains(transaction, userID); err != nil {
 				return err
 			}
@@ -233,7 +267,7 @@ func (r *UserRepository) UpdateAdminUser(
 		if result.RowsAffected == 0 {
 			return ErrNotFound
 		}
-		if !revokeSessions {
+		if !roleChanged {
 			return nil
 		}
 		if err := transaction.Model(&model.User{}).

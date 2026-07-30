@@ -28,7 +28,7 @@ func TestUpdateAdminUserRefusesDemotingTheLastAdmin(t *testing.T) {
 
 	role := model.UserRoleMember
 	_, err := users.UpdateAdminUser(context.Background(), admin.ID,
-		repository.AdminUserUpdate{Role: &role}, true, true, time.Now().UTC())
+		repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
 	if !errors.Is(err, repository.ErrLastAdmin) {
 		t.Fatalf("error = %v, want ErrLastAdmin", err)
 	}
@@ -77,7 +77,7 @@ func TestUpdateAdminUserAllowsDemotionWhenAnotherAdminRemains(t *testing.T) {
 
 	role := model.UserRoleMember
 	if _, err := users.UpdateAdminUser(context.Background(), first.ID,
-		repository.AdminUserUpdate{Role: &role}, true, true, time.Now().UTC()); err != nil {
+		repository.AdminUserUpdate{Role: &role}, time.Now().UTC()); err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
 	}
 }
@@ -118,7 +118,7 @@ func TestConcurrentDemotionsCannotRemoveEveryAdmin(t *testing.T) {
 			defer waitGroup.Done()
 			<-start
 			_, err := users.UpdateAdminUser(context.Background(), userID,
-				repository.AdminUserUpdate{Role: &role}, true, true, time.Now().UTC())
+				repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
 			results[index] = err
 		}(index, target)
 	}
@@ -172,7 +172,7 @@ func TestConcurrentDemotionAndSoftDeleteKeepOneAdmin(t *testing.T) {
 		defer waitGroup.Done()
 		<-start
 		_, err := users.UpdateAdminUser(context.Background(), first.ID,
-			repository.AdminUserUpdate{Role: &role}, true, true, time.Now().UTC())
+			repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
 		results[0] = err
 	}()
 	go func() {
@@ -198,5 +198,75 @@ func TestConcurrentDemotionAndSoftDeleteKeepOneAdmin(t *testing.T) {
 	if succeeded != 1 || refused != 1 {
 		t.Fatalf("outcomes = %d succeeded, %d refused; want exactly one of each",
 			succeeded, refused)
+	}
+}
+
+// The guard must not be skippable by the caller's view of the row. A caller decides
+// whether to arm it from a read taken before the transaction, so by the time the
+// write lands the target may have become an administrator — and the update writes
+// the role column regardless. Without an in-transaction check the demotion commits
+// unguarded, and the system can be left with nobody able to promote a replacement.
+func TestUpdateAdminUserGuardsDemotionEvenWhenCallerSaysOtherwise(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	// The only active administrator. A caller that read this row while it was still a
+	// member would pass guardLastAdmin=false and revokeSessions=false.
+	admin := adminSeed(t, database, "promoted@sast.fun", "刚提权的管理员",
+		model.UserRoleAdmin, model.UserStateOnSAST, nil)
+
+	role := model.UserRoleMember
+	_, err := users.UpdateAdminUser(context.Background(), admin.ID,
+		repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
+	if !errors.Is(err, repository.ErrLastAdmin) {
+		t.Fatalf("error = %v, want ErrLastAdmin: the transaction must judge the stored "+
+			"role, not the flag the caller derived from a stale read", err)
+	}
+
+	var reloaded model.User
+	if err := database.First(&reloaded, admin.ID).Error; err != nil {
+		t.Fatalf("reload admin: %v", err)
+	}
+	if reloaded.Role != model.UserRoleAdmin {
+		t.Fatalf("role = %q, want the demotion rolled back", reloaded.Role)
+	}
+}
+
+// A role change must revoke the account's tokens even when the caller believed the
+// role was staying put: the caller's comparison used a pre-transaction read, and the
+// refresh grant never compares token_version, so a missed bump leaves a demoted
+// account able to keep minting access tokens.
+func TestUpdateAdminUserRevokesOnRoleChangeTheCallerDidNotExpect(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	tokens := repository.NewToken(database)
+	client := createOAuthClient(t, database)
+	adminSeed(t, database, "keeper@sast.fun", "另一名管理员",
+		model.UserRoleAdmin, model.UserStateOnSAST, nil)
+	target := adminSeed(t, database, "target@sast.fun", "被降权者",
+		model.UserRoleAdmin, model.UserStateOnSAST, nil)
+	familyID := "family-stale-read"
+	createTokenPair(t, tokens, "stale", familyID, 0, client.ID, target.ID)
+	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
+
+	role := model.UserRoleMember
+	// revokeSessions=false is what a caller computes after reading the row as a member.
+	entries, err := users.UpdateAdminUser(context.Background(), target.ID,
+		repository.AdminUserUpdate{Role: &role}, revokedAt)
+	if err != nil {
+		t.Fatalf("UpdateAdminUser: %v", err)
+	}
+	if len(entries) != 1 || entries[0].TokenID != "stale-access" {
+		t.Fatalf("entries = %+v, want the live access token returned for blacklisting", entries)
+	}
+	assertPairRevokedAt(t, database, familyID, revokedAt)
+
+	var reloaded model.User
+	if err := database.First(&reloaded, target.ID).Error; err != nil {
+		t.Fatalf("reload target: %v", err)
+	}
+	if reloaded.TokenVersion != target.TokenVersion+1 {
+		t.Fatalf("token_version = %d, want %d: a role change must invalidate the "+
+			"account's tokens in the transaction that rewrites the role",
+			reloaded.TokenVersion, target.TokenVersion+1)
 	}
 }

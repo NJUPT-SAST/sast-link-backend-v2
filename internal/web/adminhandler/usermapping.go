@@ -74,14 +74,20 @@ type userProfileDTO struct {
 
 // userIdentityDTO omits the stored provider access and refresh tokens: the console
 // displays bindings, it does not hand out the credentials behind them.
+//
+// identity_data is omitted for the same reason. It holds the provider's whole user
+// object — docs/psql-db-design.md documents the Lark payload as carrying mobile,
+// email, enterprise_email and employee_no — and these endpoints are readable by
+// lecturers, not just administrators. Listing which accounts a user has bound does
+// not require handing over the personal contact details behind them. If the console
+// ever needs a field from it, forward that field, not the blob.
 type userIdentityDTO struct {
-	ID             int64       `json:"id"`
-	Provider       string      `json:"provider"`
-	ProviderID     string      `json:"provider_id"`
-	IdentityData   model.JSONB `json:"identity_data"`
-	TokenExpiresAt *time.Time  `json:"token_expires_at"`
-	CreatedAt      time.Time   `json:"created_at"`
-	UpdatedAt      time.Time   `json:"updated_at"`
+	ID             int64      `json:"id"`
+	Provider       string     `json:"provider"`
+	ProviderID     string     `json:"provider_id"`
+	TokenExpiresAt *time.Time `json:"token_expires_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 type auditLogDTO struct {
@@ -159,7 +165,6 @@ func mapUserDetail(detail adminuser.UserDetail) userDetailDTO {
 			ID:             identity.ID,
 			Provider:       identity.Provider,
 			ProviderID:     identity.ProviderID,
-			IdentityData:   identity.IdentityData,
 			TokenExpiresAt: identity.TokenExpiresAt,
 			CreatedAt:      identity.CreatedAt,
 			UpdatedAt:      identity.UpdatedAt,

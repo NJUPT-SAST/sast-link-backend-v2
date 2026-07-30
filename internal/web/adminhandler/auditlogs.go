@@ -70,7 +70,7 @@ func (h Handler) ListAuditLogs(c *gin.Context) {
 // rather than a silent fallback, since a caller that sent page=abc did not mean
 // page 1.
 func parsePaging(c *gin.Context) (int, int, error) {
-	page, err := parseOptionalPositiveInt(c.Query("page"))
+	page, err := parsePageNumber(c.Query("page"))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -79,6 +79,30 @@ func parsePaging(c *gin.Context) (int, int, error) {
 		return 0, 0, err
 	}
 	return page, pageSize, nil
+}
+
+// maxPageNumber bounds a requested page. The service turns page and page_size into
+// an offset by multiplying them, which silently overflows for a large enough page:
+// 4611686018427387905 wraps to offset 0, so the request would be answered with the
+// first page while the response echoed the page number it asked for — a wrong answer
+// rather than an error. Other values wrap negative and reach the repository's
+// argument guard, surfacing as a 500 where the contract documents a 400.
+//
+// Rejecting rather than clamping, unlike page_size: a caller asking for page 2^62
+// has made a mistake, and answering with some other page would hide it. The bound is
+// far past any real page — at the maximum page size of 100 it addresses a hundred
+// billion rows.
+const maxPageNumber = 1 << 30
+
+func parsePageNumber(raw string) (int, error) {
+	value, err := parseOptionalPositiveInt(raw)
+	if err != nil {
+		return 0, err
+	}
+	if value > maxPageNumber {
+		return 0, errInvalidQueryParameter
+	}
+	return value, nil
 }
 
 func parseOptionalPositiveInt(raw string) (int, error) {

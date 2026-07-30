@@ -10,8 +10,10 @@
 package adminuser
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 )
@@ -91,4 +93,15 @@ var (
 // back would make this a reflection point. The cause travels in Err for the logs.
 func newError(sentinel *Error, message string, cause error) error {
 	return &Error{Kind: sentinel.Kind, Code: sentinel.Code, Message: message, Err: cause}
+}
+
+// internalError builds a KindInternal error and logs the cause.
+//
+// The client is deliberately told nothing beyond a generic message, so unless the
+// cause is logged here it is discarded entirely: the HTTP layer replaces it, the
+// request logger records only the status, and a repeatedly failing admin write leaves
+// nothing to diagnose from.
+func internalError(ctx context.Context, operation, message string, cause error) error {
+	slog.ErrorContext(ctx, operation, "error", cause)
+	return newError(ErrInternal, message, cause)
 }

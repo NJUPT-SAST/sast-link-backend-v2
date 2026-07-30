@@ -24,12 +24,14 @@ type UserRepository interface {
 	// FindByID resolves a user with its profile and identities, regardless of state:
 	// the console must be able to inspect a closed account in order to restore it.
 	FindByID(ctx context.Context, userID int64) (*model.User, error)
+	// UpdateAdminUser decides for itself whether the edit demotes an administrator,
+	// from the row locked inside its transaction. It takes no flag for that: a caller's
+	// comparison is against a read from before the transaction, and acting on it let a
+	// demotion commit unguarded and unrevoked.
 	UpdateAdminUser(
 		ctx context.Context,
 		userID int64,
 		update repository.AdminUserUpdate,
-		guardLastAdmin bool,
-		revokeSessions bool,
 		revokedAt time.Time,
 	) ([]model.BlacklistEntry, error)
 	SoftDeleteAndRevokeSessions(
@@ -199,14 +201,17 @@ type ProfileDetail struct {
 	UpdatedAt  time.Time
 }
 
-// IdentityDetail is one third-party binding. The stored provider access and
-// refresh tokens are absent: the console displays bindings, it does not hand out
-// the credentials behind them.
+// IdentityDetail is one third-party binding. The stored provider access and refresh
+// tokens are absent: the console displays bindings, it does not hand out the
+// credentials behind them.
+//
+// identity_data is absent for the same reason — it is the provider's whole user
+// object, carrying mobile and email addresses, and these endpoints are readable by
+// lecturers as well as administrators.
 type IdentityDetail struct {
 	ID             int64
 	Provider       string
 	ProviderID     string
-	IdentityData   model.JSONB
 	TokenExpiresAt *time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time

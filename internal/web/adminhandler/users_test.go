@@ -154,8 +154,19 @@ func TestListUsersPassesQueryParameters(t *testing.T) {
 
 // A caller that sent page=abc did not mean page 1. Falling back silently would
 // return a page they did not ask for and hide the mistake.
+//
+// The huge values matter for a different reason: the service multiplies page by
+// page_size to get an offset, and 4611686018427387905*100 wraps to exactly 0. Left
+// unbounded, that request would be answered with the first page while the response
+// echoed the page number asked for — a wrong answer with no error. Others wrap
+// negative and reach the repository's argument guard, surfacing as a 500 where the
+// contract documents a 400.
 func TestListUsersRejectsUnparsablePaging(t *testing.T) {
-	for _, query := range []string{"page=abc", "page=0", "page=-1", "page_size=abc", "page_size=0"} {
+	for _, query := range []string{
+		"page=abc", "page=0", "page=-1", "page_size=abc", "page_size=0",
+		"page=4611686018427387905", "page=9223372036854775807",
+		"page=92233720368547760", "page=9223372036854775808",
+	} {
 		t.Run(query, func(t *testing.T) {
 			users := &fakeUsers{}
 			router := newUserRouter(t, users, nil)

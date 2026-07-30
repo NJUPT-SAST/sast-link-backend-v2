@@ -66,7 +66,6 @@ func userDetail(user *model.User) UserDetail {
 			ID:             identity.ID,
 			Provider:       string(identity.Provider),
 			ProviderID:     identity.ProviderID,
-			IdentityData:   identity.IdentityData,
 			TokenExpiresAt: identity.TokenExpiresAt,
 			CreatedAt:      identity.CreatedAt,
 			UpdatedAt:      identity.UpdatedAt,

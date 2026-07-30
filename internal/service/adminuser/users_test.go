@@ -54,13 +54,16 @@ func TestUpdateUserAllowsSelfNonRoleEdit(t *testing.T) {
 	if result.RevokedSessions {
 		t.Fatal("RevokedSessions = true, want false when the role did not change")
 	}
-	if h.users.updateRevoke {
-		t.Fatal("repository asked to revoke sessions for a name change")
+	if h.users.updateInput.Role != nil {
+		t.Fatalf("role = %v, want it left out of an edit that did not submit one",
+			h.users.updateInput.Role)
 	}
 }
 
-// Submitting the role the account already holds is not a change, so neither the
-// self-guard nor the session revocation applies.
+// Submitting the role the account already holds is not a change, so the self-guard
+// does not fire. Whether it revokes anything is the repository's call, made against
+// the locked row; here the fake reports nothing revoked, which is what a no-op role
+// write produces.
 func TestUpdateUserTreatsUnchangedRoleAsNoRoleChange(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
@@ -73,9 +76,8 @@ func TestUpdateUserTreatsUnchangedRoleAsNoRoleChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateUser: %v", err)
 	}
-	if result.RevokedSessions || h.users.updateRevoke || h.users.updateGuard {
-		t.Fatalf("re-submitting the same role revoked sessions (%v) or armed the guard (%v)",
-			h.users.updateRevoke, h.users.updateGuard)
+	if result.RevokedSessions {
+		t.Fatal("re-submitting the same role reported revoked sessions")
 	}
 }
 
@@ -95,12 +97,14 @@ func TestUpdateUserRevokesSessionsOnRoleChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateUser: %v", err)
 	}
-	if !result.RevokedSessions || !h.users.updateRevoke {
-		t.Fatal("a role change must revoke the target's sessions")
+	// The repository revoked and returned the entries; this layer must report that and
+	// deliver them. Arming the guard is no longer decided here — see the repository's
+	// integration tests, which assert it against the locked row.
+	if !result.RevokedSessions {
+		t.Fatal("a role change that revoked sessions must be reported as such")
 	}
-	// Demoting an admin could remove the last one, so the repository guard is armed.
-	if !h.users.updateGuard {
-		t.Fatal("demoting an admin must arm the last-admin guard")
+	if h.users.updateInput.Role == nil || *h.users.updateInput.Role != model.UserRoleMember {
+		t.Fatalf("role passed down = %v, want member", h.users.updateInput.Role)
 	}
 	if _, ok := h.blacklist.batch["jti-live"]; !ok {
 		t.Fatalf("blacklist batch = %v, want the live JTI delivered", h.blacklist.batch)
@@ -112,9 +116,10 @@ func TestUpdateUserRevokesSessionsOnRoleChange(t *testing.T) {
 	}
 }
 
-// Promoting someone to admin cannot remove an administrator, so the extra count
-// query is not paid for.
-func TestUpdateUserDoesNotGuardWhenPromoting(t *testing.T) {
+// A promotion is passed straight through: whether it needs the last-admin guard is
+// the repository's judgement, made against the locked row, and its integration tests
+// cover both directions. This layer only has to not mangle the submitted role.
+func TestUpdateUserPassesAPromotionThrough(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
 
@@ -123,8 +128,8 @@ func TestUpdateUserDoesNotGuardWhenPromoting(t *testing.T) {
 	})); err != nil {
 		t.Fatalf("UpdateUser: %v", err)
 	}
-	if h.users.updateGuard {
-		t.Fatal("promoting to admin armed the last-admin guard")
+	if h.users.updateInput.Role == nil || *h.users.updateInput.Role != model.UserRoleAdmin {
+		t.Fatalf("role passed down = %v, want admin", h.users.updateInput.Role)
 	}
 }
 
@@ -294,9 +299,10 @@ func TestUpdateUserAllowsStateCorrection(t *testing.T) {
 	if h.users.updateInput.State == nil || *h.users.updateInput.State != model.UserStateOnSAST {
 		t.Fatalf("state written = %v, want on_sast", h.users.updateInput.State)
 	}
-	// State is not what invalidates a session; only the role is.
-	if h.users.updateRevoke {
-		t.Fatal("a state correction revoked the user's sessions")
+	// State is not what invalidates a session; only the role is, so nothing was
+	// revoked and the result must not claim otherwise.
+	if result.RevokedSessions {
+		t.Fatal("a state correction reported revoked sessions")
 	}
 }
 
@@ -518,7 +524,7 @@ func TestGetUserMapsProfileAndIdentities(t *testing.T) {
 	user.Identities = []model.Identity{
 		{
 			ID: 11, UserID: user.ID, Provider: model.LoginMethodGitHub,
-			ProviderID: "gh-123", IdentityData: model.JSONB(`{"login":"someone"}`),
+			ProviderID: "gh-123", IdentityData: model.JSONB(`{"mobile":"+8613000288399"}`),
 			// Provider credentials are stored on the row but must not survive the mapping.
 			AccessToken: stringPtr("gho_secret"), RefreshToken: stringPtr("ghr_secret"),
 			TokenExpiresAt: &expiresAt, CreatedAt: testNow, UpdatedAt: testNow,
@@ -559,7 +565,13 @@ func TestGetUserMapsProfileAndIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal detail: %v", err)
 	}
-	for _, leaked := range []string{"gho_secret", "ghr_secret", user.PasswordHash} {
+	// identity_data is the provider's whole user object — the documented Lark payload
+	// carries mobile, email, enterprise_email and employee_no — and these endpoints are
+	// readable by lecturers, not only administrators. Listing a binding must not hand
+	// over the contact details behind it.
+	for _, leaked := range []string{
+		"gho_secret", "ghr_secret", user.PasswordHash, "+8613000288399", "mobile",
+	} {
 		if strings.Contains(string(rendered), leaked) {
 			t.Fatalf("detail leaked %q: %s", leaked, rendered)
 		}

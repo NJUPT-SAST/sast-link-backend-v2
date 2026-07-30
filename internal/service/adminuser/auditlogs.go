@@ -36,7 +36,7 @@ func (s Service) ListAuditLogs(ctx context.Context, input ListAuditLogsInput) (*
 		Offset:    (page - 1) * pageSize,
 	})
 	if err != nil {
-		return nil, newError(ErrInternal, "查询审计日志失败", err)
+		return nil, internalError(ctx, "list admin audit logs", "查询审计日志失败", err)
 	}
 	items := make([]AuditLogItem, 0, len(entries))
 	for _, entry := range entries {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // ListUsers returns a filtered page of accounts.
@@ -16,6 +17,13 @@ import (
 func (s Service) ListUsers(ctx context.Context, input ListUsersInput) (*ListUsersResult, error) {
 	if s.Users == nil {
 		return nil, newError(ErrInternal, "用户仓储未配置", nil)
+	}
+	// The keyword becomes three unindexable ILIKE predicates plus a matching COUNT(*)
+	// over the table, so an unbounded one lets any reader make the database do
+	// arbitrary work per request. Nothing here is rate limited. The bound is the widest
+	// column it is matched against; anything longer cannot match a stored value.
+	if !validate.WithinLength(input.Keyword, validate.MaxNameLength) {
+		return nil, newError(ErrInvalidInput, fieldTooLongMessage("keyword"), nil)
 	}
 	page, pageSize := normalizePaging(input.Page, input.PageSize, defaultUserPageSize)
 	filter := repository.AdminUserFilter{
@@ -48,7 +56,7 @@ func (s Service) ListUsers(ctx context.Context, input ListUsersInput) (*ListUser
 
 	rows, total, err := s.Users.ListAdminUsers(ctx, filter)
 	if err != nil {
-		return nil, newError(ErrInternal, "查询用户列表失败", err)
+		return nil, internalError(ctx, "list admin users", "查询用户列表失败", err)
 	}
 	items := make([]UserListItem, 0, len(rows))
 	for _, row := range rows {
@@ -70,7 +78,7 @@ func (s Service) GetUser(ctx context.Context, userID int64) (*UserDetail, error)
 		return nil, newError(ErrNotFound, "用户不存在", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "查询用户详情失败", err)
+		return nil, internalError(ctx, "get admin user detail", "查询用户详情失败", err)
 	}
 	if user == nil {
 		return nil, newError(ErrNotFound, "用户不存在", nil)
@@ -124,17 +132,17 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		return nil, closedErr
 	}
 
-	roleChanged := validated.role != nil && *validated.role != current.Role
-	if roleChanged && input.UserID == input.AdminUserID {
+	// Whether this edit is a role change is judged again inside the repository's
+	// transaction, against the locked row. This comparison exists only to decide
+	// whether to refuse the request outright: an administrator editing their own
+	// account may change everything except the role, and that is a fact about the
+	// caller rather than about the stored row, so a stale read cannot weaken it. The
+	// last-admin guard and the session revocation are the repository's to arm.
+	if validated.role != nil && *validated.role != current.Role && input.UserID == input.AdminUserID {
 		selfErr := newError(ErrProtected, "不可修改自己的角色", nil)
 		s.auditUpdate(ctx, input, false, errorCode(selfErr), nil)
 		return nil, selfErr
 	}
-	// Only a demotion can remove an administrator here: state can no longer be set to
-	// is_deleted through this path, so the role is the single way an admin stops being
-	// one. The repository still re-checks under a lock — this flag only says whether
-	// the check is needed.
-	guardLastAdmin := roleChanged && current.Role == model.UserRoleAdmin
 
 	entries, err := s.Users.UpdateAdminUser(ctx, input.UserID, repository.AdminUserUpdate{
 		Name:        validated.name,
@@ -151,15 +159,20 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		// signed with, and although the auth middleware reads the role from the database
 		// on every request, a demoted account's live refresh tokens would otherwise keep
 		// minting tokens for a session the administrator meant to end.
-	}, guardLastAdmin, roleChanged, s.now())
+	}, s.now())
 	if err != nil {
 		mapped := s.mapWriteError(ctx, err)
-		s.auditUpdate(ctx, input, false, errorCode(mapped), validated.changed)
+		// No field was applied, so the entry records none. Logging the attempted set on a
+		// rolled-back transaction would read as though the edit had landed.
+		s.auditUpdate(ctx, input, false, errorCode(mapped), nil)
 		return nil, mapped
 	}
 	s.deliverBlacklist(ctx, entries, s.now())
 	s.auditUpdate(ctx, input, true, 0, validated.changed)
-	return &UpdateUserResult{ChangedFields: validated.changed, RevokedSessions: roleChanged}, nil
+	// Report what the transaction actually revoked rather than what this layer
+	// predicted: the repository judges the role change against the locked row, so its
+	// answer is the only one that matches what happened.
+	return &UpdateUserResult{ChangedFields: validated.changed, RevokedSessions: len(entries) > 0}, nil
 }
 
 // DeleteUser closes an account and cuts every session it holds.
@@ -206,7 +219,7 @@ func (s Service) RestoreUser(ctx context.Context, input TargetUserInput) error {
 		case errors.Is(err, repository.ErrStateConflict):
 			mapped = newError(ErrStateConflict, "用户未被注销，无需恢复", nil)
 		default:
-			mapped = newError(ErrInternal, "恢复用户失败", err)
+			mapped = internalError(ctx, "restore admin user", "恢复用户失败", err)
 		}
 		s.auditTarget(ctx, input, actionRestoreUser, false, errorCode(mapped))
 		return mapped
@@ -222,7 +235,7 @@ func (s Service) loadTarget(ctx context.Context, userID int64) (*model.User, err
 		return nil, newError(ErrNotFound, "用户不存在", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "查询用户失败", err)
+		return nil, internalError(ctx, "load admin user target", "查询用户失败", err)
 	}
 	if user == nil {
 		return nil, newError(ErrNotFound, "用户不存在", nil)
@@ -235,6 +248,11 @@ func (s Service) mapWriteError(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, repository.ErrNotFound):
 		return newError(ErrNotFound, "用户不存在", nil)
+	// The account was closed between this request's read and its write. The row still
+	// exists and the console is displaying it, so this is the same 422 the pre-flight
+	// check reports rather than a 404 on a visible user.
+	case errors.Is(err, repository.ErrStateConflict):
+		return newError(ErrStateConflict, "用户已注销，请先恢复后再编辑", nil)
 	case errors.Is(err, repository.ErrLastAdmin):
 		return newError(ErrProtected, "系统中至少需要保留一名管理员", nil)
 	}
@@ -242,7 +260,7 @@ func (s Service) mapWriteError(ctx context.Context, err error) error {
 }
 
 // mapDeleteError translates a repository failure from the soft-delete path.
-func (s Service) mapDeleteError(_ context.Context, err error) error {
+func (s Service) mapDeleteError(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, repository.ErrNotFound):
 		return newError(ErrNotFound, "用户不存在", nil)
@@ -251,7 +269,7 @@ func (s Service) mapDeleteError(_ context.Context, err error) error {
 	case errors.Is(err, repository.ErrLastAdmin):
 		return newError(ErrProtected, "系统中至少需要保留一名管理员", nil)
 	}
-	return newError(ErrInternal, "注销用户失败", err)
+	return internalError(ctx, "soft delete admin user", "注销用户失败", err)
 }
 
 func (s Service) auditUpdate(

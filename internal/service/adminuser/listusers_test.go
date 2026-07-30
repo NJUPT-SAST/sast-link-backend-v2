@@ -3,10 +3,12 @@ package adminuser
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 func TestListUsersPassesFiltersThrough(t *testing.T) {
@@ -141,4 +143,20 @@ func TestListAuditLogsSurfacesRepositoryFailure(t *testing.T) {
 	_, err := h.service.ListAuditLogs(context.Background(), ListAuditLogsInput{})
 
 	assertKind(t, err, KindInternal)
+}
+
+// An unbounded keyword turns one request into three unindexable ILIKE scans plus a
+// COUNT(*) over the table, and nothing on this route is rate limited. A keyword wider
+// than the widest column it matches cannot match anything anyway.
+func TestListUsersRejectsAnOverlongKeyword(t *testing.T) {
+	h := newHarness(t)
+
+	_, err := h.service.ListUsers(context.Background(), ListUsersInput{
+		Keyword: strings.Repeat("a", validate.MaxNameLength+1),
+	})
+
+	assertKind(t, err, KindInvalidInput)
+	if h.users.listedFilter.Keyword != "" {
+		t.Fatal("the query ran despite the keyword being rejected")
+	}
 }

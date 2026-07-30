@@ -25,8 +25,6 @@ type fakeUsers struct {
 	updateCalls    int
 	updatedUserID  int64
 	updateInput    repository.AdminUserUpdate
-	updateGuard    bool
-	updateRevoke   bool
 	updateEntries  []model.BlacklistEntry
 	updateErr      error
 	deleteCalls    int
@@ -62,15 +60,11 @@ func (f *fakeUsers) UpdateAdminUser(
 	_ context.Context,
 	userID int64,
 	update repository.AdminUserUpdate,
-	guardLastAdmin bool,
-	revokeSessions bool,
 	_ time.Time,
 ) ([]model.BlacklistEntry, error) {
 	f.updateCalls++
 	f.updatedUserID = userID
 	f.updateInput = update
-	f.updateGuard = guardLastAdmin
-	f.updateRevoke = revokeSessions
 	if f.updateErr != nil {
 		return nil, f.updateErr
 	}
