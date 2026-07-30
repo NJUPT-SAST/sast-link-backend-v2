@@ -186,7 +186,13 @@ func (m JWTManager) parseAccessToken(tokenString string, allowExpired bool) (*To
 			}
 			return claims, nil
 		}
-		if errors.Is(err, jwt.ErrTokenExpired) || errors.Is(err, jwt.ErrTokenNotValidYet) || errors.Is(err, jwt.ErrTokenUsedBeforeIssued) {
+		// Only a genuine expiry is reported as ErrExpiredToken. nbf-in-future and
+		// iat-in-future are "not valid yet", not "expired": mapping them here would
+		// tell callers (the revoke path, the middleware) to treat a not-yet-active
+		// token as expired, which is the wrong status and, for revoke, would route it
+		// into VerifyExpiredAccessToken unnecessarily. isOnlyExpiredError already
+		// refuses to forgive them; this keeps the classification consistent.
+		if errors.Is(err, jwt.ErrTokenExpired) {
 			return nil, ErrExpiredToken
 		}
 		return nil, ErrInvalidToken
