@@ -412,6 +412,20 @@ Payload: {
 
 **角色变更**：`PUT /admin/users/:id` 实际修改 `role` 时，必须在同一事务内递增 `user.token_version` 并撤销该用户的全部 token family。`role` 未变化或仅修改普通资料时，不递增 `token_version`。旧 Access Token 继续携带签发时的 `role`，但会因版本不匹配在认证阶段失效。另外角色鉴权本身读 DB `role`（见 §4.1「角色鉴权」），因此即使未递增 `token_version`，降权也在下一个请求立即生效。
 
+**注销语义的唯一入口**：`PUT /admin/users/:id` 不接受 `state: is_deleted`，返回 `422`；对已注销用户调用亦然。注销只能走 `DELETE`、恢复只能走 `PUT .../restore` —— 只有这两条路径在同一事务内撤销全部 Token。若允许 PUT 直接置为 `is_deleted`，会留下「账号已注销但 Refresh Token 仍可换新 Access Token」的窗口（refresh 流程不比对 `token_version`）。`njupter` / `on_sast` / `retired_sast` 三者之间可任意修改，供管理员纠正误设。
+
+**管理员自我保护**（契约未写明，实现补充，均返回 `403`）：
+
+| 规则 | 理由 |
+|------|------|
+| 不可修改自己的 `role` | 自我降权不可自行恢复 —— 能撤销该操作的端点正是被交出的那一个 |
+| 不可注销自己的账号 | 同上，注销后无法调用恢复端点 |
+| 不可降权或注销最后一名活跃管理员 | 系统将无人可管理，只能直连数据库恢复 |
+
+「活跃管理员」指 `role = 'admin' AND state <> 'is_deleted'`。最后一名管理员的判定是对其他行的 count，因此必须在写事务内完成：PostgreSQL 无法对聚合加 `FOR UPDATE`，两个并发降权请求会各自读到「还剩一名」并同时提交。所有相关写路径先取同一个 `pg_advisory_xact_lock` 再计数，使其串行化（与 §V005 跨表邮箱唯一性同一手法）。
+
+**`email_type` 的一致性**：该字段只能与 `login_email` 一同提交且必须与其域名一致，否则 `400`。V001 触发器 `auto_set_email_type` 仅在 `login_email` 出现在 UPDATE 列中时才重算，单独提交 `email_type` 会写入与邮箱域名矛盾的值。
+
 **客户端注册**：`client_id` 由服务端生成，不接受请求指定 —— 否则可注册为内置 first-party 客户端的 ID 并绕过 §7.1 的 `azp` 隔离。`redirect_uris` 在注册阶段即校验（仅 https，http 限 loopback；禁 fragment/userinfo/相对路径/首尾空白），这是开放重定向的第一道闸门：`/oauth/authorize` 做字节精确匹配，但精确匹配无法保护一个本身就危险的注册值。
 
 **客户端停用**：`is_active` 由 `true` 改为 `false` 时，在同一事务内撤销该客户端全部 Access / Refresh Token。停用是安全动作，语义为「立即断开」而非「一小时后随 Access Token 自然过期」。`client_type`、`scopes`、`grant_types` 注册后不可修改。
@@ -666,7 +680,8 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流与登录/登出审计接入 |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
 | 用户资料管理 | 部分完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）已完成；头像上传待实现（依赖对象存储接入） |
-| OAuth/OIDC 业务 | 部分完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）与 OIDC Provider（discovery / JWKS / UserInfo / ID Token）已完成，含跨层端到端集成测试（真实 PostgreSQL + Redis）；OAuth 第三方登录/绑定（GitHub / 飞书回调）与客户端管理 endpoints 待实现 |
+| OAuth/OIDC 业务 | 部分完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）与 OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护）已完成，含跨层端到端集成测试（真实 PostgreSQL + Redis）；OAuth 第三方登录/绑定（GitHub / 飞书回调）待实现 |
+| 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）与审计日志查询，读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
 | 其余运维接入 | 待实现 — 设备管理、其他 endpoint 限流策略与 pg_cron |
 
 ## 11. 实现顺序
@@ -685,8 +700,8 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [ ] 头像内容审核（腾讯云 COS）
 - [x] OAuth 2.1 授权服务端（两段式 authorize / consent / token / revoke + PKCE-S256 + 重放级联撤销）
 - [x] OIDC Provider（discovery / JWKS / UserInfo / ID Token）
-- [ ] OAuth 客户端注册 API（在此之前第三方客户端无创建入口，`client_secret` 校验路径在生产上走不到）
-- [ ] 管理后台（用户管理 / OAuth 客户端管理 / 审计日志查询）
+- [x] OAuth 客户端注册 API（`/admin/oauth-clients` 列表 / 注册 / 更新，打通第三方客户端创建入口与 `client_secret` 校验路径）
+- [x] 管理后台用户管理与审计日志查询（用户列表 / 详情 / 更新 / 软删 / 恢复 / 审计日志）
 - [ ] pg_cron 定时清理
 - [x] 个人卡片端点（`GET /card/:id`；前端页面另计）
 - [ ] 测试、联调、上线
