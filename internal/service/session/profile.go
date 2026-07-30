@@ -10,21 +10,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
-)
-
-// Column widths from V001. Rejecting an over-long value here turns a PostgreSQL
-// "value too long for type character varying(n)" — which surfaces as an opaque
-// 500 — into a 40000 naming the field.
-const (
-	maxNameLength        = 255
-	maxPhoneNumberLength = 20
-	maxQQNumberLength    = 20
-	maxStudentIDLength   = 50
-	maxMajorLength       = 50
-	maxNicknameLength    = 255
-	maxIntroLength       = 255
-	maxDisplayEmailLen   = 255
-	maxURLLength         = 512
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // profileFieldOrder is the contract order used for the update_profile audit
@@ -92,11 +78,11 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 		limit int
 		into  **string
 	}{
-		{"name", input.Name, maxNameLength, &update.Name},
-		{"phone_number", input.PhoneNumber, maxPhoneNumberLength, &update.PhoneNumber},
-		{"qq_number", input.QQNumber, maxQQNumberLength, &update.QQNumber},
-		{"student_id", input.StudentID, maxStudentIDLength, &update.StudentID},
-		{"major", input.Major, maxMajorLength, &update.Major},
+		{"name", input.Name, validate.MaxNameLength, &update.Name},
+		{"phone_number", input.PhoneNumber, validate.MaxPhoneNumberLength, &update.PhoneNumber},
+		{"qq_number", input.QQNumber, validate.MaxQQNumberLength, &update.QQNumber},
+		{"student_id", input.StudentID, validate.MaxStudentIDLength, &update.StudentID},
+		{"major", input.Major, validate.MaxMajorLength, &update.Major},
 	}
 	for _, entry := range required {
 		if entry.value == nil {
@@ -109,7 +95,7 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 		if utf8.RuneCountInString(trimmed) > entry.limit {
 			return update, nil, newError(ErrInvalidInput, entry.field+" 超出长度限制", nil)
 		}
-		if hasControlCharacter(trimmed) {
+		if validate.HasControlCharacter(trimmed) {
 			return update, nil, newError(ErrInvalidInput, entry.field+" 含非法字符", nil)
 		}
 		value := trimmed
@@ -134,11 +120,11 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 		limit int
 		into  **string
 	}{
-		{"nickname", input.Nickname, maxNicknameLength, &update.Nickname},
-		{"intro", input.Intro, maxIntroLength, &update.Intro},
-		{"email", input.Email, maxDisplayEmailLen, &update.Email},
-		{"blog_url", input.BlogURL, maxURLLength, &update.BlogURL},
-		{"github_url", input.GitHubURL, maxURLLength, &update.GitHubURL},
+		{"nickname", input.Nickname, validate.MaxNicknameLength, &update.Nickname},
+		{"intro", input.Intro, validate.MaxIntroLength, &update.Intro},
+		{"email", input.Email, validate.MaxDisplayEmailLen, &update.Email},
+		{"blog_url", input.BlogURL, validate.MaxURLLength, &update.BlogURL},
+		{"github_url", input.GitHubURL, validate.MaxURLLength, &update.GitHubURL},
 	}
 	for _, entry := range optional {
 		if entry.value == nil {
@@ -148,7 +134,7 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 		if utf8.RuneCountInString(trimmed) > entry.limit {
 			return update, nil, newError(ErrInvalidInput, entry.field+" 超出长度限制", nil)
 		}
-		if hasControlCharacter(trimmed) {
+		if validate.HasControlCharacter(trimmed) {
 			return update, nil, newError(ErrInvalidInput, entry.field+" 含非法字符", nil)
 		}
 		value := trimmed
@@ -160,7 +146,7 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 	// but it still travels through logs and the card response, so it gets the same
 	// control-character and shape guard as every other address in this service.
 	if update.Email != nil && *update.Email != "" {
-		if !validEmailFormat(normalizeIdentifier(*update.Email)) {
+		if !validate.EmailFormat(normalizeIdentifier(*update.Email)) {
 			return update, nil, newError(ErrInvalidInput, "展示邮箱格式不正确", nil)
 		}
 	}

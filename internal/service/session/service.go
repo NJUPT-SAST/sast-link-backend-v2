@@ -13,6 +13,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 const (
@@ -283,10 +284,10 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 	if email == "" {
 		return nil, newError(ErrInvalidInput, "邮箱不能为空", nil)
 	}
-	if !validEmailFormat(email) {
+	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
-	if !isAllowedEmailDomain(email) {
+	if !validate.IsLoginEmailDomain(email) {
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
 	}
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
@@ -314,10 +315,10 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 	if email == "" || input.Code == "" {
 		return nil, newError(ErrInvalidInput, "邮箱与验证码不能为空", nil)
 	}
-	if !validEmailFormat(email) {
+	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
-	if !isAllowedEmailDomain(email) {
+	if !validate.IsLoginEmailDomain(email) {
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
 	}
 	purpose := string(mailer.VerificationPurposeRegister)
@@ -380,7 +381,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if !found {
 		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 无效或已过期", nil)
 	}
-	if !isAllowedEmailDomain(email) {
+	if !validate.IsLoginEmailDomain(email) {
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
 	}
 
@@ -483,7 +484,7 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 	if email == "" {
 		return nil, newError(ErrInvalidInput, "邮箱不能为空", nil)
 	}
-	if !validEmailFormat(email) {
+	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
@@ -506,7 +507,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	if email == "" || input.Code == "" || input.Password == "" {
 		return nil, newError(ErrInvalidInput, "邮箱、验证码与密码不能为空", nil)
 	}
-	if !validEmailFormat(email) {
+	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
 	// Validate everything possible before consuming the one-time code, so a
@@ -609,7 +610,7 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	if email == "" {
 		return nil, newError(ErrInvalidInput, "邮箱不能为空", nil)
 	}
-	if !validEmailFormat(email) {
+	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
 	if input.UserID <= 0 {

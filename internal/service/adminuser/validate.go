@@ -5,18 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
-)
-
-// Column widths from V001. Rejecting an over-long value here turns a PostgreSQL
-// "value too long for type character varying(n)" — which surfaces as an opaque
-// 500 — into a 40000 naming the field.
-const (
-	maxNameLength        = 255
-	maxPhoneNumberLength = 20
-	maxQQNumberLength    = 20
-	maxStudentIDLength   = 50
-	maxMajorLength       = 50
-	maxLoginEmailLength  = 255
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // Paging bounds. The contract documents a maximum of 100 for the user list and
@@ -27,12 +16,6 @@ const (
 	defaultAuditPageSize = 50
 	maxPageSize          = 100
 )
-
-// allowedEmailDomains mirrors session.isAllowedEmailDomain. The V001 trigger
-// auto_set_email_type raises an exception for any other domain, so without this
-// check an administrator's typo returns an unreadable 500 instead of a message
-// naming the rule.
-var allowedEmailDomains = []string{"@njupt.edu.cn", "@sast.fun"}
 
 // userFieldOrder is the contract order used for the admin_user_update audit
 // detail, so the log reads the same way regardless of map iteration.
@@ -71,11 +54,11 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 		limit  int
 		target **string
 	}{
-		{"name", input.Name, maxNameLength, &result.name},
-		{"phone_number", input.PhoneNumber, maxPhoneNumberLength, &result.phoneNumber},
-		{"qq_number", input.QQNumber, maxQQNumberLength, &result.qqNumber},
-		{"student_id", input.StudentID, maxStudentIDLength, &result.studentID},
-		{"major", input.Major, maxMajorLength, &result.major},
+		{"name", input.Name, validate.MaxNameLength, &result.name},
+		{"phone_number", input.PhoneNumber, validate.MaxPhoneNumberLength, &result.phoneNumber},
+		{"qq_number", input.QQNumber, validate.MaxQQNumberLength, &result.qqNumber},
+		{"student_id", input.StudentID, validate.MaxStudentIDLength, &result.studentID},
+		{"major", input.Major, validate.MaxMajorLength, &result.major},
 	}
 	for _, field := range bounded {
 		if field.value == nil {
@@ -90,7 +73,7 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 		if utf8.RuneCountInString(trimmed) > field.limit {
 			return validatedUpdate{}, newError(ErrInvalidInput, fieldTooLongMessage(field.field), nil)
 		}
-		if containsControlCharacter(trimmed) {
+		if validate.HasControlCharacter(trimmed) {
 			return validatedUpdate{}, newError(ErrInvalidInput, fieldInvalidMessage(field.field), nil)
 		}
 		value := trimmed
@@ -168,13 +151,13 @@ func validateLoginEmail(raw *string) (*string, error) {
 	if email == "" {
 		return nil, newError(ErrInvalidInput, "login_email 不能为空", nil)
 	}
-	if utf8.RuneCountInString(email) > maxLoginEmailLength {
+	if utf8.RuneCountInString(email) > validate.MaxLoginEmailLength {
 		return nil, newError(ErrInvalidInput, "login_email 长度超出限制", nil)
 	}
-	if !validEmailFormat(email) {
+	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "login_email 格式非法", nil)
 	}
-	if !allowedEmailDomain(email) {
+	if !validate.IsLoginEmailDomain(email) {
 		return nil, newError(ErrInvalidInput, "login_email 域名不允许", nil)
 	}
 	return &email, nil
@@ -216,44 +199,6 @@ func emailTypeForDomain(email string) model.EmailType {
 	return model.EmailTypeNJUpt
 }
 
-func allowedEmailDomain(email string) bool {
-	for _, domain := range allowedEmailDomains {
-		if strings.HasSuffix(email, domain) {
-			return true
-		}
-	}
-	return false
-}
-
-// validEmailFormat rejects control characters, address separators and display-name
-// brackets, and requires exactly one @. Mirrors the session package's guard: the
-// address reaches audit detail and PostgreSQL, so unprintable bytes and embedded
-// separators are refused before the write.
-func validEmailFormat(email string) bool {
-	if strings.Count(email, "@") != 1 {
-		return false
-	}
-	at := strings.IndexByte(email, '@')
-	if at == 0 || at == len(email)-1 {
-		return false
-	}
-	if strings.ContainsAny(email, " \t\r\n,;:<>()[]\\\"") {
-		return false
-	}
-	if containsControlCharacter(email) {
-		return false
-	}
-	// A domain needs a dot, and neither label may be empty.
-	domain := email[at+1:]
-	return strings.Contains(domain, ".") &&
-		!strings.HasPrefix(domain, ".") && !strings.HasSuffix(domain, ".") &&
-		!strings.Contains(domain, "..")
-}
-
-func containsControlCharacter(value string) bool {
-	return strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f })
-}
-
 func validRole(role model.UserRole) bool {
 	switch role {
 	case model.UserRoleFreshman, model.UserRoleMember, model.UserRoleLecturer, model.UserRoleAdmin:
@@ -290,19 +235,3 @@ func validEmailType(emailType model.EmailType) bool {
 func fieldRequiredMessage(field string) string { return field + " 不能为空" }
 func fieldTooLongMessage(field string) string  { return field + " 长度超出限制" }
 func fieldInvalidMessage(field string) string  { return field + " 含非法字符" }
-
-// normalizePaging clamps a requested page window. A non-positive page or size is
-// the handler's signal that the caller omitted it; an out-of-range size is capped
-// rather than rejected, matching the contract's documented maximum.
-func normalizePaging(page, pageSize, defaultSize int) (int, int) {
-	if page <= 0 {
-		page = 1
-	}
-	if pageSize <= 0 {
-		pageSize = defaultSize
-	}
-	if pageSize > maxPageSize {
-		pageSize = maxPageSize
-	}
-	return page, pageSize
-}

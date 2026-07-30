@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // The V001 trigger auto_set_email_type only recomputes email_type when
@@ -115,17 +116,17 @@ func TestValidateUpdateRejectsBlankRequiredFields(t *testing.T) {
 // Chinese name is not 765 characters long.
 func TestValidateUpdateBoundsFieldLengths(t *testing.T) {
 	if _, err := validateUpdate(updateInput(func(i *UpdateUserInput) {
-		i.Name = stringPtr(strings.Repeat("名", maxNameLength))
+		i.Name = stringPtr(strings.Repeat("名", validate.MaxNameLength))
 	})); err != nil {
-		t.Fatalf("a %d-rune name = %v, want acceptance", maxNameLength, err)
+		t.Fatalf("a %d-rune name = %v, want acceptance", validate.MaxNameLength, err)
 	}
 	if _, err := validateUpdate(updateInput(func(i *UpdateUserInput) {
-		i.Name = stringPtr(strings.Repeat("名", maxNameLength+1))
+		i.Name = stringPtr(strings.Repeat("名", validate.MaxNameLength+1))
 	})); err == nil {
 		t.Fatal("an over-long name was accepted")
 	}
 	if _, err := validateUpdate(updateInput(func(i *UpdateUserInput) {
-		i.StudentID = stringPtr(strings.Repeat("B", maxStudentIDLength+1))
+		i.StudentID = stringPtr(strings.Repeat("B", validate.MaxStudentIDLength+1))
 	})); err == nil {
 		t.Fatal("an over-long student_id was accepted")
 	}
@@ -202,5 +203,40 @@ func TestNormalizePaging(t *testing.T) {
 					page, size, testCase.wantPage, testCase.wantSize)
 			}
 		})
+	}
+}
+
+// An address this guard accepts but the session package rejects yields an account
+// whose owner cannot sign in: the console renders it as an ordinary address while
+// every login attempt fails on a difference nobody can see. unicode.IsSpace does not
+// classify the zero-width codepoints or the BOM as space, and a bare `r < 0x20` test
+// misses NBSP, U+3000 and C1 alike, so each is named.
+func TestValidateLoginEmailRejectsInvisibleCodepoints(t *testing.T) {
+	for _, testCase := range []struct{ name, email string }{
+		{"NBSP", "b2404\u00a00101@njupt.edu.cn"},
+		{"zero-width space", "b2404\u200b0101@njupt.edu.cn"},
+		{"zero-width non-joiner", "b2404\u200c0101@njupt.edu.cn"},
+		{"zero-width joiner", "b2404\u200d0101@njupt.edu.cn"},
+		{"ideographic space", "b2404\u30000101@njupt.edu.cn"},
+		{"C1 NEL", "b2404\u00850101@njupt.edu.cn"},
+		{"BOM", "b2404\ufeff0101@njupt.edu.cn"},
+		{"line separator", "b2404\u20280101@njupt.edu.cn"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := validateLoginEmail(&testCase.email); err == nil {
+				t.Fatalf("validateLoginEmail accepted an address containing %s; "+
+					"the session flow rejects it, so the owner could never log in", testCase.name)
+			}
+		})
+	}
+}
+
+// The same codepoints must not reach a display field, where they corrupt the audit
+// detail and anything that renders it.
+func TestValidateUpdateRejectsC1ControlCharacters(t *testing.T) {
+	if _, err := validateUpdate(updateInput(func(i *UpdateUserInput) {
+		i.Name = stringPtr("张\u0085三")
+	})); err == nil {
+		t.Fatal("a C1 NEL in name was accepted")
 	}
 }
