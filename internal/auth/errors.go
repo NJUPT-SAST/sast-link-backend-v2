@@ -10,9 +10,11 @@ var (
 	ErrInvalidSecret = errors.New("auth: invalid secret")
 	// ErrUnsupportedVersion reports an unknown versioned credential format.
 	ErrUnsupportedVersion = errors.New("auth: unsupported version")
-	// ErrExpiredToken reports an expired or not-yet-valid token.
+	// ErrExpiredToken reports an expired token. A not-yet-valid token (nbf or iat
+	// in the future) is not expired and is reported as ErrInvalidToken instead.
 	ErrExpiredToken = errors.New("auth: token is not active")
-	// ErrInvalidToken reports a malformed token or failed signature check.
+	// ErrInvalidToken reports a malformed token, a failed signature check, or a
+	// not-yet-valid token.
 	ErrInvalidToken = errors.New("auth: invalid token")
 	// ErrRevokedToken reports an explicitly revoked token or family.
 	ErrRevokedToken = errors.New("auth: token revoked")

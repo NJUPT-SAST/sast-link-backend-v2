@@ -36,6 +36,7 @@ func setConfigEnv(t *testing.T, dbUser, dbPassword, dbName string) {
 	t.Setenv("SMTP_HOST", "smtp.example.test")
 	t.Setenv("SMTP_PORT", "587")
 	t.Setenv("SMTP_FROM", "noreply@example.test")
+	t.Setenv("OAUTH_CONSENT_URL", "https://link.example.test/oauth/consent")
 }
 
 func TestLoadMissingRequiredFields(t *testing.T) {
@@ -421,5 +422,104 @@ func TestLoadRejectsPreviousKIDWithoutPreviousKey(t *testing.T) {
 	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "JWT_SECRET_KEY_PREV and JWT_PREVIOUS_KID must be both set or both empty") {
 		t.Fatalf("Load() error = %v, want previous key/kid pair validation", err)
+	}
+}
+
+// JWT_ISSUER is both the iss claim and the base every OIDC discovery endpoint URL
+// is built from, so a scheme-less value would publish endpoint URLs no relying
+// party can resolve — a failure visible only to third-party integrators.
+func TestValidateAPIAuthRejectsRelativeJWTIssuer(t *testing.T) {
+	for _, issuer := range []string{"link.sast.fun", "/v2", "ftp://link.sast.fun"} {
+		t.Run(issuer, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("JWT_ISSUER", issuer)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), "JWT_ISSUER must be an absolute http(s) URL") {
+				t.Fatalf("ValidateAPIAuth() error = %v, want JWT_ISSUER URL validation", err)
+			}
+		})
+	}
+}
+
+// JWT_ISSUER is canonicalized without its trailing slash, because the value is read
+// twice: as the iss claim the JWT manager signs, and as the base the discovery
+// document builds endpoint URLs from. Discovery strips a trailing slash and the
+// signer does not, so an untrimmed "…/v2/" would advertise issuer "…/v2" and sign
+// "…/v2/" — OIDC Discovery 1.0 requires them byte-identical, so a conforming relying
+// party would reject every ID Token this service issues.
+func TestValidateAPIAuthCanonicalizesJWTIssuer(t *testing.T) {
+	for _, test := range []struct{ given, want string }{
+		{"https://link.sast.fun/v2/", "https://link.sast.fun/v2"},
+		{"https://link.sast.fun/v2///", "https://link.sast.fun/v2"},
+		{"  https://link.sast.fun/v2  ", "https://link.sast.fun/v2"},
+		{"https://link.sast.fun/v2", "https://link.sast.fun/v2"},
+	} {
+		t.Run(test.given, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("JWT_ISSUER", test.given)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err != nil {
+				t.Fatalf("ValidateAPIAuth() error = %v", err)
+			}
+			if cfg.JWTIssuer != test.want {
+				t.Fatalf("JWTIssuer = %q, want %q", cfg.JWTIssuer, test.want)
+			}
+		})
+	}
+}
+
+// An authorization code is a bearer credential that travels through a browser
+// redirect. Single use plus family revocation on replay are only as tight as this
+// window, so an unbounded TTL would quietly widen the interval they exist to bound.
+func TestValidateAPIAuthRejectsOverlongOAuthTTLs(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"OAUTH_CODE_TTL", "720h", "OAUTH_CODE_TTL must not exceed"},
+		{"OAUTH_AUTHORIZE_REQUEST_TTL", "48h", "OAUTH_AUTHORIZE_REQUEST_TTL must not exceed"},
+	} {
+		t.Run(test.key, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+// The token endpoint's limiter is what keeps client_secret and refresh_token
+// guessing bounded, so a misconfigured value must fail at startup.
+func TestValidateAPIAuthRejectsBadTokenRateLimit(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"RATE_LIMIT_TOKEN_RPM", "0", "RATE_LIMIT_TOKEN_RPM must be positive"},
+		{"RATE_LIMIT_TOKEN_WINDOW", "100ms", "RATE_LIMIT_TOKEN_WINDOW must be at least 1s"},
+	} {
+		t.Run(test.key, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }

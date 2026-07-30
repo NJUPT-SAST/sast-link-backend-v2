@@ -33,9 +33,13 @@ type TokenRepository struct {
 
 // AccessAuthState is the DB-authoritative state required to authenticate one access token.
 type AccessAuthState struct {
-	TokenID      string
-	UserID       int64
-	UserState    model.UserState
+	TokenID   string
+	UserID    int64
+	UserState model.UserState
+	// UserRole is the role as it stands in the database right now, not the role the
+	// token was signed with. Authorization reads this so a demotion takes effect on
+	// the next request instead of waiting for the old token to expire.
+	UserRole     model.UserRole
 	TokenVersion int
 	RevokedAt    *time.Time
 	ExpiresAt    time.Time
@@ -328,6 +332,35 @@ func (r *TokenRepository) FindRefreshToken(
 	return nil, fmt.Errorf("find refresh token: %w", err)
 }
 
+// FindFamilyOriginCreatedAt returns the creation time of a family's first refresh
+// token, which is the instant the user authorized this family.
+//
+// It reads the lowest sequence rather than min(created_at): sequence is the
+// family's monotonic ordering and is uniquely constrained with family_id, so it
+// identifies the origin row exactly, whereas two rows could in principle share a
+// timestamp. This is what lets the ID Token's auth_time survive rotation — the
+// rotated row's own created_at is the rotation instant, not an authentication.
+func (r *TokenRepository) FindFamilyOriginCreatedAt(
+	ctx context.Context,
+	familyID string,
+) (time.Time, error) {
+	if strings.TrimSpace(familyID) == "" {
+		return time.Time{}, fmt.Errorf("find token family origin: %w", ErrInvalidArgument)
+	}
+	var origin model.OAuthRefreshToken
+	err := r.database.WithContext(ctx).
+		Where("family_id = ?", familyID).
+		Order("sequence ASC").
+		First(&origin).Error
+	if err == nil {
+		return origin.CreatedAt, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return time.Time{}, ErrNotFound
+	}
+	return time.Time{}, fmt.Errorf("find token family origin: %w", err)
+}
+
 // FindAccessAuthStateByJTI reads the DB-authoritative state for one access JTI,
 // including the token record and its associated user state in a single query.
 func (r *TokenRepository) FindAccessAuthStateByJTI(ctx context.Context, jti string) (*AccessAuthState, error) {
@@ -337,7 +370,7 @@ func (r *TokenRepository) FindAccessAuthStateByJTI(ctx context.Context, jti stri
 	var state AccessAuthState
 	err := r.database.WithContext(ctx).
 		Table("oauth_access_tokens AS access").
-		Select("access.token_id, access.user_id, \"user\".state AS user_state, \"user\".token_version, access.revoked_at, access.expires_at").
+		Select("access.token_id, access.user_id, \"user\".state AS user_state, \"user\".role AS user_role, \"user\".token_version, access.revoked_at, access.expires_at").
 		Joins("JOIN \"user\" ON \"user\".id = access.user_id").
 		Where("access.token_id = ?", jti).
 		Take(&state).Error
@@ -392,7 +425,7 @@ func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt 
 	var entries []model.BlacklistEntry
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Select("token_id", "expires_at").
-		Where("family_id = ? AND expires_at > ?", familyID, revokedAt).
+		Where("family_id = ? AND expires_at > ? AND revoked_at IS NULL", familyID, revokedAt).
 		Find(&entries).Error; err != nil {
 		return nil, fmt.Errorf("select live access token family: %w", err)
 	}
@@ -406,8 +439,20 @@ func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt 
 		Update("revoked_at", revokedAt).Error; err != nil {
 		return nil, fmt.Errorf("revoke refresh token family: %w", err)
 	}
+	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
+}
+
+// enqueueBlacklistInTransaction writes the durable outbox rows for revoked access
+// tokens. Every revocation path funnels through here so the blacklist fast-reject
+// path cannot be forgotten for one of them; the rows are written in the revoking
+// transaction, which is what lets a later Redis delivery failure be harmless.
+func enqueueBlacklistInTransaction(
+	transaction *gorm.DB,
+	entries []model.BlacklistEntry,
+	revokedAt time.Time,
+) error {
 	if len(entries) == 0 {
-		return nil, nil
+		return nil
 	}
 	rows := make([]model.TokenBlacklistOutbox, 0, len(entries))
 	for _, entry := range entries {
@@ -421,9 +466,40 @@ func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt 
 		Columns:   []clause.Column{{Name: "token_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"expires_at", "next_delivery_at"}),
 	}).Create(&rows).Error; err != nil {
-		return nil, fmt.Errorf("enqueue access token blacklist: %w", err)
+		return fmt.Errorf("enqueue access token blacklist: %w", err)
 	}
-	return entries, nil
+	return nil
+}
+
+// revokeAllByClientInTransaction revokes every live token issued to one OAuth
+// client inside an existing transaction, so the revocation can be made atomic with
+// the registration change that triggered it (disabling the client).
+//
+// clientPK is oauth_clients.id, the foreign key the token tables carry — not the
+// public client_id string.
+func revokeAllByClientInTransaction(
+	transaction *gorm.DB,
+	clientPK int64,
+	revokedAt time.Time,
+) ([]model.BlacklistEntry, error) {
+	var entries []model.BlacklistEntry
+	if err := transaction.Model(&model.OAuthAccessToken{}).
+		Select("token_id", "expires_at").
+		Where("client_id = ? AND expires_at > ? AND revoked_at IS NULL", clientPK, revokedAt).
+		Find(&entries).Error; err != nil {
+		return nil, fmt.Errorf("select live access tokens by client: %w", err)
+	}
+	if err := transaction.Model(&model.OAuthAccessToken{}).
+		Where("client_id = ? AND revoked_at IS NULL", clientPK).
+		Update("revoked_at", revokedAt).Error; err != nil {
+		return nil, fmt.Errorf("revoke access tokens by client: %w", err)
+	}
+	if err := transaction.Model(&model.OAuthRefreshToken{}).
+		Where("client_id = ? AND revoked_at IS NULL", clientPK).
+		Update("revoked_at", revokedAt).Error; err != nil {
+		return nil, fmt.Errorf("revoke refresh tokens by client: %w", err)
+	}
+	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
 }
 
 // RevokeAllByUser revokes every non-revoked access and refresh token owned by
@@ -476,22 +552,17 @@ func revokeAllByUserInTransaction(
 		Update("revoked_at", revokedAt).Error; err != nil {
 		return nil, fmt.Errorf("revoke refresh tokens by user: %w", err)
 	}
-	if len(entries) == 0 {
-		return nil, nil
+	// Outstanding authorization codes are burned too, not just the tokens already
+	// minted. A code is a bearer credential that has not been spent yet: the token
+	// endpoint reads token_version fresh from the user row when it signs, so a code
+	// held across a password reset would redeem into a session carrying the *new*
+	// token_version — one the auth middleware accepts. Revoking tokens while leaving
+	// the codes alive therefore leaves a hole exactly as wide as the code TTL, in
+	// the one flow (reset after suspected compromise) where that matters most.
+	if err := transaction.Model(&model.OAuthAuthorization{}).
+		Where("user_id = ? AND is_used = FALSE AND expires_at > ?", userID, revokedAt).
+		Update("is_used", true).Error; err != nil {
+		return nil, fmt.Errorf("burn authorization codes by user: %w", err)
 	}
-	rows := make([]model.TokenBlacklistOutbox, 0, len(entries))
-	for _, entry := range entries {
-		rows = append(rows, model.TokenBlacklistOutbox{
-			TokenID:        entry.TokenID,
-			ExpiresAt:      entry.ExpiresAt,
-			NextDeliveryAt: revokedAt,
-		})
-	}
-	if err := transaction.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "token_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"expires_at", "next_delivery_at"}),
-	}).Create(&rows).Error; err != nil {
-		return nil, fmt.Errorf("enqueue access token blacklist: %w", err)
-	}
-	return entries, nil
+	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
 }

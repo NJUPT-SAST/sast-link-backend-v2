@@ -25,11 +25,24 @@ type JWTKeyPair struct {
 }
 
 // TokenClaims are access-token claims used by SAST Link.
+//
+// AZP (OIDC "authorized party") names the client the token was issued to. Every
+// access token shares one audience — this service — because the internal API is
+// the resource server in both cases. The audience therefore cannot distinguish a
+// token minted for a third-party client from a first-party session token, and
+// without that distinction a third-party token authenticates on the internal
+// surface: an openid-only grant would reach PUT /user/profile and the email
+// binding endpoints, which is account takeover. AZP is what the internal
+// middleware pins so only the built-in client's tokens are accepted there.
+//
+// Omitted (empty) means a first-party session token, so tokens signed before this
+// claim existed keep working; those are only ever issued to the built-in client.
 type TokenClaims struct {
 	Role         string `json:"role"`
 	State        string `json:"state"`
 	TokenVersion int    `json:"token_version"`
 	Scope        string `json:"scope"`
+	AZP          string `json:"azp,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -61,6 +74,9 @@ type TokenInput struct {
 	Scopes       []string
 	TTL          time.Duration
 	NotBefore    time.Time
+	// AuthorizedParty becomes the azp claim: the client_id this token was issued
+	// to. Leave empty only for first-party session tokens.
+	AuthorizedParty string
 }
 
 // JWTManager signs with the active key and verifies with active plus previous keys.
@@ -92,6 +108,7 @@ func (m JWTManager) SignAccessToken(input TokenInput) (string, error) {
 		State:        input.State,
 		TokenVersion: input.TokenVersion,
 		Scope:        scopeClaim,
+		AZP:          strings.TrimSpace(input.AuthorizedParty),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    m.Issuer,
 			Subject:   input.Subject,
@@ -113,6 +130,33 @@ func (m JWTManager) SignAccessToken(input TokenInput) (string, error) {
 
 // VerifyAccessToken verifies strict RS256 JWT claims and active/previous kid.
 func (m JWTManager) VerifyAccessToken(tokenString string) (*TokenClaims, error) {
+	return m.parseAccessToken(tokenString, false)
+}
+
+// VerifyExpiredAccessToken verifies everything VerifyAccessToken does except the
+// expiry, returning the claims of a token whose signature is valid but whose lifetime
+// has run out.
+//
+// This exists for RFC 7009 revocation, which is family-wide in this service: an
+// expired access token is itself already useless, but it still names a token family
+// whose refresh token can be live for weeks. Without a way to read the jti out of it,
+// revoking an expired access token silently revokes nothing and answers 200, telling
+// the client the session ended while it has not.
+//
+// Every other check stays in force — RS256 only, known kid, matching issuer and
+// audience, iat sanity, and the required-claim set — because the only thing safe to
+// relax here is the clock. In particular this is NOT jwt.ParseUnverified: an
+// unverified jti is attacker-chosen, and accepting one would let anyone revoke an
+// arbitrary family. The caller must still confirm ownership against the database row
+// the jti resolves to, which is what actually authorizes the revocation.
+func (m JWTManager) VerifyExpiredAccessToken(tokenString string) (*TokenClaims, error) {
+	return m.parseAccessToken(tokenString, true)
+}
+
+// parseAccessToken is the single parser both entry points share. The parser options
+// are identical in both modes; allowExpired changes only which failure is forgiven
+// afterwards, so nothing else can be relaxed by accident.
+func (m JWTManager) parseAccessToken(tokenString string, allowExpired bool) (*TokenClaims, error) {
 	if m.Issuer == "" || len(m.Audience) == 0 {
 		return nil, ErrInvalidInput
 	}
@@ -128,7 +172,27 @@ func (m JWTManager) VerifyAccessToken(tokenString string) (*TokenClaims, error) 
 	}
 	token, err := jwt.ParseWithClaims(tokenString, claims, m.keyfunc, parserOptions...)
 	if err != nil {
-		if errors.Is(err, jwt.ErrTokenExpired) || errors.Is(err, jwt.ErrTokenNotValidYet) || errors.Is(err, jwt.ErrTokenUsedBeforeIssued) {
+		// jwt/v5 joins every claim failure into one error and each stays individually
+		// detectable, which is what lets expiry be forgiven on its own. Neither
+		// WithoutClaimsValidation nor a back-shifted clock would do: the first disables
+		// issuer and audience checking outright, and the second turns a freshly issued
+		// token into "not valid yet".
+		if allowExpired && isOnlyExpiredError(err) {
+			if claims.ExpiresAt == nil {
+				return nil, ErrInvalidToken
+			}
+			if validateErr := validateTokenClaims(claims); validateErr != nil {
+				return nil, validateErr
+			}
+			return claims, nil
+		}
+		// Only a genuine expiry is reported as ErrExpiredToken. nbf-in-future and
+		// iat-in-future are "not valid yet", not "expired": mapping them here would
+		// tell callers (the revoke path, the middleware) to treat a not-yet-active
+		// token as expired, which is the wrong status and, for revoke, would route it
+		// into VerifyExpiredAccessToken unnecessarily. isOnlyExpiredError already
+		// refuses to forgive them; this keeps the classification consistent.
+		if errors.Is(err, jwt.ErrTokenExpired) {
 			return nil, ErrExpiredToken
 		}
 		return nil, ErrInvalidToken
@@ -140,6 +204,40 @@ func (m JWTManager) VerifyAccessToken(tokenString string) (*TokenClaims, error) 
 		return nil, err
 	}
 	return claims, nil
+}
+
+// isOnlyExpiredError reports whether expiry is the sole reason a token was rejected.
+//
+// Enumerated as a deny list of everything that must still be fatal rather than as
+// "contains ErrTokenExpired", because a token can fail several validations at once: an
+// expired token from a foreign issuer reports both, and treating it as merely expired
+// would accept it. A signature failure never reaches here — the parser stops before
+// claim validation — but it is listed anyway so the guarantee does not depend on that
+// ordering.
+func isOnlyExpiredError(err error) bool {
+	if !errors.Is(err, jwt.ErrTokenExpired) {
+		return false
+	}
+	// Deliberately not jwt.ErrTokenInvalidClaims: that is the wrapper every claim
+	// failure is joined under, including a plain expiry, so listing it would make this
+	// function always report false.
+	for _, fatal := range []error{
+		jwt.ErrTokenSignatureInvalid,
+		jwt.ErrTokenUnverifiable,
+		jwt.ErrTokenMalformed,
+		jwt.ErrTokenInvalidIssuer,
+		jwt.ErrTokenInvalidAudience,
+		jwt.ErrTokenInvalidSubject,
+		jwt.ErrTokenInvalidId,
+		jwt.ErrTokenNotValidYet,
+		jwt.ErrTokenUsedBeforeIssued,
+		jwt.ErrTokenRequiredClaimMissing,
+	} {
+		if errors.Is(err, fatal) {
+			return false
+		}
+	}
+	return true
 }
 
 // JWKS returns public JWKs for active and previous RSA keys.

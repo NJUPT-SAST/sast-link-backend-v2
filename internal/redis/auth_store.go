@@ -81,6 +81,12 @@ func (k Keys) OAuthRegistration(state string) string {
 	return k.join("oauth", "registration", dynamicKeySegment(state))
 }
 
+// AuthorizeRequest returns the key holding a validated but unconfirmed
+// /oauth/authorize request, pending the user's consent decision.
+func (k Keys) AuthorizeRequest(requestID string) string {
+	return k.join("oauth", "authorize_request", dynamicKeySegment(requestID))
+}
+
 // RegisterTicket returns a registration-ticket key.
 func (k Keys) RegisterTicket(ticket string) string {
 	return k.join("auth", "register_ticket", dynamicKeySegment(ticket))

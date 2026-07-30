@@ -20,6 +20,9 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
+// testInternalClientID is the built-in first-party client these tests issue for.
+const testInternalClientID = "sast-link-web"
+
 type testClock struct{ value time.Time }
 
 func (c testClock) Now() time.Time { return c.value }
@@ -114,7 +117,7 @@ func performAuthRequest(manager *auth.JWTManager, blacklist *fakeBlacklist, stat
 	if blacklist != nil {
 		blacklistStore = blacklist
 	}
-	authenticator := Authenticator{JWT: manager, Blacklist: blacklistStore, Tokens: states, Clock: testClock{value: now}}
+	authenticator := Authenticator{JWT: manager, Blacklist: blacklistStore, Tokens: states, Clock: testClock{value: now}, InternalClientID: testInternalClientID}
 	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) {
 		principal, _ := PrincipalFrom(c)
 		c.JSON(http.StatusOK, envelope{Code: 0, Message: "ok", Data: map[string]any{"user_id": principal.UserID, "jti": principal.JTI}})
@@ -154,9 +157,10 @@ func TestAuthenticatorRejectsBlankJTIWithoutBlacklistLookup(t *testing.T) {
 		JWT: fakeVerifier{claims: &auth.TokenClaims{RegisteredClaims: jwt.RegisteredClaims{
 			Subject: "42", ID: " \t", ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 		}}},
-		Blacklist: blacklist,
-		Tokens:    states,
-		Clock:     testClock{value: now},
+		Blacklist:        blacklist,
+		Tokens:           states,
+		Clock:            testClock{value: now},
+		InternalClientID: testInternalClientID,
 	}
 	router := gin.New()
 	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
@@ -271,10 +275,114 @@ func TestStrictBearerRejectsWhitespaceInToken(t *testing.T) {
 	}
 }
 
+// The scheme name is matched exactly, which RFC 7235 §2.1 does not require — it
+// defines the scheme as case-insensitive, so "bearer" names the same scheme.
+//
+// Kept strict deliberately, and asserted here so the choice is visible rather than
+// incidental: every current caller is either this project's own frontend or a test.
+// Revisit if a third-party OIDC library ever fails against /userinfo, where the
+// header spelling is not ours to dictate and the rejection surfaces as a misleading
+// invalid_token. See the "not strict bearer" case in TestAuthenticatorRequireAuth.
+func TestStrictBearerSchemeIsCaseSensitive(t *testing.T) {
+	for _, header := range []string{"bearer t", "BEARER t", "BeArEr t"} {
+		if _, ok := strictBearerToken(header); ok {
+			t.Errorf("strictBearerToken(%q) accepted a non-canonical scheme spelling", header)
+		}
+	}
+	for _, header := range []string{"Basic t", "Bearerx t", "Bearer", "Bearer "} {
+		if _, ok := strictBearerToken(header); ok {
+			t.Errorf("strictBearerToken(%q) accepted a non-Bearer or empty credential", header)
+		}
+	}
+}
+
 func TestPrincipalFromMissing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	if principal, ok := PrincipalFrom(c); ok || principal.UserID != 0 {
 		t.Fatalf("PrincipalFrom missing = %+v, %v", principal, ok)
+	}
+}
+
+// A third-party OAuth access token must not authenticate on the internal API.
+// Every access token names this service as its audience, so azp is the only claim
+// that distinguishes them; without this gate an openid-only third-party grant
+// reaches PUT /user/profile and the email-binding endpoints, which is account
+// takeover.
+func TestAuthenticatorRejectsThirdPartyAccessToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid"}, TTL: time.Hour,
+		AuthorizedParty: "some-third-party-app",
+	})
+	recorder, body := performAuthRequest(manager, nil, validStates(now), now, "Bearer "+token)
+	if recorder.Code != http.StatusForbidden || body.Code != errcode.CodeForbidden {
+		t.Fatalf("response = %d %#v, want 403/%d", recorder.Code, body, errcode.CodeForbidden)
+	}
+}
+
+// The built-in client's own tokens must still pass.
+func TestAuthenticatorAcceptsInternalClientToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid"}, TTL: time.Hour,
+		AuthorizedParty: testInternalClientID,
+	})
+	recorder, body := performAuthRequest(manager, nil, validStates(now), now, "Bearer "+token)
+	if recorder.Code != http.StatusOK || body.Data["user_id"] != float64(42) {
+		t.Fatalf("response = %d %#v, want 200 and user 42", recorder.Code, body)
+	}
+}
+
+// A missing InternalClientID must reject rather than admit every client: a
+// deployment that forgets it should fail loudly, not silently drop the check.
+func TestAuthenticatorFailsClosedWithoutInternalClientID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid"}, TTL: time.Hour, AuthorizedParty: testInternalClientID,
+	})
+	router := gin.New()
+	authenticator := Authenticator{JWT: manager, Tokens: validStates(now), Clock: testClock{value: now}}
+	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/protected", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("response = %d, want 500 (fail closed)", recorder.Code)
+	}
+}
+
+// AuthenticateAnyClient is what /userinfo uses; it must accept a third-party token
+// that Authenticate rejects.
+func TestAuthenticateAnyClientAcceptsThirdPartyToken(t *testing.T) {
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid"}, TTL: time.Hour, AuthorizedParty: "some-third-party-app",
+	})
+	authenticator := Authenticator{
+		JWT: manager, Tokens: validStates(now), Clock: testClock{value: now},
+		InternalClientID: testInternalClientID,
+	}
+	principal, err := authenticator.AuthenticateAnyClient(context.Background(), "Bearer "+token)
+	if err != nil {
+		t.Fatalf("AuthenticateAnyClient() error = %v, want success", err)
+	}
+	if principal.ClientID != "some-third-party-app" {
+		t.Fatalf("principal.ClientID = %q, want the third-party client", principal.ClientID)
+	}
+	if _, err := authenticator.Authenticate(context.Background(), "Bearer "+token); err == nil {
+		t.Fatal("Authenticate() accepted a third-party token")
 	}
 }

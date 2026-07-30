@@ -14,13 +14,12 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
 )
 
 type issuedPair struct {
@@ -32,11 +31,16 @@ type issuedPair struct {
 	refresh      *model.OAuthRefreshToken
 }
 
+// issuePair signs a session token pair through the shared issuer.
+//
+// The issuer is shared with the OAuth token endpoint so both paths produce
+// identical token metadata. Errors are translated to session errors here, since
+// every failure at this layer is a server-side signing or configuration fault
+// rather than anything the caller submitted.
 func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence int, familyID string, requestedScopes []string) (*issuedPair, error) {
 	if user == nil || client == nil || s.JWT == nil || s.RefreshTokens == nil || s.Tokens == nil {
 		return nil, newError(ErrInternal, "会话服务依赖未配置", nil)
 	}
-	now := s.now()
 	accessTTL := s.AccessTTL
 	if accessTTL <= 0 {
 		accessTTL = defaultAccessTTL
@@ -45,65 +49,26 @@ func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence
 	if refreshTTL <= 0 {
 		refreshTTL = defaultRefreshTTL
 	}
-	scopes, err := scope.Normalize(requestedScopes)
-	if err != nil {
-		return nil, newError(ErrInternal, "规范化 Token scope 失败", err)
-	}
-	scopeClaim, err := scope.Claim(scopes)
-	if err != nil {
-		return nil, newError(ErrInternal, "编码会话 scope 失败", err)
-	}
-	if familyID == "" {
-		familyID = uuid.NewString()
-	}
-	jti := uuid.NewString()
-	accessToken, err := s.JWT.SignAccessToken(auth.TokenInput{
-		Subject:      strconv.FormatInt(user.ID, 10),
-		JTI:          jti,
-		Role:         string(user.Role),
-		State:        string(user.State),
-		TokenVersion: user.TokenVersion,
-		Scopes:       scopes,
-		TTL:          accessTTL,
-		NotBefore:    now,
+	issuer := tokenissue.Issuer{JWT: s.JWT, Refresh: s.RefreshTokens, Clock: s.Clock}
+	pair, err := issuer.Issue(tokenissue.Request{
+		User:       user,
+		Client:     client,
+		Sequence:   sequence,
+		FamilyID:   familyID,
+		Scopes:     requestedScopes,
+		AccessTTL:  accessTTL,
+		RefreshTTL: refreshTTL,
 	})
 	if err != nil {
-		return nil, newError(ErrInternal, "签发 Access Token 失败", err)
-	}
-	refreshToken, err := s.RefreshTokens.NewRefreshToken()
-	if err != nil {
-		return nil, newError(ErrInternal, "创建 Refresh Token 失败", err)
-	}
-	refreshHash, err := s.RefreshTokens.HashRefreshToken(refreshToken)
-	if err != nil {
-		return nil, newError(ErrInternal, "计算 Refresh Token 哈希失败", err)
-	}
-	access := &model.OAuthAccessToken{
-		TokenID:   jti,
-		ClientID:  client.ID,
-		UserID:    user.ID,
-		FamilyID:  &familyID,
-		Scopes:    model.StringArray(scopes),
-		ExpiresAt: now.Add(accessTTL).UTC(),
-		CreatedAt: now.UTC(),
-	}
-	refresh := &model.OAuthRefreshToken{
-		TokenHash: refreshHash,
-		FamilyID:  familyID,
-		Sequence:  sequence,
-		ClientID:  client.ID,
-		UserID:    user.ID,
-		Scopes:    model.StringArray(scopes),
-		ExpiresAt: now.Add(refreshTTL).UTC(),
-		CreatedAt: now.UTC(),
+		return nil, newError(ErrInternal, "签发会话 Token Pair 失败", err)
 	}
 	return &issuedPair{
-		accessToken:  accessToken,
-		refreshToken: refreshToken,
-		scopeClaim:   scopeClaim,
-		familyID:     familyID,
-		access:       access,
-		refresh:      refresh,
+		accessToken:  pair.AccessToken,
+		refreshToken: pair.RefreshToken,
+		scopeClaim:   pair.ScopeClaim,
+		familyID:     pair.FamilyID,
+		access:       pair.Access,
+		refresh:      pair.Refresh,
 	}, nil
 }
 

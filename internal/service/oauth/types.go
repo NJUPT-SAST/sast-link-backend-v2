@@ -1,0 +1,209 @@
+package oauth
+
+import (
+	"context"
+	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+)
+
+// BearerTokenType is the token_type value in every token response.
+const BearerTokenType = "Bearer"
+
+// Clock is an alias for auth.Clock to keep this package's API stable.
+type Clock = auth.Clock
+
+// LimitResult is a rate-limit decision.
+type LimitResult struct {
+	Allowed    bool
+	RetryAfter time.Duration
+}
+
+// EndpointLimiter throttles one endpoint per subject.
+type EndpointLimiter interface {
+	Allow(ctx context.Context, endpoint, subject string) (LimitResult, error)
+}
+
+// TokenBlacklist delivers revoked JTIs to the fast-reject cache. Revocation is
+// authoritative in PostgreSQL, so these calls are advisory.
+type TokenBlacklist interface {
+	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
+}
+
+// AuthorizeRequestPayload is a validated /oauth/authorize request awaiting the
+// user's consent decision.
+//
+// Every field the code will be built from is captured here rather than re-read
+// from the consent request. The consent call is authenticated but the parameters
+// it echoes are not trusted: if the client, scope or PKCE challenge could be
+// changed between the two legs, a caller could consent to one request and mint a
+// code for another.
+type AuthorizeRequestPayload struct {
+	ClientID            string   `json:"client_id"`
+	RedirectURI         string   `json:"redirect_uri"`
+	Scopes              []string `json:"scopes"`
+	State               string   `json:"state"`
+	CodeChallenge       string   `json:"code_challenge"`
+	CodeChallengeMethod string   `json:"code_challenge_method"`
+	Nonce               string   `json:"nonce,omitempty"`
+}
+
+// AuthorizeRequestStore holds validated authorize requests between the two legs
+// of the flow. Fail-closed: Redis is the only copy, so an unreadable request
+// cannot be treated as consented and the user must restart.
+type AuthorizeRequestStore interface {
+	SaveAuthorizeRequest(ctx context.Context, requestID string, payload AuthorizeRequestPayload, ttl time.Duration) error
+	// ConsumeAuthorizeRequest atomically reads and deletes a stashed request, so a
+	// single stash cannot yield two authorization codes.
+	ConsumeAuthorizeRequest(ctx context.Context, requestID string) (payload AuthorizeRequestPayload, found bool, err error)
+}
+
+// UserRepository reads the account behind an authorization.
+type UserRepository interface {
+	FindByID(ctx context.Context, userID int64) (*model.User, error)
+}
+
+// ClientRepository resolves OAuth clients.
+//
+// Only the active-client lookup is needed: every OAuth request authenticates its
+// caller, and a deactivated client must not authenticate. Resolving a client by
+// primary key would be for reading an existing token row's owner, which no flow
+// here does — the token endpoints compare the row's client_id against the
+// authenticated client rather than looking it up.
+type ClientRepository interface {
+	FindActiveByClientID(ctx context.Context, clientID string) (*model.OAuthClient, error)
+}
+
+// AuthorizationRepository persists single-use authorization codes.
+type AuthorizationRepository interface {
+	Create(ctx context.Context, authorization *model.OAuthAuthorization) error
+	// Consume marks a code used under a row lock. On replay it returns
+	// repository.ErrAuthorizationReplayed together with the record, whose family
+	// ID the caller must revoke.
+	Consume(ctx context.Context, code string, now time.Time) (*model.OAuthAuthorization, error)
+}
+
+// TokenRepository persists and revokes token metadata.
+type TokenRepository interface {
+	CreatePair(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
+	RotateRefreshToken(ctx context.Context, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
+	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
+	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
+	// FindFamilyOriginCreatedAt returns when a family's first refresh token was
+	// created, i.e. when the user actually authorized. Rotation must not advance the
+	// ID Token's auth_time, so it cannot be read from the rotated row itself.
+	FindFamilyOriginCreatedAt(ctx context.Context, familyID string) (time.Time, error)
+	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
+}
+
+// AuditRepository records audit events.
+type AuditRepository interface {
+	Create(ctx context.Context, entry *model.AuditLog) error
+}
+
+// ProfileRepository reads the display fields backing OIDC profile claims.
+type ProfileRepository interface {
+	FindPublicCardByUserID(ctx context.Context, userID int64) (*repository.PublicCard, error)
+}
+
+// AuthorizeInput is a raw /oauth/authorize request.
+type AuthorizeInput struct {
+	ResponseType        string
+	ClientID            string
+	RedirectURI         string
+	Scope               string
+	State               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	Nonce               string
+	ClientIP            string
+	UserAgent           string
+}
+
+// AuthorizeResult tells the handler where to send the browser.
+type AuthorizeResult struct {
+	// RequestID identifies the stashed request the consent page must submit.
+	RequestID string
+	// ExpiresIn is the stash lifetime in seconds.
+	ExpiresIn int
+	// ClientName is shown on the consent page so the user knows who is asking.
+	ClientName string
+	// Scopes is the validated scope set being requested.
+	Scopes []string
+}
+
+// ConsentInput is an authenticated consent decision.
+type ConsentInput struct {
+	RequestID string
+	Approve   bool
+	// UserID and UserState come from the verified access token, never from the body.
+	UserID    int64
+	ClientIP  string
+	UserAgent string
+}
+
+// ConsentResult carries the URI the browser must be sent to, whether the user
+// approved or refused. RFC 6749 §4.1.2.1 requires a refusal to be reported to
+// the client as access_denied rather than swallowed here.
+type ConsentResult struct {
+	RedirectURI string
+}
+
+// TokenInput is a raw /oauth/token request.
+type TokenInput struct {
+	GrantType    string
+	Code         string
+	RedirectURI  string
+	ClientID     string
+	ClientSecret string
+	CodeVerifier string
+	RefreshToken string
+	ClientIP     string
+	UserAgent    string
+}
+
+// TokenResult is an RFC 6749 §5.1 token response.
+type TokenResult struct {
+	AccessToken  string
+	RefreshToken string
+	TokenType    string
+	ExpiresIn    int
+	Scope        string
+	// IDToken is set only for grants carrying the openid scope, which for this
+	// service is every grant; it stays a separate field so the handler can omit it.
+	IDToken string
+}
+
+// RevokeInput is a raw /oauth/revoke request.
+type RevokeInput struct {
+	Token         string
+	TokenTypeHint string
+	ClientID      string
+	ClientSecret  string
+	ClientIP      string
+	UserAgent     string
+}
+
+// UserInfoInput identifies the subject of a UserInfo request. The fields come
+// from the authenticated principal, so this endpoint performs no token parsing
+// of its own.
+type UserInfoInput struct {
+	UserID int64
+	Scopes []string
+}
+
+// UserInfoResult is the claim set for a UserInfo response. Pointer and omitempty
+// fields keep claims outside the granted scopes absent rather than empty, which
+// is what OIDC requires.
+type UserInfoResult struct {
+	Subject           string `json:"sub"`
+	Name              string `json:"name,omitempty"`
+	Picture           string `json:"picture,omitempty"`
+	PreferredUsername string `json:"preferred_username,omitempty"`
+	Profile           string `json:"profile,omitempty"`
+	UpdatedAt         int64  `json:"updated_at,omitempty"`
+	Email             string `json:"email,omitempty"`
+	EmailVerified     *bool  `json:"email_verified,omitempty"`
+}
