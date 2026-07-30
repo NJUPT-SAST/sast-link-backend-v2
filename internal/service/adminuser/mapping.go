@@ -3,6 +3,7 @@ package adminuser
 import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 func userListItem(row repository.AdminUserRow) UserListItem {
@@ -104,8 +105,8 @@ func normalizePaging(page, pageSize, defaultSize int) (int, int) {
 	if pageSize <= 0 {
 		pageSize = defaultSize
 	}
-	if pageSize > maxPageSize {
-		pageSize = maxPageSize
+	if pageSize > validate.MaxPageSize {
+		pageSize = validate.MaxPageSize
 	}
 	return page, pageSize
 }

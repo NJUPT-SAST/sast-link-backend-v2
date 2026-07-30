@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // AuditLogRepository persists audit events.
@@ -68,7 +69,7 @@ func (r *AuditLogRepository) List(
 		return []model.AuditLog{}, 0, nil
 	}
 
-	entries := make([]model.AuditLog, 0, filter.Limit)
+	entries := make([]model.AuditLog, 0, validate.PreallocateRows(filter.Limit))
 	err := r.auditLogQuery(ctx, filter).
 		Order("created_at DESC, id DESC").
 		Limit(filter.Limit).

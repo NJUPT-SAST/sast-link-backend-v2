@@ -14,7 +14,6 @@ import (
 const (
 	defaultUserPageSize  = 20
 	defaultAuditPageSize = 50
-	maxPageSize          = 100
 )
 
 // userFieldOrder is the contract order used for the admin_user_update audit

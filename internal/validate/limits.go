@@ -12,6 +12,7 @@ import "unicode/utf8"
 const (
 	MaxNameLength        = 255
 	MaxPhoneNumberLength = 20
+	MaxPageSize          = 100
 	MaxQQNumberLength    = 20
 	MaxStudentIDLength   = 50
 	MaxMajorLength       = 50
@@ -28,4 +29,19 @@ const (
 // varchar(255) despite being 600 bytes. Using len() here would reject it.
 func WithinLength(value string, limit int) bool {
 	return utf8.RuneCountInString(value) <= limit
+}
+
+// PreallocateRows returns a slice capacity safe to reserve for a page of limit rows.
+//
+// A repository must not size an allocation from a caller-supplied limit directly. Its
+// list methods are exported and reachable by any future caller, not only through the
+// service that clamps page_size, and the allocation happens before a single row is
+// read: a limit of 50 million reserves gigabytes for a query that may return nothing.
+// Capping at the page size the contract actually serves costs nothing, since a larger
+// limit could never fill the extra capacity through any supported request.
+func PreallocateRows(limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	return min(limit, MaxPageSize)
 }

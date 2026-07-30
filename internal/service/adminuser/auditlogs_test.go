@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 func TestListAuditLogsPassesFiltersThrough(t *testing.T) {
@@ -46,9 +47,9 @@ func TestListAuditLogsCapsPageSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAuditLogs: %v", err)
 	}
-	if result.PageSize != maxPageSize || h.audit.listed.Limit != maxPageSize {
+	if result.PageSize != validate.MaxPageSize || h.audit.listed.Limit != validate.MaxPageSize {
 		t.Fatalf("page size = %d (limit %d), want %d",
-			result.PageSize, h.audit.listed.Limit, maxPageSize)
+			result.PageSize, h.audit.listed.Limit, validate.MaxPageSize)
 	}
 }
 

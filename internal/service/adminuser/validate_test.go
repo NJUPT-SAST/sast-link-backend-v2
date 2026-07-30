@@ -193,7 +193,7 @@ func TestNormalizePaging(t *testing.T) {
 		{"defaults", 0, 0, defaultUserPageSize, 1, defaultUserPageSize},
 		{"audit default", 0, 0, defaultAuditPageSize, 1, defaultAuditPageSize},
 		{"explicit", 3, 25, defaultUserPageSize, 3, 25},
-		{"over the cap", 1, 5000, defaultUserPageSize, 1, maxPageSize},
+		{"over the cap", 1, 5000, defaultUserPageSize, 1, validate.MaxPageSize},
 		{"negative page", -4, 10, defaultUserPageSize, 1, 10},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -520,5 +521,32 @@ func TestUpdateAdminUserRefusesEmailTypeWithoutAddress(t *testing.T) {
 	if reloaded.EmailType != model.EmailTypeNJUpt {
 		t.Fatalf("email_type = %q, want it unchanged and consistent with the address",
 			reloaded.EmailType)
+	}
+}
+
+// The preallocation cap bounds reserved capacity, not the result. A limit above the
+// cap must still return every row the query matches — a slice grows past its initial
+// capacity, so capping it can only cost an append, never truncate. Swapping the cap
+// into the SQL LIMIT instead would silently shorten pages.
+func TestListAdminUsersHonoursALimitAboveThePreallocationCap(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	const seeded = 5
+	for i := range seeded {
+		adminSeed(t, database, fmt.Sprintf("b24040%d@njupt.edu.cn", i), fmt.Sprintf("用户%d", i),
+			model.UserRoleMember, model.UserStateOnSAST, nil)
+	}
+
+	rows, total, err := users.ListAdminUsers(context.Background(),
+		repository.AdminUserFilter{Limit: 10_000_000, Offset: 0})
+	if err != nil {
+		t.Fatalf("ListAdminUsers: %v", err)
+	}
+	if total != seeded {
+		t.Fatalf("total = %d, want %d", total, seeded)
+	}
+	if len(rows) != seeded {
+		t.Fatalf("rows = %d, want %d: the cap must bound the reservation, not the page",
+			len(rows), seeded)
 	}
 }

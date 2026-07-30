@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // adminLockKey serializes the writes that must observe an accurate count of
@@ -93,7 +94,7 @@ func (r *UserRepository) ListAdminUsers(
 		return []AdminUserRow{}, 0, nil
 	}
 
-	rows := make([]AdminUserRow, 0, filter.Limit)
+	rows := make([]AdminUserRow, 0, validate.PreallocateRows(filter.Limit))
 	err := r.adminUserQuery(ctx, filter).
 		Select(`"user".id`, `"user".name`, `"user".student_id`, `"user".login_email`,
 			`"user".role`, `"user".state`, `"user".email_type`, `"user".phone_number`,
