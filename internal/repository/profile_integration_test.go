@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -43,8 +44,13 @@ func TestUserRepositoryUpdateProfileAppliesBothTables(t *testing.T) {
 		t.Fatalf("department = %v, want software", got)
 	}
 	// The V001 trigger bumps updated_at on every UPDATE, so the write really landed.
-	if !updated.UpdatedAt.After(user.CreatedAt) && !updated.UpdatedAt.Equal(user.CreatedAt) {
-		t.Fatalf("updated_at = %v, want refreshed", updated.UpdatedAt)
+	// Compare at PostgreSQL's microsecond precision: timestamptz stores microseconds
+	// while time.Now() carries nanoseconds, so an update inside the same microsecond as
+	// the create can otherwise read the DB value as fractionally older than the
+	// in-memory CreatedAt and flake.
+	createdAt := user.CreatedAt.Truncate(time.Microsecond)
+	if updated.UpdatedAt.Before(createdAt) {
+		t.Fatalf("updated_at = %v, want at least the create instant %v", updated.UpdatedAt, createdAt)
 	}
 }
 
