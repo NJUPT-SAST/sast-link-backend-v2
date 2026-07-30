@@ -96,9 +96,12 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	}
 
 	// The code must belong to the authenticated client. Without this a client could
-	// redeem a code issued to a different client and receive tokens for it.
+	// redeem a code issued to a different client and receive tokens for it. The
+	// description is the same "授权码无效" as an unknown code so this endpoint is
+	// not an oracle; the wrapped error records the mismatch for operators.
 	if authorization.ClientID != client.ID {
-		return nil, newError(ErrInvalidGrant, "授权码与客户端不匹配", nil)
+		return nil, newError(ErrInvalidGrant, "授权码无效",
+			errors.New("authorization code belongs to a different client"))
 	}
 	// RFC 6749 §4.1.3 requires redirect_uri to match the authorization request.
 	if redirectErr := matchRedirectURI(authorization.RedirectURI, input.RedirectURI); redirectErr != nil {
@@ -189,9 +192,12 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	// The token must belong to the authenticated client. This is also what keeps
 	// the OAuth path and the internal session path from crossing: a session token
 	// belongs to the built-in client, so presenting it here with a third-party
-	// client_id fails, and vice versa in session.Refresh.
+	// client_id fails, and vice versa in session.Refresh. The description is the
+	// same "refresh_token 无效" as an unknown token so this endpoint is not an
+	// oracle; the wrapped error records the mismatch for operators.
 	if current.ClientID != client.ID {
-		return nil, newError(ErrInvalidGrant, "refresh_token 与客户端不匹配", nil)
+		return nil, newError(ErrInvalidGrant, "refresh_token 无效",
+			errors.New("refresh token belongs to a different client"))
 	}
 	if current.RevokedAt != nil {
 		// Replay of an already-rotated token: the family is compromised.

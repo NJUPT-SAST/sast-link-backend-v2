@@ -306,6 +306,35 @@ func TestTokenAuthorizationCodeRejectsForeignClient(t *testing.T) {
 	}
 }
 
+// A code that belongs to another client must read identically to one that never
+// existed. authenticateClient already hides client existence; this covers the
+// grant-ownership check that runs after authentication succeeds, so a holder of a
+// stolen code cannot probe which client it belongs to by watching the description.
+func TestTokenAuthorizationCodeMismatchIsIndistinguishableFromUnknown(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+
+	// Both requests authenticate as the same confidential client, so the only
+	// difference is whether the code exists at all or belongs to another client.
+	unknownInput := validCodeTokenInput("ac_nonexistent")
+	unknownInput.ClientID = testConfidentialClientID
+	unknownInput.ClientSecret = testClientSecret
+	_, unknownErr := h.service.Token(context.Background(), unknownInput)
+
+	foreignInput := validCodeTokenInput(code)
+	foreignInput.ClientID = testConfidentialClientID
+	foreignInput.ClientSecret = testClientSecret
+	_, foreignErr := h.service.Token(context.Background(), foreignInput)
+
+	unknown := oauthError(t, unknownErr, ErrorInvalidGrant)
+	foreign := oauthError(t, foreignErr, ErrorInvalidGrant)
+	if foreign.Description != unknown.Description {
+		t.Fatalf("foreign description = %q, unknown description = %q; a distinct message "+
+			"lets a caller learn which client a stolen code belongs to",
+			foreign.Description, unknown.Description)
+	}
+}
+
 func TestTokenAuthorizationCodeRejectsExpiredCode(t *testing.T) {
 	h := newHarness(t)
 	code := issueCode(t, h, testPublicClientID, "openid")
@@ -541,6 +570,38 @@ func TestTokenRefreshGrantRejectsForeignClient(t *testing.T) {
 	requireOAuthError(t, err, ErrorInvalidGrant)
 	if len(h.tokens.revokedFamilies) != 0 {
 		t.Fatal("a client mismatch revoked the family; only a replay should")
+	}
+}
+
+// A refresh token that belongs to another client must read identically to one that
+// never existed, for the same reason as the code check above.
+func TestTokenRefreshMismatchIsIndistinguishableFromUnknown(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid")
+	first, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+
+	_, unknownErr := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: "rt_nonexistent",
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+	})
+	_, foreignErr := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: first.RefreshToken,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+	})
+
+	unknown := oauthError(t, unknownErr, ErrorInvalidGrant)
+	foreign := oauthError(t, foreignErr, ErrorInvalidGrant)
+	if foreign.Description != unknown.Description {
+		t.Fatalf("foreign description = %q, unknown description = %q; a distinct message "+
+			"lets a caller learn which client a stolen refresh token belongs to",
+			foreign.Description, unknown.Description)
 	}
 }
 
