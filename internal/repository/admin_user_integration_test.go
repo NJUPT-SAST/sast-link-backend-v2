@@ -3,7 +3,6 @@ package repository_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // assertPairRevokedAt checks a single token pair. The shared assertFamilyRevokedAt
@@ -524,29 +524,29 @@ func TestUpdateAdminUserRefusesEmailTypeWithoutAddress(t *testing.T) {
 	}
 }
 
-// The preallocation cap bounds reserved capacity, not the result. A limit above the
-// cap must still return every row the query matches — a slice grows past its initial
-// capacity, so capping it can only cost an append, never truncate. Swapping the cap
-// into the SQL LIMIT instead would silently shorten pages.
-func TestListAdminUsersHonoursALimitAboveThePreallocationCap(t *testing.T) {
+// The result slice is sized from Limit before any row is read, so an unbounded limit
+// reserves memory for rows that may not exist: 50 million AdminUserRows is gigabytes
+// for a query that can return nothing. This method is exported, so the service's
+// page_size clamp is not the only way in — the bound has to live here.
+func TestListAdminUsersRefusesALimitBeyondThePageSize(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)
-	const seeded = 5
-	for i := range seeded {
-		adminSeed(t, database, fmt.Sprintf("b24040%d@njupt.edu.cn", i), fmt.Sprintf("用户%d", i),
-			model.UserRoleMember, model.UserStateOnSAST, nil)
+	adminSeed(t, database, "b24040@njupt.edu.cn", "用户",
+		model.UserRoleMember, model.UserStateOnSAST, nil)
+
+	_, _, err := users.ListAdminUsers(context.Background(),
+		repository.AdminUserFilter{Limit: 10_000_000, Offset: 0})
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("error = %v, want ErrInvalidArgument", err)
 	}
 
-	rows, total, err := users.ListAdminUsers(context.Background(),
-		repository.AdminUserFilter{Limit: 10_000_000, Offset: 0})
+	// The largest page the contract serves is still accepted.
+	rows, _, err := users.ListAdminUsers(context.Background(),
+		repository.AdminUserFilter{Limit: validate.MaxPageSize, Offset: 0})
 	if err != nil {
-		t.Fatalf("ListAdminUsers: %v", err)
+		t.Fatalf("ListAdminUsers at the maximum page size: %v", err)
 	}
-	if total != seeded {
-		t.Fatalf("total = %d, want %d", total, seeded)
-	}
-	if len(rows) != seeded {
-		t.Fatalf("rows = %d, want %d: the cap must bound the reservation, not the page",
-			len(rows), seeded)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want the seeded user", len(rows))
 	}
 }

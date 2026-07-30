@@ -57,6 +57,12 @@ func (r *AuditLogRepository) List(
 	if filter.Limit <= 0 {
 		return nil, 0, fmt.Errorf("%w: limit must be positive", ErrInvalidArgument)
 	}
+	// Bounded for the reason given on ListAdminUsers: the result slice is sized from
+	// Limit before any row is read, and this method is exported.
+	if filter.Limit > validate.MaxPageSize {
+		return nil, 0, fmt.Errorf("%w: limit must not exceed %d",
+			ErrInvalidArgument, validate.MaxPageSize)
+	}
 	if filter.Offset < 0 {
 		return nil, 0, fmt.Errorf("%w: offset must not be negative", ErrInvalidArgument)
 	}
@@ -69,7 +75,7 @@ func (r *AuditLogRepository) List(
 		return []model.AuditLog{}, 0, nil
 	}
 
-	entries := make([]model.AuditLog, 0, validate.PreallocateRows(filter.Limit))
+	entries := make([]model.AuditLog, 0, filter.Limit)
 	err := r.auditLogQuery(ctx, filter).
 		Order("created_at DESC, id DESC").
 		Limit(filter.Limit).

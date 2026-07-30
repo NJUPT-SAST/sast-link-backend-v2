@@ -82,6 +82,16 @@ func (r *UserRepository) ListAdminUsers(
 	if filter.Limit <= 0 {
 		return nil, 0, fmt.Errorf("%w: limit must be positive", ErrInvalidArgument)
 	}
+	// The result slice is sized from Limit before any row is read, so an unbounded limit
+	// reserves memory for rows that may not exist — 50 million AdminUserRows is
+	// gigabytes for a query that can return nothing. Refusing rather than clamping: this
+	// method is exported, and a caller asking for a page this large has misunderstood
+	// the contract, which serves at most MaxPageSize per page everywhere. Silently
+	// returning a differently sized page would hide that.
+	if filter.Limit > validate.MaxPageSize {
+		return nil, 0, fmt.Errorf("%w: limit must not exceed %d",
+			ErrInvalidArgument, validate.MaxPageSize)
+	}
 	if filter.Offset < 0 {
 		return nil, 0, fmt.Errorf("%w: offset must not be negative", ErrInvalidArgument)
 	}
@@ -94,7 +104,7 @@ func (r *UserRepository) ListAdminUsers(
 		return []AdminUserRow{}, 0, nil
 	}
 
-	rows := make([]AdminUserRow, 0, validate.PreallocateRows(filter.Limit))
+	rows := make([]AdminUserRow, 0, filter.Limit)
 	err := r.adminUserQuery(ctx, filter).
 		Select(`"user".id`, `"user".name`, `"user".student_id`, `"user".login_email`,
 			`"user".role`, `"user".state`, `"user".email_type`, `"user".phone_number`,
