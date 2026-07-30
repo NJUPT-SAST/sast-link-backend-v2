@@ -14,6 +14,10 @@ import (
 // Clock is the service's time source.
 type Clock = auth.Clock
 
+// auditTimeout bounds a detached audit write, matching oauth.Service.audit so an
+// admin action that already committed is still recorded when the caller disconnects.
+const auditTimeout = 5 * time.Second
+
 // Service implements the administrative OAuth client registry.
 type Service struct {
 	Clients   ClientRepository
@@ -115,8 +119,14 @@ func (s Service) audit(
 		}
 		entry.Detail = model.JSONB(encoded)
 	}
-	if err := s.Audit.Create(ctx, entry); err != nil {
-		slog.ErrorContext(ctx, "record admin oauth client audit",
+	// Detached like oauth.Service.audit: an admin action that already committed
+	// (e.g. disabling a client and revoking its tokens) must still be recorded when
+	// the caller goes away, or the audit log loses exactly the events an aborted
+	// request produced.
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	if err := s.Audit.Create(auditCtx, entry); err != nil {
+		slog.ErrorContext(auditCtx, "record admin oauth client audit",
 			"action", action, "error", err)
 	}
 }
