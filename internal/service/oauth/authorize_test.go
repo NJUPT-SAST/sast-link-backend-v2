@@ -215,8 +215,9 @@ func TestAuthorizeThrottlesByIP(t *testing.T) {
 	if oauthErr.Kind != KindRateLimited || oauthErr.RetryAfter != 30*time.Second {
 		t.Fatalf("error = %+v, want a rate-limited error carrying Retry-After", oauthErr)
 	}
-	if len(h.limiter.calls) != 1 || h.limiter.calls[0] != "authorize:ip:203.0.113.10" {
-		t.Fatalf("limiter calls = %v, want one keyed by caller IP", h.limiter.calls)
+	calls := h.limiter.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "authorize:ip:203.0.113.10" {
+		t.Fatalf("limiter calls = %v, want one keyed by caller IP", calls)
 	}
 }
 

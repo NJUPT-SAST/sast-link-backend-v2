@@ -329,13 +329,16 @@ func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]
 }
 
 type fakeLimiter struct {
+	mutex  sync.Mutex
 	result LimitResult
 	err    error
 	calls  []string
 }
 
 func (f *fakeLimiter) Allow(_ context.Context, endpoint, subject string) (LimitResult, error) {
+	f.mutex.Lock()
 	f.calls = append(f.calls, endpoint+":"+subject)
+	f.mutex.Unlock()
 	if f.err != nil {
 		return LimitResult{}, f.err
 	}
@@ -343,6 +346,14 @@ func (f *fakeLimiter) Allow(_ context.Context, endpoint, subject string) (LimitR
 		return LimitResult{Allowed: true}, nil
 	}
 	return f.result, nil
+}
+
+func (f *fakeLimiter) callsSnapshot() []string {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	out := make([]string, len(f.calls))
+	copy(out, f.calls)
+	return out
 }
 
 // harness bundles a Service with the fakes behind it so tests can assert on both.
