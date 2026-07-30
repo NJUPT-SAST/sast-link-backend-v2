@@ -189,11 +189,6 @@ func (u AdminUserUpdate) columns() map[string]any {
 	return columns
 }
 
-// Empty reports whether the update would touch no column at all.
-func (u AdminUserUpdate) Empty() bool {
-	return len(u.columns()) == 0
-}
-
 // UpdateAdminUser applies an administrative edit in one transaction.
 //
 // guardLastAdmin refuses the write when it would leave no active administrator.

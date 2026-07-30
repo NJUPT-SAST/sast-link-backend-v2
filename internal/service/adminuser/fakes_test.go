@@ -10,24 +10,29 @@ import (
 )
 
 type fakeUsers struct {
-	listRows  []repository.AdminUserRow
-	listTotal int64
-	listErr   error
-	listeded  repository.AdminUserFilter
+	listRows     []repository.AdminUserRow
+	listTotal    int64
+	listErr      error
+	listedFilter repository.AdminUserFilter
 
 	findResult *model.User
 	findErr    error
 
+	// Every write fake records the user id it was handed. A mis-targeted write is the
+	// one bug in this layer that no other assertion can see: the audit entry is built
+	// from the input rather than from what the repository was told, so it stays
+	// correct even when the write lands on the wrong row.
 	updateCalls    int
+	updatedUserID  int64
 	updateInput    repository.AdminUserUpdate
 	updateGuard    bool
 	updateRevoke   bool
 	updateEntries  []model.BlacklistEntry
 	updateErr      error
 	deleteCalls    int
+	deletedUserID  int64
 	deleteEntries  []model.BlacklistEntry
 	deleteErr      error
-	restoreCalls   int
 	restoreErr     error
 	restoredUserID int64
 }
@@ -36,7 +41,7 @@ func (f *fakeUsers) ListAdminUsers(
 	_ context.Context,
 	filter repository.AdminUserFilter,
 ) ([]repository.AdminUserRow, int64, error) {
-	f.listeded = filter
+	f.listedFilter = filter
 	if f.listErr != nil {
 		return nil, 0, f.listErr
 	}
@@ -55,13 +60,14 @@ func (f *fakeUsers) FindByID(_ context.Context, _ int64) (*model.User, error) {
 
 func (f *fakeUsers) UpdateAdminUser(
 	_ context.Context,
-	_ int64,
+	userID int64,
 	update repository.AdminUserUpdate,
 	guardLastAdmin bool,
 	revokeSessions bool,
 	_ time.Time,
 ) ([]model.BlacklistEntry, error) {
 	f.updateCalls++
+	f.updatedUserID = userID
 	f.updateInput = update
 	f.updateGuard = guardLastAdmin
 	f.updateRevoke = revokeSessions
@@ -73,10 +79,11 @@ func (f *fakeUsers) UpdateAdminUser(
 
 func (f *fakeUsers) SoftDeleteAndRevokeSessions(
 	_ context.Context,
-	_ int64,
+	userID int64,
 	_ time.Time,
 ) ([]model.BlacklistEntry, error) {
 	f.deleteCalls++
+	f.deletedUserID = userID
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
@@ -84,7 +91,6 @@ func (f *fakeUsers) SoftDeleteAndRevokeSessions(
 }
 
 func (f *fakeUsers) RestoreUser(_ context.Context, userID int64) error {
-	f.restoreCalls++
 	f.restoredUserID = userID
 	return f.restoreErr
 }
@@ -183,14 +189,19 @@ func targetUser(role model.UserRole, state model.UserState) *model.User {
 	}
 }
 
+const (
+	testClientIP  = "203.0.113.7"
+	testUserAgent = "console"
+)
+
 func stringPtr(value string) *string { return &value }
 
 func updateInput(mutate func(*UpdateUserInput)) UpdateUserInput {
 	input := UpdateUserInput{
 		UserID:      testTargetID,
 		AdminUserID: testAdminID,
-		ClientIP:    "203.0.113.7",
-		UserAgent:   "console",
+		ClientIP:    testClientIP,
+		UserAgent:   testUserAgent,
 	}
 	if mutate != nil {
 		mutate(&input)
@@ -202,7 +213,7 @@ func targetInput() TargetUserInput {
 	return TargetUserInput{
 		UserID:      testTargetID,
 		AdminUserID: testAdminID,
-		ClientIP:    "203.0.113.7",
-		UserAgent:   "console",
+		ClientIP:    testClientIP,
+		UserAgent:   testUserAgent,
 	}
 }

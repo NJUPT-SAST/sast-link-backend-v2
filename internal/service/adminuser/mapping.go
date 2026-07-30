@@ -94,3 +94,19 @@ func auditLogItem(entry model.AuditLog) AuditLogItem {
 	item.Success = entry.Success == nil || *entry.Success
 	return item
 }
+
+// normalizePaging clamps a requested page window. A non-positive page or size is
+// the handler's signal that the caller omitted it; an out-of-range size is capped
+// rather than rejected, matching the contract's documented maximum.
+func normalizePaging(page, pageSize, defaultSize int) (int, int) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = defaultSize
+	}
+	if pageSize > maxPageSize {
+		pageSize = maxPageSize
+	}
+	return page, pageSize
+}

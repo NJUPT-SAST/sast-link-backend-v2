@@ -2,6 +2,7 @@ package adminuser
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
@@ -19,7 +20,7 @@ func TestListUsersPassesFiltersThrough(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ListUsers: %v", err)
 	}
-	filter := h.users.listeded
+	filter := h.users.listedFilter
 	if filter.Role == nil || *filter.Role != model.UserRoleLecturer {
 		t.Fatalf("role filter = %v, want lecturer", filter.Role)
 	}
@@ -66,9 +67,9 @@ func TestListUsersDoesNotFilterDeletedByDefault(t *testing.T) {
 	if _, err := h.service.ListUsers(context.Background(), ListUsersInput{}); err != nil {
 		t.Fatalf("ListUsers: %v", err)
 	}
-	if h.users.listeded.State != nil {
+	if h.users.listedFilter.State != nil {
 		t.Fatalf("state filter = %v, want none so closed accounts remain visible",
-			h.users.listeded.State)
+			h.users.listedFilter.State)
 	}
 }
 
@@ -120,4 +121,24 @@ func TestListUsersReturnsEmptySliceNotNil(t *testing.T) {
 	if result.Users == nil {
 		t.Fatal("users = nil, want an empty slice")
 	}
+}
+
+// A repository failure must not read as an empty result: an operator seeing zero
+// users would conclude the filter matched nothing rather than that the query broke.
+func TestListUsersSurfacesRepositoryFailure(t *testing.T) {
+	h := newHarness(t)
+	h.users.listErr = errors.New("connection reset")
+
+	_, err := h.service.ListUsers(context.Background(), ListUsersInput{})
+
+	assertKind(t, err, KindInternal)
+}
+
+func TestListAuditLogsSurfacesRepositoryFailure(t *testing.T) {
+	h := newHarness(t)
+	h.audit.listErr = errors.New("connection reset")
+
+	_, err := h.service.ListAuditLogs(context.Background(), ListAuditLogsInput{})
+
+	assertKind(t, err, KindInternal)
 }

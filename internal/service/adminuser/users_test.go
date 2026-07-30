@@ -2,7 +2,9 @@ package adminuser
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +153,77 @@ func TestDeleteUserReportsLastAdminRefusal(t *testing.T) {
 	assertAudited(t, h, actionDeleteUser, false, errcode.CodeForbidden)
 }
 
+// Each repository sentinel must keep its own meaning on the way out. Swapping two
+// of these arms would tell an administrator that a user who does not exist is
+// "already closed", and vice versa — both plausible enough to act on.
+func TestDeleteAndRestoreTranslateEachRepositorySentinel(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		from     error
+		wantKind Kind
+		wantCode int
+	}{
+		{"missing user", repository.ErrNotFound, KindNotFound, errcode.CodeUserNotFound},
+		{"already closed", repository.ErrStateConflict, KindStateConflict, errcode.CodeValidationFailed},
+		{"last admin", repository.ErrLastAdmin, KindProtected, errcode.CodeForbidden},
+	} {
+		t.Run("delete/"+testCase.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.users.deleteErr = testCase.from
+
+			assertMappedTo(t, h.service.DeleteUser(context.Background(), targetInput()),
+				testCase.wantKind, testCase.wantCode)
+		})
+	}
+
+	for _, testCase := range []struct {
+		name     string
+		from     error
+		wantKind Kind
+		wantCode int
+	}{
+		{"missing user", repository.ErrNotFound, KindNotFound, errcode.CodeUserNotFound},
+		{"not closed", repository.ErrStateConflict, KindStateConflict, errcode.CodeValidationFailed},
+	} {
+		t.Run("restore/"+testCase.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.users.restoreErr = testCase.from
+
+			assertMappedTo(t, h.service.RestoreUser(context.Background(), targetInput()),
+				testCase.wantKind, testCase.wantCode)
+		})
+	}
+}
+
+// An unrecognized constraint must still be a conflict rather than a 500: the write
+// lost a uniqueness race, which the caller can act on, even when the service cannot
+// name the field.
+func TestUpdateUserMapsUnknownConstraintToConflict(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+	h.users.updateErr = &pgconn.PgError{
+		Code: pgerrcode.UniqueViolation, ConstraintName: "uq_user_something_new",
+	}
+
+	_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.Name = stringPtr("张三")
+	}))
+
+	assertMappedTo(t, err, KindConflict, errcode.CodeConflict)
+}
+
+func assertMappedTo(t *testing.T, err error, wantKind Kind, wantCode int) {
+	t.Helper()
+	var serviceErr *Error
+	if !errors.As(err, &serviceErr) {
+		t.Fatalf("error = %v, want a typed service error", err)
+	}
+	if serviceErr.Kind != wantKind || serviceErr.Code != wantCode {
+		t.Fatalf("kind/code = %s/%d, want %s/%d",
+			serviceErr.Kind, serviceErr.Code, wantKind, wantCode)
+	}
+}
+
 // Closing your own account through the console locks you out of the endpoint that
 // would reopen it.
 func TestDeleteUserRefusesSelf(t *testing.T) {
@@ -206,10 +279,17 @@ func TestUpdateUserAllowsStateCorrection(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateRetiredSAST)
 
-	if _, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+	result, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
 		input.State = stringPtr(string(model.UserStateOnSAST))
-	})); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("UpdateUser: %v", err)
+	}
+	if h.users.updatedUserID != testTargetID {
+		t.Fatalf("wrote to user %d, want the target %d", h.users.updatedUserID, testTargetID)
+	}
+	if !slices.Equal(result.ChangedFields, []string{"state"}) {
+		t.Fatalf("changed fields = %v, want exactly the submitted field", result.ChangedFields)
 	}
 	if h.users.updateInput.State == nil || *h.users.updateInput.State != model.UserStateOnSAST {
 		t.Fatalf("state written = %v, want on_sast", h.users.updateInput.State)
@@ -349,6 +429,9 @@ func TestDeleteUserDeliversRevokedTokens(t *testing.T) {
 	if err := h.service.DeleteUser(context.Background(), targetInput()); err != nil {
 		t.Fatalf("DeleteUser: %v", err)
 	}
+	if h.users.deletedUserID != testTargetID {
+		t.Fatalf("closed user %d, want the target %d", h.users.deletedUserID, testTargetID)
+	}
 	if _, ok := h.blacklist.batch["jti-a"]; !ok {
 		t.Fatalf("blacklist batch = %v, want the revoked JTI delivered", h.blacklist.batch)
 	}
@@ -403,9 +486,83 @@ func TestGetUserOmitsPasswordHash(t *testing.T) {
 	if detail.ID != testTargetID || detail.LoginEmail != "b24040101@njupt.edu.cn" {
 		t.Fatalf("detail = %+v, want the target account", detail)
 	}
-	// UserDetail has no password field at all; this asserts the type stays that way.
+	// A user with neither a profile row nor a binding maps to a nil profile and an
+	// empty slice, so the JSON carries [] rather than null.
+	if detail.Profile != nil {
+		t.Fatalf("profile = %+v, want nil for a user with no profile row", detail.Profile)
+	}
 	if identities := detail.Identities; identities == nil {
 		t.Fatal("identities = nil, want an empty slice so the JSON is not null")
+	}
+}
+
+// Assembling the profile and the bindings is the whole job of GET /admin/users/:id.
+// Without this the mapper could return a null profile and an empty binding list for
+// a user who has both, and every other test would still pass: they all use a target
+// with neither.
+func TestGetUserMapsProfileAndIdentities(t *testing.T) {
+	h := newHarness(t)
+	user := targetUser(model.UserRoleMember, model.UserStateOnSAST)
+	nickname := "三儿"
+	department := model.DepartmentSoftware
+	avatar := "https://cdn.test/a.png"
+	expiresAt := testNow.Add(time.Hour)
+	user.Profile = &model.Profile{
+		UserID:     user.ID,
+		Nickname:   &nickname,
+		Department: &department,
+		Avatar:     &avatar,
+		CreatedAt:  testNow,
+		UpdatedAt:  testNow,
+	}
+	user.Identities = []model.Identity{
+		{
+			ID: 11, UserID: user.ID, Provider: model.LoginMethodGitHub,
+			ProviderID: "gh-123", IdentityData: model.JSONB(`{"login":"someone"}`),
+			// Provider credentials are stored on the row but must not survive the mapping.
+			AccessToken: stringPtr("gho_secret"), RefreshToken: stringPtr("ghr_secret"),
+			TokenExpiresAt: &expiresAt, CreatedAt: testNow, UpdatedAt: testNow,
+		},
+		{
+			ID: 12, UserID: user.ID, Provider: model.LoginMethodOtherMail,
+			ProviderID: "alt@njupt.edu.cn", CreatedAt: testNow, UpdatedAt: testNow,
+		},
+	}
+	h.users.findResult = user
+
+	detail, err := h.service.GetUser(context.Background(), testTargetID)
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if detail.Profile == nil {
+		t.Fatal("profile = nil, want the user's profile row mapped")
+	}
+	if detail.Profile.Nickname == nil || *detail.Profile.Nickname != nickname {
+		t.Fatalf("nickname = %v, want %q", detail.Profile.Nickname, nickname)
+	}
+	if detail.Profile.Department == nil || *detail.Profile.Department != string(department) {
+		t.Fatalf("department = %v, want software", detail.Profile.Department)
+	}
+	if len(detail.Identities) != 2 {
+		t.Fatalf("identities = %d, want both bindings", len(detail.Identities))
+	}
+	first := detail.Identities[0]
+	if first.ID != 11 || first.Provider != string(model.LoginMethodGitHub) || first.ProviderID != "gh-123" {
+		t.Fatalf("first identity = %+v, want the GitHub binding", first)
+	}
+	if first.TokenExpiresAt == nil || !first.TokenExpiresAt.Equal(expiresAt) {
+		t.Fatalf("token_expires_at = %v, want %v", first.TokenExpiresAt, expiresAt)
+	}
+	// The console lists bindings; it does not hand out the provider credentials behind
+	// them. UserIdentity has no field for them, so this pins the type's shape.
+	rendered, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatalf("marshal detail: %v", err)
+	}
+	for _, leaked := range []string{"gho_secret", "ghr_secret", user.PasswordHash} {
+		if strings.Contains(string(rendered), leaked) {
+			t.Fatalf("detail leaked %q: %s", leaked, rendered)
+		}
 	}
 }
 
@@ -445,6 +602,14 @@ func assertAudited(t *testing.T, h *harness, action string, success bool, errCod
 	}
 	if entry.Success == nil || *entry.Success != success {
 		t.Fatalf("success = %v, want %v", entry.Success, success)
+	}
+	// The caller's address and agent are what make a row attributable to a person
+	// rather than just to an account, so every audited path must carry them through.
+	if entry.ClientIP == nil || *entry.ClientIP != testClientIP {
+		t.Fatalf("client ip = %v, want %q", entry.ClientIP, testClientIP)
+	}
+	if entry.UserAgent == nil || *entry.UserAgent != testUserAgent {
+		t.Fatalf("user agent = %v, want %q", entry.UserAgent, testUserAgent)
 	}
 	if errCode == 0 {
 		if entry.ErrCode != nil {
