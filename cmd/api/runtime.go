@@ -17,6 +17,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminclient"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	sessionworker "github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session/worker"
@@ -181,6 +182,12 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Issuer: cfg.JWTIssuer,
 	}
 
+	adminUserService := adminuser.Service{
+		Users:     users,
+		Audit:     audit,
+		Blacklist: oauthredis.BlacklistStore{Store: store},
+	}
+
 	adminClientService := adminclient.Service{
 		Clients:   clients,
 		Blacklist: oauthredis.BlacklistStore{Store: store},
@@ -200,8 +207,12 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Auth:       authenticator,
 			ConsentURL: cfg.OAuthConsentURL,
 		},
-		Admin: adminhandler.Handler{Clients: adminClientService},
-		Auth:  authenticator,
+		Admin: adminhandler.Handler{
+			Clients:   adminClientService,
+			Users:     adminUserService,
+			AuditLogs: adminUserService,
+		},
+		Auth: authenticator,
 		Workers: []backgroundWorker{
 			sessionworker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist},
 			forgotPasswords,

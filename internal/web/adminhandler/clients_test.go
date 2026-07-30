@@ -77,7 +77,7 @@ func newRouter(t *testing.T, service ClientService) *gin.Engine {
 		c.Next()
 	}
 	allow := func(c *gin.Context) { c.Next() }
-	RegisterRoutes(r, Handler{Clients: service}, injectPrincipal, allow)
+	RegisterRoutes(r, Handler{Clients: service}, injectPrincipal, allow, allow)
 	return r
 }
 
@@ -362,7 +362,7 @@ func TestCreateClientWithoutPrincipalIsAnInternalError(t *testing.T) {
 	service := &fakeClients{createResult: &adminclient.CreateClientResult{Client: sampleClient()}}
 	r := gin.New()
 	allow := func(c *gin.Context) { c.Next() }
-	RegisterRoutes(r, Handler{Clients: service}, allow, allow)
+	RegisterRoutes(r, Handler{Clients: service}, allow, allow, allow)
 
 	recorder := doRequest(t, r, http.MethodPost, "/admin/oauth-clients", "application/json",
 		`{"client_name":"X","client_type":"third_party","redirect_uris":["https://x.test/cb"],"grant_types":["authorization_code"],"scopes":["openid"]}`)

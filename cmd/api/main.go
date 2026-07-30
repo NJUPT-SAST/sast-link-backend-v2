@@ -73,7 +73,9 @@ func run() error {
 	sessionhandler.RegisterRoutes(router, runtime.Handler, runtime.Auth.RequireAuth())
 	oauthhandler.RegisterRoutes(router, runtime.OAuth, runtime.Auth.RequireAuth())
 	adminhandler.RegisterRoutes(router, runtime.Admin,
-		runtime.Auth.RequireAuth(), runtime.Auth.RequireRole(adminhandler.AdminRole))
+		runtime.Auth.RequireAuth(),
+		runtime.Auth.RequireRole(adminhandler.AdminRole),
+		runtime.Auth.RequireRole(adminhandler.ReaderRoles...))
 
 	slog.Info("server starting", slog.String("port", cfg.AppPort))
 	return serve(ctx, ":"+cfg.AppPort, router, runtime.Workers)
