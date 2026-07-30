@@ -199,10 +199,13 @@ func (f *fakeTokens) RevokeFamily(_ context.Context, familyID string, revokedAt 
 		if access.FamilyID == nil || *access.FamilyID != familyID {
 			continue
 		}
-		if access.RevokedAt == nil {
-			at := revokedAt
-			access.RevokedAt = &at
+		// Mirrors repository.RevokeFamily: already-revoked tokens are neither
+		// re-revoked nor re-enqueued, so the entries equal the tokens this call cut.
+		if access.RevokedAt != nil {
+			continue
 		}
+		at := revokedAt
+		access.RevokedAt = &at
 		if access.ExpiresAt.After(revokedAt) {
 			entries = append(entries, model.BlacklistEntry{TokenID: access.TokenID, ExpiresAt: access.ExpiresAt})
 		}

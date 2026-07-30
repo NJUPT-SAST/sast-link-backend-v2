@@ -425,7 +425,7 @@ func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt 
 	var entries []model.BlacklistEntry
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Select("token_id", "expires_at").
-		Where("family_id = ? AND expires_at > ?", familyID, revokedAt).
+		Where("family_id = ? AND expires_at > ? AND revoked_at IS NULL", familyID, revokedAt).
 		Find(&entries).Error; err != nil {
 		return nil, fmt.Errorf("select live access token family: %w", err)
 	}
