@@ -12,6 +12,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
 )
 
@@ -24,6 +25,7 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 
 	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{}, passthrough)
 	oauthhandler.RegisterRoutes(router, oauthhandler.Handler{}, passthrough)
+	oauthloginhandler.RegisterRoutes(router, oauthloginhandler.Handler{}, passthrough)
 	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, passthrough, passthrough, passthrough)
 
 	registered := make(map[string]bool)
@@ -45,6 +47,15 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 		http.MethodGet + " /.well-known/jwks.json",
 		http.MethodGet + " /userinfo",
 		http.MethodPost + " /userinfo",
+		// Third-party login: the two authorize legs, their callbacks, the
+		// login_code exchange, and the two authenticated binding endpoints.
+		http.MethodGet + " /oauth/github",
+		http.MethodGet + " /oauth/github/callback",
+		http.MethodGet + " /oauth/lark",
+		http.MethodGet + " /oauth/lark/callback",
+		http.MethodPost + " /oauth/exchange-code",
+		http.MethodPost + " /user/identities/github",
+		http.MethodPost + " /user/identities/lark",
 		http.MethodGet + " /admin/oauth-clients",
 		http.MethodPost + " /admin/oauth-clients",
 		http.MethodPut + " /admin/oauth-clients/:id",

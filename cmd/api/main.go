@@ -19,6 +19,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
 )
 
@@ -72,6 +73,7 @@ func run() error {
 	}).Register(router)
 	sessionhandler.RegisterRoutes(router, runtime.Handler, runtime.Auth.RequireAuth())
 	oauthhandler.RegisterRoutes(router, runtime.OAuth, runtime.Auth.RequireAuth())
+	oauthloginhandler.RegisterRoutes(router, runtime.OAuthLogin, runtime.Auth.RequireAuth())
 	adminhandler.RegisterRoutes(router, runtime.Admin,
 		runtime.Auth.RequireAuth(),
 		runtime.Auth.RequireRole(adminhandler.AdminRole),
