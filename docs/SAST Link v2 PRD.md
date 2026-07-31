@@ -697,7 +697,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [ ] 头像上传（依赖对象存储接入，与内容审核一并实现）
 - [x] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [x] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
-- [ ] 限流与防刷扩展（登录 endpoint 已接入；验证码、注册等策略待对应业务实现）
+- [ ] 限流与防刷扩展（登录、`/oauth/authorize`、`/oauth/token`、解绑已接入；验证码、注册、以及第三方登录的 5 个端点待接入——`GET /oauth/{github,lark}` 与 `/oauth/authorize` 形状相同，无认证且每次调用写一个 Redis 键）
 - [ ] 审计日志扩展（登录/登出已接入；其余业务随 endpoint 实现）
 - [ ] 头像内容审核（腾讯云 COS）
 - [x] OAuth 2.1 授权服务端（两段式 authorize / consent / token / revoke + PKCE-S256 + 重放级联撤销）

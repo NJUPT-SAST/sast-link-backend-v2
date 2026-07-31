@@ -485,6 +485,8 @@ POST /auth/reset-password
 > **provider 开关**：GitHub 与飞书各由 `OAUTH_GITHUB_ENABLED` / `OAUTH_FEISHU_ENABLED` 独立控制，未启用的 provider 路由仍然注册，调用返回 `40000`（不支持的第三方登录方式）而非 `404`。启用某个 provider 时其 client id / secret / redirect_uri 均为必填，飞书还必须提供 `OAUTH_FEISHU_TENANT_KEY`——留空会关闭租户校验，接受任意飞书企业的用户。
 >
 > **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
+>
+> **限流待接入**：本章 5 个端点目前均未限流。`GET /oauth/{github,lark}` 与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——因此同样可被灌满键空间，后者已按 `RATE_LIMIT_AUTHORIZE_RPM` 限流。`POST /oauth/exchange-code` 则是一个无限速的 `login_code` 猜测入口（256 位随机值，实际不可枚举，但端点本身免费）。归入 PRD §11「限流与防刷扩展」，与验证码、注册的限流策略一并实现。
 
 ### 2.1 GitHub 登录
 
