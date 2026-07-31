@@ -8,7 +8,9 @@ OAuth/OIDC Provider 部分已完成两段式授权端点（`GET /oauth/authorize
 
 管理后台已完成用户管理（`/admin/users` 分页列表与详情、更新、软删注销、恢复）与审计日志查询（`/admin/audit-logs`）。鉴权按读写分级：列表与详情开放 lecturer，其余仅 admin。注销与角色变更在同一事务内递增 `token_version` 并撤销该用户全部 Token；管理员不可修改自己的角色、不可注销自己，也不可降权或注销系统中最后一名活跃管理员。
 
-头像上传、第三方 OAuth 登录、设备管理与 pg_cron 运维任务仍待接入。
+第三方 OAuth 登录已完成：GitHub 与飞书的授权跳转与回调、`login_code` 交换（回调只投递一次性 code，Token 绝不出现在重定向 URL 中）、登录态下的绑定接口，以及 `registration_state` + `oauth_state` 双重校验的注册补全（账号、资料、第三方绑定与首个会话在同一事务内提交）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验。
+
+头像上传（含内容审核）、限流与防刷扩展、设备管理与 pg_cron 运维任务仍待接入。
 
 `cmd/api` 只负责运行 HTTP 服务，启动时不会执行 DDL 或 schema migration。数据库结构只能通过 `cmd/migrate` 显式管理。
 
@@ -63,6 +65,9 @@ golangci-lint run ./...
 - `internal/service/session/`：内部登录、Refresh rotation、登出撤销与资料查询用例
 - `internal/service/session/worker/`：token blacklist Outbox 的 Redis 投递与重试 worker
 - `internal/adapter/redis/session/`：将 Redis 限流、登录失败计数和 JTI blacklist 适配到 Session ports
+- `internal/provider/`：GitHub 与飞书的出站 HTTP client，把第三方响应归一化为 Identity
+- `internal/service/oauthlogin/`：第三方登录三条链路（授权跳转 / 回调分叉 / login_code 交换）与登录态绑定
+- `internal/adapter/redis/oauthlogin/`：`oauth_state`、`registration_state`、`login_code` 的一次性状态适配
 - `internal/web/`：Gin router、JWT middleware、认证 handlers 与基础响应设施
 - `internal/redis/`：一次性认证状态、JTI blacklist、登录失败计数与 fixed-window limiter
 - `internal/model/`：GORM persistence entities 与 PostgreSQL 类型

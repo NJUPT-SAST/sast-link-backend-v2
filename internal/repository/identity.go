@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -96,6 +97,56 @@ func (r *IdentityRepository) FindByProviderID(ctx context.Context, provider mode
 		return nil, ErrNotFound
 	}
 	return nil, fmt.Errorf("find identity by provider and provider_id: %w", err)
+}
+
+// IdentityCredentialUpdate carries the provider-issued credentials and metadata
+// refreshed on an existing binding when the user logs in again.
+//
+// IdentityData is a whole-column replacement rather than a merge: the provider
+// response is the authoritative description of the account, and merging would
+// keep stale keys (a renamed GitHub login, a changed avatar) alive forever.
+type IdentityCredentialUpdate struct {
+	IdentityData   model.JSONB
+	AccessToken    *string
+	RefreshToken   *string
+	TokenExpiresAt *time.Time
+}
+
+// UpdateProviderCredentials refreshes the provider tokens and metadata stored on
+// an existing binding.
+//
+// This is deliberately not an upsert on (provider, provider_id): a login must
+// never create a binding as a side effect. Creating one belongs to the explicit
+// bind and registration paths, which check ownership first.
+func (r *IdentityRepository) UpdateProviderCredentials(
+	ctx context.Context,
+	identityID int64,
+	update IdentityCredentialUpdate,
+) error {
+	if identityID <= 0 {
+		return ErrInvalidArgument
+	}
+	fields := map[string]any{
+		"access_token":     update.AccessToken,
+		"refresh_token":    update.RefreshToken,
+		"token_expires_at": update.TokenExpiresAt,
+	}
+	// A nil IdentityData means the provider returned nothing worth storing;
+	// leave the column untouched rather than blanking it.
+	if update.IdentityData != nil {
+		fields["identity_data"] = update.IdentityData
+	}
+	result := r.database.WithContext(ctx).
+		Model(&model.Identity{}).
+		Where("id = ?", identityID).
+		Updates(fields)
+	if result.Error != nil {
+		return fmt.Errorf("update identity provider credentials: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // CreateWithinLimit inserts a new identity binding only while the owning user

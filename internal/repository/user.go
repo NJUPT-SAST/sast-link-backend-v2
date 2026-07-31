@@ -70,6 +70,30 @@ func (r *UserRepository) CreateRegistration(
 	profile *model.Profile,
 	pairFactory TokenPairFactory,
 ) error {
+	return r.CreateRegistrationWithIdentity(ctx, user, profile, nil, pairFactory)
+}
+
+// CreateRegistrationWithIdentity creates an account, its profile, an optional
+// third-party binding and the initial session in one PostgreSQL transaction.
+//
+// The identity joins the same transaction rather than being inserted afterwards
+// because "register through GitHub" is one atomic outcome: a committed account
+// with a failed identity insert would leave a user who cannot log in the way
+// they just registered, and whose provider account still looks unbound. A nil
+// identity is the plain email registration path.
+//
+// This deliberately does not reuse IdentityRepository.CreateWithinLimit: that
+// method opens its own transaction and locks the user row, which is redundant
+// here — the user row was created in this transaction and is not yet visible to
+// any concurrent writer, so no other binding can race it. The V001 unique
+// indexes remain the backstop.
+func (r *UserRepository) CreateRegistrationWithIdentity(
+	ctx context.Context,
+	user *model.User,
+	profile *model.Profile,
+	identity *model.Identity,
+	pairFactory TokenPairFactory,
+) error {
 	if user == nil {
 		return fmt.Errorf("%w: user is nil", ErrInvalidArgument)
 	}
@@ -87,6 +111,14 @@ func (r *UserRepository) CreateRegistration(
 		profile.UserID = user.ID
 		if err := transaction.Create(profile).Error; err != nil {
 			return fmt.Errorf("create profile: %w", err)
+		}
+		if identity != nil {
+			// Set the owner here rather than trusting the caller: the ID does
+			// not exist until the INSERT above.
+			identity.UserID = user.ID
+			if err := transaction.Create(identity).Error; err != nil {
+				return fmt.Errorf("create registration identity: %w", err)
+			}
 		}
 
 		access, refresh, err := pairFactory(user)

@@ -68,6 +68,39 @@ type Config struct {
 	// in Redis for the user's consent decision.
 	OAuthAuthorizeRequestTTL time.Duration `env:"OAUTH_AUTHORIZE_REQUEST_TTL" envDefault:"10m"`
 
+	// Third-party login providers: SAST Link acting as an OAuth *client*, the
+	// opposite direction from the OAuth* provider settings above. Each provider
+	// is gated by its own Enabled flag so a deployment can run one, both, or
+	// neither; a disabled provider's route is still registered and answers 400
+	// rather than 404, which keeps the contract stable.
+	//
+	// The env names keep the OAUTH_FEISHU_* spelling that .env.example already
+	// documents, while the provider enum, routes and identities.provider all use
+	// "lark". Renaming the variables would break existing deployments for a
+	// cosmetic gain.
+	OAuthGitHubEnabled      bool   `env:"OAUTH_GITHUB_ENABLED" envDefault:"false"`
+	OAuthGitHubClientID     string `env:"OAUTH_GITHUB_CLIENT_ID"`
+	OAuthGitHubClientSecret string `env:"OAUTH_GITHUB_CLIENT_SECRET"`
+	OAuthGitHubRedirectURI  string `env:"OAUTH_GITHUB_REDIRECT_URI"`
+	OAuthLarkEnabled        bool   `env:"OAUTH_FEISHU_ENABLED" envDefault:"false"`
+	OAuthLarkClientID       string `env:"OAUTH_FEISHU_CLIENT_ID"`
+	OAuthLarkClientSecret   string `env:"OAUTH_FEISHU_CLIENT_SECRET"`
+	OAuthLarkRedirectURI    string `env:"OAUTH_FEISHU_REDIRECT_URI"`
+	// OAuthLarkTenantKey restricts Lark login to the SAST enterprise (PRD §4.5).
+	// It is required when Lark is enabled: an empty value would silently accept
+	// every tenant, which is the one thing this gate exists to prevent.
+	OAuthLarkTenantKey string `env:"OAUTH_FEISHU_TENANT_KEY"`
+	// OAuthLoginRedirects is the exact-match allow-list of frontend URLs a
+	// provider callback may return the browser to. Exact match only: a prefix
+	// rule would make the callback an open redirector handing out login codes.
+	OAuthLoginRedirects []string `env:"OAUTH_LOGIN_REDIRECTS" envSeparator:","`
+	// OAuthLoginErrorRedirect is the frontend page a failed callback lands on.
+	OAuthLoginErrorRedirect string `env:"OAUTH_LOGIN_ERROR_REDIRECT"`
+	// TTLs for the three fail-closed Redis values this flow owns (PRD §6).
+	OAuthLoginStateTTL             time.Duration `env:"OAUTH_LOGIN_STATE_TTL" envDefault:"10m"`
+	OAuthLoginRegistrationStateTTL time.Duration `env:"OAUTH_LOGIN_REGISTRATION_STATE_TTL" envDefault:"15m"`
+	OAuthLoginCodeTTL              time.Duration `env:"OAUTH_LOGIN_CODE_TTL" envDefault:"60s"`
+
 	InternalOAuthClientID    string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
 	CORSAllowedOrigins       []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
 	TrustedProxies           []string      `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
@@ -136,6 +169,62 @@ func (c *Config) validate() error {
 		return fmt.Errorf("DB_NAME is required")
 	case (strings.TrimSpace(c.JWTSecretKeyPrev) == "") != (strings.TrimSpace(c.JWTPreviousKID) == ""):
 		return fmt.Errorf("JWT_SECRET_KEY_PREV and JWT_PREVIOUS_KID must be both set or both empty")
+	}
+	return nil
+}
+
+// validateThirdPartyLogin checks the GitHub and Lark client settings, but only
+// for providers that are enabled.
+//
+// A disabled provider's blank credentials are not an error: most deployments run
+// neither, and demanding values for an unused provider would make the service
+// unstartable for no benefit. An enabled provider with missing credentials is an
+// error, because the failure would otherwise surface as a confusing provider
+// rejection on the first user who tries to log in.
+func (c *Config) validateThirdPartyLogin() error {
+	if !c.OAuthGitHubEnabled && !c.OAuthLarkEnabled {
+		return nil
+	}
+	// The allow-list and error page are shared by both providers, so they are
+	// required as soon as either is on. Without the allow-list every redirect
+	// falls back to the empty default and the callback cannot complete.
+	if len(c.OAuthLoginRedirects) == 0 {
+		return fmt.Errorf("OAUTH_LOGIN_REDIRECTS is required when a third-party login provider is enabled")
+	}
+	for _, redirect := range c.OAuthLoginRedirects {
+		if !isAbsoluteHTTPURL(redirect) {
+			return fmt.Errorf("OAUTH_LOGIN_REDIRECTS entries must be absolute http(s) URLs, got %q", redirect)
+		}
+	}
+	if strings.TrimSpace(c.OAuthLoginErrorRedirect) != "" &&
+		!isAbsoluteHTTPURL(c.OAuthLoginErrorRedirect) {
+		return fmt.Errorf("OAUTH_LOGIN_ERROR_REDIRECT must be an absolute http(s) URL")
+	}
+
+	if c.OAuthGitHubEnabled {
+		switch {
+		case strings.TrimSpace(c.OAuthGitHubClientID) == "":
+			return fmt.Errorf("OAUTH_GITHUB_CLIENT_ID is required when OAUTH_GITHUB_ENABLED is true")
+		case strings.TrimSpace(c.OAuthGitHubClientSecret) == "":
+			return fmt.Errorf("OAUTH_GITHUB_CLIENT_SECRET is required when OAUTH_GITHUB_ENABLED is true")
+		case !isAbsoluteHTTPURL(c.OAuthGitHubRedirectURI):
+			return fmt.Errorf("OAUTH_GITHUB_REDIRECT_URI must be an absolute http(s) URL")
+		}
+	}
+	if c.OAuthLarkEnabled {
+		switch {
+		case strings.TrimSpace(c.OAuthLarkClientID) == "":
+			return fmt.Errorf("OAUTH_FEISHU_CLIENT_ID is required when OAUTH_FEISHU_ENABLED is true")
+		case strings.TrimSpace(c.OAuthLarkClientSecret) == "":
+			return fmt.Errorf("OAUTH_FEISHU_CLIENT_SECRET is required when OAUTH_FEISHU_ENABLED is true")
+		case !isAbsoluteHTTPURL(c.OAuthLarkRedirectURI):
+			return fmt.Errorf("OAUTH_FEISHU_REDIRECT_URI must be an absolute http(s) URL")
+		// PRD §4.5 limits Lark login to the SAST enterprise. An empty tenant key
+		// disables that gate, so it cannot be optional here: the deployment would
+		// accept logins from every Lark tenant and nothing would look wrong.
+		case strings.TrimSpace(c.OAuthLarkTenantKey) == "":
+			return fmt.Errorf("OAUTH_FEISHU_TENANT_KEY is required when OAUTH_FEISHU_ENABLED is true")
+		}
 	}
 	return nil
 }
@@ -228,6 +317,15 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("SMTP_FROM is required")
 	case c.SMTPMaxConcurrent <= 0:
 		return fmt.Errorf("SMTP_MAX_CONCURRENT must be positive")
+	case c.OAuthLoginStateTTL <= 0:
+		return fmt.Errorf("OAUTH_LOGIN_STATE_TTL must be positive")
+	case c.OAuthLoginRegistrationStateTTL <= 0:
+		return fmt.Errorf("OAUTH_LOGIN_REGISTRATION_STATE_TTL must be positive")
+	case c.OAuthLoginCodeTTL <= 0:
+		return fmt.Errorf("OAUTH_LOGIN_CODE_TTL must be positive")
+	}
+	if err := c.validateThirdPartyLogin(); err != nil {
+		return err
 	}
 	normalizedProxies, err := normalizeTrustedProxies(c.TrustedProxies)
 	if err != nil {

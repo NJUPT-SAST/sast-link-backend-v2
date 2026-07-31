@@ -1,62 +1,159 @@
 services:
-  api:
-    image: ${API_IMAGE:-sastlink-api:current}
-    container_name: sastlink-api
+  postgres:
+    image: postgres:16-alpine
+    container_name: sastlink-compose-postgres
     restart: unless-stopped
     environment:
-      APP_ENV: ${APP_ENV:-production}
-      APP_PORT: ${APP_PORT:-8080}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      DB_HOST: ${DB_HOST:-postgres-postgres-1}
-      DB_PORT: ${DB_PORT:-5432}
+      POSTGRES_USER: ${DB_USER:-sastlink}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me}
+      POSTGRES_DB: ${DB_NAME:-sastlink}
+    ports:
+      - "127.0.0.1:${COMPOSE_DB_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sastlink} -d ${DB_NAME:-sastlink}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    container_name: sastlink-compose-redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-change_me}"]
+    ports:
+      - "127.0.0.1:${COMPOSE_REDIS_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-change_me} ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    image: sastlink-api:current
+    restart: "no"
+    command: ["/usr/local/bin/migrate", "up"]
+    environment:
+      APP_ENV: development
+      DB_HOST: postgres
+      DB_PORT: "5432"
       DB_USER: ${DB_USER:-sastlink}
-      DB_PASSWORD: ${DB_PASSWORD}
+      DB_PASSWORD: ${DB_PASSWORD:-change_me}
       DB_NAME: ${DB_NAME:-sastlink}
-      DB_SSLMODE: ${DB_SSLMODE:-disable}
-      REDIS_HOST: ${REDIS_HOST:-redis-redis-1}
-      REDIS_PORT: ${REDIS_PORT:-6379}
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
-      REDIS_DB: ${REDIS_DB:-0}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-sastlink}
+      DB_SSLMODE: disable
+      # migrate runs config.Load() which validates JWT_SECRET_KEY even though the
+      # CLI never signs tokens; pass it through so validation passes.
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       JWT_SECRET_KEY_PREV: ${JWT_SECRET_KEY_PREV}
-      JWT_ACTIVE_KID: ${JWT_ACTIVE_KID}
+      JWT_ACTIVE_KID: ${JWT_ACTIVE_KID:-link-v2-active}
       JWT_PREVIOUS_KID: ${JWT_PREVIOUS_KID}
-      JWT_ISSUER: ${JWT_ISSUER:-https://link.sast.fun/v2}
+      JWT_ISSUER: ${JWT_ISSUER:-http://localhost:8080}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-sast-link-v2}
-      JWT_ACCESS_TOKEN_EXPIRY: ${JWT_ACCESS_TOKEN_EXPIRY:-1h}
-      JWT_REFRESH_TOKEN_EXPIRY: ${JWT_REFRESH_TOKEN_EXPIRY:-720h}
       REFRESH_TOKEN_HMAC_SECRET: ${REFRESH_TOKEN_HMAC_SECRET}
-      INTERNAL_OAUTH_CLIENT_ID: ${INTERNAL_OAUTH_CLIENT_ID:-sast-link-web}
-      # OAuth 2.1 / OIDC Provider. OAUTH_CONSENT_URL has no default and is
-      # required: the service refuses to start without it, because a guessed
-      # value would redirect users mid-authorization to a page that does not exist.
       OAUTH_CONSENT_URL: ${OAUTH_CONSENT_URL}
       OAUTH_CARD_BASE_URL: ${OAUTH_CARD_BASE_URL:-https://link.sast.fun/card}
-      OAUTH_CODE_TTL: ${OAUTH_CODE_TTL:-5m}
-      OAUTH_AUTHORIZE_REQUEST_TTL: ${OAUTH_AUTHORIZE_REQUEST_TTL:-10m}
-      RATE_LIMIT_LOGIN_RPM: ${RATE_LIMIT_LOGIN_RPM:-5}
-      RATE_LIMIT_LOGIN_WINDOW: ${RATE_LIMIT_LOGIN_WINDOW:-15m}
-      RATE_LIMIT_AUTHORIZE_RPM: ${RATE_LIMIT_AUTHORIZE_RPM:-20}
-      RATE_LIMIT_AUTHORIZE_WINDOW: ${RATE_LIMIT_AUTHORIZE_WINDOW:-60s}
-      RATE_LIMIT_TOKEN_RPM: ${RATE_LIMIT_TOKEN_RPM:-60}
-      RATE_LIMIT_TOKEN_WINDOW: ${RATE_LIMIT_TOKEN_WINDOW:-60s}
-      LOGIN_FAILURE_LIMIT: ${LOGIN_FAILURE_LIMIT:-10}
-      LOGIN_FAILURE_WINDOW: ${LOGIN_FAILURE_WINDOW:-15m}
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT:-465}
       SMTP_USERNAME: ${SMTP_USERNAME}
       SMTP_PASSWORD: ${SMTP_PASSWORD}
       SMTP_FROM: ${SMTP_FROM}
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      SMTP_MAX_CONCURRENT: ${SMTP_MAX_CONCURRENT:-32}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: sastlink-api:current
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-sastlink}
+      DB_PASSWORD: ${DB_PASSWORD:-change_me}
+      DB_NAME: ${DB_NAME:-sastlink}
+      DB_SSLMODE: disable
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change_me}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-sastlink}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_SECRET_KEY_PREV: ${JWT_SECRET_KEY_PREV}
+      JWT_ACTIVE_KID: ${JWT_ACTIVE_KID:-link-v2-active}
+      JWT_PREVIOUS_KID: ${JWT_PREVIOUS_KID}
+      JWT_ISSUER: ${JWT_ISSUER:-http://localhost:8080}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-sast-link-v2}
+      JWT_ACCESS_TOKEN_EXPIRY: ${JWT_ACCESS_TOKEN_EXPIRY:-1h}
+      JWT_REFRESH_TOKEN_EXPIRY: ${JWT_REFRESH_TOKEN_EXPIRY:-720h}
+      REFRESH_TOKEN_HMAC_SECRET: ${REFRESH_TOKEN_HMAC_SECRET}
+      INTERNAL_OAUTH_CLIENT_ID: ${INTERNAL_OAUTH_CLIENT_ID:-sast-link-web}
+      OAUTH_CONSENT_URL: ${OAUTH_CONSENT_URL}
+      OAUTH_CARD_BASE_URL: ${OAUTH_CARD_BASE_URL:-https://link.sast.fun/card}
+      OAUTH_CODE_TTL: ${OAUTH_CODE_TTL:-5m}
+      OAUTH_AUTHORIZE_REQUEST_TTL: ${OAUTH_AUTHORIZE_REQUEST_TTL:-10m}
+      # Third-party login: SAST Link acting as an OAuth *client*, the opposite
+      # direction from the provider settings above. Both providers default to
+      # off; a disabled one needs no credentials. Enabling either makes
+      # OAUTH_LOGIN_REDIRECTS required, and enabling Feishu additionally
+      # requires OAUTH_FEISHU_TENANT_KEY — an empty tenant key would accept
+      # logins from every Lark tenant instead of the SAST enterprise.
+      OAUTH_GITHUB_ENABLED: ${OAUTH_GITHUB_ENABLED:-false}
+      OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID}
+      OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET}
+      OAUTH_GITHUB_REDIRECT_URI: ${OAUTH_GITHUB_REDIRECT_URI}
+      OAUTH_FEISHU_ENABLED: ${OAUTH_FEISHU_ENABLED:-false}
+      OAUTH_FEISHU_CLIENT_ID: ${OAUTH_FEISHU_CLIENT_ID}
+      OAUTH_FEISHU_CLIENT_SECRET: ${OAUTH_FEISHU_CLIENT_SECRET}
+      OAUTH_FEISHU_REDIRECT_URI: ${OAUTH_FEISHU_REDIRECT_URI}
+      OAUTH_FEISHU_TENANT_KEY: ${OAUTH_FEISHU_TENANT_KEY}
+      # Exact-match allow-list of frontend URLs a callback may return to. The
+      # callback hands a login_code to whatever it redirects to, so a prefix
+      # rule would let link.sast.fun.evil.test collect one.
+      OAUTH_LOGIN_REDIRECTS: ${OAUTH_LOGIN_REDIRECTS}
+      OAUTH_LOGIN_ERROR_REDIRECT: ${OAUTH_LOGIN_ERROR_REDIRECT}
+      OAUTH_LOGIN_STATE_TTL: ${OAUTH_LOGIN_STATE_TTL:-10m}
+      OAUTH_LOGIN_REGISTRATION_STATE_TTL: ${OAUTH_LOGIN_REGISTRATION_STATE_TTL:-15m}
+      OAUTH_LOGIN_CODE_TTL: ${OAUTH_LOGIN_CODE_TTL:-60s}
+      RATE_LIMIT_LOGIN_RPM: ${RATE_LIMIT_LOGIN_RPM:-5}
+      RATE_LIMIT_LOGIN_WINDOW: ${RATE_LIMIT_LOGIN_WINDOW:-15m}
+      RATE_LIMIT_SEND_EMAIL_RPM: ${RATE_LIMIT_SEND_EMAIL_RPM:-3}
+      RATE_LIMIT_SEND_EMAIL_IP_RPM: ${RATE_LIMIT_SEND_EMAIL_IP_RPM:-10}
+      RATE_LIMIT_SEND_EMAIL_WINDOW: ${RATE_LIMIT_SEND_EMAIL_WINDOW:-60s}
+      RATE_LIMIT_UNBIND_RPM: ${RATE_LIMIT_UNBIND_RPM:-3}
+      RATE_LIMIT_UNBIND_WINDOW: ${RATE_LIMIT_UNBIND_WINDOW:-60s}
+      RATE_LIMIT_AUTHORIZE_RPM: ${RATE_LIMIT_AUTHORIZE_RPM:-20}
+      RATE_LIMIT_AUTHORIZE_WINDOW: ${RATE_LIMIT_AUTHORIZE_WINDOW:-60s}
+      RATE_LIMIT_TOKEN_RPM: ${RATE_LIMIT_TOKEN_RPM:-60}
+      RATE_LIMIT_TOKEN_WINDOW: ${RATE_LIMIT_TOKEN_WINDOW:-60s}
+      LOGIN_FAILURE_LIMIT: ${LOGIN_FAILURE_LIMIT:-10}
+      LOGIN_FAILURE_WINDOW: ${LOGIN_FAILURE_WINDOW:-15m}
+      PASSWORD_HASH_MAX_CONCURRENT: ${PASSWORD_HASH_MAX_CONCURRENT:-64}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USERNAME: ${SMTP_USERNAME}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_MAX_CONCURRENT: ${SMTP_MAX_CONCURRENT:-32}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1}
       HSTS_MAX_AGE: ${HSTS_MAX_AGE:-31536000}
-    ports:
-      - "127.0.0.1:${API_PORT:-8080}:8080"
-    networks:
-      - postgres
-      - redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health | grep -q '\"status\":\"ok\"' || exit 1"]
       interval: 30s
@@ -74,8 +171,5 @@ services:
         max-size: "10m"
         max-file: "3"
 
-networks:
-  postgres:
-    external: true
-  redis:
-    external: true
+volumes:
+  postgres-data:

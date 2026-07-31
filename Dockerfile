@@ -1,0 +1,21 @@
+# Build stage
+FROM golang:1.26.5-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
+
+# Runtime stage
+FROM alpine:3.20
+# ca-certificates for outbound HTTPS (GitHub / Feishu / SMTP); tzdata keeps the
+# process timezone sane.
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=build /out/api /usr/local/bin/api
+COPY --from=build /out/migrate /usr/local/bin/migrate
+EXPOSE 8080
+# No ENTRYPOINT: the api service starts /usr/local/bin/api (default CMD) and the
+# migrate service overrides command to run /usr/local/bin/migrate. A fixed
+# ENTRYPOINT of "api" would turn "migrate up" into "api migrate up".
+CMD ["/usr/local/bin/api"]

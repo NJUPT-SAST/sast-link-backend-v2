@@ -465,15 +465,36 @@ paths:
     get:
       summary: GitHub 登录
       deprecated: false
-      description: 重定向至 GitHub OAuth 授权页。
+      description: >
+        重定向至 GitHub OAuth 授权页，并在 Redis 写入一次性 `oauth_state`（10min）。
+
+        `redirect` 按精确匹配校验 `OAUTH_LOGIN_REDIRECTS` 白名单，不支持前缀匹配：
+        回调会把 `login_code` 交给它重定向到的地址，前缀规则会让
+        `https://link.sast.fun.evil.test` 也通过。省略时使用白名单首项。
+
+        未启用该 provider（`OAUTH_GITHUB_ENABLED=false`）时路由仍然存在，返回 `40000`。
       operationId: oauthLoginGithub
       tags:
         - OAuth Login
-      parameters: []
+      parameters:
+        - name: redirect
+          in: query
+          required: false
+          description: 登录完成后返回的前端地址，必须在 OAUTH_LOGIN_REDIRECTS 白名单内。
+          schema:
+            type: string
+            format: uri
       responses:
         '302':
           description: 重定向至 GitHub OAuth 授权页
           headers: {}
+        '400':
+          description: >-
+            `40000` —— redirect 不在允许列表中，或该 provider 未启用
+        '503':
+          description: >-
+            `50300` —— Redis 不可用，无法写入 oauth_state。fail-closed：
+            没有已存储的 state 就无法校验回调，因此登录不予开始
       security: []
   /oauth/github/callback:
     get:
@@ -485,7 +506,7 @@ paths:
         - 已有绑定 → 签发一次性 login_code，302 重定向至前端 `?code=<login_code>`
 
         - 无绑定 → 生成 registration_state（Redis，15min），302 重定向至注册补全页
-        `?registration_state=<registration_state>&provider=github&name=<login>&avatar=<url>`
+        `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=github&name=<login>&avatar=<url>`
       operationId: oauthGithubCallback
       tags:
         - OAuth Login
@@ -511,15 +532,31 @@ paths:
     get:
       summary: 飞书登录
       deprecated: false
-      description: 重定向至飞书 OAuth 授权页。
+      description: >
+        重定向至飞书 OAuth 授权页，并在 Redis 写入一次性 `oauth_state`（10min）。
+
+        `redirect` 的白名单校验与 `/oauth/github` 相同。未启用该 provider
+        （`OAUTH_FEISHU_ENABLED=false`）时路由仍然存在，返回 `40000`。
       operationId: oauthLoginLark
       tags:
         - OAuth Login
-      parameters: []
+      parameters:
+        - name: redirect
+          in: query
+          required: false
+          description: 登录完成后返回的前端地址，必须在 OAUTH_LOGIN_REDIRECTS 白名单内。
+          schema:
+            type: string
+            format: uri
       responses:
         '302':
           description: 重定向至飞书 OAuth 授权页
           headers: {}
+        '400':
+          description: >-
+            `40000` —— redirect 不在允许列表中，或该 provider 未启用
+        '503':
+          description: '`50300` —— Redis 不可用，无法写入 oauth_state（fail-closed）'
       security: []
   /oauth/lark/callback:
     get:
@@ -531,7 +568,7 @@ paths:
         - 已有绑定 → 签发一次性 login_code，302 重定向至前端
 
         - 无绑定 → 生成 registration_state（Redis，15min），302 重定向至注册补全页
-        `?registration_state=<registration_state>&provider=lark&name=<name>&avatar=<url>`
+        `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=lark&name=<name>&avatar=<url>`
 
         - 非 SAST 企业用户 → 拒绝
       operationId: oauthLarkCallback
@@ -847,7 +884,16 @@ paths:
     post:
       summary: 绑定飞书
       deprecated: false
-      description: 每个用户只能绑定一个飞书账号，每个飞书账号只能绑定一个用户。
+      description: >
+        每个用户只能绑定一个飞书账号，每个飞书账号只能绑定一个用户。
+
+        绑定与登录使用**不同的回调地址**，两条都要登记进飞书应用的重定向白名单。
+        登录回调（`OAUTH_FEISHU_REDIRECT_URI`）指向本后端的
+        `/oauth/lark/callback`；绑定回调是前端页面，由它拿到 provider code 后
+        调用本接口。
+
+        本接口不接受 `registration_state`：该值只证明有人完成了一次第三方回调，
+        不证明是哪个 SAST 账号在操作，因此调用者一律由 Bearer token 认定。
       operationId: userBindLark
       tags:
         - Identities
@@ -858,6 +904,17 @@ paths:
           required: true
           schema:
             type: string
+        - name: redirect_uri
+          in: query
+          required: false
+          description: >
+            签发该 code 时使用的回调地址（前端的绑定回调页）。RFC 6749 §4.1.3
+            要求 token 交换重复这个值；飞书注册了多条回调时，不一致会以
+            invalid_grant 拒绝。省略时回退到 OAUTH_FEISHU_REDIRECT_URI，仅在
+            绑定与登录共用同一回调地址时适用。
+          schema:
+            type: string
+            format: uri
       responses:
         '200':
           description: 绑定成功
@@ -875,7 +932,14 @@ paths:
     post:
       summary: 绑定 GitHub
       deprecated: false
-      description: 每个用户只能绑定一个 GitHub 账号，每个 GitHub 账号只能绑定一个用户。
+      description: >
+        每个用户只能绑定一个 GitHub 账号，每个 GitHub 账号只能绑定一个用户。
+
+        绑定回调与登录回调不同，但 GitHub OAuth App 只能注册一条 callback URL，
+        且要求 host 与端口精确匹配、path 只能是已注册路径的子目录。因此绑定回调
+        要么是登录回调的子路径，要么为绑定另开一个 OAuth App。
+
+        本接口不接受 `registration_state`，调用者一律由 Bearer token 认定。
       operationId: userBindGithub
       tags:
         - Identities
@@ -886,6 +950,16 @@ paths:
           required: true
           schema:
             type: string
+        - name: redirect_uri
+          in: query
+          required: false
+          description: >
+            签发该 code 时使用的回调地址（前端的绑定回调页）。GitHub 在 token
+            交换阶段用它校验与签发 code 时是否一致。省略时回退到
+            OAUTH_GITHUB_REDIRECT_URI。
+          schema:
+            type: string
+            format: uri
       responses:
         '200':
           description: 绑定成功

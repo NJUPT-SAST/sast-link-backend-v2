@@ -8,31 +8,37 @@ import (
 	"gorm.io/gorm"
 
 	oauthredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/oauth"
+	oauthloginredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/oauthlogin"
 	sessionredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/provider"
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminclient"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauthlogin"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	sessionworker "github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session/worker"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
 )
 
 type sessionRuntime struct {
-	Handler sessionhandler.Handler
-	OAuth   oauthhandler.Handler
-	Admin   adminhandler.Handler
-	Auth    middleware.Authenticator
-	Workers []backgroundWorker
+	Handler    sessionhandler.Handler
+	OAuth      oauthhandler.Handler
+	OAuthLogin oauthloginhandler.Handler
+	Admin      adminhandler.Handler
+	Auth       middleware.Authenticator
+	Workers    []backgroundWorker
 }
 
 func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm.DB, rdb *goredis.Client) (*sessionRuntime, error) {
@@ -91,6 +97,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	}
 	failures := sessionredis.LoginFailureStore{Store: store, Limit: cfg.LoginFailureLimit, Window: cfg.LoginFailureWindow}
 	bindTickets := sessionredis.BindTicketStore{Store: store}
+	oauthLoginStates := oauthloginredis.StateStore{Store: store}
+	oauthRegistrations := oauthloginredis.RegistrationStateStore{Store: store}
+	oauthLoginCodes := oauthloginredis.LoginCodeStore{Store: store}
 	unbindLimiter := sessionredis.EndpointLimiter{
 		Limiter: internalredis.FixedWindowLimiter{
 			Client: rdb,
@@ -125,14 +134,17 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		VerificationCode: store,
 		RegisterTicket:   store,
 		BindTicket:       bindTickets,
-		UnbindLimiter:    unbindLimiter,
-		ForgotPasswords:  forgotPasswords,
-		InternalClientID: cfg.InternalOAuthClientID,
-		JWT:              jwtManager,
-		RefreshTokens:    refreshManager,
-		Passwords:        auth.PasswordHasher{Semaphore: make(chan struct{}, cfg.PasswordHashMaxConcurrent)},
-		AccessTTL:        cfg.JWTAccessTokenExpiry,
-		RefreshTTL:       cfg.JWTRefreshTokenExpiry,
+		// Reads the key oauthloginredis.RegistrationStateStore writes, so a
+		// callback's parked identity can be redeemed by POST /auth/register.
+		OAuthRegistration: sessionredis.OAuthRegistrationStore{Store: store},
+		UnbindLimiter:     unbindLimiter,
+		ForgotPasswords:   forgotPasswords,
+		InternalClientID:  cfg.InternalOAuthClientID,
+		JWT:               jwtManager,
+		RefreshTokens:     refreshManager,
+		Passwords:         auth.PasswordHasher{Semaphore: make(chan struct{}, cfg.PasswordHashMaxConcurrent)},
+		AccessTTL:         cfg.JWTAccessTokenExpiry,
+		RefreshTTL:        cfg.JWTRefreshTokenExpiry,
 	}
 	authenticator := middleware.Authenticator{
 		JWT:       jwtManager,
@@ -182,6 +194,55 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Issuer: cfg.JWTIssuer,
 	}
 
+	// Third-party login providers. Only the enabled ones are registered, and the
+	// service answers 400 for a provider absent from the map, so a disabled
+	// provider's route exists but declines rather than 404ing.
+	loginProviders := make(map[model.LoginMethod]oauthlogin.ProviderClient)
+	if cfg.OAuthGitHubEnabled {
+		loginProviders[model.LoginMethodGitHub] = provider.NewGitHub(provider.GitHubConfig{
+			ClientID:     cfg.OAuthGitHubClientID,
+			ClientSecret: cfg.OAuthGitHubClientSecret,
+			RedirectURI:  cfg.OAuthGitHubRedirectURI,
+		}, nil, nil)
+	}
+	if cfg.OAuthLarkEnabled {
+		loginProviders[model.LoginMethodLark] = provider.NewLark(provider.LarkConfig{
+			AppID:       cfg.OAuthLarkClientID,
+			AppSecret:   cfg.OAuthLarkClientSecret,
+			RedirectURI: cfg.OAuthLarkRedirectURI,
+			// Config validation requires this whenever Lark is enabled, so the
+			// tenant gate cannot be silently disabled in production.
+			TenantKey: cfg.OAuthLarkTenantKey,
+		}, nil, nil)
+	}
+	oauthLoginService := oauthlogin.Service{
+		Providers:         loginProviders,
+		Users:             users,
+		Identities:        identities,
+		Clients:           clients,
+		Tokens:            tokens,
+		Audits:            audit,
+		States:            oauthLoginStates,
+		RegistrationState: oauthRegistrations,
+		LoginCodes:        oauthLoginCodes,
+		Issuer: tokenissue.Issuer{
+			JWT:     jwtManager,
+			Refresh: refreshManager,
+		},
+		InternalClientID:     cfg.InternalOAuthClientID,
+		AllowedRedirects:     cfg.OAuthLoginRedirects,
+		StateTTL:             cfg.OAuthLoginStateTTL,
+		RegistrationStateTTL: cfg.OAuthLoginRegistrationStateTTL,
+		LoginCodeTTL:         cfg.OAuthLoginCodeTTL,
+		AccessTTL:            cfg.JWTAccessTokenExpiry,
+		RefreshTTL:           cfg.JWTRefreshTokenExpiry,
+	}
+	// The first allow-listed redirect is the default for a callback that names
+	// none, so a login started without one still lands somewhere valid.
+	if len(cfg.OAuthLoginRedirects) > 0 {
+		oauthLoginService.DefaultRedirect = cfg.OAuthLoginRedirects[0]
+	}
+
 	adminUserService := adminuser.Service{
 		Users:     users,
 		Audit:     audit,
@@ -206,6 +267,10 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Service:    oauthService,
 			Auth:       authenticator,
 			ConsentURL: cfg.OAuthConsentURL,
+		},
+		OAuthLogin: oauthloginhandler.Handler{
+			Service:       oauthLoginService,
+			ErrorRedirect: cfg.OAuthLoginErrorRedirect,
 		},
 		Admin: adminhandler.Handler{
 			Clients:   adminClientService,

@@ -1,0 +1,8 @@
+bin/
+coverage.out
+.env
+.git
+docs/
+scripts/
+tmp/
+*.log
