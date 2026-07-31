@@ -231,9 +231,13 @@ POST /auth/reset-password             →  校验验证码 + 新密码
 
 | 绑定类型 | 端点 | 方式 | 约束 |
 |----------|------|------|------|
-| 飞书 | `POST /user/identities/lark?code=xxx` | 飞书 OAuth 授权码 | 每用户 1 个飞书；每飞书账号 1 个用户；限 SAST 企业用户 |
-| GitHub | `POST /user/identities/github?code=xxx` | GitHub OAuth 授权码 | 每用户 1 个 GitHub；每 GitHub 账号 1 个用户 |
+| 飞书 | `POST /user/identities/lark?code=xxx&redirect_uri=xxx` | 飞书 OAuth 授权码 | 每用户 1 个飞书；每飞书账号 1 个用户；限 SAST 企业用户 |
+| GitHub | `POST /user/identities/github?code=xxx&redirect_uri=xxx` | GitHub OAuth 授权码 | 每用户 1 个 GitHub；每 GitHub 账号 1 个用户 |
 | 第三方邮箱 | `POST /user/identities/email` → `POST /user/identities/email/verify` | 两步：获取 Bind-Ticket → 验证码确认 | 每用户最多 2 个；`provider='other_mail'`；provider_id = 邮箱地址 |
+
+绑定的授权码**不经过本服务的回调**：已登录用户在前端发起 provider 授权，provider 把 code 交给前端的绑定页，前端再带 `code` 与该绑定页地址调用上表的接口。`redirect_uri` 必须是签发该 code 时使用的回调地址——RFC 6749 §4.1.3 要求 token 交换重复它，省略时后端回退到登录回调，与绑定 code 不匹配会被 provider 以 `invalid_grant` 拒绝。
+
+因此绑定回调与登录回调是两条不同地址，都要登记进 provider 应用。GitHub 只允许一条 callback URL 且要求路径位于注册路径之下，故两条须共享一个已注册父路径；配置细节见 `docs/runbooks/caddy-reverse-proxy.md`。
 
 #### 解绑
 
