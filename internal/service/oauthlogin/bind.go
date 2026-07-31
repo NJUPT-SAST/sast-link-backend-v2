@@ -48,7 +48,7 @@ func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error)
 
 	identity, err := client.Exchange(ctx, input.Code)
 	if err != nil {
-		return nil, s.providerError(ctx, input.Provider, err)
+		return nil, providerError(err)
 	}
 
 	// Check for an existing owner before inserting. The unique constraint would

@@ -2473,6 +2473,10 @@ func TestRegisterMapsUniqueViolationToTheCollidingField(t *testing.T) {
 		{name: "student id", constraint: userStudentIDConstraint, wantCode: errcode.CodeStudentIDOccupied, wantKind: KindConflict},
 		{name: "login email", constraint: userLoginEmailConstraint, wantCode: errcode.CodeEmailAlreadyRegistered, wantKind: KindConflict},
 		{name: "login email bound as identity", constraint: userLoginEmailIsIdentityConstraint, wantCode: errcode.CodeEmailAlreadyRegistered, wantKind: KindConflict},
+		// The provider account was bound by someone else during the
+		// registration_state window. The registrant's own fields are fine, so a
+		// generic conflict would send them hunting through the wrong ones.
+		{name: "third-party account taken mid-window", constraint: identityProviderConstraint, wantCode: errcode.CodeIdentityOccupied, wantKind: KindConflict},
 		{name: "unmapped constraint", constraint: "user_some_future_key", wantCode: errcode.CodeConflict, wantKind: KindConflict},
 	}
 	for _, test := range tests {

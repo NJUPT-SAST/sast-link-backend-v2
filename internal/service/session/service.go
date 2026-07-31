@@ -520,6 +520,13 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 			// same outcome as a taken login email, and saying more would reveal that
 			// another account has it bound.
 			return nil, newError(ErrEmailAlreadyRegistered, "邮箱已被注册", createErr)
+		case identityProviderConstraint:
+			// The OAuth callback saw this provider account unbound, but up to 15
+			// minutes pass before registration completes, and someone else can
+			// bind it in that window. Naming the real cause matters: the
+			// registrant's own fields are all fine, and the generic conflict
+			// message would send them hunting through their email and student ID.
+			return nil, newError(ErrIdentityOccupied, "该第三方账号已被其他用户绑定", createErr)
 		case "":
 		default:
 			// An unmapped unique constraint. Report a generic conflict rather than

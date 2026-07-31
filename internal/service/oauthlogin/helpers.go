@@ -49,7 +49,7 @@ func (s Service) resolveRedirect(requested string) (string, error) {
 }
 
 // providerError maps an outbound provider failure onto a business outcome.
-func (s Service) providerError(ctx context.Context, name model.LoginMethod, err error) error {
+func providerError(err error) error {
 	switch {
 	case errors.Is(err, provider.ErrForeignTenant):
 		return newError(ErrForeignTenant, "仅限 SAST 成员登录", err)

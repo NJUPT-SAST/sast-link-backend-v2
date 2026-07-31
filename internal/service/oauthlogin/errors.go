@@ -79,12 +79,10 @@ var (
 	ErrStateInvalid = &Error{Kind: KindInvalidState, Code: errcode.CodeBadRequest}
 	// ErrLoginCodeInvalid covers a login_code that is unknown, expired or spent.
 	ErrLoginCodeInvalid = &Error{Kind: KindInvalidToken, Code: errcode.CodeLoginCodeInvalid}
-	// ErrRegistrationStateInvalid covers a registration_state that is missing,
-	// expired, or whose stored oauth_state does not match the submitted one.
-	// PRD §4.5 requires both values; a mismatch is indistinguishable from a
-	// forged state as far as the caller is told.
-	ErrRegistrationStateInvalid = &Error{Kind: KindInvalidState, Code: errcode.CodeBadRequest}
-	ErrUserDeleted              = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
+	// Registration-state failures are raised by the session service, which owns
+	// POST /auth/register and has its own sentinel for them; this package only
+	// writes the parked state, so it needs no equivalent here.
+	ErrUserDeleted = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
 	// ErrForeignTenant rejects a Lark account outside the SAST enterprise.
 	ErrForeignTenant = &Error{Kind: KindForbidden, Code: errcode.CodeLarkTenantRequired}
 	// ErrIdentityOccupied means the third-party account is already bound to a

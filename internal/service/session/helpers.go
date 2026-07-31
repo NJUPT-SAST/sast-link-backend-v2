@@ -152,6 +152,10 @@ const (
 	// identity would end up holding the same address.
 	userLoginEmailIsIdentityConstraint = "ck_user_login_email_not_identity"
 	identityIsLoginEmailConstraint     = "ck_identities_provider_id_not_login_email"
+	// V001's global uniqueness on a third-party account. Registration can hit it
+	// when the OAuth callback saw the provider account unbound but someone bound
+	// it during the 15-minute registration_state window.
+	identityProviderConstraint = "uq_identities_provider_provider_id"
 )
 
 func isDuplicateError(err error) bool {
