@@ -836,7 +836,11 @@ GET /user/identities
 >
 > 登录用的回调（`OAUTH_*_REDIRECT_URI`）指向**本后端**的 `/oauth/{lark,github}/callback`，由后端消费 code 后 302 到前端。绑定用的回调是**前端页面**（例如 `/oauth/bind/lark`）：已登录用户在前端发起 provider 授权，provider 把 code 交给该前端页面，前端再带着 `code` 与自己那个回调地址调用本接口。
 >
-> 两条回调都要登记进 provider 应用的重定向白名单。飞书的重定向 URL 支持配置多条；GitHub OAuth App 只能配一条且要求 host 与端口精确匹配、path 只能是已注册路径的子目录，所以绑定回调要么是登录回调的子路径，要么另开一个 OAuth App。
+> 两条回调都要登记进 provider 应用的重定向白名单。飞书的重定向 URL 支持配置多条，两条都填即可。
+>
+> GitHub OAuth App 只能配**一条** callback URL，匹配规则是 host（不含子域）与端口精确相等、请求路径必须位于已注册路径**之下**（官方示例表中，注册 `/path` 时 `/` 会被拒绝）。因此两条回调必须共享一个已注册的父路径：生产上把绑定页放在 `/v2/oauth/bind/{provider}`、与登录回调同处 `/v2/oauth` 之下，注册 `https://link.sast.fun/v2/oauth`；本地则利用 loopback 免端口匹配的例外，注册 `http://127.0.0.1/oauth`。完整配置与 Caddy 分流规则见 `docs/runbooks/caddy-reverse-proxy.md`。
+>
+> 为绑定单独开一个 OAuth App **行不通**：`Bind()` 用 `OAUTH_GITHUB_CLIENT_ID/SECRET` 这一套凭据交换 code，另一个 App 签发的 code 会被拒绝。若要走这条路，需先为绑定增加一组 client 配置项。
 
 ```
 POST /user/identities/lark

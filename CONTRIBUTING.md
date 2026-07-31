@@ -82,7 +82,8 @@ CI 中的 lint job 必须在合入前通过。建议推送前本地先跑，避�
 
 ```powershell
 # 全量测试（竞态检测 + 覆盖率）
-go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
+# -flag=value 必须加引号：PowerShell 会在 = 处切开，go test 会把 .out 当包路径
+go test -race -shuffle=on "-coverprofile=coverage.out" "-covermode=atomic" ./...
 
 # 单包测试
 go test -race -shuffle=on ./path/to/package -run TestName

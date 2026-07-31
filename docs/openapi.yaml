@@ -936,8 +936,13 @@ paths:
         每个用户只能绑定一个 GitHub 账号，每个 GitHub 账号只能绑定一个用户。
 
         绑定回调与登录回调不同，但 GitHub OAuth App 只能注册一条 callback URL，
-        且要求 host 与端口精确匹配、path 只能是已注册路径的子目录。因此绑定回调
-        要么是登录回调的子路径，要么为绑定另开一个 OAuth App。
+        且要求 host 与端口精确匹配、path 必须位于已注册路径之下。因此两条回调必须
+        共享一个已注册的父路径：生产上绑定页放在 /v2/oauth/bind/github，与登录回调
+        同处 /v2/oauth 之下并注册该前缀；本地利用 loopback 免端口匹配的例外注册
+        http://127.0.0.1/oauth。详见 docs/runbooks/caddy-reverse-proxy.md。
+
+        为绑定单独开一个 OAuth App 行不通：Bind() 用 OAUTH_GITHUB_CLIENT_ID/SECRET
+        交换 code，另一个 App 签发的 code 会被拒绝。
 
         本接口不接受 `registration_state`，调用者一律由 Bearer token 认定。
       operationId: userBindGithub

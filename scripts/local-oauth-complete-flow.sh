@@ -22,8 +22,11 @@ step()  { printf "\n${GREEN}==== %s ====${NC}\n" "$*"; }
 json()  { echo "$1" | jq .; }
 code()  { echo "$1" | jq -r '.code // empty'; }
 
-PG_CONTAINER="sastlink-postgres"; PG_PORT="5433"
-REDIS_CONTAINER="sastlink-redis"; REDIS_PORT="6379"
+# 容器名默认对齐 docker-compose.yml，那里起的容器叫 sastlink-compose-{postgres,redis}。
+# psql 与 redis-cli 都是 docker exec 进容器执行的，不走宿主端口，所以这里只需要容器名。
+# 连自建容器时用环境变量覆盖，例如 PG_CONTAINER=sastlink-postgres。
+PG_CONTAINER="${PG_CONTAINER:-sastlink-compose-postgres}"
+REDIS_CONTAINER="${REDIS_CONTAINER:-sastlink-compose-redis}"
 # 端口在 source .env 后用 APP_PORT 覆盖，这里先留默认。
 API_PORT="8080"; API_PID=""
 # 登录后重新赋值，先初始化避免 set -u 报 unbound。
@@ -36,7 +39,6 @@ TEST_PHONE="${TEST_PHONE:-13800000000}"
 TEST_QQ="${TEST_QQ:-123456789}"
 TEST_COLLEGE="${TEST_COLLEGE:-计算机学院、软件学院、网络空间安全学院}"
 TEST_MAJOR="${TEST_MAJOR:-软件工程}"
-REDIS_PREFIX="${REDIS_KEY_PREFIX:-sastlink}"
 USE_REAL_SMTP="${USE_REAL_SMTP:-0}"
 
 for cmd in docker go jq openssl curl lsof; do
@@ -60,6 +62,13 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
 fi
 set -a; source .env; set +a
 API_PORT="${APP_PORT:-8080}"
+# 这几个必须在 source .env 之后取值。放在文件开头会读到空值：REDIS_PREFIX 会退回
+# "sastlink" 而实际前缀来自 .env，于是脚本注入的验证码键与服务读取的键不是同一个，
+# 而 psql/redis-cli 的凭据也会变成硬编码的猜测。
+REDIS_PREFIX="${REDIS_KEY_PREFIX:-sastlink}"
+DB_USER_NAME="${DB_USER:-sastlink}"
+DB_NAME_VALUE="${DB_NAME:-sastlink}"
+REDIS_PASS_VALUE="${REDIS_PASSWORD:-}"
 ./bin/migrate up >/dev/null 2>&1 || true
 ok "迁移完成"
 
@@ -83,8 +92,12 @@ api_get()   { curl -s "http://localhost:$API_PORT$1"; }
 api_form()  { curl -s -X POST "http://localhost:$API_PORT$1" -H 'Content-Type: application/x-www-form-urlencoded' --data "$2"; }
 api_put_auth() { curl -s -X PUT "http://localhost:$API_PORT$1" -H "Authorization: Bearer $2" -H 'Content-Type: application/json' -d "$3"; }
 api_delete_auth() { curl -s -X DELETE "http://localhost:$API_PORT$1" -H "Authorization: Bearer $2" -H 'Content-Type: application/json' -d "$3"; }
-psql()      { docker exec -i "$PG_CONTAINER" psql -U sastlink -d sastlink -tAc "$1"; }
-redis_del() { docker exec "$REDIS_CONTAINER" redis-cli DEL "$@" >/dev/null 2>&1 || true; }
+psql()      { docker exec -i "$PG_CONTAINER" psql -U "$DB_USER_NAME" -d "$DB_NAME_VALUE" -tAc "$1"; }
+# compose 用 --requirepass 起 Redis，因此 redis-cli 必须带 -a，否则每条命令都以
+# NOAUTH 失败。这里的失败是静默的（redis_del 有 || true，验证码读取有 || echo ""），
+# 表现为注册卡在等验证码，所以密码必须传进去。
+redis_cli() { docker exec "$REDIS_CONTAINER" redis-cli ${REDIS_PASS_VALUE:+-a "$REDIS_PASS_VALUE"} --no-auth-warning "$@"; }
+redis_del() { redis_cli DEL "$@" >/dev/null 2>&1 || true; }
 redis_key() { echo "${REDIS_PREFIX}:verify:register:$1"; }
 
 clear_limits() {
@@ -119,10 +132,16 @@ else
     sleep 2
   else
     info "A.1 Redis 注入验证码 123456"
-    docker exec "$REDIS_CONTAINER" redis-cli SET "$(redis_key "$TEST_EMAIL")" 123456 PX 300000 >/dev/null
+    redis_cli SET "$(redis_key "$TEST_EMAIL")" 123456 PX 300000 >/dev/null
   fi
-  CODE=$(docker exec "$REDIS_CONTAINER" redis-cli GET "$(redis_key "$TEST_EMAIL")" 2>/dev/null || echo "")
-  [[ -z "$CODE" ]] && { err "未读到验证码"; exit 1; }
+  # redis-cli 把 NOAUTH 之类的错误写到 stdout 并且仍以 0 退出，所以 || echo "" 兜不住：
+  # 不校验的话 CODE 会变成 "NOAUTH Authentication required." 并被当作验证码发出去。
+  # 验证码固定是 6 位数字，用它作为判据。
+  CODE=$(redis_cli GET "$(redis_key "$TEST_EMAIL")" 2>/dev/null || echo "")
+  if [[ ! "$CODE" =~ ^[0-9]{6}$ ]]; then
+    err "未读到验证码，Redis 返回：${CODE:-（空）}"
+    exit 1
+  fi
   ok "验证码: $CODE"
 
   info "A.2 verify-code 换 register_ticket"

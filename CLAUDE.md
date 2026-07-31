@@ -24,8 +24,12 @@ The project targets Go `1.26.5`, Gin, GORM, PostgreSQL 16+, Redis 8+, and testco
 # Download modules
 go mod download
 
-# Run all tests with race detection, randomized execution order, and coverage
-go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
+# Run all tests with race detection, randomized execution order, and coverage.
+# Quote the -flag=value arguments: PowerShell splits an unquoted -a=b at the "=",
+# so go test receives ".out" as a package path and fails with
+# "no required module provides package .out" before running anything. The same
+# applies to `go tool cover "-func=coverage.out"`.
+go test -race -shuffle=on "-coverprofile=coverage.out" "-covermode=atomic" ./...
 
 # Run lint
 golangci-lint run ./...
@@ -41,7 +45,7 @@ go build -o bin/migrate.exe ./cmd/migrate
 
 For a production database that already has the V001 schema, follow `docs/runbooks/database-baseline.md`. V001 already exists in production: do not run V001 `up` there. The guarded baseline command is `.\bin\migrate.exe force 1 --confirm-existing-baseline` after the runbook's preflight checks. Future production migrations require the explicit `.\bin\migrate.exe up --confirm-production` form.
 
-`docker-compose.yml` runs a prebuilt API image through `API_IMAGE` or the default `sastlink-api:current` tag.
+`docker-compose.yml` is self-contained for local development: it provisions its own PostgreSQL and Redis, builds the image from the repository `Dockerfile`, runs `migrate up` as a one-shot service, and only then starts the API. Set `API_IMAGE` to point at a prebuilt image instead. The published host ports are deliberately offset (`15432`, `16379`) so the stack does not collide with a PostgreSQL or Redis already running on the machine.
 
 ## Source Of Truth Documents
 
@@ -54,7 +58,8 @@ For a production database that already has the V001 schema, follow `docs/runbook
 - `docs/runbooks/caddy-reverse-proxy.md`: Caddy routing for the externally visible `/v2` prefix. Every route in this service is registered at the root — there is no `/v2` in the Go code — so the proxy strips it with `handle_path`. It also carries the third-party OAuth callback layout: the bind page must sit under the same `/v2/oauth` prefix as the login callback so one GitHub OAuth App registration covers both.
 - `migrations/`: embedded versioned SQL migrations, including V002's S256-only PKCE constraint.
 - `.env.example`: environment variable names and defaults expected by the service.
-- `docker-compose.yml`: runtime reference for an API container connected to external PostgreSQL and Redis Docker networks.
+- `docker-compose.yml` and `Dockerfile`: a self-contained local stack (PostgreSQL, Redis, one-shot migration, API) and the multi-stage build behind it.
+- `scripts/local-oauth-complete-flow.sh`: drives the whole OAuth surface against a locally running API. Its container names and ports default to the compose stack; the third-party legs need manual browser authorization.
 - `.golangci.yml`: golangci-lint rule set.
 - `.pre-commit-config.yaml`: pre-commit hook definitions.
 - `CONTRIBUTING.md`: contribution guide covering environment setup, lint, tests, commit convention, and PR workflow.
@@ -121,7 +126,7 @@ The provider callback must never return tokens: it is a 302 to the frontend, so 
 
 ## Deployment Notes
 
-`docker-compose.yml` defines one `api` service listening on `127.0.0.1:${API_PORT:-8080}:8080` with external `postgres` and `redis` networks. It does not build an image from this repository; provide a prebuilt image through `API_IMAGE` or tag one as `sastlink-api:current`. The health check expects:
+`docker-compose.yml` brings up `postgres`, `redis`, a one-shot `migrate`, and the `api` service on `127.0.0.1:${API_PORT:-8080}:8080`. `api` waits for both stores to report healthy and for `migrate` to exit successfully, so a schema change lands before the service that depends on it starts. The image is built from the repository `Dockerfile` (a multi-stage build producing both binaries, running as an unprivileged user), or supplied prebuilt through `API_IMAGE`. The health check expects:
 
 ```text
 GET /health -> { "status": "ok", "db": "ok", "redis": "ok" }
@@ -134,7 +139,7 @@ Only PostgreSQL is a required dependency. When Redis is unreachable the endpoint
 `.github/workflows/ci.yml` runs for pull requests targeting `main` and supports manual dispatch. It has three parallel jobs:
 
 - **lint** — golangci-lint using `.golangci.yml` against the Go module.
-- **test** — `go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...`; PostgreSQL integration tests provision isolated PostgreSQL 16 containers through Testcontainers and require a healthy Docker provider.
+- **test** — `go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...` (CI runs bash, where the quoting caveat above does not apply); PostgreSQL integration tests provision isolated PostgreSQL 16 containers through Testcontainers and require a healthy Docker provider.
 - **build** — builds both `./cmd/api` and `./cmd/migrate`.
 
 `.github/workflows/security.yml` runs weekly (`0 3 * * 1`) or by manual dispatch and scans the Go module with version-pinned `gosec` and `govulncheck`.
