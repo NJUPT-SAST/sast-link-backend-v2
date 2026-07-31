@@ -37,6 +37,7 @@ import (
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminclient"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/testutil"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
@@ -130,6 +131,11 @@ func setupAdminE2E(t *testing.T) *adminE2EHarness {
 		Audit:     auditLog,
 		Secrets:   auth.ClientSecretHasher{},
 	}
+	adminUserService := adminuser.Service{
+		Users:     users,
+		Audit:     auditLog,
+		Blacklist: blacklist,
+	}
 
 	router := gin.New()
 	oauthhandler.RegisterRoutes(router, oauthhandler.Handler{
@@ -142,13 +148,18 @@ func setupAdminE2E(t *testing.T) *adminE2EHarness {
 	})
 	// The role gate itself is covered in middleware and cmd/api; here the admin is
 	// simply present, so the registry behavior is what is under test.
-	adminhandler.RegisterRoutes(router, adminhandler.Handler{Clients: adminService},
+	adminhandler.RegisterRoutes(router, adminhandler.Handler{
+		Clients:   adminService,
+		Users:     adminUserService,
+		AuditLogs: adminUserService,
+	},
 		func(c *gin.Context) {
 			middleware.SetPrincipal(c, middleware.Principal{
 				UserID: admin.ID, Role: string(model.UserRoleAdmin), JTI: "admin-e2e",
 			})
 			c.Next()
 		},
+		func(c *gin.Context) { c.Next() },
 		func(c *gin.Context) { c.Next() })
 
 	return &adminE2EHarness{router: router, database: database, user: user, admin: admin}
@@ -479,4 +490,156 @@ func TestAdminE2ERejectsDangerousRedirectURI(t *testing.T) {
 	if count != 0 {
 		t.Fatal("a client with a javascript: redirect URI was persisted")
 	}
+}
+
+// Closing an account through the console must end the sessions it already holds.
+// That consequence spans three packages: the admin service asks for the revocation,
+// the repository writes the token rows and the outbox entry in one transaction, and
+// the OAuth layer has to stop honoring what was already issued. A unit test with a
+// fake repository proves the service asked; only this proves it happened.
+func TestAdminE2EClosingAccountRevokesUserTokens(t *testing.T) {
+	testutil.RequireProvider(t)
+	h := setupAdminE2E(t)
+
+	clientID, secret, _ := h.registerClient(t)
+	code := h.authorizeAndConsent(t, clientID)
+	redeemed := h.redeem(t, clientID, secret, code)
+	if redeemed.Code != http.StatusOK {
+		t.Fatalf("token status = %d: %s", redeemed.Code, redeemed.Body.String())
+	}
+	var token struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(redeemed.Body.Bytes(), &token); err != nil {
+		t.Fatalf("decode token body: %v", err)
+	}
+
+	// The token works before the account is closed, so the assertion afterwards is
+	// about the closure and not about the token never having been valid.
+	before := h.userInfo(t, token.AccessToken)
+	if before.Code != http.StatusOK {
+		t.Fatalf("userinfo before closing = %d, want 200: %s", before.Code, before.Body.String())
+	}
+
+	target := strconv.FormatInt(h.user.ID, 10)
+	closed := h.do(t, http.MethodDelete, "/admin/users/"+target, "", "")
+	if closed.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200: %s", closed.Code, closed.Body.String())
+	}
+
+	var revoked int64
+	if err := h.database.Model(&model.OAuthAccessToken{}).
+		Where("user_id = ? AND revoked_at IS NOT NULL", h.user.ID).
+		Count(&revoked).Error; err != nil {
+		t.Fatalf("count revoked access tokens: %v", err)
+	}
+	if revoked == 0 {
+		t.Fatal("closing the account revoked no access tokens")
+	}
+
+	// The issued access token is no longer accepted.
+	after := h.userInfo(t, token.AccessToken)
+	if after.Code == http.StatusOK {
+		t.Fatalf("userinfo still succeeded after the account was closed: %s", after.Body.String())
+	}
+
+	// And the refresh token cannot renew past the closure.
+	refresh := h.do(t, http.MethodPost, "/oauth/token", "application/x-www-form-urlencoded",
+		url.Values{
+			"grant_type":    {"refresh_token"},
+			"refresh_token": {token.RefreshToken},
+			"client_id":     {clientID},
+			"client_secret": {secret},
+		}.Encode())
+	if refresh.Code == http.StatusOK {
+		t.Fatalf("refresh succeeded after the account was closed: %s", refresh.Body.String())
+	}
+
+	// Restoring returns the account to njupter, and the revoked tokens stay revoked:
+	// the owner signs in again rather than resuming the old session.
+	restored := h.do(t, http.MethodPut, "/admin/users/"+target+"/restore", "", "")
+	if restored.Code != http.StatusOK {
+		t.Fatalf("restore status = %d, want 200: %s", restored.Code, restored.Body.String())
+	}
+	var reloaded model.User
+	if err := h.database.First(&reloaded, h.user.ID).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if reloaded.State != model.UserStateNJUPTer {
+		t.Fatalf("state after restore = %q, want njupter", reloaded.State)
+	}
+	if stillValid := h.userInfo(t, token.AccessToken); stillValid.Code == http.StatusOK {
+		t.Fatal("the pre-closure access token works again after restore; revocation must be permanent")
+	}
+}
+
+// The console's write endpoints and the audit query must agree: an administrative
+// action has to be visible in the trail the console reads back.
+func TestAdminE2EAdminActionsAppearInTheAuditLog(t *testing.T) {
+	testutil.RequireProvider(t)
+	h := setupAdminE2E(t)
+
+	target := strconv.FormatInt(h.user.ID, 10)
+	updated := h.do(t, http.MethodPut, "/admin/users/"+target, "application/json",
+		`{"name":"审计测试","major":"软件工程"}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want 200: %s", updated.Code, updated.Body.String())
+	}
+
+	listed := h.do(t, http.MethodGet, "/admin/audit-logs?action=admin_user_update", "", "")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("audit list status = %d, want 200: %s", listed.Code, listed.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			Logs []struct {
+				Action     string          `json:"action"`
+				Resource   string          `json:"resource"`
+				ResourceID *string         `json:"resource_id"`
+				UserID     *int64          `json:"user_id"`
+				Success    bool            `json:"success"`
+				Detail     json.RawMessage `json:"detail"`
+			} `json:"logs"`
+			Total int64 `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode audit list: %v", err)
+	}
+	if payload.Data.Total != 1 || len(payload.Data.Logs) != 1 {
+		t.Fatalf("audit logs = %+v (total %d), want the single update",
+			payload.Data.Logs, payload.Data.Total)
+	}
+	entry := payload.Data.Logs[0]
+	if entry.Resource != "user" || entry.ResourceID == nil || *entry.ResourceID != target {
+		t.Fatalf("entry = %+v, want it to name the edited user", entry)
+	}
+	if entry.UserID == nil || *entry.UserID != h.admin.ID {
+		t.Fatalf("entry user_id = %v, want the acting administrator %d", entry.UserID, h.admin.ID)
+	}
+	if !entry.Success {
+		t.Fatal("the successful edit was recorded as a failure")
+	}
+	detail := string(entry.Detail)
+	if !strings.Contains(detail, "name") || !strings.Contains(detail, "major") {
+		t.Fatalf("detail = %s, want the changed field names", detail)
+	}
+	// The submitted values must not be in the trail: it outlives the request and every
+	// administrator can read it.
+	if strings.Contains(detail, "审计测试") {
+		t.Fatalf("detail = %s, want it to omit the submitted value", detail)
+	}
+}
+
+// userInfo calls the OIDC UserInfo endpoint with a bearer token. It is the cheapest
+// real check that an access token is still honored end to end: it authenticates
+// inline against the database and the blacklist.
+func (h *adminE2EHarness) userInfo(t *testing.T, accessToken string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/userinfo", nil)
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	recorder := httptest.NewRecorder()
+	h.router.ServeHTTP(recorder, request)
+	return recorder
 }

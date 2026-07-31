@@ -84,59 +84,6 @@ func normalizeIdentifier(identifier string) string {
 	return strings.ToLower(strings.TrimSpace(identifier))
 }
 
-func isAllowedEmailDomain(email string) bool {
-	return strings.HasSuffix(email, "@njupt.edu.cn") || strings.HasSuffix(email, "@sast.fun")
-}
-
-// validEmailFormat is the input-layer guard against SMTP header injection and
-// key/audit corruption. It rejects control characters (notably CR/LF, which
-// the go-playground "email" validator lets through), address separators and
-// display-name brackets, and requires exactly one @. This is defense in depth
-// ahead of the mailer's own mail.ParseAddress check; it also keeps Redis keys
-// and audit detail free of unprintable bytes.
-//
-// Whitespace is rejected everywhere, not just at the ends. An address is used as
-// a Redis key segment and a rate-limit subject before the mailer ever sees it, so
-// letting whitespace through means "a b@x" and "ab@x" occupy different buckets
-// while naming the same mailbox. A bare `r < 0x20` test misses this: U+0020 sits
-// just outside it, and NBSP, U+3000, U+200B and U+2028 are far above it. Those
-// four also survive mail.ParseAddress, so the request would travel all the way to
-// SMTP before failing — surfacing a 50001 delivery error for what is really
-// malformed input.
-// Invisible codepoints that unicode.IsSpace does not classify as space. Named
-// rather than written as literals so they stay reviewable in source.
-const (
-	zeroWidthSpace     = '\u200b'
-	zeroWidthNonJoiner = '\u200c'
-	zeroWidthJoiner    = '\u200d'
-	byteOrderMark      = '\ufeff'
-)
-
-func validEmailFormat(email string) bool {
-	if email == "" || strings.Count(email, "@") != 1 {
-		return false
-	}
-	if strings.ContainsAny(email, ",<>") {
-		return false
-	}
-	for _, symbol := range email {
-		if symbol < 0x20 || symbol == 0x7f {
-			return false
-		}
-		// unicode.IsSpace covers ASCII space, NBSP, U+2028/U+2029 and the U+2000
-		// block; the zero-width and BOM codepoints are invisible rather than space
-		// by Unicode's definition, so they need naming.
-		switch symbol {
-		case zeroWidthSpace, zeroWidthNonJoiner, zeroWidthJoiner, byteOrderMark:
-			return false
-		}
-		if unicode.IsSpace(symbol) {
-			return false
-		}
-	}
-	return true
-}
-
 // validHTTPURL reports whether value is an absolute http/https URL with a host.
 //
 // The scheme allowlist is the point: blog_url and github_url are rendered as
@@ -340,26 +287,4 @@ func (s Service) audit(ctx context.Context, userID *int64, action, resource stri
 		ErrCode:    errCodePtr,
 		CreatedAt:  s.now(),
 	})
-}
-
-// hasControlCharacter reports whether value contains a C0/C1 control character.
-//
-// PostgreSQL rejects U+0000 in text at the protocol level (SQLSTATE 22021), which
-// is not a unique violation and so surfaces as a 500 naming no field. The other
-// control characters do store, but they travel into audit logs and onto the
-// public card, where a stray CR or LF splits a log line or a rendered value.
-// Display text has no legitimate use for any of them.
-//
-// Interior spaces are deliberately allowed: names, intros and majors contain
-// them, and callers already trim the edges.
-func hasControlCharacter(value string) bool {
-	for _, symbol := range value {
-		if symbol < 0x20 || symbol == 0x7f {
-			return true
-		}
-		if symbol >= 0x80 && symbol <= 0x9f {
-			return true
-		}
-	}
-	return false
 }

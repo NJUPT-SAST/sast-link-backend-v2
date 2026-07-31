@@ -8,6 +8,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 func stringPtr(value string) *string { return &value }
@@ -115,7 +116,7 @@ func TestUpdateProfileRejectsOverlongValues(t *testing.T) {
 	service := newRegisterService(t)
 	_, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
 		UserID: 42,
-		Major:  stringPtr(strings.Repeat("专", maxMajorLength+1)),
+		Major:  stringPtr(strings.Repeat("专", validate.MaxMajorLength+1)),
 	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 }

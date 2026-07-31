@@ -24,7 +24,7 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 
 	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{}, passthrough)
 	oauthhandler.RegisterRoutes(router, oauthhandler.Handler{}, passthrough)
-	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, passthrough, passthrough)
+	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, passthrough, passthrough, passthrough)
 
 	registered := make(map[string]bool)
 	for _, route := range router.Routes() {
@@ -48,6 +48,12 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 		http.MethodGet + " /admin/oauth-clients",
 		http.MethodPost + " /admin/oauth-clients",
 		http.MethodPut + " /admin/oauth-clients/:id",
+		http.MethodGet + " /admin/users",
+		http.MethodGet + " /admin/users/:id",
+		http.MethodPut + " /admin/users/:id",
+		http.MethodDelete + " /admin/users/:id",
+		http.MethodPut + " /admin/users/:id/restore",
+		http.MethodGet + " /admin/audit-logs",
 	}
 	for _, route := range want {
 		if !registered[route] {
@@ -90,25 +96,40 @@ func TestSetPrincipalRoundTrips(t *testing.T) {
 	}
 }
 
-// The admin routes must be mounted behind both middlewares. Mounting them with only
-// authentication would let any logged-in freshman register OAuth clients, which is a
-// wiring mistake no unit test inside adminhandler can catch — it stubs its own
-// middleware. This asserts the composition root passes both, in order.
+// Every admin route must be mounted behind authentication and exactly one role
+// gate. Mounting one with only authentication would let any logged-in freshman
+// reach it, which is a wiring mistake no unit test inside adminhandler can catch —
+// it stubs its own middleware. This asserts the composition root passes all three
+// in order, and that each route picks the gate its contract calls for: the two
+// read-only user endpoints admit a lecturer, everything else is admin-only.
 func TestAdminRoutesAreGatedByAuthAndRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	var order []string
 	authStep := func(c *gin.Context) { order = append(order, "auth"); c.Next() }
-	roleStep := func(c *gin.Context) {
-		order = append(order, "role")
+	adminStep := func(c *gin.Context) {
+		order = append(order, "admin")
 		c.AbortWithStatus(http.StatusForbidden)
 	}
-	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, authStep, roleStep)
+	readerStep := func(c *gin.Context) {
+		order = append(order, "reader")
+		c.AbortWithStatus(http.StatusForbidden)
+	}
+	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, authStep, adminStep, readerStep)
 
-	for _, route := range []struct{ method, path string }{
-		{http.MethodGet, "/admin/oauth-clients"},
-		{http.MethodPost, "/admin/oauth-clients"},
-		{http.MethodPut, "/admin/oauth-clients/5"},
+	for _, route := range []struct {
+		method, path, gate string
+	}{
+		{http.MethodGet, "/admin/oauth-clients", "admin"},
+		{http.MethodPost, "/admin/oauth-clients", "admin"},
+		{http.MethodPut, "/admin/oauth-clients/5", "admin"},
+		// PRD §4.12: reading the directory is open to lecturers, writing is not.
+		{http.MethodGet, "/admin/users", "reader"},
+		{http.MethodGet, "/admin/users/5", "reader"},
+		{http.MethodPut, "/admin/users/5", "admin"},
+		{http.MethodDelete, "/admin/users/5", "admin"},
+		{http.MethodPut, "/admin/users/5/restore", "admin"},
+		{http.MethodGet, "/admin/audit-logs", "admin"},
 	} {
 		order = nil
 		recorder := httptest.NewRecorder()
@@ -119,16 +140,33 @@ func TestAdminRoutesAreGatedByAuthAndRole(t *testing.T) {
 				route.method, route.path, recorder.Code)
 		}
 		// Authentication must run first: the role check reads the principal it sets.
-		if len(order) != 2 || order[0] != "auth" || order[1] != "role" {
-			t.Fatalf("%s %s: middleware order = %v, want [auth role]", route.method, route.path, order)
+		if len(order) != 2 || order[0] != "auth" || order[1] != route.gate {
+			t.Fatalf("%s %s: middleware order = %v, want [auth %s]",
+				route.method, route.path, order, route.gate)
 		}
 	}
 }
 
-// The role the composition root gates on must be admin. If AdminRole drifted to a
-// weaker role, every check above would still pass while the endpoints opened up.
+// The role the composition root gates writes on must be admin. If AdminRole
+// drifted to a weaker role, every check above would still pass while the
+// endpoints opened up.
 func TestAdminRoleIsAdmin(t *testing.T) {
 	if adminhandler.AdminRole != model.UserRoleAdmin {
 		t.Fatalf("AdminRole = %q, want admin", adminhandler.AdminRole)
+	}
+}
+
+// The read-only gate must admit exactly admin and lecturer. A drift that added
+// member here would open the whole user directory, and the route test above cannot
+// see it: it only checks which gate ran, not which roles that gate accepts.
+func TestReaderRolesAreAdminAndLecturer(t *testing.T) {
+	want := []model.UserRole{model.UserRoleAdmin, model.UserRoleLecturer}
+	if len(adminhandler.ReaderRoles) != len(want) {
+		t.Fatalf("ReaderRoles = %v, want %v", adminhandler.ReaderRoles, want)
+	}
+	for index, role := range want {
+		if adminhandler.ReaderRoles[index] != role {
+			t.Fatalf("ReaderRoles = %v, want %v", adminhandler.ReaderRoles, want)
+		}
 	}
 }

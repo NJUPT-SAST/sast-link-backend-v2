@@ -1233,7 +1233,18 @@ token=rt_abc123...&token_type_hint=refresh_token&client_id=9f3a1c7d2e5b40a8c6d1f
 
 ## 6. 管理后台（Admin）
 
-> **实现状态**：仅 §6.6–6.8 的 OAuth 客户端管理（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`）已注册。§6.1–6.5 的用户管理与 §6.9 的审计日志查询均未注册路由，调用会得到 `404`。
+> **实现状态**：本章全部端点已注册。
+>
+> 以下三处对 OpenAPI 契约做了收紧，实现按本文档为准：
+>
+> 1. **`PUT /admin/users/:id` 不接受 `state: is_deleted`**，返回 `422`。注销必须走 `DELETE`，恢复必须走 `PUT .../restore` —— 只有这两条路径会在同一事务内撤销该用户的全部 Token。若允许 PUT 直接置为 `is_deleted`，会留下「账号已注销但 Refresh Token 仍可换新 Access Token」的窗口。对已注销用户执行 PUT 同样返回 `422`，需先恢复。
+> 2. **`email_type` 只能与 `login_email` 一同提交，且必须与其域名一致**，否则返回 `400`。V001 触发器 `auto_set_email_type` 仅在 `login_email` 出现在 UPDATE 列中时才重算该字段，单独提交 `email_type` 会写入与邮箱域名矛盾的值。
+> 3. **`page_size` 上限统一为 100**（含 `/admin/audit-logs`，契约未定上限）。超出上限按 100 截断，不报错。`page` / `page_size` 传非正整数或非数字返回 `400`，不静默回落默认值。`page` 另有上限 2^30：偏移量由 `page × page_size` 算出，`page` 过大时该乘积会整数溢出，`4611686018427387905` 恰好绕回 0，会在回显所请求页码的同时返回第一页——溢出按 `400` 拒绝而非截断，避免答非所问。
+> 4. **`keyword` 长度上限 255**（所匹配列的最宽列宽）。超长返回 `400`：该参数会展开为三个无法走索引的 `ILIKE` 加一次全表 `COUNT(*)`，且本组端点未接入限流。
+>
+> 另有三条契约未写明的管理员自我保护规则，均返回 `403`：不可修改自己的 `role`；不可注销自己的账号；不可将系统中最后一名活跃管理员降权或注销（「活跃」指 `role = admin` 且 `state <> is_deleted`）。三者都是不可自行恢复的锁死场景 —— 能撤销该操作的端点正是被交出的那一个。
+>
+> `department` 筛选跨表关联 `profile`，采用 `LEFT JOIN`，因此无 `profile` 行的用户在**不带** `department` 筛选时正常出现在列表中（`department` 为 `null`）；带该筛选时自然被排除。
 
 ### 6.1 用户列表
 
@@ -1253,7 +1264,11 @@ GET /admin/users
 | `state` | 筛选状态：on_sast / retired_sast / njupter / is_deleted |
 | `department` | 筛选部门：software / media |
 | `student_id` | 筛选学号 |
-| `keyword` | 搜索关键词（姓名/学号/邮箱模糊匹配） |
+| `keyword` | 搜索关键词（姓名/学号/邮箱模糊匹配，大小写不敏感；`%`、`_`、`\` 按字面量处理，不作通配符） |
+
+**说明**：不带 `state` 筛选时列表包含已注销用户（`state = is_deleted`），否则无法找到并恢复它们。
+
+**错误码**：`40000`（分页参数非法 / `role`、`state`、`department` 取值非法）、`40100`、`40300`。
 
 **Response** `200`:
 ```json
@@ -1291,6 +1306,10 @@ GET /admin/users/:id
 ```
 
 **Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色）
+
+**说明**：`id` 非数字或非正整数一律返回 `404`（与用户不存在同一响应），不区分两者。`identities` 不含第三方 `access_token` / `refresh_token`，也不含 `identity_data`——该字段存的是第三方返回的完整用户对象（飞书含 `mobile`、`email`、`enterprise_email`、`employee_no`），本端点 lecturer 亦可读，列出绑定不等于交出绑定背后的联系方式。
+
+**错误码**：`40100`、`40300`、`40401`。
 
 **Response** `200`:
 ```json
@@ -1339,6 +1358,15 @@ PUT /admin/users/:id
 }
 ```
 
+**说明**：
+- 至少传一个字段，否则返回 `400`。未知字段（含 `password`、`token_version`、`id`、`profile`）一律返回 `400`，不静默忽略。
+- `name` / `phone_number` / `qq_number` / `student_id` 不可传空串（列为 `NOT NULL`）；`major` 可置空。长度按 V001 列宽校验，中文按字符数而非字节数计。
+- `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。
+- `role` 实际发生变化时，同一事务内递增 `token_version` 并撤销该用户全部 Token，响应 `message` 变为 `"用户信息更新成功，已撤销该用户的全部 Token"`。仅提交与当前值相同的 `role` 不算变化，不触发撤销。
+- `state` 可在 `njupter` / `on_sast` / `retired_sast` 之间任意修改（供管理员纠错），但不接受 `is_deleted`。
+
+**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
+
 **Response** `200`:
 ```json
 {
@@ -1363,7 +1391,11 @@ DELETE /admin/users/:id
 }
 ```
 
-**说明**: 将 `user.state` 设为 `is_deleted`，保留数据；应用层查找该用户所有 token family 并逐个撤销（非 DB 级联删除），同时失效所有 Redis session。
+**说明**: 将 `user.state` 设为 `is_deleted`，保留数据；同一事务内递增 `token_version` 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，非 DB 级联删除），撤销的 JTI 写入 outbox 并投递至 Redis 黑名单。
+
+不可注销自己的账号，也不可注销系统中最后一名活跃管理员，均返回 `403`。重复注销返回 `422`。
+
+**错误码**：`40100`、`40300`、`40401`、`42200`（用户已注销）。
 
 ---
 
@@ -1382,7 +1414,11 @@ PUT /admin/users/:id/restore
 }
 ```
 
-**说明**: 将 `user.state` 从 `is_deleted` 恢复至 `njupter`。已撤销的 token 不恢复，需用户重新登录。
+**说明**: 将 `user.state` 从 `is_deleted` 恢复至 `njupter`。不记忆注销前的状态 —— 原 `on_sast` 成员恢复后为 `njupter`，需管理员另行调整。已撤销的 token 不恢复，需用户重新登录。
+
+对未注销的用户调用返回 `422`。
+
+**错误码**：`40100`、`40300`、`40401`、`42200`（用户未被注销）。
 
 ---
 
@@ -1528,13 +1564,19 @@ GET /admin/audit-logs
 | 参数 | 说明 |
 |------|------|
 | `page` | 页码，默认 1 |
-| `page_size` | 每页条数，默认 50 |
-| `user_id` | 按用户筛选 |
-| `action` | 按操作类型筛选 |
-| `resource` | 按资源类型筛选 |
-| `success` | 是否成功：true / false |
-| `start_time` | 开始时间（ISO 8601） |
-| `end_time` | 结束时间（ISO 8601） |
+| `page_size` | 每页条数，默认 50，最大 100 |
+| `user_id` | 按用户筛选（正整数） |
+| `action` | 按操作类型筛选（精确匹配） |
+| `resource` | 按资源类型筛选（精确匹配） |
+| `success` | 是否成功：仅接受 `true` / `false`，`1` / `yes` / `TRUE` 返回 `400` |
+| `start_time` | 开始时间（RFC 3339，含时区偏移），**含**该时刻 |
+| `end_time` | 结束时间（RFC 3339，含时区偏移），**不含**该时刻 |
+
+**说明**：时间参数必须带时区偏移（如 `2026-07-01T00:00:00Z`），不带偏移返回 `400` —— `created_at` 是 `timestamptz`，擅自按 UTC 解释会使窗口偏移数小时。`end_time` 早于 `start_time` 返回 `400`。排序为 `created_at DESC, id DESC`（`id` 用于同一时刻内的稳定分页）。
+
+管理端写操作在审计日志中的 `action` 为 `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值。
+
+**错误码**：`40000`（参数格式非法 / 时间窗口倒置）、`40100`、`40300`。
 
 **Response** `200`:
 ```json

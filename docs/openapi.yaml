@@ -1547,11 +1547,12 @@ paths:
             default: 1
         - name: page_size
           in: query
-          description: 每页条数，默认 20，最大 100
+          description: 每页条数，默认 20，最大 100（超出按 100 截断）
           required: false
           schema:
             type: integer
             default: 20
+            minimum: 1
             maximum: 100
         - name: role
           in: query
@@ -1579,18 +1580,26 @@ paths:
             type: string
         - name: keyword
           in: query
-          description: 搜索关键词（姓名/学号/邮箱模糊匹配）
+          description: |
+            搜索关键词，对姓名/学号/登录邮箱做大小写不敏感的模糊匹配。
+            `%`、`_`、`\` 按字面量处理，不作为通配符。
           required: false
           schema:
             type: string
       responses:
         '200':
-          description: 分页用户列表
+          description: |
+            分页用户列表。不带 state 筛选时包含已注销用户（state = is_deleted），
+            否则无法找到并恢复它们。department 走 profile 的 LEFT JOIN，
+            因此无 profile 行的用户仍会出现，department 为 null。
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AdminUsersListResponse'
           headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 分页参数或枚举筛选值非法（400xx）
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
@@ -1655,68 +1664,102 @@ paths:
             schema:
               type: object
               minProperties: 1
+              additionalProperties: false
+              description: |
+                至少传一个字段。未知字段（含 password、token_version、id、profile）
+                返回 400 而非静默忽略。长度按 V001 列宽校验，中文按字符数计。
               properties:
                 name:
                   type: string
+                  minLength: 1
                   maxLength: 255
-                  description: 真实姓名
+                  description: 真实姓名（列为 NOT NULL，不可传空串）
                 phone_number:
                   type: string
+                  minLength: 1
                   maxLength: 20
-                  description: 手机号
+                  description: 手机号（不可传空串）
                 qq_number:
                   type: string
+                  minLength: 1
                   maxLength: 20
-                  description: QQ 号
+                  description: QQ 号（不可传空串）
                 college:
                   $ref: '#/components/schemas/College'
                   description: 学院
                 major:
                   type: string
                   maxLength: 50
-                  description: 专业
+                  description: 专业（可置为空串）
                 student_id:
                   type: string
+                  minLength: 1
                   maxLength: 50
-                  description: 学号
+                  description: 学号（不可传空串）
                 role:
                   $ref: '#/components/schemas/UserRole'
-                  description: 用户角色
+                  description: |
+                    用户角色。实际发生变化时同一事务内递增 token_version 并撤销该用户全部 Token。
+                    不可修改自己的 role，也不可降权系统中最后一名活跃管理员（均 403）。
                 state:
                   $ref: '#/components/schemas/UserState'
-                  description: 用户状态
+                  description: |
+                    用户状态。仅接受 njupter / on_sast / retired_sast，三者之间可任意修改以供纠错。
+                    不接受 is_deleted（422）——注销必须走 DELETE，它才会在同一事务内撤销 Token。
+                    对已注销用户调用本接口同样返回 422，需先恢复。
                 email_type:
                   $ref: '#/components/schemas/EmailType'
-                  description: 注册邮箱类型
+                  description: |
+                    注册邮箱类型。只能与 login_email 一同提交且必须与其域名一致，否则 400：
+                    触发器 auto_set_email_type 仅在 login_email 出现在 UPDATE 列中时才重算该字段，
+                    单独提交会写入与邮箱矛盾的值。
                 login_email:
                   type: string
                   format: email
                   maxLength: 255
-                  description: 登录邮箱（修改后触发器 auto_set_email_type 自动重算 email_type）
+                  description: |
+                    登录邮箱。域名限 @njupt.edu.cn / @sast.fun，会被规范化为小写；
+                    修改后触发器 auto_set_email_type 自动重算 email_type。
         required: true
       responses:
         '200':
-          description: 更新成功
+          description: |
+            更新成功。role 实际变化时 message 为
+            「用户信息更新成功，已撤销该用户的全部 Token」。
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MessageResponse'
           headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 字段校验失败、未知字段或无可更新字段（400xx）
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
         '403':
           $ref: '#/components/responses/Forbidden'
-          description: 无权限（403xx）
+          description: 无权限，或改自己的 role / 降权最后一名管理员（403xx）
         '404':
           $ref: '#/components/responses/NotFound'
           description: 资源不存在（404xx）
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 学号或邮箱已被占用（40901 / 40902）
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: state 为 is_deleted，或目标用户已注销（42200）
       security:
         - bearerAuth: []
     delete:
       summary: 注销用户（软删除）
       deprecated: false
-      description: 需 admin 角色。将 user.state 设为 is_deleted，保留数据，级联撤销所有 token family。
+      description: |
+        需 admin 角色。将 user.state 设为 is_deleted，保留数据；同一事务内递增
+        token_version 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，
+        非 DB 级联删除），撤销的 JTI 写入 outbox 并投递至 Redis 黑名单。
+
+        不可注销自己的账号，也不可注销系统中最后一名活跃管理员（均 403）。
       operationId: adminDeleteUser
       tags:
         - Admin
@@ -1741,17 +1784,23 @@ paths:
           description: 未认证（401xx）
         '403':
           $ref: '#/components/responses/Forbidden'
-          description: 无权限（403xx）
+          description: 无权限，或注销自己 / 最后一名管理员（403xx）
         '404':
           $ref: '#/components/responses/NotFound'
           description: 资源不存在（404xx）
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: 用户已注销（42200）
       security:
         - bearerAuth: []
   /admin/users/{id}/restore:
     put:
       summary: 恢复已注销用户
       deprecated: false
-      description: 需 admin 角色。将 user.state 从 is_deleted 恢复至 njupter。
+      description: |
+        需 admin 角色。将 user.state 从 is_deleted 恢复至 njupter。不记忆注销前的状态 ——
+        原 on_sast 成员恢复后为 njupter，需管理员另行调整。已撤销的 token 不恢复，
+        用户需重新登录。
       operationId: adminRestoreUser
       tags:
         - Admin
@@ -1780,6 +1829,9 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
           description: 资源不存在（404xx）
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: 用户未被注销，无需恢复（42200）
       security:
         - bearerAuth: []
   /admin/oauth-clients:
@@ -1993,45 +2045,50 @@ paths:
             default: 1
         - name: page_size
           in: query
-          description: 每页条数，默认 50
+          description: 每页条数，默认 50，最大 100（超出按 100 截断）
           required: false
           schema:
             type: integer
             default: 50
+            minimum: 1
+            maximum: 100
         - name: user_id
           in: query
           description: 按用户筛选
           required: false
           schema:
             type: integer
+            minimum: 1
         - name: action
           in: query
-          description: 按操作类型筛选
+          description: 按操作类型筛选（精确匹配）
           required: false
           schema:
             type: string
         - name: resource
           in: query
-          description: 按资源类型筛选
+          description: 按资源类型筛选（精确匹配）
           required: false
           schema:
             type: string
         - name: success
           in: query
-          description: 是否成功
+          description: 是否成功。仅接受 true / false，其他写法返回 400
           required: false
           schema:
             type: boolean
         - name: start_time
           in: query
-          description: 开始时间（ISO 8601）
+          description: |
+            开始时间（RFC 3339，必须带时区偏移），含该时刻。
+            不带偏移返回 400：created_at 是 timestamptz，按 UTC 猜测会使窗口偏移数小时。
           required: false
           schema:
             type: string
             format: date-time
         - name: end_time
           in: query
-          description: 结束时间（ISO 8601）
+          description: 结束时间（RFC 3339，必须带时区偏移），不含该时刻
           required: false
           schema:
             type: string
@@ -2044,6 +2101,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/AuditLogsListResponse'
           headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 参数格式非法或时间窗口倒置（400xx）
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
@@ -2277,11 +2337,18 @@ components:
           type: string
           description: 专业
         department:
-          $ref: '#/components/schemas/Department'
+          allOf:
+            - $ref: '#/components/schemas/Department'
+          nullable: true
+          description: 部门，用户尚无 profile 行时为 null
         created_at:
           type: string
           format: date-time
           description: 注册时间
+        updated_at:
+          type: string
+          format: date-time
+          description: 最后更新时间
     OAuthClient:
       type: object
       properties:
