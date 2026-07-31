@@ -45,6 +45,10 @@ type Service struct {
 	VerificationCode VerificationCodeStore
 	RegisterTicket   RegisterTicketStore
 	BindTicket       BindTicketStore
+	// OAuthRegistration reads the identity parked by an OAuth callback. A nil
+	// value disables OAuth-completed registration, which is what a deployment
+	// with no third-party providers configured wants.
+	OAuthRegistration OAuthRegistrationStore
 	// UnbindLimiter is separate from Limiter because checkEndpointLimit reads the
 	// quota off the instance, not the endpoint name — sharing one would give unbind
 	// the login budget.
@@ -341,17 +345,69 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 	return &VerifyRegisterCodeResult{RegisterTicket: ticket, Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
 }
 
+// resolveRegistrationIdentity consumes a parked OAuth identity and enforces PRD
+// §4.5's double binding.
+//
+// The stored oauth_state must equal the one the caller submitted. That is the
+// whole point of the pair: a leaked registration_state is not enough, because the
+// attacker would also need the state value the victim's browser carried through
+// the redirect chain. A mismatch is reported the same way as a missing state so
+// the caller cannot tell which half was wrong.
+func (s Service) resolveRegistrationIdentity(
+	ctx context.Context,
+	registrationState string,
+	oauthState string,
+) (*model.Identity, error) {
+	if s.OAuthRegistration == nil {
+		return nil, newError(ErrInvalidInput, "第三方 OAuth 注册未启用", nil)
+	}
+	payload, found, err := s.OAuthRegistration.ConsumeRegistrationState(ctx, registrationState)
+	if err != nil {
+		// Fail-closed: falling through would create an unbound account for a
+		// user who asked to register through a provider.
+		return nil, newError(ErrDependencyUnavailable, "读取 registration_state 失败", err)
+	}
+	if !found {
+		return nil, newError(ErrInvalidInput, "registration_state 无效或已过期", nil)
+	}
+	// Constant-time comparison is unnecessary here: both values are already
+	// known to the caller, and the timing of a string compare reveals nothing
+	// they did not submit.
+	if payload.OAuthState != oauthState {
+		return nil, newError(ErrInvalidInput, "registration_state 与 oauth_state 不匹配", nil)
+	}
+	if payload.ProviderID == "" || payload.Provider == "" {
+		return nil, newError(ErrInvalidInput, "registration_state 内容不完整", nil)
+	}
+
+	identity := &model.Identity{
+		Provider:       payload.Provider,
+		ProviderID:     payload.ProviderID,
+		IdentityData:   payload.IdentityData,
+		TokenExpiresAt: payload.TokenExpiresAt,
+	}
+	if payload.AccessToken != "" {
+		identity.AccessToken = &payload.AccessToken
+	}
+	if payload.RefreshToken != "" {
+		identity.RefreshToken = &payload.RefreshToken
+	}
+	return identity, nil
+}
+
 func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterResult, error) {
 	ticket := strings.TrimSpace(input.RegisterTicket)
 	if ticket == "" {
 		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 不能为空", nil)
 	}
-	// The contract accepts registration_state + oauth_state for the third-party
-	// OAuth no-binding branch; reject them until OAuth login issues such states,
-	// so nothing silently pretends to bind an identity. Validate before the
-	// ticket so a rejected request does not burn the one-time ticket.
-	if strings.TrimSpace(input.RegistrationState) != "" || strings.TrimSpace(input.OAuthState) != "" {
-		return nil, newError(ErrInvalidInput, "registration_state 无效：第三方 OAuth 注册尚未开放", nil)
+	// The third-party OAuth branch needs both halves of PRD §4.5's double
+	// binding. Shape is checked before the ticket is read so a malformed request
+	// does not burn the one-time ticket.
+	registrationState := strings.TrimSpace(input.RegistrationState)
+	oauthState := strings.TrimSpace(input.OAuthState)
+	if (registrationState == "") != (oauthState == "") {
+		return nil, newError(ErrInvalidInput,
+			"registration_state 与 oauth_state 必须同时提供", nil)
 	}
 
 	name := strings.TrimSpace(input.Name)
@@ -400,6 +456,19 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return nil, newError(ErrStudentIDOccupied, "学号已被占用", nil)
 	}
 
+	// The parked OAuth identity is resolved last among the rejectable checks, so
+	// an email or student-ID clash does not consume the one-time
+	// registration_state. Once consumed it is gone even on a later failure: the
+	// pair was presented, and leaving it live would let a leaked
+	// registration_state be retried against other OAuth states.
+	var oauthIdentity *model.Identity
+	if registrationState != "" {
+		oauthIdentity, err = s.resolveRegistrationIdentity(ctx, registrationState, oauthState)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	passwordHash, err := s.Passwords.HashPassword(ctx, password)
 	if err != nil {
 		return nil, s.hashError(ctx, err)
@@ -427,7 +496,10 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	// Account, profile and initial session share one PostgreSQL transaction. The
 	// pair is built after INSERT assigns user.ID; any signing or token persistence
 	// failure rolls the account back and leaves the Register-Ticket retryable.
-	if createErr := s.Users.CreateRegistration(ctx, user, profile, func(created *model.User) (*model.OAuthAccessToken, *model.OAuthRefreshToken, error) {
+	// The account, its profile, the optional third-party binding and the initial
+	// session all commit together, so registering through GitHub or Lark cannot
+	// leave an account whose binding failed to persist.
+	if createErr := s.Users.CreateRegistrationWithIdentity(ctx, user, profile, oauthIdentity, func(created *model.User) (*model.OAuthAccessToken, *model.OAuthRefreshToken, error) {
 		issued, issueErr := s.issuePair(created, client, 0, "", sessionScopes)
 		if issueErr != nil {
 			return nil, nil, issueErr

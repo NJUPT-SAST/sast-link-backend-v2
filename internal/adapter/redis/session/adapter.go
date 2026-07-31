@@ -22,6 +22,39 @@ func (l EndpointLimiter) Allow(ctx context.Context, endpoint, subject string) (s
 	return session.LimitResult{Allowed: result.Allowed, RetryAfter: result.RetryAfter}, nil
 }
 
+// OAuthRegistrationStore reads the identity parked by an OAuth callback, for the
+// registration flow that completes it.
+//
+// This reads the same Redis key that oauthloginredis.RegistrationStateStore
+// writes. The two payload structs are separate because neither service package
+// may import the other, so the JSON field tags are what keep them compatible —
+// changing a tag on one side without the other silently breaks OAuth
+// registration, and the integration test covering the round trip is what catches
+// it.
+type OAuthRegistrationStore struct {
+	Store internalredis.Store
+}
+
+// ConsumeRegistrationState atomically reads and deletes the parked identity.
+//
+// A missing key is reported as not-found rather than an error: an expired or
+// already-spent registration_state is an ordinary outcome the caller answers by
+// asking the user to restart the flow.
+func (s OAuthRegistrationStore) ConsumeRegistrationState(
+	ctx context.Context,
+	state string,
+) (session.OAuthRegistrationPayload, bool, error) {
+	var payload session.OAuthRegistrationPayload
+	err := s.Store.GetDelOneTime(ctx, s.Store.Keys.OAuthRegistration(state), &payload)
+	if err != nil {
+		if errors.Is(err, internalredis.ErrMiss) {
+			return session.OAuthRegistrationPayload{}, false, nil
+		}
+		return session.OAuthRegistrationPayload{}, false, err
+	}
+	return payload, true, nil
+}
+
 type LoginFailureStore struct {
 	Store  internalredis.Store
 	Limit  int

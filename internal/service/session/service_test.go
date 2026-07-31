@@ -48,6 +48,9 @@ type fakeUsers struct {
 	// createErr forces CreateWithProfile to fail, for racing-insert scenarios the
 	// in-memory maps cannot reproduce.
 	createErr error
+	// registeredIdentity records the third-party binding persisted alongside a
+	// registration, so tests can assert the OAuth branch wrote one.
+	registeredIdentity *model.Identity
 	// otherMailIdentities holds provider_id -> user_id for other_mail identities,
 	// so ExistsAsEmailAnywhere can mirror the cross-table uniqueness check.
 	otherMailIdentities map[string]int64
@@ -170,8 +173,22 @@ func (f *fakeUsers) CreateRegistration(
 	profile *model.Profile,
 	pairFactory repository.TokenPairFactory,
 ) error {
+	return f.CreateRegistrationWithIdentity(ctx, user, profile, nil, pairFactory)
+}
+
+func (f *fakeUsers) CreateRegistrationWithIdentity(
+	ctx context.Context,
+	user *model.User,
+	profile *model.Profile,
+	identity *model.Identity,
+	pairFactory repository.TokenPairFactory,
+) error {
 	if err := f.CreateWithProfile(ctx, user, profile); err != nil {
 		return err
+	}
+	if identity != nil {
+		identity.UserID = user.ID
+		f.registeredIdentity = identity
 	}
 	access, refresh, err := pairFactory(user)
 	if err != nil {
@@ -1564,13 +1581,31 @@ func TestRegisterRejectsInvalidCollege(t *testing.T) {
 	}
 }
 
-func TestRegisterRejectsUnsupportedRegistrationState(t *testing.T) {
-	service := newRegisterService(t)
-	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
-	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
-		t.Fatalf("save register ticket: %v", err)
+// fakeOAuthRegistrationStore stands in for the Redis-backed parked-identity
+// store, with GetDel semantics so a consumed state is gone.
+type fakeOAuthRegistrationStore struct {
+	states  map[string]OAuthRegistrationPayload
+	readErr error
+}
+
+func (s *fakeOAuthRegistrationStore) ConsumeRegistrationState(
+	_ context.Context,
+	state string,
+) (OAuthRegistrationPayload, bool, error) {
+	if s.readErr != nil {
+		return OAuthRegistrationPayload{}, false, s.readErr
 	}
-	_, err := service.Register(context.Background(), RegisterInput{
+	payload, ok := s.states[state]
+	if !ok {
+		return OAuthRegistrationPayload{}, false, nil
+	}
+	delete(s.states, state)
+	return payload, true, nil
+}
+
+// oauthRegisterInput is a complete registration payload for the OAuth branch.
+func oauthRegisterInput(registrationState, oauthState string) RegisterInput {
+	return RegisterInput{
 		RegisterTicket:    "reg_xxx",
 		Password:          "newpassword",
 		Name:              "New",
@@ -1579,12 +1614,171 @@ func TestRegisterRejectsUnsupportedRegistrationState(t *testing.T) {
 		QQNumber:          "10000",
 		College:           string(model.CollegeOther),
 		Major:             "CS",
-		RegistrationState: "rs_abc",
-		OAuthState:        "os_abc",
-	})
+		RegistrationState: registrationState,
+		OAuthState:        oauthState,
+	}
+}
+
+// newOAuthRegisterService wires a register service with a parked GitHub identity
+// under "rs_abc", issued alongside OAuth state "os_abc".
+func newOAuthRegisterService(t *testing.T) (Service, *fakeOAuthRegistrationStore) {
+	t.Helper()
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+	store := &fakeOAuthRegistrationStore{states: map[string]OAuthRegistrationPayload{
+		"rs_abc": {
+			Provider:     model.LoginMethodGitHub,
+			ProviderID:   "145339646",
+			IdentityData: model.JSONB(`{"login":"ptilopsis"}`),
+			OAuthState:   "os_abc",
+			AccessToken:  "gho_token",
+		},
+	}}
+	service.OAuthRegistration = store
+	return service, store
+}
+
+func TestRegisterWithOAuthStatePairCreatesIdentity(t *testing.T) {
+	service, _ := newOAuthRegisterService(t)
+	users := service.Users.(*fakeUsers)
+
+	result, err := service.Register(context.Background(), oauthRegisterInput("rs_abc", "os_abc"))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if result.AccessToken == "" {
+		t.Fatal("Register returned no access token")
+	}
+	// The binding must be persisted with the account, not afterwards.
+	if users.registeredIdentity == nil {
+		t.Fatal("no third-party identity was persisted with the registration")
+	}
+	if users.registeredIdentity.Provider != model.LoginMethodGitHub {
+		t.Fatalf("identity provider = %q, want github", users.registeredIdentity.Provider)
+	}
+	if users.registeredIdentity.ProviderID != "145339646" {
+		t.Fatalf("identity provider_id = %q, want 145339646", users.registeredIdentity.ProviderID)
+	}
+	if users.registeredIdentity.UserID == 0 {
+		t.Fatal("identity was not linked to the created user")
+	}
+}
+
+func TestRegisterRejectsMismatchedOAuthState(t *testing.T) {
+	service, _ := newOAuthRegisterService(t)
+	users := service.Users.(*fakeUsers)
+
+	// PRD §4.5: a leaked registration_state is useless without the OAuth state
+	// it was issued with. This is the check that makes that true.
+	_, err := service.Register(context.Background(), oauthRegisterInput("rs_abc", "os_wrong"))
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if users.registeredIdentity != nil {
+		t.Fatal("an identity was persisted despite a mismatched oauth_state")
+	}
+	if _, ok := users.byLogin["new@sast.fun"]; ok {
+		t.Fatal("an account was created despite a mismatched oauth_state")
+	}
+}
+
+func TestRegisterRejectsRegistrationStateWithoutOAuthState(t *testing.T) {
+	service, store := newOAuthRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+
+	// Half a pair is rejected on shape, before anything is consumed.
+	_, err := service.Register(context.Background(), oauthRegisterInput("rs_abc", ""))
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if _, ok := store.states["rs_abc"]; !ok {
+		t.Fatal("registration_state was consumed by a malformed request")
+	}
 	if _, ok := tickets.tickets["reg_xxx"]; !ok {
-		t.Fatal("register ticket was consumed by rejected registration_state input")
+		t.Fatal("register ticket was consumed by a malformed request")
+	}
+}
+
+func TestRegisterRejectsOAuthStateWithoutRegistrationState(t *testing.T) {
+	service, _ := newOAuthRegisterService(t)
+	_, err := service.Register(context.Background(), oauthRegisterInput("", "os_abc"))
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+}
+
+func TestRegisterRejectsUnknownRegistrationState(t *testing.T) {
+	service, _ := newOAuthRegisterService(t)
+	_, err := service.Register(context.Background(), oauthRegisterInput("rs_missing", "os_abc"))
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+}
+
+func TestRegisterKeepsRegistrationStateWhenStudentIDClashes(t *testing.T) {
+	service, store := newOAuthRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	// Occupy the student ID so the registration is rejected before the OAuth
+	// pair is resolved.
+	existing := &model.User{
+		ID: 7, StudentID: "B24040099", LoginEmail: "taken@sast.fun",
+		Role: model.UserRoleFreshman, State: model.UserStateNJUPTer,
+	}
+	users.byID[existing.ID] = existing
+	users.byLogin[existing.LoginEmail] = existing
+
+	_, err := service.Register(context.Background(), oauthRegisterInput("rs_abc", "os_abc"))
+	assertKind(t, err, KindConflict, errcode.CodeStudentIDOccupied)
+	// The parked identity is resolved after the recoverable conflict checks, so
+	// a fixable clash does not cost the user another trip through the provider.
+	if _, ok := store.states["rs_abc"]; !ok {
+		t.Fatal("registration_state was consumed by a recoverable student-ID conflict")
+	}
+}
+
+func TestRegisterConsumesRegistrationStateEvenOnMismatch(t *testing.T) {
+	service, store := newOAuthRegisterService(t)
+
+	// The pair was presented and failed. Leaving it live would let an attacker
+	// holding a leaked registration_state keep guessing OAuth states.
+	if _, err := service.Register(context.Background(), oauthRegisterInput("rs_abc", "os_wrong")); err == nil {
+		t.Fatal("Register succeeded with a mismatched oauth_state")
+	}
+	if _, ok := store.states["rs_abc"]; ok {
+		t.Fatal("registration_state survived a failed double-binding check")
+	}
+}
+
+func TestRegisterFailsClosedWhenRegistrationStoreIsDown(t *testing.T) {
+	service, store := newOAuthRegisterService(t)
+	store.readErr = errors.New("redis is down")
+	users := service.Users.(*fakeUsers)
+
+	// Falling through would create an unbound account for a user who asked to
+	// register through GitHub, with no way for them to tell.
+	_, err := service.Register(context.Background(), oauthRegisterInput("rs_abc", "os_abc"))
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	if _, ok := users.byLogin["new@sast.fun"]; ok {
+		t.Fatal("an account was created while the registration store was down")
+	}
+}
+
+func TestRegisterRejectsOAuthBranchWhenStoreNotConfigured(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+	// OAuthRegistration is nil: no third-party providers are configured.
+	_, err := service.Register(context.Background(), oauthRegisterInput("rs_abc", "os_abc"))
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+}
+
+func TestRegisterWithoutOAuthPairCreatesNoIdentity(t *testing.T) {
+	service, _ := newOAuthRegisterService(t)
+	users := service.Users.(*fakeUsers)
+
+	input := oauthRegisterInput("", "")
+	if _, err := service.Register(context.Background(), input); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if users.registeredIdentity != nil {
+		t.Fatal("a plain email registration persisted a third-party identity")
 	}
 }
 

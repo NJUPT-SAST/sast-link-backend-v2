@@ -55,6 +55,9 @@ type UserRepository interface {
 	ExistsAsEmailAnywhere(ctx context.Context, email string) (bool, error)
 	CreateWithProfile(ctx context.Context, user *model.User, profile *model.Profile) error
 	CreateRegistration(ctx context.Context, user *model.User, profile *model.Profile, pairFactory repository.TokenPairFactory) error
+	// CreateRegistrationWithIdentity additionally persists a third-party binding
+	// in the same transaction, for registration completed through OAuth.
+	CreateRegistrationWithIdentity(ctx context.Context, user *model.User, profile *model.Profile, identity *model.Identity, pairFactory repository.TokenPairFactory) error
 	// UpdatePasswordAndRevokeSessions rewrites the password, bumps token_version
 	// and revokes every live token of the user atomically, returning the
 	// access-token entries still pending blacklist delivery.
@@ -123,6 +126,34 @@ type BindTicketStore interface {
 	// caller was the one that removed it. Callers rely on that to serialize
 	// concurrent binds using the same ticket.
 	ConsumeBindTicket(ctx context.Context, ticket string) (consumed bool, err error)
+}
+
+// OAuthRegistrationPayload is the third-party identity parked by the OAuth
+// callback for a user who has no account yet.
+//
+// This mirrors oauthlogin.RegistrationPayload rather than importing it: the
+// OAuth login service already depends on repository and model, and having it
+// import session (or session import it) would couple the two flows in a cycle.
+// The Redis adapter is what keeps the two shapes reading the same key.
+type OAuthRegistrationPayload struct {
+	Provider       model.LoginMethod `json:"provider"`
+	ProviderID     string            `json:"provider_id"`
+	IdentityData   model.JSONB       `json:"identity_data"`
+	OAuthState     string            `json:"oauth_state"`
+	AccessToken    string            `json:"access_token,omitempty"`
+	RefreshToken   string            `json:"refresh_token,omitempty"`
+	TokenExpiresAt *time.Time        `json:"token_expires_at,omitempty"`
+}
+
+// OAuthRegistrationStore reads the identity parked by an OAuth callback.
+//
+// Fail-closed: Redis holds the only copy, so an unreadable value must reject the
+// registration rather than fall back to creating an unbound account — the user
+// asked to register through a provider and would otherwise get an account with
+// no binding and no way to tell.
+type OAuthRegistrationStore interface {
+	// ConsumeRegistrationState atomically reads and deletes the parked identity.
+	ConsumeRegistrationState(ctx context.Context, state string) (payload OAuthRegistrationPayload, found bool, err error)
 }
 
 type IdentityRepository interface {
@@ -242,9 +273,10 @@ type RegisterInput struct {
 	QQNumber       string
 	College        string
 	Major          string
-	// RegistrationState and OAuthState are the optional third-party OAuth
-	// no-binding registration pair. They are accepted at the contract level but
-	// rejected until the OAuth login flows are implemented.
+	// RegistrationState and OAuthState are the third-party OAuth registration
+	// pair. Both must be present together or both absent: PRD §4.5 binds the
+	// parked identity to the OAuth state it was issued with, so one without the
+	// other is rejected rather than silently ignored.
 	RegistrationState string
 	OAuthState        string
 	ClientIP          string
