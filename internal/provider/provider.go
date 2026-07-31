@@ -89,13 +89,14 @@ func contextError(ctx context.Context, stage string, err error) error {
 	return fmt.Errorf("%s: %w", stage, err)
 }
 
-// getJSON issues req and decodes a JSON response body into target.
+// doJSON issues req and decodes a JSON response body into target.
 //
 // It applies the I/O timeout even when ctx carries none, caps the body, and
-// treats any non-2xx status as a failure. The status is folded into the error
-// message rather than returned separately: callers dispatch on the sentinel
-// errors, and a provider that signals a bad code with 200 plus an error field
-// is handled by the caller inspecting the decoded payload.
+// treats any non-2xx status as a failure. A non-2xx returns a *statusError,
+// which wraps ErrUnexpectedResponse and keeps the status code so a caller can
+// separate a provider's rejection of the input from a provider outage; see
+// isClientRejection. A provider that signals a bad code with 200 plus an error
+// field is handled by the caller inspecting the decoded payload.
 func doJSON(ctx context.Context, client Doer, req *http.Request, stage string, target any) error {
 	ctx, cancel := context.WithTimeout(ctx, httpIOTimeout)
 	defer cancel()

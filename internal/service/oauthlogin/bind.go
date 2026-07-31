@@ -177,7 +177,7 @@ func (s Service) auditBind(
 	}
 }
 
-// logAuditFailure records an audit write failure. Audit rows are an trail, not a
+// logAuditFailure records an audit write failure. Audit rows are a trail, not a
 // gate: losing one must not fail the user's request, but it must be visible.
 func logAuditFailure(ctx context.Context, action string, err error) {
 	slog.ErrorContext(ctx, "audit write failed", "action", action, "error", err)
