@@ -77,7 +77,31 @@ Authorization callback URL: https://link.sast.fun/v2/oauth
 
 飞书没有这个限制，其重定向 URL 支持配置多条，把登录与绑定两条地址都填进去即可；不过与 GitHub 保持同一套路径布局可以减少两边配置的差异。
 
+## 本地开发不需要反代
+
+本地后端在 `:8080`、前端在 `:3000`，端口不同，因此无法像生产那样靠「同为 443」满足 GitHub 的端口精确匹配。改用 GitHub 为 loopback 地址提供的例外：callback 注册为 `http://127.0.0.1/path` 时，实际 `redirect_uri` **不需要匹配端口**。
+
+```
+Authorization callback URL: http://127.0.0.1/oauth
+```
+
+**已实测可用**，覆盖两条回调：
+
+| 用途 | 地址 | 端口 | 路径 |
+|------|------|------|------|
+| 登录回调 | `http://127.0.0.1:8080/oauth/github/callback` | 豁免 | 在 `/oauth` 之下 |
+| 绑定页 | `http://127.0.0.1:3000/oauth/bind/github` | 豁免 | 在 `/oauth` 之下 |
+
+两点必须注意：
+
+- **写 `127.0.0.1`，不要写 `localhost`。** 该例外只对字面的 loopback 地址成立，`localhost` 拿不到端口豁免。
+- **路径规则依然生效。** 端口被豁免，路径不被豁免，所以两条回调仍然要落在注册路径 `/oauth` 之下。
+
+这条捷径**仅限本地**。生产环境没有端口豁免（两条回调本来都在 443），依赖的是上文那条 Caddy 分流规则。两套配置的共同点是「路径共享一个已注册的父目录」——这部分在两处都成立，本地验证的正是它。
+
 ## 对应的环境变量
+
+生产：
 
 ```bash
 OAUTH_GITHUB_ENABLED=true
@@ -88,8 +112,19 @@ OAUTH_GITHUB_CLIENT_SECRET=<Generate 出来的值>
 OAUTH_GITHUB_REDIRECT_URI=https://link.sast.fun/v2/oauth/github/callback
 
 # 后端回调完成后可 302 到的前端地址，精确匹配，逗号分隔可多条。
+# 这个值不注册进 provider——provider 从不看它。
 OAUTH_LOGIN_REDIRECTS=https://link.sast.fun/oauth/callback
 OAUTH_LOGIN_ERROR_REDIRECT=https://link.sast.fun/oauth/error
+```
+
+本地（无反代，故不带 `/v2`）：
+
+```bash
+OAUTH_GITHUB_REDIRECT_URI=http://127.0.0.1:8080/oauth/github/callback
+OAUTH_LOGIN_REDIRECTS=http://127.0.0.1:3000/oauth/callback
+OAUTH_LOGIN_ERROR_REDIRECT=http://127.0.0.1:3000/oauth/error
+# 前端绑定页，服务端不读取，由前端作为 redirect_uri 参数回传
+OAUTH_GITHUB_BIND_REDIRECT_URI=http://127.0.0.1:3000/oauth/bind/github
 ```
 
 前端绑定页在调用 `POST /v2/user/identities/github` 时，需要把 `redirect_uri=https://link.sast.fun/v2/oauth/bind/github` 作为 query 参数一并传入——RFC 6749 §4.1.3 要求 token 交换重复签发 code 时使用的那个回调地址。省略时后端会回退到 `OAUTH_GITHUB_REDIRECT_URI`，那是登录回调，与绑定 code 不匹配，provider 会以 `invalid_grant` 拒绝。
