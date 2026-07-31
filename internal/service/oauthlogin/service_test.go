@@ -176,6 +176,13 @@ func TestCallbackUnboundUserIssuesRegistrationStateBoundToOAuthState(t *testing.
 	if stored.OAuthState != state {
 		t.Fatalf("stored oauth_state = %q, want %q", stored.OAuthState, state)
 	}
+	// The result must hand that same state back, or the caller has no way to
+	// satisfy the pairing: the state was consumed from Redis and the page that
+	// started the login is gone. Returning only the registration_state would
+	// make every third-party registration fail with a state mismatch.
+	if result.OAuthState != state {
+		t.Fatalf("result oauth_state = %q, want %q", result.OAuthState, state)
+	}
 	if stored.ProviderID != "145339646" {
 		t.Fatalf("stored provider_id = %q, want 145339646", stored.ProviderID)
 	}

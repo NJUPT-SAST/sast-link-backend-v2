@@ -287,7 +287,7 @@ POST /auth/register
 
 `registration_state` + `oauth_state` 为可选字段，来自第三方 OAuth 回调（GitHub / 飞书）的无绑定分支。两者**必须同时提供或同时省略**，只给一半返回 `40000`。传入双值时：GetDel 一次性消费 `registration_state`，比对其中暂存的 `oauth_state` 与请求传入值，匹配后在**同一事务内**创建账号、资料、第三方绑定与首个会话——注册即绑定是一个原子结果，不会出现建号成功而绑定缺失的中间态。
 
-双重校验的意义：`registration_state` 泄露也不足以滥用，攻击者还需要受害者浏览器在重定向链中携带的那个 `oauth_state`。校验失败时 `registration_state` 已被消费且不可重试（该对值已被提交并失败，留活会让持有泄露值的攻击者继续枚举 state）。`registration_state` 只能用于新建账号，**不可**用于给已存在账号追加绑定——后者只能走 §4.2 / §4.3 的登录态接口。
+双重校验的意义：`registration_state` 单独泄露（被分享的 URL、日志、referrer）不足以兑换，还需要与之配对的 `oauth_state`。两者都由回调重定向下发到注册补全页——发起登录的那个页面已被跳转到 provider 时卸载，前端无从自行保留 `oauth_state`。校验失败时 `registration_state` 已被消费且不可重试（该对值已被提交并失败，留活会让持有泄露值的攻击者继续枚举 state）。`registration_state` 只能用于新建账号，**不可**用于给已存在账号追加绑定——后者只能走 §4.2 / §4.3 的登录态接口。
 
 未配置第三方 provider（`OAUTH_*_ENABLED` 均为 false）时传入这对字段返回 `40000`；Redis 不可用时返回 `50300` 而非降级为无绑定注册。
 
@@ -506,7 +506,7 @@ GET /oauth/github/callback?code=...&state=...
 
 **处理分支**:
 - 已有绑定 → 签发一次性 `login_code`（Redis，60s），302 重定向至前端 `?code=<login_code>`
-- 无绑定 → 生成 `registration_state`（Redis，15min，暂存 provider + provider_id + identity_data + oauth_state），302 重定向至注册补全页 `?registration_state=<registration_state>&provider=github&name=<login>&avatar=<url>`
+- 无绑定 → 生成 `registration_state`（Redis，15min，暂存 provider + provider_id + identity_data + oauth_state），302 重定向至注册补全页 `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=github&name=<login>&avatar=<url>`
 
 ---
 
@@ -532,7 +532,7 @@ GET /oauth/lark/callback?code=...&state=...
 
 **处理分支**:
 - 已有绑定 → 签发一次性 `login_code`（Redis，60s），302 重定向至前端 `?code=<login_code>`
-- 无绑定 → 生成 `registration_state`（Redis，15min，暂存 provider + provider_id + identity_data + oauth_state），302 重定向至注册补全页 `?registration_state=<registration_state>&provider=lark&name=<name>&avatar=<url>`
+- 无绑定 → 生成 `registration_state`（Redis，15min，暂存 provider + provider_id + identity_data + oauth_state），302 重定向至注册补全页 `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=lark&name=<name>&avatar=<url>`
 - 非 SAST 企业用户 → 拒绝，提示"仅限 SAST 成员登录"
 
 ---

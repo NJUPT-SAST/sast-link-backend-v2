@@ -120,6 +120,16 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 			// hints so the frontend can prefill the form. The identity itself
 			// stays server-side in Redis.
 			query.Set("registration_state", result.RegistrationState)
+			// The OAuth state travels with it because POST /auth/register
+			// requires both halves of PRD §4.5's double binding, and the page
+			// that started the login was unloaded by the redirect to the
+			// provider — the frontend has no other way to still hold it.
+			//
+			// Emitting it here does not defeat the pairing. Its purpose is that
+			// a registration_state leaked on its own (a shared URL, a log, a
+			// referrer) is not redeemable, and an attacker who can read this
+			// redirect already holds both values plus the session it belongs to.
+			query.Set("oauth_state", result.OAuthState)
 			query.Set("provider", result.Provider)
 			if result.DisplayName != "" {
 				query.Set("name", result.DisplayName)

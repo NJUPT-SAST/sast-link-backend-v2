@@ -128,13 +128,15 @@ func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackRe
 
 	identity, err := client.Exchange(ctx, input.Code)
 	if err != nil {
-		return nil, s.providerError(ctx, input.Provider, err)
+		return nil, providerError(err)
 	}
 
+	// Taken from the state rather than re-resolved: Authorize validated it
+	// against the allow-list before storing, and SetOneTime's SET NX means an
+	// attacker cannot overwrite a victim's pending state to retarget it. The
+	// value is never empty, because resolveRedirect substitutes the default at
+	// authorize time.
 	redirect := statePayload.Redirect
-	if redirect == "" {
-		redirect = s.DefaultRedirect
-	}
 
 	existing, err := s.Identities.FindByProviderID(ctx, input.Provider, identity.ProviderID)
 	if err != nil && !isNotFound(err) {
@@ -222,6 +224,7 @@ func (s Service) registrationBranch(
 	return &CallbackResult{
 		Bound:             false,
 		RegistrationState: state,
+		OAuthState:        input.State,
 		Provider:          string(input.Provider),
 		DisplayName:       identity.DisplayName,
 		AvatarURL:         identity.AvatarURL,

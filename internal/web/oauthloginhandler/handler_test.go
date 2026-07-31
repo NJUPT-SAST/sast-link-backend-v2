@@ -170,6 +170,7 @@ func TestCallbackUnboundRedirectsWithRegistrationState(t *testing.T) {
 	service := &fakeService{callbackResult: &oauthlogin.CallbackResult{
 		Bound:             false,
 		RegistrationState: "rs_abc123",
+		OAuthState:        "os_abc",
 		Provider:          "github",
 		DisplayName:       "Ptilopsis",
 		AvatarURL:         "https://avatars.test/p.png",
@@ -188,6 +189,12 @@ func TestCallbackUnboundRedirectsWithRegistrationState(t *testing.T) {
 	query := location.Query()
 	if query.Get("registration_state") != "rs_abc123" {
 		t.Fatalf("registration_state = %q", query.Get("registration_state"))
+	}
+	// POST /auth/register requires both halves of the double binding, and the
+	// page that began the login was unloaded by the redirect to the provider.
+	// Without this the registration branch cannot complete at all.
+	if query.Get("oauth_state") != "os_abc" {
+		t.Fatalf("oauth_state = %q, want os_abc", query.Get("oauth_state"))
 	}
 	if query.Get("provider") != "github" {
 		t.Fatalf("provider = %q, want github", query.Get("provider"))

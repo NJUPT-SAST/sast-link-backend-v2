@@ -152,9 +152,13 @@ type CallbackResult struct {
 	LoginCode string
 
 	RegistrationState string
-	Provider          string
-	DisplayName       string
-	AvatarURL         string
+	// OAuthState is echoed back so the handler can hand it to the frontend.
+	// POST /auth/register needs it alongside RegistrationState, and the page
+	// that started the login no longer exists to remember it.
+	OAuthState  string
+	Provider    string
+	DisplayName string
+	AvatarURL   string
 
 	Redirect string
 }
