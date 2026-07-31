@@ -465,15 +465,36 @@ paths:
     get:
       summary: GitHub 登录
       deprecated: false
-      description: 重定向至 GitHub OAuth 授权页。
+      description: >
+        重定向至 GitHub OAuth 授权页，并在 Redis 写入一次性 `oauth_state`（10min）。
+
+        `redirect` 按精确匹配校验 `OAUTH_LOGIN_REDIRECTS` 白名单，不支持前缀匹配：
+        回调会把 `login_code` 交给它重定向到的地址，前缀规则会让
+        `https://link.sast.fun.evil.test` 也通过。省略时使用白名单首项。
+
+        未启用该 provider（`OAUTH_GITHUB_ENABLED=false`）时路由仍然存在，返回 `40000`。
       operationId: oauthLoginGithub
       tags:
         - OAuth Login
-      parameters: []
+      parameters:
+        - name: redirect
+          in: query
+          required: false
+          description: 登录完成后返回的前端地址，必须在 OAUTH_LOGIN_REDIRECTS 白名单内。
+          schema:
+            type: string
+            format: uri
       responses:
         '302':
           description: 重定向至 GitHub OAuth 授权页
           headers: {}
+        '400':
+          description: >-
+            `40000` —— redirect 不在允许列表中，或该 provider 未启用
+        '503':
+          description: >-
+            `50300` —— Redis 不可用，无法写入 oauth_state。fail-closed：
+            没有已存储的 state 就无法校验回调，因此登录不予开始
       security: []
   /oauth/github/callback:
     get:
@@ -511,15 +532,31 @@ paths:
     get:
       summary: 飞书登录
       deprecated: false
-      description: 重定向至飞书 OAuth 授权页。
+      description: >
+        重定向至飞书 OAuth 授权页，并在 Redis 写入一次性 `oauth_state`（10min）。
+
+        `redirect` 的白名单校验与 `/oauth/github` 相同。未启用该 provider
+        （`OAUTH_FEISHU_ENABLED=false`）时路由仍然存在，返回 `40000`。
       operationId: oauthLoginLark
       tags:
         - OAuth Login
-      parameters: []
+      parameters:
+        - name: redirect
+          in: query
+          required: false
+          description: 登录完成后返回的前端地址，必须在 OAUTH_LOGIN_REDIRECTS 白名单内。
+          schema:
+            type: string
+            format: uri
       responses:
         '302':
           description: 重定向至飞书 OAuth 授权页
           headers: {}
+        '400':
+          description: >-
+            `40000` —— redirect 不在允许列表中，或该 provider 未启用
+        '503':
+          description: '`50300` —— Redis 不可用，无法写入 oauth_state（fail-closed）'
       security: []
   /oauth/lark/callback:
     get:

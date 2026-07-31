@@ -283,11 +283,17 @@ POST /auth/register
 }
 ```
 
-**说明**: Register-Ticket 已包含验证过的邮箱，无需再次传入 `login_email`；密码最短 8 位；注册成功后自动签发 Token，无需单独登录。`registration_state` + `oauth_state` 为可选字段，来自第三方 OAuth 回调（GitHub / 飞书）的无绑定分支——传入双值后注册成功的同时校验匹配并自动创建对应的 identities 绑定记录。**当前实现**：第三方 OAuth 登录尚未开放，传入任一非空 `registration_state` / `oauth_state` 会被拒绝并返回 `40000`；待 OAuth 回调实现后才会消费这对字段并自动创建绑定。
+**说明**: Register-Ticket 已包含验证过的邮箱，无需再次传入 `login_email`；密码最短 8 位；注册成功后自动签发 Token，无需单独登录。
 
-**错误码**: 400xx（参数错误）、40020（邮箱域名不允许）、40103（Register-Ticket 无效或已过期）、40901（邮箱已被注册）、40902（学号已被占用）、40900（其他唯一性冲突）、42201（密码长度不足）
+`registration_state` + `oauth_state` 为可选字段，来自第三方 OAuth 回调（GitHub / 飞书）的无绑定分支。两者**必须同时提供或同时省略**，只给一半返回 `40000`。传入双值时：GetDel 一次性消费 `registration_state`，比对其中暂存的 `oauth_state` 与请求传入值，匹配后在**同一事务内**创建账号、资料、第三方绑定与首个会话——注册即绑定是一个原子结果，不会出现建号成功而绑定缺失的中间态。
 
-Register-Ticket 在建号成功后才消费。返回 40901/40902/40900 时 ticket 仍然有效，客户端可修正对应字段用同一 ticket 重试，不必重新发送验证码。
+双重校验的意义：`registration_state` 泄露也不足以滥用，攻击者还需要受害者浏览器在重定向链中携带的那个 `oauth_state`。校验失败时 `registration_state` 已被消费且不可重试（该对值已被提交并失败，留活会让持有泄露值的攻击者继续枚举 state）。`registration_state` 只能用于新建账号，**不可**用于给已存在账号追加绑定——后者只能走 §4.2 / §4.3 的登录态接口。
+
+未配置第三方 provider（`OAUTH_*_ENABLED` 均为 false）时传入这对字段返回 `40000`；Redis 不可用时返回 `50300` 而非降级为无绑定注册。
+
+**错误码**: 400xx（参数错误、`registration_state` 无效/已过期/与 `oauth_state` 不匹配/只提供其中一个）、40020（邮箱域名不允许）、40103（Register-Ticket 无效或已过期）、40901（邮箱已被注册）、40902（学号已被占用）、40900（其他唯一性冲突）、42201（密码长度不足）、50300（`registration_state` 存储不可用）
+
+Register-Ticket 在建号成功后才消费。返回 40901/40902/40900 时 ticket 仍然有效，客户端可修正对应字段用同一 ticket 重试，不必重新发送验证码。`registration_state` 的消费排在这些可拒绝校验**之后**，因此邮箱或学号冲突同样不会消耗它，带 OAuth 双值的请求可以用同一对值重试；只有走到双重校验本身才会消费（无论匹配与否）。
 
 ---
 
@@ -474,9 +480,11 @@ POST /auth/reset-password
 
 ## 2. 第三方 OAuth 登录
 
-> **本章尚未实现**：`/oauth/github`、`/oauth/github/callback`、`/oauth/lark`、`/oauth/lark/callback`、`/oauth/exchange-code` 均未注册路由，调用会得到 `404`。`.env.example` 中的 `OAUTH_GITHUB_*` / `OAUTH_FEISHU_*` 同样未被 `internal/config` 读取。以下内容是目标契约，不是当前行为。
+> 注意本章描述的「SAST Link 作为 OAuth *客户端*」方向，与第 8 章「SAST Link 作为 OAuth *Provider*」方向相反。
 >
-> 注意本章描述的「SAST Link 作为 OAuth *客户端*」方向，与第 8 章「SAST Link 作为 OAuth *Provider*」方向相反，后者已实现。
+> **provider 开关**：GitHub 与飞书各由 `OAUTH_GITHUB_ENABLED` / `OAUTH_FEISHU_ENABLED` 独立控制，未启用的 provider 路由仍然注册，调用返回 `40000`（不支持的第三方登录方式）而非 `404`。启用某个 provider 时其 client id / secret / redirect_uri 均为必填，飞书还必须提供 `OAUTH_FEISHU_TENANT_KEY`——留空会关闭租户校验，接受任意飞书企业的用户。
+>
+> **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
 
 ### 2.1 GitHub 登录
 
@@ -533,6 +541,10 @@ GET /oauth/lark/callback?code=...&state=...
 
 用 OAuth 回调中的一次性 `login_code` 换取 token。
 
+回调本身不返回 Token：它是一个到前端的 302，Token 出现在查询串里会进入浏览器历史与 `Referer` 头，因此改为投递一次性 `login_code`（60s），由本端点兑换。本端点**不需要**登录态——兑换 code 正是取得会话的方式。
+
+`login_code` 为 GetDel 一次性消费，并发兑换同一 code 只有一个成功。账号状态在兑换时**重新校验**：code 有 60s 寿命，这期间被注销的账号不得凭它取得会话，返回 `40301`。
+
 ```
 POST /oauth/exchange-code
 ```
@@ -563,7 +575,9 @@ POST /oauth/exchange-code
 }
 ```
 
-**说明**: `login_code` 存储在 Redis，有效期 60 秒，一次性使用；交换成功后立即删除。
+**说明**: `login_code` 存储在 Redis，有效期 60 秒，一次性使用；交换成功后立即删除。签发的会话与密码登录完全一致（同一内置客户端、同一 `openid profile email` scope），第三方登录不因此更高或更低权限。
+
+**错误码**: `40000`（`code` 缺失、未知字段或 Content-Type 非 JSON）、`40107`（`login_code` 无效或已过期）、`40301`（账号已注销）、`40401`（用户不存在）、`50300`（Redis 不可用，fail-closed）、`50000`（服务器内部错误）
 
 ---
 
@@ -814,7 +828,7 @@ GET /user/identities
 
 ### 4.2 绑定飞书
 
-> **尚未实现**：本节与 §4.3（绑定 GitHub）的路由均未注册，调用会得到 `404`。两者依赖第 2 章的第三方 OAuth 登录，同样待接入。§4.1、§4.4–4.6（邮箱绑定与解绑）已实现。
+> 本节与 §4.3（绑定 GitHub）只接受登录态调用，`code` 走 query 参数。绑定路径**不接受** `registration_state`：该值只证明有人走完了一次第三方回调，不证明是哪个 SAST 账号在操作，因此追加绑定一律由 Bearer token 认定调用者。每个用户每种 provider 最多一条绑定（V001 partial unique index）：该第三方账号已属他人返回 `40903`，调用者自己已绑同类型返回 `40904`。
 
 ```
 POST /user/identities/lark

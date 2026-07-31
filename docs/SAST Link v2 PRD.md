@@ -680,7 +680,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流与登录/登出审计接入 |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
 | 用户资料管理 | 部分完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）已完成；头像上传待实现（依赖对象存储接入） |
-| OAuth/OIDC 业务 | 部分完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）与 OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护）已完成，含跨层端到端集成测试（真实 PostgreSQL + Redis）；OAuth 第三方登录/绑定（GitHub / 飞书回调）待实现 |
+| OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
 | 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）与审计日志查询，读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
 | 其余运维接入 | 待实现 — 设备管理、其他 endpoint 限流策略与 pg_cron |
 
@@ -693,8 +693,8 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [x] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码 / 第三方邮箱绑定）
 - [x] 用户资料自助管理（资料编辑 / 绑定列表 / 解绑 / 公开个人卡片）
 - [ ] 头像上传（依赖对象存储接入，与内容审核一并实现）
-- [ ] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
-- [ ] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
+- [x] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
+- [x] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
 - [ ] 限流与防刷扩展（登录 endpoint 已接入；验证码、注册等策略待对应业务实现）
 - [ ] 审计日志扩展（登录/登出已接入；其余业务随 endpoint 实现）
 - [ ] 头像内容审核（腾讯云 COS）
