@@ -126,7 +126,7 @@ func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		return nil, newError(ErrStateInvalid, "state 与回调 provider 不匹配", nil)
 	}
 
-	identity, err := client.Exchange(ctx, input.Code)
+	identity, err := client.Exchange(ctx, input.Code, "")
 	if err != nil {
 		return nil, providerError(err)
 	}

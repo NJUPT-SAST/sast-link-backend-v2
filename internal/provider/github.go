@@ -91,8 +91,13 @@ type githubUser struct {
 }
 
 // Exchange turns an authorization code into a normalized Identity.
-func (c *GitHubClient) Exchange(ctx context.Context, code string) (*Identity, error) {
-	token, err := c.exchangeCode(ctx, code)
+//
+// redirectURI is the exact callback the code was issued against. RFC 6749
+// §4.1.3 requires the token request to repeat it. An empty value falls back to
+// the configured login callback (GitHubConfig.RedirectURI); the bind flow passes
+// the frontend bind callback instead.
+func (c *GitHubClient) Exchange(ctx context.Context, code, redirectURI string) (*Identity, error) {
+	token, err := c.exchangeCode(ctx, code, redirectURI)
 	if err != nil {
 		return nil, err
 	}
@@ -128,12 +133,16 @@ func (c *GitHubClient) Exchange(ctx context.Context, code string) (*Identity, er
 	return identity, nil
 }
 
-func (c *GitHubClient) exchangeCode(ctx context.Context, code string) (*githubTokenResponse, error) {
+func (c *GitHubClient) exchangeCode(ctx context.Context, code, redirectURI string) (*githubTokenResponse, error) {
+	redirect := strings.TrimSpace(redirectURI)
+	if redirect == "" {
+		redirect = c.cfg.RedirectURI
+	}
 	form := url.Values{
 		"client_id":     {c.cfg.ClientID},
 		"client_secret": {c.cfg.ClientSecret},
 		"code":          {code},
-		"redirect_uri":  {c.cfg.RedirectURI},
+		"redirect_uri":  {redirect},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, githubTokenURL,
 		strings.NewReader(form.Encode()))

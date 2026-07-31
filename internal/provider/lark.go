@@ -118,12 +118,17 @@ type larkUserData struct {
 
 // Exchange turns an authorization code into a normalized Identity, rejecting
 // accounts outside the configured tenant.
-func (c *LarkClient) Exchange(ctx context.Context, code string) (*Identity, error) {
+//
+// redirectURI is the exact callback the code was issued against. RFC 6749
+// §4.1.3 requires the token request to repeat it. An empty value falls back to
+// the configured login callback (LarkConfig.RedirectURI), which is what the
+// login flow uses; the bind flow passes the frontend bind callback instead.
+func (c *LarkClient) Exchange(ctx context.Context, code, redirectURI string) (*Identity, error) {
 	appToken, err := c.fetchAppAccessToken(ctx)
 	if err != nil {
 		return nil, err
 	}
-	userToken, err := c.exchangeCode(ctx, appToken, code)
+	userToken, err := c.exchangeCode(ctx, appToken, code, redirectURI)
 	if err != nil {
 		return nil, err
 	}
@@ -204,13 +209,17 @@ func (c *LarkClient) fetchAppAccessToken(ctx context.Context) (string, error) {
 	return response.AppAccessToken, nil
 }
 
-func (c *LarkClient) exchangeCode(ctx context.Context, appToken, code string) (*larkUserTokenResponse, error) {
+func (c *LarkClient) exchangeCode(ctx context.Context, appToken, code, redirectURI string) (*larkUserTokenResponse, error) {
+	redirect := strings.TrimSpace(redirectURI)
+	if redirect == "" {
+		redirect = c.cfg.RedirectURI
+	}
 	payload, err := json.Marshal(map[string]string{
 		"grant_type":    "authorization_code",
 		"client_id":     c.cfg.AppID,
 		"client_secret": c.cfg.AppSecret,
 		"code":          code,
-		"redirect_uri":  c.cfg.RedirectURI,
+		"redirect_uri":  redirect,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode lark token request: %w", err)

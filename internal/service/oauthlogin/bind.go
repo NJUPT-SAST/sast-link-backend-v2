@@ -46,7 +46,7 @@ func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error)
 		return nil, newError(ErrUserDeleted, "账号已注销", nil)
 	}
 
-	identity, err := client.Exchange(ctx, input.Code)
+	identity, err := client.Exchange(ctx, input.Code, input.RedirectURI)
 	if err != nil {
 		return nil, providerError(err)
 	}

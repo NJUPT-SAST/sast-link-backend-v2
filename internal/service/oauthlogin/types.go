@@ -17,8 +17,10 @@ const BearerTokenType = "Bearer"
 type ProviderClient interface {
 	// AuthorizeURL builds the provider page to redirect the user to.
 	AuthorizeURL(state string) string
-	// Exchange turns a callback code into a normalized identity.
-	Exchange(ctx context.Context, code string) (*provider.Identity, error)
+	// Exchange turns a callback code into a normalized identity. redirectURI is
+	// the exact callback the code was issued against; an empty value uses the
+	// provider's configured login callback.
+	Exchange(ctx context.Context, code, redirectURI string) (*provider.Identity, error)
 }
 
 // StatePayload is the value stored under oauth_state for the duration of one
@@ -181,12 +183,18 @@ type ExchangeCodeResult struct {
 }
 
 // BindInput binds a provider account to the authenticated caller.
+//
+// RedirectURI is the exact frontend callback the provider code was issued
+// against, and must be repeated when exchanging the code (RFC 6749 §4.1.3). An
+// empty value falls back to the provider's configured login callback, matching
+// the login flow.
 type BindInput struct {
-	UserID    int64
-	Provider  model.LoginMethod
-	Code      string
-	ClientIP  string
-	UserAgent string
+	UserID      int64
+	Provider    model.LoginMethod
+	Code        string
+	RedirectURI string
+	ClientIP    string
+	UserAgent   string
 }
 
 type BindResult struct {

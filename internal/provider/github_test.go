@@ -47,7 +47,7 @@ func TestGitHubExchangeReturnsIdentity(t *testing.T) {
 			"id":145339646,"login":"ptilopsis","name":"Ptilopsis",
 			"avatar_url":"https://avatars.githubusercontent.com/u/145339646"}`},
 	}}
-	identity, err := githubTestClient(doer).Exchange(context.Background(), "code-1")
+	identity, err := githubTestClient(doer).Exchange(context.Background(), "code-1", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestGitHubExchangeMapsBodyErrorToInvalidGrant(t *testing.T) {
 			"error":"bad_verification_code",
 			"error_description":"The code passed is incorrect or expired."}`},
 	}}
-	_, err := githubTestClient(doer).Exchange(context.Background(), "spent")
+	_, err := githubTestClient(doer).Exchange(context.Background(), "spent", "")
 	if !errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("error = %v, want ErrInvalidGrant", err)
 	}
@@ -106,7 +106,7 @@ func TestGitHubExchangeRejectsMissingAccessToken(t *testing.T) {
 	doer := &fakeDoer{responses: map[string]fakeResponse{
 		githubTokenURL: {status: http.StatusOK, body: `{"token_type":"bearer"}`},
 	}}
-	_, err := githubTestClient(doer).Exchange(context.Background(), "code-1")
+	_, err := githubTestClient(doer).Exchange(context.Background(), "code-1", "")
 	if !errors.Is(err, ErrUnexpectedResponse) {
 		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
 	}
@@ -119,7 +119,7 @@ func TestGitHubExchangeRejectsZeroUserID(t *testing.T) {
 		githubTokenURL: {status: http.StatusOK, body: `{"access_token":"gho_token"}`},
 		githubUserURL:  {status: http.StatusOK, body: `{"login":"ghost"}`},
 	}}
-	_, err := githubTestClient(doer).Exchange(context.Background(), "code-1")
+	_, err := githubTestClient(doer).Exchange(context.Background(), "code-1", "")
 	if !errors.Is(err, ErrUnexpectedResponse) {
 		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
 	}
@@ -130,7 +130,7 @@ func TestGitHubExchangeFallsBackToLoginForDisplayName(t *testing.T) {
 		githubTokenURL: {status: http.StatusOK, body: `{"access_token":"gho_token"}`},
 		githubUserURL:  {status: http.StatusOK, body: `{"id":7,"login":"ptilopsis","name":""}`},
 	}}
-	identity, err := githubTestClient(doer).Exchange(context.Background(), "code-1")
+	identity, err := githubTestClient(doer).Exchange(context.Background(), "code-1", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestGitHubExchangeOmitsExpiryWhenProviderSaysNothing(t *testing.T) {
 		githubTokenURL: {status: http.StatusOK, body: `{"access_token":"gho_token"}`},
 		githubUserURL:  {status: http.StatusOK, body: `{"id":7,"login":"ptilopsis"}`},
 	}}
-	identity, err := githubTestClient(doer).Exchange(context.Background(), "code-1")
+	identity, err := githubTestClient(doer).Exchange(context.Background(), "code-1", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}

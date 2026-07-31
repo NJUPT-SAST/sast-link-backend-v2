@@ -387,7 +387,7 @@ func TestBindPassesPrincipalAndProvider(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodPost,
-		"/user/identities/github?code=provider-code", nil))
+		"/user/identities/github?code=provider-code&redirect_uri=https%3A%2F%2Flink.sast.fun%2Foauth%2Fbind%2Fgithub", nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", recorder.Code, recorder.Body.String())
@@ -401,6 +401,11 @@ func TestBindPassesPrincipalAndProvider(t *testing.T) {
 	}
 	if service.bindInput.Code != "provider-code" {
 		t.Fatalf("code = %q, want the query value", service.bindInput.Code)
+	}
+	// The frontend bind callback must be echoed back so the provider code can be
+	// exchanged against the exact callback it was issued for (RFC 6749 §4.1.3).
+	if service.bindInput.RedirectURI != "https://link.sast.fun/oauth/bind/github" {
+		t.Fatalf("redirect_uri = %q, want the query value", service.bindInput.RedirectURI)
 	}
 
 	_, _, data := decodeEnvelope(t, recorder.Body.String())

@@ -209,7 +209,10 @@ func (h Handler) ExchangeCode(c *gin.Context) {
 
 // bind returns the handler that attaches one provider account to the caller.
 //
-// The code arrives as a query parameter, matching the documented contract.
+// The code arrives as a query parameter, matching the documented contract. For a
+// provider that supports multiple callbacks (Lark), redirect_uri must be echoed
+// back when exchanging the code, so the caller passes the exact callback the
+// code was issued against.
 func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		principal, ok := middleware.PrincipalFrom(c)
@@ -222,11 +225,12 @@ func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 			return
 		}
 		result, err := h.Service.Bind(c.Request.Context(), oauthlogin.BindInput{
-			UserID:    principal.UserID,
-			Provider:  name,
-			Code:      c.Query("code"),
-			ClientIP:  c.ClientIP(),
-			UserAgent: c.Request.UserAgent(),
+			UserID:      principal.UserID,
+			Provider:    name,
+			Code:        c.Query("code"),
+			RedirectURI: c.Query("redirect_uri"),
+			ClientIP:    c.ClientIP(),
+			UserAgent:   c.Request.UserAgent(),
 		})
 		if err != nil {
 			response.Error(c, mapServiceError(err))

@@ -52,7 +52,7 @@ func (p *fakeProvider) AuthorizeURL(state string) string {
 	return p.authorizeURL + "?state=" + state
 }
 
-func (p *fakeProvider) Exchange(_ context.Context, _ string) (*provider.Identity, error) {
+func (p *fakeProvider) Exchange(_ context.Context, _ string, _ string) (*provider.Identity, error) {
 	p.calls++
 	if p.err != nil {
 		return nil, p.err

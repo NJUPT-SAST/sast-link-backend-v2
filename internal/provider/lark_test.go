@@ -52,7 +52,7 @@ func TestLarkAuthorizeURLCarriesAppIDAndState(t *testing.T) {
 
 func TestLarkExchangeUsesUnionIDAsProviderID(t *testing.T) {
 	doer := &fakeDoer{responses: larkHappyResponses(testTenantKey)}
-	identity, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1")
+	identity, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestLarkExchangeUsesUnionIDAsProviderID(t *testing.T) {
 
 func TestLarkExchangeRejectsForeignTenant(t *testing.T) {
 	doer := &fakeDoer{responses: larkHappyResponses("other-company")}
-	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1")
+	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1", "")
 	if !errors.Is(err, ErrForeignTenant) {
 		t.Fatalf("error = %v, want ErrForeignTenant", err)
 	}
@@ -102,7 +102,7 @@ func TestLarkExchangeRejectsForeignTenant(t *testing.T) {
 func TestLarkExchangeAllowsAnyTenantWhenGateDisabled(t *testing.T) {
 	// An empty TenantKey disables the gate. Only tests should rely on this.
 	doer := &fakeDoer{responses: larkHappyResponses("other-company")}
-	identity, err := larkTestClient(doer, "").Exchange(context.Background(), "code-1")
+	identity, err := larkTestClient(doer, "").Exchange(context.Background(), "code-1", "")
 	if err != nil {
 		t.Fatalf("Exchange with the gate disabled: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestLarkExchangeRejectsMissingUnionID(t *testing.T) {
 
 	// Falling back to open_id here would create a binding that silently breaks
 	// when a second Lark app is registered, so this must fail loudly.
-	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1")
+	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1", "")
 	if !errors.Is(err, ErrUnexpectedResponse) {
 		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
 	}
@@ -134,7 +134,7 @@ func TestLarkExchangeMapsClientRejectionToInvalidGrant(t *testing.T) {
 		body:   `{"code":20037,"error":"invalid_grant","error_description":"code is expired"}`,
 	}
 	doer := &fakeDoer{responses: responses}
-	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "spent")
+	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "spent", "")
 	if !errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("error = %v, want ErrInvalidGrant", err)
 	}
@@ -145,7 +145,7 @@ func TestLarkExchangeKeepsServerErrorAsOutage(t *testing.T) {
 	responses[larkUserTokenURL] = fakeResponse{status: http.StatusBadGateway, body: `gateway down`}
 	doer := &fakeDoer{responses: responses}
 
-	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1")
+	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1", "")
 	if errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("error = %v, want an outage rather than ErrInvalidGrant", err)
 	}
@@ -164,7 +164,7 @@ func TestLarkExchangeRejectsAppTokenApplicationError(t *testing.T) {
 	}
 	doer := &fakeDoer{responses: responses}
 
-	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1")
+	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1", "")
 	if !errors.Is(err, ErrUnexpectedResponse) {
 		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
 	}
@@ -183,7 +183,7 @@ func TestLarkExchangeRejectsUserInfoApplicationError(t *testing.T) {
 	}
 	doer := &fakeDoer{responses: responses}
 
-	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1")
+	_, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1", "")
 	if !errors.Is(err, ErrUnexpectedResponse) {
 		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
 	}
@@ -196,7 +196,7 @@ func TestLarkExchangeFallsBackToEnName(t *testing.T) {
 		"tenant_key":"` + testTenantKey + `"}}`}
 	doer := &fakeDoer{responses: responses}
 
-	identity, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1")
+	identity, err := larkTestClient(doer, testTenantKey).Exchange(context.Background(), "code-1", "")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
