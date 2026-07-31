@@ -23,10 +23,12 @@ OAuth/OIDC Provider 部分已完成两段式授权端点（`GET /oauth/authorize
 
 ## Development
 
-完整 integration tests 会通过 Testcontainers 启动 disposable PostgreSQL 16，需要本机 Docker：
+完整 integration tests 会通过 Testcontainers 启动 disposable PostgreSQL 16，需要本机 Docker。
+
+注意 PowerShell 会在 `=` 处切开未加引号的 `-flag=value`，`-coverprofile=coverage.out` 会被拆成两段，`go test` 把 `.out` 当成包路径并直接失败（`no required module provides package .out`），所以这类参数要加引号：
 
 ```powershell
-go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
+go test -race -shuffle=on "-coverprofile=coverage.out" "-covermode=atomic" ./...
 go build -o bin/api.exe ./cmd/api
 go build -o bin/migrate.exe ./cmd/migrate
 golangci-lint run ./...
