@@ -1731,6 +1731,26 @@ func TestRegisterKeepsRegistrationStateWhenStudentIDClashes(t *testing.T) {
 	}
 }
 
+func TestRegisterRejectsParkedStateWithEmptyOAuthState(t *testing.T) {
+	service, store := newOAuthRegisterService(t)
+	// A payload stored without an oauth_state would compare equal to an empty
+	// submitted value and silently disable the double binding. The shape check in
+	// Register blocks the empty submission, but this guard is what makes the
+	// comparison safe on its own.
+	store.states["rs_empty"] = OAuthRegistrationPayload{
+		Provider:   model.LoginMethodGitHub,
+		ProviderID: "145339646",
+		OAuthState: "",
+	}
+	_, err := service.Register(context.Background(), oauthRegisterInput("rs_empty", "os_abc"))
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	users := service.Users.(*fakeUsers)
+	if users.registeredIdentity != nil {
+		t.Fatal("an identity was persisted from a payload with no oauth_state")
+	}
+}
+
 func TestRegisterConsumesRegistrationStateEvenOnMismatch(t *testing.T) {
 	service, store := newOAuthRegisterService(t)
 

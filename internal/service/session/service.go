@@ -370,14 +370,20 @@ func (s Service) resolveRegistrationIdentity(
 	if !found {
 		return nil, newError(ErrInvalidInput, "registration_state 无效或已过期", nil)
 	}
+	// A stored state must be non-empty before it is compared. Two empty strings
+	// compare equal, so a payload written without one would satisfy the pairing
+	// against an empty submitted value and turn the double binding off. Callers
+	// currently reject that shape before reaching here and the callback never
+	// stores an empty state, but neither guarantee belongs to this function, and
+	// the failure mode is silent.
+	if payload.OAuthState == "" || payload.ProviderID == "" || payload.Provider == "" {
+		return nil, newError(ErrInvalidInput, "registration_state 内容不完整", nil)
+	}
 	// Constant-time comparison is unnecessary here: both values are already
 	// known to the caller, and the timing of a string compare reveals nothing
 	// they did not submit.
 	if payload.OAuthState != oauthState {
 		return nil, newError(ErrInvalidInput, "registration_state 与 oauth_state 不匹配", nil)
-	}
-	if payload.ProviderID == "" || payload.Provider == "" {
-		return nil, newError(ErrInvalidInput, "registration_state 内容不完整", nil)
 	}
 
 	identity := &model.Identity{
