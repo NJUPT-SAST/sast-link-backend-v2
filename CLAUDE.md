@@ -51,6 +51,7 @@ For a production database that already has the V001 schema, follow `docs/runbook
 - `docs/openapi.yaml`: machine-readable OpenAPI 3.0.1 contract. Keep it aligned with `docs/API文档.md` when endpoints change.
 - `docs/psql-db-design.md`: PostgreSQL schema design, enum values, indexes, triggers, token-family cascade revocation flow, and planned pg_cron cleanup jobs.
 - `docs/runbooks/database-baseline.md`: V001 baseline procedure for the pre-existing production schema.
+- `docs/runbooks/caddy-reverse-proxy.md`: Caddy routing for the externally visible `/v2` prefix. Every route in this service is registered at the root — there is no `/v2` in the Go code — so the proxy strips it with `handle_path`. It also carries the third-party OAuth callback layout: the bind page must sit under the same `/v2/oauth` prefix as the login callback so one GitHub OAuth App registration covers both.
 - `migrations/`: embedded versioned SQL migrations, including V002's S256-only PKCE constraint.
 - `.env.example`: environment variable names and defaults expected by the service.
 - `docker-compose.yml`: runtime reference for an API container connected to external PostgreSQL and Redis Docker networks.
