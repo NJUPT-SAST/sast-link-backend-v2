@@ -2798,6 +2798,48 @@ func TestRefreshAuditRecordsReplayOutcomeForRevokedToken(t *testing.T) {
 	}
 }
 
+// An expired refresh token is benign, but it has to reach the log anyway: if only
+// replays were recorded, a refresh_replayed row could not be told apart from the
+// failures nobody wrote down.
+func TestRefreshAuditRecordsExpiredOutcome(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	// Age the stored token out against the service's fixed clock.
+	for _, stored := range tokens.refreshByHash {
+		stored.ExpiresAt = service.now().Add(-time.Minute)
+	}
+
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err == nil {
+		t.Fatal("Refresh accepted an expired token")
+	}
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeExpired {
+		t.Fatalf("expired refresh outcome = %q, want %q", got, refreshOutcomeExpired)
+	}
+}
+
+// A token presented against a different client is unreachable through the
+// first-party flow, so it means a misrouted client or a token being probed.
+func TestRefreshAuditRecordsClientMismatchOutcome(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	for _, stored := range tokens.refreshByHash {
+		stored.ClientID = 999
+	}
+
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err == nil {
+		t.Fatal("Refresh accepted a token issued to another client")
+	}
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeClientMismatch {
+		t.Fatalf("client-mismatch outcome = %q, want %q", got, refreshOutcomeClientMismatch)
+	}
+}
+
 func lastAuditAction(t *testing.T, audit *fakeAudit, action string) model.AuditLog {
 	t.Helper()
 	for i := len(audit.entries) - 1; i >= 0; i-- {

@@ -180,6 +180,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	if !current.ExpiresAt.After(s.now()) {
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeExpired, input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	client, err := s.findInternalClient(ctx)
@@ -187,6 +188,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		return nil, err
 	}
 	if current.ClientID != client.ID {
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeClientMismatch, input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 与客户端不匹配", nil)
 	}
 	user, err := s.Users.FindByID(ctx, current.UserID)
@@ -1013,8 +1015,8 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 }
 
 // Refresh audit outcomes. These name why a rotation ended, which the action and
-// error code alone cannot: every failure below carries the same invalid-token
-// code, and only some of them mean an attack.
+// error code alone cannot: every failure carries the same invalid-token code, and
+// only some of them mean an attack.
 const (
 	// refreshOutcomeRotated is a successful rotation.
 	refreshOutcomeRotated = "rotated"
@@ -1022,17 +1024,26 @@ const (
 	// rotated. This is the replay defense firing, and it revoked the whole
 	// family — the one outcome here that needs to be searchable on its own.
 	refreshOutcomeReplayed = "refresh_replayed"
+	// refreshOutcomeExpired is a token that aged out. Benign on its own, but it
+	// has to be in the log for refresh_replayed to be meaningful: without the
+	// mundane outcomes recorded, a replay row cannot be told apart from the
+	// failures nobody wrote down.
+	refreshOutcomeExpired = "expired"
+	// refreshOutcomeClientMismatch is a token presented against a client other
+	// than the one it was issued to. Not reachable through the first-party flow,
+	// so it means either a misrouted client or a token being probed.
+	refreshOutcomeClientMismatch = "client_mismatch"
 )
 
 // auditRefresh records a refresh rotation outcome. Failures mean the token
 // family was revoked as a replay defense, so they carry the invalid-token code;
 // the audit itself is fail-open like every other audit call in this service.
 //
-// The outcome is recorded because "refresh failed" is not actionable on its own:
-// an expired token, a client mismatch and a replayed token are one action and one
-// error code in the log, but only the last means a token leaked and a family was
-// cut. It matches the oauth service's refresh_replayed outcome so a reviewer can
-// filter both token paths with one query.
+// The outcome is recorded because the action and error code alone do not say why
+// a rotation failed: every failed row carries the same invalid-token code, and
+// the name is what separates a replay — a leaked token, family cut in response —
+// from an ordinary rejection. It matches the oauth service's refresh_replayed
+// outcome so a reviewer can filter both token paths with one query.
 func (s Service) auditRefresh(
 	ctx context.Context,
 	userID int64,
