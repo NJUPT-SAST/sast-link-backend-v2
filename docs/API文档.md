@@ -1263,7 +1263,7 @@ token=rt_abc123...&token_type_hint=refresh_token&client_id=9f3a1c7d2e5b40a8c6d1f
 
 > **实现状态**：本章全部端点已注册。
 >
-> 以下三处对 OpenAPI 契约做了收紧，实现按本文档为准：
+> 以下四处对 OpenAPI 契约做了收紧，实现按本文档为准：
 >
 > 1. **`PUT /admin/users/:id` 不接受 `state: is_deleted`**，返回 `422`。注销必须走 `DELETE`，恢复必须走 `PUT .../restore` —— 只有这两条路径会在同一事务内撤销该用户的全部 Token。若允许 PUT 直接置为 `is_deleted`，会留下「账号已注销但 Refresh Token 仍可换新 Access Token」的窗口。对已注销用户执行 PUT 同样返回 `422`，需先恢复。
 > 2. **`email_type` 只能与 `login_email` 一同提交，且必须与其域名一致**，否则返回 `400`。V001 触发器 `auto_set_email_type` 仅在 `login_email` 出现在 UPDATE 列中时才重算该字段，单独提交 `email_type` 会写入与邮箱域名矛盾的值。

@@ -10,6 +10,10 @@ info:
     - OAuth 2.1: 授权端点使用 PKCE-S256，第一方应用无需 client_secret
     - OIDC Provider: 基于 OAuth 2.1 的 OpenID Connect 认证层，scope 含 openid 时返回 ID Token
     - 响应格式: 标准业务接口使用标准化响应信封；OAuth/OIDC/健康检查/公开卡片等协议或直出端点见 StandardEnvelope 注释
+
+    本文件是目标契约，不是已注册路由的清单。当前唯一尚未实现的路径是
+    `PUT /user/avatar`（路由未注册，调用得到 404），其 description 已就地标注。
+    实现对契约的收紧之处以 `docs/API文档.md` 为准。
   version: 2.0.0
   contact:
     name: SAST
@@ -113,9 +117,13 @@ paths:
       deprecated: false
       description: >-
         注册第二步。凭 Register-Ticket + 补充信息完成注册，成功后自动签发 Token。
-        registration_state / oauth_state 是为第三方 OAuth 无绑定分支预留的可选字段；
-        当前实现中传入任一非空值会被拒绝（40000），待 OAuth 登录开放后才会消费并自动创建
-        identities 绑定记录。
+        registration_state / oauth_state 服务第三方 OAuth（GitHub / 飞书）回调的无绑定分支，
+        两者必须同时提供或同时省略，只给一半返回 40000。传入双值时 GetDel 一次性消费
+        registration_state，比对其中暂存的 oauth_state 与请求传入值，匹配后在同一事务内
+        创建账号、资料、identities 绑定与首个会话。registration_state 只能用于新建账号，
+        不可用于给已存在账号追加绑定——后者只能走 POST /user/identities/{github,lark}。
+        未配置任何第三方 provider 时传入这对字段返回 40000；Redis 不可用返回 50300，
+        不降级为无绑定注册。
       operationId: authCompleteRegister
       tags:
         - Auth
@@ -782,7 +790,10 @@ paths:
     put:
       summary: 上传头像
       deprecated: false
-      description: ''
+      description: >-
+        目标契约，尚未实现：路由未注册，当前调用得到 404。
+        依赖 .env.example 中同样未接入的 STORAGE_* 对象存储配置，
+        内容审核（腾讯云 COS）与本端点一并实现。
       operationId: userUploadAvatar
       tags:
         - Profile
