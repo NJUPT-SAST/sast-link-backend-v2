@@ -483,7 +483,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	// The subject is the Register-Ticket, not the caller IP. The ticket is one
 	// verified email address, which is what the derivation cost should be metered
 	// against; an IP key would put an entire campus NAT behind a single counter.
-	if err := s.checkEndpointLimit(ctx, s.RegisterLimiter, "register", "ticket:"+ticket); err != nil {
+	if err = s.checkEndpointLimit(ctx, s.RegisterLimiter, "register", "ticket:"+ticket); err != nil {
 		return nil, err
 	}
 
