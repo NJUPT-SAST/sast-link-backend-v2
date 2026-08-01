@@ -5,6 +5,7 @@ package oauthlogin
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 )
@@ -17,6 +18,7 @@ type Kind string
 
 const (
 	KindInvalidInput Kind = "invalid_input"
+	KindRateLimited  Kind = "rate_limited"
 	KindInvalidState Kind = "invalid_state"
 	KindInvalidToken Kind = "invalid_token"
 	KindUserDeleted  Kind = "user_deleted"
@@ -41,7 +43,10 @@ type Error struct {
 	Kind    Kind
 	Code    int
 	Message string
-	Err     error
+	// RetryAfter carries the limiter's remaining window so the HTTP layer can
+	// emit a Retry-After header.
+	RetryAfter time.Duration
+	Err        error
 }
 
 func (e *Error) Error() string {
@@ -74,6 +79,8 @@ func (e *Error) Is(target error) bool {
 // Sentinels for each business outcome.
 var (
 	ErrInvalidInput = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
+	// ErrRateLimited reports that a per-IP endpoint cap was exceeded.
+	ErrRateLimited = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
 	// ErrStateInvalid covers a missing, expired or already-consumed OAuth state.
 	// All three are one outcome for the user: restart the login.
 	ErrStateInvalid = &Error{Kind: KindInvalidState, Code: errcode.CodeBadRequest}
@@ -104,4 +111,15 @@ var (
 // newError returns a contextual error that matches its sentinel via Kind.
 func newError(sentinel *Error, message string, cause error) *Error {
 	return &Error{Kind: sentinel.Kind, Code: sentinel.Code, Message: message, Err: cause}
+}
+
+// withRetryAfter sets RetryAfter on a freshly built *Error. It is a no-op for
+// nil or non-*Error values.
+func withRetryAfter(err error, retryAfter time.Duration) error {
+	var serviceErr *Error
+	if !errors.As(err, &serviceErr) {
+		return err
+	}
+	serviceErr.RetryAfter = retryAfter
+	return serviceErr
 }

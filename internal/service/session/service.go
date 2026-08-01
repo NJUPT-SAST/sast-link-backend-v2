@@ -52,7 +52,15 @@ type Service struct {
 	// UnbindLimiter is separate from Limiter because checkEndpointLimit reads the
 	// quota off the instance, not the endpoint name — sharing one would give unbind
 	// the login budget.
-	UnbindLimiter    EndpointLimiter
+	UnbindLimiter EndpointLimiter
+	// RegisterLimiter throttles POST /auth/register per caller IP. A valid
+	// Register-Ticket is required to reach the write, so this bounds cost rather
+	// than guessing: every accepted call runs a 600k-iteration PBKDF2 derivation.
+	RegisterLimiter EndpointLimiter
+	// CardLimiter throttles the unauthenticated GET /card/:id per caller IP. The
+	// path parameter is a sequential user ID, so an uncapped endpoint is a scrape
+	// of every public card.
+	CardLimiter      EndpointLimiter
 	ForgotPasswords  ForgotPasswordDispatcher
 	InternalClientID string
 	JWT              *auth.JWTManager
@@ -402,6 +410,13 @@ func (s Service) resolveRegistrationIdentity(
 }
 
 func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterResult, error) {
+	// Throttled first: the cap exists to bound PBKDF2 cost, and the checks below
+	// are cheap enough that letting them run unthrottled changes nothing.
+	if clientIP := strings.TrimSpace(input.ClientIP); clientIP != "" {
+		if err := s.checkEndpointLimit(ctx, s.RegisterLimiter, "register", "ip:"+clientIP); err != nil {
+			return nil, err
+		}
+	}
 	ticket := strings.TrimSpace(input.RegisterTicket)
 	if ticket == "" {
 		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 不能为空", nil)

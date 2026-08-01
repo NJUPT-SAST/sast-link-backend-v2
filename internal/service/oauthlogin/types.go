@@ -11,6 +11,19 @@ import (
 
 const BearerTokenType = "Bearer"
 
+// LimitResult is a rate-limit decision.
+type LimitResult struct {
+	Allowed    bool
+	RetryAfter time.Duration
+}
+
+// EndpointLimiter throttles one endpoint per subject. It mirrors the port the
+// session and oauth services declare rather than importing either: each package
+// owns its own result type so a limiter adapter cannot couple them.
+type EndpointLimiter interface {
+	Allow(ctx context.Context, endpoint, subject string) (LimitResult, error)
+}
+
 // ProviderClient is one third-party provider. Both concrete clients in
 // internal/provider satisfy it; the interface lives here so tests can fake a
 // provider without a live endpoint.

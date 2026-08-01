@@ -518,3 +518,50 @@ func TestRedisOutageMapsTo503(t *testing.T) {
 		t.Fatalf("status = %d, want 503", recorder.Code)
 	}
 }
+
+// A throttled service error must surface as 429 with Retry-After, so clients can
+// back off instead of hammering a capped endpoint.
+func TestExchangeCodeMapsRateLimitTo429(t *testing.T) {
+	service := &fakeService{exchangeErr: &oauthlogin.Error{
+		Kind:       oauthlogin.KindRateLimited,
+		Code:       errcode.CodeRateLimited,
+		RetryAfter: 30 * time.Second,
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
+		strings.NewReader(`{"code":"lc_abc"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (body: %s)", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After = %q, want %q", got, "30")
+	}
+	code, _, _ := decodeEnvelope(t, recorder.Body.String())
+	if code != errcode.CodeRateLimited {
+		t.Fatalf("envelope code = %d, want %d", code, errcode.CodeRateLimited)
+	}
+}
+
+// The authorize leg answers in the envelope even though it arrives in a browser:
+// unlike the callback it is the entry point, so there is no in-flight login whose
+// state would be lost by not redirecting.
+func TestAuthorizeMapsRateLimitTo429(t *testing.T) {
+	service := &fakeService{authorizeErr: &oauthlogin.Error{
+		Kind: oauthlogin.KindRateLimited,
+		Code: errcode.CodeRateLimited,
+	}}
+	router := newTestRouter(Handler{Service: service, ErrorRedirect: "https://link.sast.fun/error"}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/github", nil)
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (body: %s)", recorder.Code, recorder.Body.String())
+	}
+}

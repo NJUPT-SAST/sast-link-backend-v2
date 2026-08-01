@@ -2658,3 +2658,57 @@ func TestRegisterReportsAbandonedHashingAsDependencyUnavailable(t *testing.T) {
 		t.Fatal("Register-Ticket was consumed by an abandoned request")
 	}
 }
+
+func TestRegisterThrottlesPerIP(t *testing.T) {
+	service := newRegisterService(t)
+	limiter := &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: time.Hour}}
+	service.RegisterLimiter = limiter
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "New User",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+		ClientIP:       "198.51.100.7",
+	})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+	if got, want := limiter.calls[0], "register:ip:198.51.100.7"; got != want {
+		t.Fatalf("limiter call = %q, want %q", got, want)
+	}
+	// A throttled call must leave the ticket spendable: the whole point of the
+	// ticket surviving rejections is that the client can retry with it.
+	if _, found, _ := tickets.PeekRegisterTicket(context.Background(), "reg_xxx"); !found {
+		t.Fatal("Register-Ticket was consumed by a throttled call")
+	}
+}
+
+func TestRegisterAllowsWhenLimiterUnavailable(t *testing.T) {
+	service := newRegisterService(t)
+	service.RegisterLimiter = &fakeLimiter{err: errors.New("redis unavailable")}
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	if _, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "New User",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+		ClientIP:       "198.51.100.7",
+	}); err != nil {
+		t.Fatalf("Register with a broken limiter = %v, want fail-open", err)
+	}
+}

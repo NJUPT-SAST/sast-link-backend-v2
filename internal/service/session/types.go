@@ -401,6 +401,9 @@ type UnbindIdentityResult struct {
 
 type CardInput struct {
 	UserID int64
+	// ClientIP is the rate-limit subject. This endpoint is unauthenticated, so
+	// the caller IP is the only key available.
+	ClientIP string
 }
 
 type CardResult struct {

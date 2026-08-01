@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
@@ -50,6 +51,15 @@ type Service struct {
 	RegistrationState RegistrationStateStore
 	LoginCodes        LoginCodeStore
 
+	// AuthorizeLimiter throttles the unauthenticated provider-login endpoints per
+	// IP. Each call writes one oauth_state key, so an uncapped endpoint lets
+	// anyone fill the keyspace.
+	AuthorizeLimiter EndpointLimiter
+	// ExchangeLimiter throttles login_code redemption per IP. The endpoint cannot
+	// require a session — redeeming the code is how one is obtained — so the cap is
+	// what bounds free probing of the code space.
+	ExchangeLimiter EndpointLimiter
+
 	Issuer tokenissue.Issuer
 	Clock  auth.Clock
 
@@ -72,8 +82,39 @@ type Service struct {
 	RefreshTTL           time.Duration
 }
 
+// checkLimit applies one per-IP endpoint cap.
+//
+// Fail-open per PRD §6.0: these limiters bound abuse volume, and PostgreSQL plus
+// the fail-closed Redis state this flow already consults remain authoritative for
+// every decision that matters. Refusing all third-party logins during a Redis
+// blip would take the feature down to protect a counter.
+//
+// An empty clientIP skips the check rather than sharing one bucket: collapsing
+// unknown callers into a single key would let one of them lock out the rest.
+func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, clientIP string) error {
+	subject := strings.TrimSpace(clientIP)
+	if limiter == nil || subject == "" {
+		return nil
+	}
+	result, err := limiter.Allow(ctx, endpoint, "ip:"+subject)
+	if err != nil {
+		slog.WarnContext(ctx, "oauth login limiter unavailable, allowing request",
+			"endpoint", endpoint, "error", err)
+		return nil
+	}
+	if !result.Allowed {
+		return withRetryAfter(newError(ErrRateLimited, "请求过于频繁", nil), result.RetryAfter)
+	}
+	return nil
+}
+
 // Authorize issues an OAuth state and returns the provider page to redirect to.
 func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*AuthorizeResult, error) {
+	// Throttled before the provider is resolved, so a disabled provider's route
+	// cannot be used as an unthrottled probe either.
+	if err := s.checkLimit(ctx, s.AuthorizeLimiter, "oauth_login", input.ClientIP); err != nil {
+		return nil, err
+	}
 	client, err := s.providerClient(input.Provider)
 	if err != nil {
 		return nil, err
@@ -234,6 +275,12 @@ func (s Service) registrationBranch(
 
 // ExchangeCode redeems a one-time login_code for a session.
 func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*ExchangeCodeResult, error) {
+	// Throttled ahead of the empty-code check: an attacker probing the code space
+	// controls the input, so rejecting blanks for free would leave the expensive
+	// path — a Redis GetDel per guess — uncapped.
+	if err := s.checkLimit(ctx, s.ExchangeLimiter, "oauth_exchange_code", input.ClientIP); err != nil {
+		return nil, err
+	}
 	if input.Code == "" {
 		return nil, newError(ErrLoginCodeInvalid, "code 不能为空", nil)
 	}

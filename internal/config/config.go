@@ -130,6 +130,29 @@ type Config struct {
 	// clients can share an egress IP. Fail-open, per PRD §6.0.
 	RateLimitTokenRPM    int           `env:"RATE_LIMIT_TOKEN_RPM" envDefault:"60"`
 	RateLimitTokenWindow time.Duration `env:"RATE_LIMIT_TOKEN_WINDOW" envDefault:"60s"`
+	// Throttles GET /oauth/github and GET /oauth/lark per caller IP. Same shape as
+	// the authorize endpoint above — unauthenticated, and every call writes one
+	// oauth_state key — so it carries the same cap. Fail-open, per PRD §6.0.
+	RateLimitOAuthLoginRPM    int           `env:"RATE_LIMIT_OAUTH_LOGIN_RPM" envDefault:"20"`
+	RateLimitOAuthLoginWindow time.Duration `env:"RATE_LIMIT_OAUTH_LOGIN_WINDOW" envDefault:"60s"`
+	// Throttles POST /oauth/exchange-code per caller IP. Unauthenticated by
+	// design — redeeming a login_code is how a session is obtained — so without a cap
+	// the code space can be probed for free. Higher than the login cap: one login
+	// legitimately redeems once, but a shared egress IP multiplies that.
+	RateLimitExchangeCodeRPM    int           `env:"RATE_LIMIT_EXCHANGE_CODE_RPM" envDefault:"30"`
+	RateLimitExchangeCodeWindow time.Duration `env:"RATE_LIMIT_EXCHANGE_CODE_WINDOW" envDefault:"60s"`
+	// Throttles POST /auth/register per caller IP. A valid Register-Ticket is
+	// required to reach the write, but each accepted call runs one PBKDF2-SHA512
+	// derivation at 600k iterations, so the cost per request is the reason for the
+	// cap rather than the ticket being guessable. Per hour, not per minute.
+	RateLimitRegisterRPH    int           `env:"RATE_LIMIT_REGISTER_RPH" envDefault:"3"`
+	RateLimitRegisterWindow time.Duration `env:"RATE_LIMIT_REGISTER_WINDOW" envDefault:"1h"`
+	// Throttles GET /card/:id per caller IP. Unauthenticated, one DB read per call,
+	// and the path parameter is enumerable, so an uncapped endpoint hands out a
+	// full scrape of every public card. Generous enough for a page that legitimately
+	// renders several cards.
+	RateLimitCardRPM    int           `env:"RATE_LIMIT_CARD_RPM" envDefault:"60"`
+	RateLimitCardWindow time.Duration `env:"RATE_LIMIT_CARD_WINDOW" envDefault:"60s"`
 
 	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
 	// beyond this queues at the hasher instead of saturating every CPU core.
@@ -279,6 +302,22 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_TOKEN_RPM must be positive")
 	case c.RateLimitTokenWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_TOKEN_WINDOW must be at least 1s")
+	case c.RateLimitOAuthLoginRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_LOGIN_RPM must be positive")
+	case c.RateLimitOAuthLoginWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_LOGIN_WINDOW must be at least 1s")
+	case c.RateLimitExchangeCodeRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_EXCHANGE_CODE_RPM must be positive")
+	case c.RateLimitExchangeCodeWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_EXCHANGE_CODE_WINDOW must be at least 1s")
+	case c.RateLimitRegisterRPH <= 0:
+		return fmt.Errorf("RATE_LIMIT_REGISTER_RPH must be positive")
+	case c.RateLimitRegisterWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_REGISTER_WINDOW must be at least 1s")
+	case c.RateLimitCardRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_CARD_RPM must be positive")
+	case c.RateLimitCardWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_CARD_WINDOW must be at least 1s")
 	// The consent URL has no default: guessing one would make a deployment that
 	// forgot it redirect every third-party authorization to a page that does not
 	// exist, and the failure would only surface for the end user mid-flow.

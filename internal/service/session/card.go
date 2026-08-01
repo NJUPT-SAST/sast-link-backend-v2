@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -13,6 +14,13 @@ import (
 // dedicated repository projection instead of reusing FindByID so that widening
 // UserProfileDTO later cannot silently publish private columns.
 func (s Service) Card(ctx context.Context, input CardInput) (*CardResult, error) {
+	// Throttled ahead of the ID check so probing for valid IDs is capped too: the
+	// rejection an invalid ID gets is itself the signal an enumerator wants.
+	if clientIP := strings.TrimSpace(input.ClientIP); clientIP != "" {
+		if err := s.checkEndpointLimit(ctx, s.CardLimiter, "card", "ip:"+clientIP); err != nil {
+			return nil, err
+		}
+	}
 	if input.UserID <= 0 {
 		return nil, newError(ErrUserNotFound, "用户不存在", nil)
 	}
