@@ -30,6 +30,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/worker"
 )
 
 type sessionRuntime struct {
@@ -317,6 +318,15 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Workers: []backgroundWorker{
 			sessionworker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist},
 			forgotPasswords,
+			worker.Retention{
+				Store:            repository.NewRetention(database),
+				Interval:         cfg.RetentionInterval,
+				BatchSize:        cfg.RetentionBatchSize,
+				AuthorizationAge: cfg.RetentionAuthorizationAge,
+				AccessTokenAge:   cfg.RetentionAccessTokenAge,
+				RefreshTokenAge:  cfg.RetentionRefreshTokenAge,
+				AuditLogAge:      cfg.RetentionAuditLogAge,
+			},
 		},
 	}, nil
 }
