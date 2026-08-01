@@ -39,6 +39,80 @@ func setConfigEnv(t *testing.T, dbUser, dbPassword, dbName string) {
 	t.Setenv("OAUTH_CONSENT_URL", "https://link.example.test/oauth/consent")
 }
 
+// Retention windows bound how long dead rows survive, but two of them are floors
+// rather than free knobs: access-token metadata must outlive the JWT it describes,
+// and audit history may not be trimmed below what PRD §9 promises.
+func TestValidateAPIAuthRejectsBadRetentionSettings(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"RETENTION_INTERVAL", "30s", "RETENTION_INTERVAL must be at least 1m"},
+		{"RETENTION_BATCH_SIZE", "0", "RETENTION_BATCH_SIZE must be positive"},
+		{"RETENTION_AUTHORIZATION_AGE", "0", "RETENTION_AUTHORIZATION_AGE must be positive"},
+		{"RETENTION_ACCESS_TOKEN_AGE", "0", "RETENTION_ACCESS_TOKEN_AGE must be positive"},
+		{"RETENTION_ACCESS_TOKEN_AGE", "5m", "RETENTION_ACCESS_TOKEN_AGE must not be shorter than JWT_ACCESS_TOKEN_EXPIRY"},
+		{"RETENTION_REFRESH_TOKEN_AGE", "0", "RETENTION_REFRESH_TOKEN_AGE must be positive"},
+		{"RETENTION_AUDIT_LOG_AGE", "24h", "RETENTION_AUDIT_LOG_AGE must be at least"},
+		{"RETENTION_AUDIT_LOG_AGE", "719h", "RETENTION_AUDIT_LOG_AGE must be at least"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+// Audit history is operational rather than compliance-bound, so the 90-day PRD §9
+// figure is the default, not a hard minimum: a deployment may keep more, or trim
+// below it down to the sanity floor.
+func TestValidateAPIAuthAllowsAuditRetentionAboveFloor(t *testing.T) {
+	for _, value := range []string{
+		"8760h", // a year: more history than the default
+		"2160h", // the 90-day default
+		"720h",  // 30 days: the floor itself
+		"1000h", // between the floor and the default
+	} {
+		t.Run(value, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("RETENTION_AUDIT_LOG_AGE", value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err != nil {
+				t.Fatalf("ValidateAPIAuth() error = %v, want nil for %q", err, value)
+			}
+		})
+	}
+}
+
+// Every default must satisfy its own floor, or a deployment that sets none of
+// these fails to start.
+func TestDefaultRetentionSettingsValidate(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RetentionAuditLogAge < minAuditLogRetention {
+		t.Fatalf("default RETENTION_AUDIT_LOG_AGE = %s, want >= %s", cfg.RetentionAuditLogAge, minAuditLogRetention)
+	}
+	if cfg.RetentionAccessTokenAge < cfg.JWTAccessTokenExpiry {
+		t.Fatalf("default RETENTION_ACCESS_TOKEN_AGE = %s, want >= JWT_ACCESS_TOKEN_EXPIRY %s",
+			cfg.RetentionAccessTokenAge, cfg.JWTAccessTokenExpiry)
+	}
+	if err := cfg.ValidateAPIAuth(); err != nil {
+		t.Fatalf("ValidateAPIAuth() with defaults = %v, want nil", err)
+	}
+}
+
 func TestLoadMissingRequiredFields(t *testing.T) {
 	setConfigEnv(t, "", "", "")
 

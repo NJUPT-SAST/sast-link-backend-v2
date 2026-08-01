@@ -29,6 +29,12 @@ const (
 	// against it, since a window outliving the ticket leaves a throttled caller
 	// nothing to retry with. Keep the two in step.
 	registerTicketTTL = 5 * time.Minute
+	// minAuditLogRetention is a sanity floor, not the product commitment. Audit
+	// history is operationally useful rather than compliance-bound here, so a
+	// deployment may trim it below the 90 days PRD §9 targets — the default stays at
+	// 90. The floor only rejects values so short that an incident investigation would
+	// find the relevant entries already deleted.
+	minAuditLogRetention = 30 * 24 * time.Hour
 )
 
 // Config holds all runtime configuration for the service.
@@ -175,6 +181,28 @@ type Config struct {
 	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
 	// beyond this queues at the hasher instead of saturating every CPU core.
 	PasswordHashMaxConcurrent int `env:"PASSWORD_HASH_MAX_CONCURRENT" envDefault:"64"`
+
+	// Retention windows for the cleanup worker. Each is measured back from now, so a
+	// row is deleted only once it has been dead for the whole window; the margin
+	// absorbs clock skew between this process and PostgreSQL.
+	RetentionInterval  time.Duration `env:"RETENTION_INTERVAL" envDefault:"1h"`
+	RetentionBatchSize int           `env:"RETENTION_BATCH_SIZE" envDefault:"1000"`
+	// An expired authorization code has no authority left: it is single-use and a
+	// replay is answered by revoking the family at redemption time.
+	RetentionAuthorizationAge time.Duration `env:"RETENTION_AUTHORIZATION_AGE" envDefault:"1h"`
+	// Deliberately far wider than the 1h default access-token TTL. The auth middleware
+	// reports an unknown JTI with the same 401 it uses for a revoked one, so
+	// deleting metadata while its JWT is still inside exp would show a merely
+	// expired token as revoked: the client gets CodeAccessTokenInvalid instead of
+	// CodeAccessTokenExpired and reads a forced logout where it should have
+	// refreshed. There is no clock-skew leeway in the JWT verifier to lean on, and
+	// these rows are small, so the window buys that safety cheaply.
+	RetentionAccessTokenAge  time.Duration `env:"RETENTION_ACCESS_TOKEN_AGE" envDefault:"24h"`
+	RetentionRefreshTokenAge time.Duration `env:"RETENTION_REFRESH_TOKEN_AGE" envDefault:"24h"`
+	// Defaults to the 90 days PRD §9 targets. May be raised, or trimmed down to the
+	// minAuditLogRetention sanity floor — audit history here is operational, not
+	// compliance-bound.
+	RetentionAuditLogAge time.Duration `env:"RETENTION_AUDIT_LOG_AGE" envDefault:"2160h"`
 
 	// SMTPHost has no default: a "localhost" fallback would let a deployment
 	// that forgot SMTP_HOST start cleanly and only fail when a user registers.
@@ -368,6 +396,22 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("OAUTH_AUTHORIZE_REQUEST_TTL must not exceed %s", maxOAuthAuthorizeRequestTTL)
 	case c.PasswordHashMaxConcurrent <= 0:
 		return fmt.Errorf("PASSWORD_HASH_MAX_CONCURRENT must be positive")
+	case c.RetentionInterval < time.Minute:
+		return fmt.Errorf("RETENTION_INTERVAL must be at least 1m")
+	case c.RetentionBatchSize <= 0:
+		return fmt.Errorf("RETENTION_BATCH_SIZE must be positive")
+	case c.RetentionAuthorizationAge <= 0:
+		return fmt.Errorf("RETENTION_AUTHORIZATION_AGE must be positive")
+	case c.RetentionAccessTokenAge <= 0:
+		return fmt.Errorf("RETENTION_ACCESS_TOKEN_AGE must be positive")
+	// Metadata must outlive the JWT it describes, or the middleware turns an
+	// expired token into an apparent revocation.
+	case c.RetentionAccessTokenAge < c.JWTAccessTokenExpiry:
+		return fmt.Errorf("RETENTION_ACCESS_TOKEN_AGE must not be shorter than JWT_ACCESS_TOKEN_EXPIRY (%s)", c.JWTAccessTokenExpiry)
+	case c.RetentionRefreshTokenAge <= 0:
+		return fmt.Errorf("RETENTION_REFRESH_TOKEN_AGE must be positive")
+	case c.RetentionAuditLogAge < minAuditLogRetention:
+		return fmt.Errorf("RETENTION_AUDIT_LOG_AGE must be at least %s", minAuditLogRetention)
 	// SMTP backs registration, password reset and email binding. Validating it
 	// at boot turns a missing value into a startup failure instead of a runtime
 	// "邮件发送失败" on the first user who tries to register.
