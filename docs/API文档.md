@@ -231,6 +231,8 @@ POST /auth/register/verify-code
 
 注册第二步：凭 Register-Ticket + 补充信息完成注册。
 
+> **限流**：按调用方 IP 固定窗口限流（默认 3 次/小时，`RATE_LIMIT_REGISTER_RPH`）。需要有效 Register-Ticket 才能走到写入，因此该配额限制的是成本而非猜测：每个被接受的请求都会执行一次 60 万轮迭代的 PBKDF2-SHA512 派生。被限流的请求**不消费** Register-Ticket，客户端可在窗口恢复后用同一 ticket 重试。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+
 ```
 POST /auth/register
 ```
@@ -486,7 +488,9 @@ POST /auth/reset-password
 >
 > **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
 >
-> **限流待接入**：本章 5 个端点目前均未限流。`GET /oauth/{github,lark}` 与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——因此同样可被灌满键空间，后者已按 `RATE_LIMIT_AUTHORIZE_RPM` 限流。`POST /oauth/exchange-code` 则是一个无限速的 `login_code` 猜测入口（256 位随机值，实际不可枚举，但端点本身免费）。归入 PRD §11「限流与防刷扩展」，与验证码、注册的限流策略一并实现。
+> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 20 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是免费探测面。`POST /oauth/exchange-code` 按 IP 限流（默认 30 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先免费拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可烧掉他人活跃凭证。两处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+>
+> 回调端点（`/oauth/{github,lark}/callback`）不单独限流：它需要一个有效的一次性 `oauth_state` 才能推进，而该 state 由已限流的授权端点签发。
 
 ### 2.1 GitHub 登录
 
@@ -751,6 +755,8 @@ PUT /user/avatar
 ```
 GET /card/:id
 ```
+
+> **限流**：按调用方 IP 固定窗口限流（默认 60 次/60s，`RATE_LIMIT_CARD_RPM`）。本端点无认证且路径参数是连续的用户 ID，不限流即等于开放全站公开卡片的抓取。限流检查排在 ID 合法性校验**之前**——无效 ID 得到的 `404` 本身就是枚举者要读的信号。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 
 **Path Parameters**:
 

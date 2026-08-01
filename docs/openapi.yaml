@@ -195,6 +195,12 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
           description: 资源冲突（409xx）
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: >-
+            注册过于频繁（42900，带 Retry-After）。按调用方 IP 限流，默认 3 次/小时
+            （RATE_LIMIT_REGISTER_RPH）：每个被接受的请求执行一次 60 万轮 PBKDF2 派生。
+            被限流的请求不消费 Register-Ticket，可用同一 ticket 重试。
       security: []
   /user/login:
     post:
@@ -499,6 +505,13 @@ paths:
         '400':
           description: >-
             `40000` —— redirect 不在允许列表中，或该 provider 未启用
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: >-
+            `42900`（带 Retry-After）—— 按调用方 IP 限流，默认 20 次/60s
+            （RATE_LIMIT_OAUTH_LOGIN_RPM）。与 /oauth/authorize 形状相同：
+            无认证且每次调用写一个 oauth_state 键。限流在解析 provider 之前生效，
+            因此未启用的 provider 那条返回 40000 的路由也不是免费探测面。
         '503':
           description: >-
             `50300` —— Redis 不可用，无法写入 oauth_state。fail-closed：
@@ -563,6 +576,12 @@ paths:
         '400':
           description: >-
             `40000` —— redirect 不在允许列表中，或该 provider 未启用
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: >-
+            `42900`（带 Retry-After）—— 按调用方 IP 限流，默认 20 次/60s
+            （RATE_LIMIT_OAUTH_LOGIN_RPM），与 GitHub 授权端点共用同一档配额与
+            同一 Redis 计数域（endpoint 名 oauth_login）。
         '503':
           description: '`50300` —— Redis 不可用，无法写入 oauth_state（fail-closed）'
       security: []
@@ -634,6 +653,14 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
           description: 未认证（401xx）
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: >-
+            `42900`（带 Retry-After）—— 按调用方 IP 限流，默认 30 次/60s
+            （RATE_LIMIT_EXCHANGE_CODE_RPM）。本端点按设计免认证——兑换 login_code
+            正是取得会话的方式——故配额是约束免费探测的唯一手段。限流检查排在
+            空 code 校验之前：调用方控制输入，先免费拒空会让每次猜测一次
+            Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 login_code。
       security: []
   /user/profile:
     get:
@@ -861,6 +888,13 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
           description: 用户不存在或已注销
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: >-
+            请求过于频繁（42900，带 Retry-After）。按调用方 IP 限流，默认 60 次/60s
+            （RATE_LIMIT_CARD_RPM）：本端点无认证且路径参数是连续用户 ID，
+            不限流即等于开放全站公开卡片的抓取。限流在 ID 校验之前生效，
+            因此无效 ID 同样消耗配额——它得到的 404 正是枚举者要读的信号。
         '500':
           $ref: '#/components/responses/InternalError'
       security: []
