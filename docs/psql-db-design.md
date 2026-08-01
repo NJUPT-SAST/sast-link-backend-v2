@@ -272,7 +272,7 @@ CREATE TABLE audit_logs (
 > `{"source": "people_link_merge", "action_type": "migration", "migrated_at": "...", "needs_password_reset": false}`。
 > 此格式仅在迁移数据中存在，新系统不生成此格式。
 
-**数据保留**：audit_logs 保留 90 天，通过 pg_cron 每天清理过期数据（见[定时清理](#定时清理)）。
+**数据保留**：audit_logs 默认保留 90 天，可调大或收紧至最低 30 天，由 retention worker 清理过期数据（见[定时清理](#定时清理)）。
 
 ```sql
 CREATE INDEX idx_audit_logs_user_created ON audit_logs(user_id, created_at DESC);
@@ -688,81 +688,48 @@ oauth_authorizations.family_id
 
 ### 定时清理
 
-> **目标设计，尚未接入**：本节的 SQL 不在 `migrations/` 的任何版本中，生产库当前没有
-> 任何 `cron.schedule` 任务，过期数据不会被自动清理。落地前请视为设计稿而非现状。
+清理由 API 进程内的 Go worker（`internal/worker/retention.go`）按 ticker 执行，**不使用
+`pg_cron`**。
 
-使用 `pg_cron` 在 PostgreSQL 内部调度，无多实例重复执行问题。
+#### 为什么不用 pg_cron
 
-#### 前置：安装扩展
+- 生产库没有安装该扩展，安装需要改 `shared_preload_libraries` 并重启数据库。
+- 更关键的是可测性：集成测试用 `postgres:16-alpine`，该镜像根本无法加载 pg_cron，
+  走 pg_cron 意味着这部分清理规则在 CI 中永远没有测试覆盖。
+- 项目已有同类先例：`internal/service/session/worker/token_blacklist.go` 早已在 Go 侧
+  每小时清理 `token_blacklist_outbox`。因此这里沿用既有模式，而非引入第二套调度机制。
 
-```sql
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-```
+代价是清理只在 API 进程存活期间发生。服务全停时不清理，但此时也没有新数据写入，
+不影响正确性。
 
-> 云托管 PG 通常已内置，本地/Docker 需 `shared_preload_libraries = 'pg_cron'` 并重启。
+#### 多实例协调
 
-#### 清理任务调度
+每轮 sweep 前用 `pg_try_advisory_lock` 抢锁，抢不到就跳过本轮（而非排队等待）——清理
+错过一轮无害，下一轮覆盖同样的行。所有删除都是 `DELETE WHERE 已死`，天然幂等，锁只是
+避免多实例重复扫描。
 
-```sql
--- 每小时：清理已过期且未使用的授权码
-SELECT cron.schedule(
-    'cleanup-expired-authorizations',
-    '0 * * * *',
-    $$DELETE FROM oauth_authorizations WHERE expires_at < NOW() - INTERVAL '1 hour'$$
-);
-
--- 每小时：清理已过期的 access_token 元数据
-SELECT cron.schedule(
-    'cleanup-expired-access-tokens',
-    '0 * * * *',
-    $$DELETE FROM oauth_access_tokens WHERE expires_at < NOW() - INTERVAL '1 hour'$$
-);
-
--- 每天凌晨 3 点：清理已撤销且已过期的 refresh_token
-SELECT cron.schedule(
-    'cleanup-revoked-refresh-tokens',
-    '0 3 * * *',
-    $$DELETE FROM oauth_refresh_tokens WHERE revoked_at IS NOT NULL AND expires_at < NOW() - INTERVAL '1 day'$$
-);
-
--- 每天凌晨 4 点：清理超过 90 天保留期的审计日志
-SELECT cron.schedule(
-    'cleanup-expired-audit-logs',
-    '0 4 * * *',
-    $$DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL '90 days'$$
-);
-
--- 每小时：清理已过期的 token_blacklist_outbox 记录（JWT 已自然失效，无需继续投递）
-SELECT cron.schedule(
-    'cleanup-expired-blacklist-outbox',
-    '0 * * * *',
-    $$DELETE FROM token_blacklist_outbox WHERE expires_at < NOW() - INTERVAL '1 hour'$$
-);
-```
-
-#### 管理命令
-
-```sql
--- 查看所有定时任务
-SELECT * FROM cron.job;
-
--- 暂停 / 恢复某个任务
-SELECT cron.alter_job(<job_id>, active := false);
-SELECT cron.alter_job(<job_id>, active := true);
-
--- 删除任务
-SELECT cron.unschedule(<job_id>);
-```
+该锁是 session 级的，而 GORM 连接池每条语句可能取到不同连接，因此 `TryLock` 会固定
+（pin）一条连接，`Unlock` 在同一条连接上释放后再归还。否则 `pg_advisory_unlock` 可能
+跑在从未持锁的连接上——它只返回 false 而不报错，真正的持锁连接会一直锁到被回收，
+阻塞此后所有实例的每一轮 sweep。
 
 #### 清理策略说明
 
-| 表 | 清理对象 | 频率 | 延迟窗口 |
-|----|---------|------|---------|
-| `oauth_authorizations` | 已过期，无论是否使用 | 每小时 | `expires_at` + 1h（留缓冲防时钟偏差）。注：索引 `idx_oauth_authorizations_expires_at` 是部分索引（`WHERE is_used = FALSE`），未覆盖 `is_used = TRUE` 的过期行——SAST 规模下可接受，必要时可增设覆盖全过期行的索引 |
-| `oauth_access_tokens` | 已过期元数据 | 每小时 | `expires_at` + 1h |
-| `oauth_refresh_tokens` | 已撤销且已过期 | 每天 | `expires_at` + 1d（只清已撤销的，未撤销的 refresh_token 过期后仍可查审计） |
-| `audit_logs` | 超过保留期数据 | 每天 | `created_at` + 90d（90 天保留期） |
-| `token_blacklist_outbox` | 已过期的投递记录 | 每小时 | `expires_at` + 1h（JWT 过期后无需继续投递黑名单） |
+窗口均为「从现在往前推」，即行必须已死满整个窗口才删除，余量用于吸收 API 与数据库之间
+的时钟偏差。全部可通过环境变量调整，见 `.env.example` 的 `RETENTION_*`。
+
+| 表 | 清理对象 | 默认窗口 | 说明 |
+|----|---------|---------|------|
+| `oauth_authorizations` | 已过期，无论是否使用 | `expires_at` + 1h | 授权码单次使用，重放由兑换时的 family 撤销处理，过期行不再承载任何权限。V001 的 `idx_oauth_authorizations_expires_at` 是部分索引（`WHERE is_used = FALSE`），而已兑换才是常态，故 **V006 增设全量索引** `idx_oauth_authorizations_expires_at_all`，否则每小时退化为全表扫描 |
+| `oauth_access_tokens` | 已过期元数据 | `expires_at` + 24h | 远宽于默认 1h 的 access token TTL，且校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的配置。原因：中间件对「JTI 不存在」与「已撤销」返回同一个 401，若在 JWT 仍处于 `exp` 内时删掉元数据，仅仅过期的 token 会被呈现为已撤销——客户端读到的是被强制登出，而不是该去刷新。JWT 校验器没有 leeway 可依赖，这些行又很小，窗口宽一点很便宜 |
+| `oauth_refresh_tokens` | 已撤销、已过期，且 `sequence > 0` | `expires_at` + 24h | **必须保留每个 family 的 sequence-0 行**：`FindFamilyOriginCreatedAt` 靠它给 ID Token 的 `auth_time` 定时间，而该行从首次轮换起就带有 `revoked_at`。只要 family 还在轮换，它会活得比自己的 `expires_at` 更久；删掉会让刷新流程撤销整个 family 并返回 500——即用户被强制登出。每个 family 长期留一行，是换取 `auth_time` 准确的成本 |
+| `audit_logs` | 超过保留期 | `created_at` + 90d | 90 天（PRD §9）是**默认值**：审计日志在这里属运维用途而非合规强制，可调大以保留更多历史，也可收紧至 30 天下限；低于下限启动时拒绝，避免误配到「事故排查时相关记录已被删」的程度 |
+
+`token_blacklist_outbox` 不在此列：`sessionworker.TokenBlacklist` 已负责清理它，再加一个
+清理者只会让两者竞争同一张表。
+
+单条语句删除的行数受 `RETENTION_BATCH_SIZE` 限制，扫到满批就继续下一批，直到某批不满为止；
+单轮最多 20 批，剩余积压留给下一轮，避免长期未清理的表占用在线流量所需的连接池份额。
 
 ---
 

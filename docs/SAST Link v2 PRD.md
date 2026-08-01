@@ -66,7 +66,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 
 - **容器化**：Docker 多阶段构建（golang:alpine → alpine），复用服务器上已有的 PostgreSQL 与 Redis 实例
 - **高可用**：API 服务无状态（JWT 自包含），可水平扩展；黑名单仅是快速拒绝路径，`oauth_access_tokens.revoked_at` 每请求经 DB 校验，Redis 黑名单不一致不影响吊销正确性；设备记录在扩缩容时短暂不一致可接受。PostgreSQL 是唯一必需依赖，Redis 故障时服务降级但仍可提供认证能力（见 §6.0）
-- **定时任务**：pg_cron 在 PG 内部调度清理过期数据，无多实例重复执行问题
+- **定时任务**：API 进程内的 Go worker 按 ticker 清理过期数据，多实例通过 PostgreSQL advisory lock 协调（不用 pg_cron：生产库未装该扩展，且测试镜像无法加载）
 - **Base URL**：`https://link.sast.fun/v2`
 
 ---
@@ -298,7 +298,7 @@ POST /oauth/authorize/consent  → Bearer 认证 → GetDel 消费暂存 → 建
 
 #### 安全约束
 
-- Authorization Code 有效期 5min，单次使用（is_used 标记），过期后 pg_cron 每小时清理
+- Authorization Code 有效期 5min，单次使用（is_used 标记），过期后由 retention worker 每小时清理
 - PKCE-S256 强制，仅接受 `code_challenge_method=S256`。V001 数据库历史约束仍允许 `plain` 存量值，实际协议层由 V002 迁移收紧为 S256-only。
 - State 参数强制，回调时必须校验
 - Redirect URI 必须**精确字符串相等**于 `oauth_clients.redirect_uris` 之一。不做前缀匹配：前缀规则允许攻击者追加客户端从未注册的路径并在那里接收授权码
@@ -469,7 +469,7 @@ Payload: {
 | `upload_avatar` | `{"avatar_url": "https://..."}` |
 | `admin_action` | `{"target_user_id": 123, "sub_action": "edit_user" \| "delete_user" \| "restore_user" \| "manage_oauth_client"}` |
 
-**数据保留**：audit_logs 保留 90 天，pg_cron 每天凌晨 4:00 清理过期数据。
+**数据保留**：audit_logs 默认保留 90 天，可调大或收紧至最低 30 天，由 retention worker 清理过期数据。
 
 ### 4.14 个人卡片
 
@@ -609,14 +609,21 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 
 ## 9. 数据运维
 
-### 9.1 pg_cron 定时清理
+### 9.1 定时清理
 
-| 任务 | 频率 | 清理对象 |
-|------|------|----------|
-| `cleanup-expired-authorizations` | 每小时 | `oauth_authorizations` 已过期 +1h 缓冲（无论是否使用） |
-| `cleanup-expired-access-tokens` | 每小时 | `oauth_access_tokens` 已过期 +1h 缓冲 |
-| `cleanup-revoked-refresh-tokens` | 每天 03:00 | `oauth_refresh_tokens` 已撤销 且 已过期 +1d 缓冲。注：+1d 仅为审计保留缓冲，不影响 refresh 逻辑——refresh_token 过期即不可用，不依赖清理任务 |
-| `cleanup-expired-audit-logs` | 每天 04:00 | `audit_logs` 超过 90 天保留期的数据 |
+由 API 进程内的 Go worker（`internal/worker/retention.go`）按 ticker 执行，默认每小时一轮。
+**不使用 pg_cron**：生产库未安装该扩展，安装需改 `shared_preload_libraries` 并重启；且集成
+测试镜像 `postgres:16-alpine` 无法加载它，走 pg_cron 会让清理规则失去 CI 覆盖。多实例通过
+`pg_try_advisory_lock` 协调，每轮只有一个实例执行。窗口均可通过 `RETENTION_*` 环境变量调整。
+
+| 清理对象 | 默认窗口 | 说明 |
+|---------|---------|------|
+| `oauth_authorizations` 已过期（无论是否使用） | +1h | V006 增设全量 `expires_at` 索引，因 V001 的索引是 `WHERE is_used = FALSE` 的部分索引，而已兑换才是常态 |
+| `oauth_access_tokens` 已过期元数据 | +24h | 中间件对「JTI 不存在」与「已撤销」返回同一个 401，窗口过短会把仅仅过期的 token 呈现为已撤销，客户端读成被强制登出而不去刷新。校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的值 |
+| `oauth_refresh_tokens` 已撤销、已过期且 `sequence > 0` | +24h | 每个 family 的 sequence-0 行永久保留：它是 ID Token `auth_time` 的来源，且从首次轮换起即带 `revoked_at`；删掉会让活跃 family 的刷新返回 500 |
+| `audit_logs` 超过保留期 | 90d | 审计日志属运维用途而非合规强制，故 90 天是**默认值**而非硬下限：可调大，也可收紧到 720h（30 天）的下限；低于下限启动时拒绝 |
+
+`token_blacklist_outbox` 由 `sessionworker.TokenBlacklist` 自行清理，不重复接管。
 
 ### 9.2 备份策略
 
@@ -688,7 +695,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 用户资料管理 | 部分完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）已完成；头像上传待实现（依赖对象存储接入） |
 | OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
 | 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）与审计日志查询，读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
-| 其余运维接入 | 待实现 — 设备管理与 pg_cron。endpoint 限流已全量接入（见 §11），pg_cron 的 SQL 只存在于 `docs/psql-db-design.md` 的设计稿，任何 migration 都未创建它，因此过期数据目前不会被清理 |
+| 其余运维接入 | 待实现 — 设备管理。endpoint 限流已全量接入（见 §11）。数据保留清理已接入：由 `internal/worker/retention.go` 在 API 进程内按 ticker 执行，多实例用 advisory lock 协调；不用 pg_cron（生产库未装扩展，测试镜像亦无法加载），详见 §9.1 |
 
 ## 11. 实现顺序
 
@@ -708,6 +715,6 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [x] OIDC Provider（discovery / JWKS / UserInfo / ID Token）
 - [x] OAuth 客户端注册 API（`/admin/oauth-clients` 列表 / 注册 / 更新，打通第三方客户端创建入口与 `client_secret` 校验路径）
 - [x] 管理后台用户管理与审计日志查询（用户列表 / 详情 / 更新 / 软删 / 恢复 / 审计日志）
-- [ ] pg_cron 定时清理
+- [x] 定时清理过期数据（Go retention worker，非 pg_cron；见 §9.1）
 - [x] 个人卡片端点（`GET /card/:id`；前端页面另计）
 - [ ] 测试、联调、上线

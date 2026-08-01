@@ -2,7 +2,7 @@
 
 SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一身份认证中心与人员信息管理系统。
 
-当前仓库已完成 Go 服务骨架、数据基础层、认证基础设施、内部认证闭环、用户资料自助管理、OAuth 2.1/OIDC Provider 与管理后台（OAuth 客户端 + 用户管理 + 审计日志）：HTTP API 入口、PostgreSQL/Redis 连接、健康检查、V001–V005 SQL migrations（含固定内置 `sast-link-web` first-party Client、token blacklist Outbox 与跨表邮箱唯一性触发器）、持久化实体与 Auth repositories、密码哈希、RS256 JWT/JWKS、opaque Refresh Token、PKCE-S256、统一 OAuth/OIDC scope、Redis 一次性状态/限流/登录失败计数，以及密码登录、Token 刷新、登出、JWT middleware、可靠黑名单投递 worker、SMTP 邮件、两步邮箱注册、改密/重置密码（含全量 Token 吊销与授权码作废）、第三方邮箱绑定、资料查询与编辑、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 按用户限流）和公开个人卡片。
+当前仓库已完成 Go 服务骨架、数据基础层、认证基础设施、内部认证闭环、用户资料自助管理、OAuth 2.1/OIDC Provider 与管理后台（OAuth 客户端 + 用户管理 + 审计日志）：HTTP API 入口、PostgreSQL/Redis 连接、健康检查、V001–V006 SQL migrations（含固定内置 `sast-link-web` first-party Client、token blacklist Outbox、跨表邮箱唯一性触发器与过期授权码清理索引）、持久化实体与 Auth repositories、密码哈希、RS256 JWT/JWKS、opaque Refresh Token、PKCE-S256、统一 OAuth/OIDC scope、Redis 一次性状态/限流/登录失败计数，以及密码登录、Token 刷新、登出、JWT middleware、可靠黑名单投递 worker、SMTP 邮件、两步邮箱注册、改密/重置密码（含全量 Token 吊销与授权码作废）、第三方邮箱绑定、资料查询与编辑、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 按用户限流）和公开个人卡片。
 
 OAuth/OIDC Provider 部分已完成两段式授权端点（`GET /oauth/authorize` + `POST /oauth/authorize/consent`）、Token 端点（authorization_code 与 refresh_token 两种 grant、ID Token 签发）、RFC 7009 撤销端点、`/userinfo`、OIDC discovery 与 JWKS，以及 `/admin/oauth-clients` 客户端注册与更新（内置客户端受保护，不可停用或改写 redirect_uris）。
 
@@ -10,7 +10,7 @@ OAuth/OIDC Provider 部分已完成两段式授权端点（`GET /oauth/authorize
 
 第三方 OAuth 登录已完成：GitHub 与飞书的授权跳转与回调、`login_code` 交换（回调只投递一次性 code，Token 绝不出现在重定向 URL 中）、登录态下的绑定接口，以及 `registration_state` + `oauth_state` 双重校验的注册补全（账号、资料、第三方绑定与首个会话在同一事务内提交）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验。
 
-头像上传（含内容审核）、限流与防刷扩展、设备管理与 pg_cron 运维任务仍待接入。
+头像上传（含内容审核）与设备管理仍待接入。
 
 `cmd/api` 只负责运行 HTTP 服务，启动时不会执行 DDL 或 schema migration。数据库结构只能通过 `cmd/migrate` 显式管理。
 
@@ -66,6 +66,7 @@ golangci-lint run ./...
 - `internal/health/`：健康检查 handler
 - `internal/service/session/`：内部登录、Refresh rotation、登出撤销与资料查询用例
 - `internal/service/session/worker/`：token blacklist Outbox 的 Redis 投递与重试 worker
+- `internal/worker/`：过期数据清理 worker（授权码、access/refresh token 元数据、审计日志）。在 API 进程内按 ticker 执行，多实例通过 PostgreSQL advisory lock 协调；不用 pg_cron，因生产库未装该扩展且测试镜像无法加载
 - `internal/adapter/redis/session/`：将 Redis 限流、登录失败计数和 JTI blacklist 适配到 Session ports
 - `internal/provider/`：GitHub 与飞书的出站 HTTP client，把第三方响应归一化为 Identity
 - `internal/service/oauthlogin/`：第三方登录三条链路（授权跳转 / 回调分叉 / login_code 交换）与登录态绑定
