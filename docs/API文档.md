@@ -231,7 +231,9 @@ POST /auth/register/verify-code
 
 注册第二步：凭 Register-Ticket + 补充信息完成注册。
 
-> **限流**：按调用方 IP 固定窗口限流（默认 3 次/小时，`RATE_LIMIT_REGISTER_RPH`）。需要有效 Register-Ticket 才能走到写入，因此该配额限制的是成本而非猜测：每个被接受的请求都会执行一次 60 万轮迭代的 PBKDF2-SHA512 派生。被限流的请求**不消费** Register-Ticket，客户端可在窗口恢复后用同一 ticket 重试。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+> **限流**：按 **Register-Ticket** 固定窗口限流（默认 5 次/5 分钟，`RATE_LIMIT_REGISTER_ATTEMPTS`），不按 IP。该配额限制的是成本：每个被接受的请求执行一次 60 万轮迭代的 PBKDF2-SHA512 派生，而 ticket 恰好代表「一个已验证邮箱」这一应被计量的单位。按 IP 限流会让校园网 NAT 后整栋楼共享一个计数桶，正是新生集中注册的流量形状。
+>
+> 限流检查排在**全部廉价校验之后**（密码长度、学院枚举、邮箱与学号占用），因此用户填错表单不消耗配额；同时排在 `registration_state` 消费**之前**，故被限流的请求既不消费 Register-Ticket 也不消费 `registration_state`，窗口恢复后可用同一 ticket 重试。窗口不得超过 Register-Ticket 的 5 分钟 TTL——否则窗口尚未恢复而 ticket 已过期，重试无从谈起——服务启动时校验这一约束。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 
 ```
 POST /auth/register
@@ -756,7 +758,9 @@ PUT /user/avatar
 GET /card/:id
 ```
 
-> **限流**：按调用方 IP 固定窗口限流（默认 60 次/60s，`RATE_LIMIT_CARD_RPM`）。本端点无认证且路径参数是连续的用户 ID，不限流即等于开放全站公开卡片的抓取。限流检查排在 ID 合法性校验**之前**——无效 ID 得到的 `404` 本身就是枚举者要读的信号。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+> **限流**：按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_CARD_RPM`）。本端点无认证且路径参数是连续的用户 ID，不限流即等于开放全站公开卡片的抓取。限流检查排在 ID 合法性校验**之前**——无效 ID 得到的 `404` 本身就是枚举者要读的信号。
+>
+> 配额按「共享出口 IP 下的成员墙」定档：一页渲染数十张卡片，不能让一位访客耗尽整个 NAT 当分钟的额度。这一档只能减缓而非阻止抓取——公开卡片的批量读取应交由反向代理缓存承担，容量防线本就在那一层。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 
 **Path Parameters**:
 

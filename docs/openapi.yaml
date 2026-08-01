@@ -198,9 +198,13 @@ paths:
         '429':
           $ref: '#/components/responses/TooManyRequests'
           description: >-
-            注册过于频繁（42900，带 Retry-After）。按调用方 IP 限流，默认 3 次/小时
-            （RATE_LIMIT_REGISTER_RPH）：每个被接受的请求执行一次 60 万轮 PBKDF2 派生。
-            被限流的请求不消费 Register-Ticket，可用同一 ticket 重试。
+            注册过于频繁（42900，带 Retry-After）。按 Register-Ticket 限流而非按 IP，
+            默认 5 次/5 分钟（RATE_LIMIT_REGISTER_ATTEMPTS）：每个被接受的请求执行一次
+            60 万轮 PBKDF2 派生，ticket 即该成本应计量的「一个已验证邮箱」；按 IP 限流会让
+            校园网 NAT 后整栋楼共享一个桶。检查排在全部廉价校验之后（填错表单不计费）、
+            registration_state 消费之前，故被限流的请求既不消费 Register-Ticket 也不消费
+            registration_state，可在窗口恢复后用同一 ticket 重试——窗口不得超过 ticket 的
+            5 分钟 TTL，服务启动时校验。
       security: []
   /user/login:
     post:
@@ -891,10 +895,12 @@ paths:
         '429':
           $ref: '#/components/responses/TooManyRequests'
           description: >-
-            请求过于频繁（42900，带 Retry-After）。按调用方 IP 限流，默认 60 次/60s
+            请求过于频繁（42900，带 Retry-After）。按调用方 IP 限流，默认 300 次/60s
             （RATE_LIMIT_CARD_RPM）：本端点无认证且路径参数是连续用户 ID，
             不限流即等于开放全站公开卡片的抓取。限流在 ID 校验之前生效，
             因此无效 ID 同样消耗配额——它得到的 404 正是枚举者要读的信号。
+            配额按共享出口 IP 下的成员墙定档，只能减缓而非阻止抓取；
+            公开卡片的批量读取应交由反向代理缓存承担。
         '500':
           $ref: '#/components/responses/InternalError'
       security: []

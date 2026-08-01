@@ -701,7 +701,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [ ] 头像上传（依赖对象存储接入，与内容审核一并实现）
 - [x] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [x] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
-- [x] 限流与防刷扩展（登录、验证码发信（邮箱 + IP 双键）、解绑、`/oauth/authorize`、`/oauth/token` + `/oauth/revoke`、`GET /oauth/{github,lark}`、`/oauth/exchange-code`、`POST /auth/register`、`GET /card/:id` 均已接入。全部按具名端点在 service 内生效，没有全局中间件——新增路由不会自动继承任何配额，必须显式声明。默认值按端点形状推定，尚未据真实流量校准）
+- [x] 限流与防刷扩展（登录、验证码发信（邮箱 + IP 双键）、解绑、`/oauth/authorize`、`/oauth/token` + `/oauth/revoke`、`GET /oauth/{github,lark}`、`/oauth/exchange-code`、`POST /auth/register`、`GET /card/:id` 均已接入。全部按具名端点在 service 内生效，没有全局中间件——新增路由不会自动继承任何配额，必须显式声明。键的选择按端点实际承压对象而非一律按 IP：注册按 Register-Ticket（计量 PBKDF2 成本的单位），解绑按 user，其余无认证端点只有 IP 可用。校园网 NAT 是这一取舍的主因——整栋楼共享一个出口 IP，按 IP 给注册设小额度等于全校每窗口只能注册数次。默认值按端点形状推定，尚未据真实流量校准）
 - [x] 审计日志扩展（登录/登出/刷新、注册三步、改密与重置、邮箱与第三方绑定/解绑、资料修改、`oauth_authorize` / `oauth_token` / `oauth_revoke`、第三方登录与 `login_code` 交换、管理后台用户与客户端变更均已接入。Token 重放在两条路径上均以 `outcome: refresh_replayed` / `code_replayed` 落库，可单独检索——同一 action 同一错误码下，只有 outcome 能区分「令牌泄露并已级联撤销」与普通失败）
 - [ ] 头像内容审核（腾讯云 COS）
 - [x] OAuth 2.1 授权服务端（两段式 authorize / consent / token / revoke + PKCE-S256 + 重放级联撤销）
