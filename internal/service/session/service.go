@@ -176,7 +176,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			return nil, newError(ErrInternal, "撤销被重放的 Refresh Token 家族失败", revokeErr)
 		}
 		s.deliverBlacklist(ctx, entries, s.now())
-		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, input)
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	if !current.ExpiresAt.After(s.now()) {
@@ -213,12 +213,12 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 				return nil, newError(ErrInternal, "轮换失败后撤销 Refresh Token 家族失败", revokeErr)
 			}
 			s.deliverBlacklist(ctx, entries, s.now())
-			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, input)
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
 			return nil, newError(ErrInvalidToken, "Refresh Token 无效", rotateErr)
 		}
 		return nil, newError(ErrInternal, "轮换 Refresh Token 失败", rotateErr)
 	}
-	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, input)
+	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, refreshOutcomeRotated, input)
 	return &RefreshResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -1004,16 +1004,42 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 	return newError(sentinel, message, cause)
 }
 
+// Refresh audit outcomes. These name why a rotation ended, which the action and
+// error code alone cannot: every failure below carries the same invalid-token
+// code, and only some of them mean an attack.
+const (
+	// refreshOutcomeRotated is a successful rotation.
+	refreshOutcomeRotated = "rotated"
+	// refreshOutcomeReplayed is a presented token that was already revoked or
+	// rotated. This is the replay defense firing, and it revoked the whole
+	// family — the one outcome here that needs to be searchable on its own.
+	refreshOutcomeReplayed = "refresh_replayed"
+)
+
 // auditRefresh records a refresh rotation outcome. Failures mean the token
 // family was revoked as a replay defense, so they carry the invalid-token code;
 // the audit itself is fail-open like every other audit call in this service.
-func (s Service) auditRefresh(ctx context.Context, userID int64, familyID *string, success bool, input RefreshInput) {
+//
+// The outcome is recorded because "refresh failed" is not actionable on its own:
+// an expired token, a client mismatch and a replayed token are one action and one
+// error code in the log, but only the last means a token leaked and a family was
+// cut. It matches the oauth service's refresh_replayed outcome so a reviewer can
+// filter both token paths with one query.
+func (s Service) auditRefresh(
+	ctx context.Context,
+	userID int64,
+	familyID *string,
+	success bool,
+	outcome string,
+	input RefreshInput,
+) {
 	errCode := 0
 	if !success {
 		errCode = errcode.CodeAccessTokenInvalid
 	}
-	if auditErr := s.audit(ctx, &userID, "refresh", "session", familyID, success, errCode, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
-		slog.Error("audit refresh", "family_id", familyID, "error", auditErr)
+	detail := map[string]any{"outcome": outcome}
+	if auditErr := s.audit(ctx, &userID, "refresh", "session", familyID, success, errCode, input.ClientIP, input.UserAgent, detail); auditErr != nil {
+		slog.Error("audit refresh", "family_id", familyID, "outcome", outcome, "error", auditErr)
 	}
 }
 

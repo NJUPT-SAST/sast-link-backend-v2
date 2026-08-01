@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sort"
@@ -2711,4 +2712,82 @@ func TestRegisterAllowsWhenLimiterUnavailable(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Register with a broken limiter = %v, want fail-open", err)
 	}
+}
+
+// A replayed refresh token and an ordinary rotation share one action and, on
+// failure, one error code. The outcome is what separates "a token leaked and we
+// cut the family" from the mundane failures, so it has to be in the row.
+func TestRefreshAuditRecordsReplayOutcome(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	refresh, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeRotated {
+		t.Fatalf("successful refresh outcome = %q, want %q", got, refreshOutcomeRotated)
+	}
+
+	// Replay the token that was just rotated away.
+	tokens.rotateErr = repository.ErrTokenReplay
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: refresh.RefreshToken}); err == nil {
+		t.Fatal("Refresh accepted a replayed token")
+	}
+	entry := lastAuditAction(t, audit, "refresh")
+	if got := auditOutcome(t, entry); got != refreshOutcomeReplayed {
+		t.Fatalf("replayed refresh outcome = %q, want %q", got, refreshOutcomeReplayed)
+	}
+	// The family ID must travel with it, or the row cannot be tied to the tokens
+	// that were revoked in response.
+	if entry.ResourceID == nil || *entry.ResourceID == "" {
+		t.Fatalf("audit entry = %+v, want the revoked family_id recorded", entry)
+	}
+}
+
+// The already-revoked branch is a separate code path from the rotation-error
+// branch above, and it is the one a stolen-then-reused token hits.
+func TestRefreshAuditRecordsReplayOutcomeForRevokedToken(t *testing.T) {
+	service, _, _, _, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	// The original token is now revoked; presenting it again is the replay.
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err == nil {
+		t.Fatal("Refresh accepted a revoked token")
+	}
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeReplayed {
+		t.Fatalf("revoked-token outcome = %q, want %q", got, refreshOutcomeReplayed)
+	}
+}
+
+func lastAuditAction(t *testing.T, audit *fakeAudit, action string) model.AuditLog {
+	t.Helper()
+	for i := len(audit.entries) - 1; i >= 0; i-- {
+		if audit.entries[i].Action == action {
+			return audit.entries[i]
+		}
+	}
+	t.Fatalf("no audit entry with action %q in %#v", action, audit.entries)
+	return model.AuditLog{}
+}
+
+func auditOutcome(t *testing.T, entry model.AuditLog) string {
+	t.Helper()
+	if len(entry.Detail) == 0 {
+		t.Fatalf("audit entry %+v has no detail", entry)
+	}
+	var detail struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.Unmarshal(entry.Detail, &detail); err != nil {
+		t.Fatalf("unmarshal audit detail %s: %v", entry.Detail, err)
+	}
+	return detail.Outcome
 }
