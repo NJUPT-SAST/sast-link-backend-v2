@@ -2660,9 +2660,9 @@ func TestRegisterReportsAbandonedHashingAsDependencyUnavailable(t *testing.T) {
 	}
 }
 
-func TestRegisterThrottlesPerIP(t *testing.T) {
+func TestRegisterThrottlesPerRegisterTicket(t *testing.T) {
 	service := newRegisterService(t)
-	limiter := &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: time.Hour}}
+	limiter := &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: time.Minute}}
 	service.RegisterLimiter = limiter
 	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
 	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
@@ -2681,13 +2681,44 @@ func TestRegisterThrottlesPerIP(t *testing.T) {
 		ClientIP:       "198.51.100.7",
 	})
 	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
-	if got, want := limiter.calls[0], "register:ip:198.51.100.7"; got != want {
+	// Keyed by ticket, not IP: a campus NAT puts an entire building behind one
+	// egress address, so an IP key would make enrollment traffic lock itself out.
+	if got, want := limiter.calls[0], "register:ticket:reg_xxx"; got != want {
 		t.Fatalf("limiter call = %q, want %q", got, want)
 	}
 	// A throttled call must leave the ticket spendable: the whole point of the
 	// ticket surviving rejections is that the client can retry with it.
 	if _, found, _ := tickets.PeekRegisterTicket(context.Background(), "reg_xxx"); !found {
 		t.Fatal("Register-Ticket was consumed by a throttled call")
+	}
+}
+
+// The cap bounds PBKDF2 cost, so it must not charge for rejections that never
+// reach a derivation — otherwise a user mistyping their own form locks themselves
+// out of the endpoint.
+func TestRegisterDoesNotSpendQuotaOnCheapRejections(t *testing.T) {
+	service := newRegisterService(t)
+	limiter := &fakeLimiter{}
+	service.RegisterLimiter = limiter
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "short",
+		Name:           "New User",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+		ClientIP:       "198.51.100.7",
+	})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
+	if len(limiter.calls) != 0 {
+		t.Fatalf("limiter calls = %v, want none for a rejection that never hashes", limiter.calls)
 	}
 }
 

@@ -410,13 +410,6 @@ func (s Service) resolveRegistrationIdentity(
 }
 
 func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterResult, error) {
-	// Throttled first: the cap exists to bound PBKDF2 cost, and the checks below
-	// are cheap enough that letting them run unthrottled changes nothing.
-	if clientIP := strings.TrimSpace(input.ClientIP); clientIP != "" {
-		if err := s.checkEndpointLimit(ctx, s.RegisterLimiter, "register", "ip:"+clientIP); err != nil {
-			return nil, err
-		}
-	}
 	ticket := strings.TrimSpace(input.RegisterTicket)
 	if ticket == "" {
 		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 不能为空", nil)
@@ -475,6 +468,21 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	}
 	if exists {
 		return nil, newError(ErrStudentIDOccupied, "学号已被占用", nil)
+	}
+
+	// Throttled here rather than at the top of the function: the cap exists to
+	// bound PBKDF2 derivations, and this is the last point before the flow starts
+	// spending things. Every rejection above — a short password, a bad college, an
+	// occupied student ID — costs nothing to produce, so charging quota for it
+	// would let a user lock themselves out by mistyping their own form. It still
+	// precedes the registration_state consumption below, so a throttled call
+	// spends neither one-time credential.
+	//
+	// The subject is the Register-Ticket, not the caller IP. The ticket is one
+	// verified email address, which is what the derivation cost should be metered
+	// against; an IP key would put an entire campus NAT behind a single counter.
+	if err := s.checkEndpointLimit(ctx, s.RegisterLimiter, "register", "ticket:"+ticket); err != nil {
+		return nil, err
 	}
 
 	// The parked OAuth identity is resolved last among the rejectable checks, so

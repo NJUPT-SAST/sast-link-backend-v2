@@ -112,7 +112,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Limiter: internalredis.FixedWindowLimiter{
 			Client: rdb,
 			Keys:   keys,
-			Limit:  cfg.RateLimitRegisterRPH,
+			Limit:  cfg.RateLimitRegisterAttempts,
 			Window: cfg.RateLimitRegisterWindow,
 		},
 	}

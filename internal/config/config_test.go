@@ -501,6 +501,48 @@ func TestValidateAPIAuthRejectsOverlongOAuthTTLs(t *testing.T) {
 	}
 }
 
+// The register limiter is keyed by Register-Ticket, so a window outliving the
+// ticket's TTL would still be closed once the ticket expired — the throttled
+// caller would have nothing left to retry with. Caught at startup rather than
+// discovered by a user who cannot register.
+func TestValidateAPIAuthRejectsRegisterWindowLongerThanTicketTTL(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"RATE_LIMIT_REGISTER_ATTEMPTS", "0", "RATE_LIMIT_REGISTER_ATTEMPTS must be positive"},
+		{"RATE_LIMIT_REGISTER_WINDOW", "100ms", "RATE_LIMIT_REGISTER_WINDOW must be at least 1s"},
+		{"RATE_LIMIT_REGISTER_WINDOW", "1h", "RATE_LIMIT_REGISTER_WINDOW must not exceed the Register-Ticket TTL"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+// The default must satisfy its own ceiling, or every deployment that does not set
+// the variable fails to start.
+func TestDefaultRegisterWindowFitsTicketTTL(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RateLimitRegisterWindow > registerTicketTTL {
+		t.Fatalf("default RATE_LIMIT_REGISTER_WINDOW = %s, want <= ticket TTL %s",
+			cfg.RateLimitRegisterWindow, registerTicketTTL)
+	}
+	if err := cfg.ValidateAPIAuth(); err != nil {
+		t.Fatalf("ValidateAPIAuth() with defaults = %v, want nil", err)
+	}
+}
+
 // The token endpoint's limiter is what keeps client_secret and refresh_token
 // guessing bounded, so a misconfigured value must fail at startup.
 func TestValidateAPIAuthRejectsBadTokenRateLimit(t *testing.T) {
