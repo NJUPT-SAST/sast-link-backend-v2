@@ -1,0 +1,1 @@
+DROP INDEX idx_oauth_authorizations_expires_at_all;

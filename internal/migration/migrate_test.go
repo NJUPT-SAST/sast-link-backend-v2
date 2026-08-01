@@ -55,6 +55,11 @@ const triggerExistsQuery = `SELECT EXISTS (
   WHERE tgname = $1 AND NOT tgisinternal
 )`
 
+const indexExistsQuery = `SELECT EXISTS (
+  SELECT 1 FROM pg_catalog.pg_indexes
+  WHERE schemaname = 'public' AND indexname = $1
+)`
+
 func TestNewRejectsMissingDatabaseName(t *testing.T) {
 	for _, databaseURL := range []string{
 		"postgres://user:password@localhost",
@@ -130,6 +135,12 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	} {
 		assertExists(t, database, triggerExistsQuery, triggerName)
 	}
+
+	// V006. The retention worker sweeps expired authorization codes regardless of
+	// is_used, which V001's partial index (WHERE is_used = FALSE) cannot serve —
+	// redeemed codes are the common case, so without this the hourly sweep is a
+	// sequential scan over the whole table.
+	assertExists(t, database, indexExistsQuery, "idx_oauth_authorizations_expires_at_all")
 
 	userID := insertTestUser(t, database)
 	assertRejectsInvalidEmailDomain(t, database)
