@@ -231,6 +231,10 @@ POST /auth/register/verify-code
 
 注册第二步：凭 Register-Ticket + 补充信息完成注册。
 
+> **限流**：按 **Register-Ticket** 固定窗口限流（默认 5 次/5 分钟，`RATE_LIMIT_REGISTER_ATTEMPTS`），不按 IP。该配额限制的是成本：每个被接受的请求执行一次 60 万轮迭代的 PBKDF2-SHA512 派生，而 ticket 恰好代表「一个已验证邮箱」这一应被计量的单位。按 IP 限流会让校园网 NAT 后整栋楼共享一个计数桶，正是新生集中注册的流量形状。
+>
+> 限流检查排在**全部廉价校验之后**（密码长度、学院枚举、邮箱与学号占用），因此用户填错表单不消耗配额；同时排在 `registration_state` 消费**之前**，故被限流的请求既不消费 Register-Ticket 也不消费 `registration_state`，窗口恢复后可用同一 ticket 重试。窗口不得超过 Register-Ticket 的 5 分钟 TTL——否则窗口尚未恢复而 ticket 已过期，重试无从谈起——服务启动时校验这一约束。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+
 ```
 POST /auth/register
 ```
@@ -486,7 +490,9 @@ POST /auth/reset-password
 >
 > **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
 >
-> **限流待接入**：本章 5 个端点目前均未限流。`GET /oauth/{github,lark}` 与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——因此同样可被灌满键空间，后者已按 `RATE_LIMIT_AUTHORIZE_RPM` 限流。`POST /oauth/exchange-code` 则是一个无限速的 `login_code` 猜测入口（256 位随机值，实际不可枚举，但端点本身免费）。归入 PRD §11「限流与防刷扩展」，与验证码、注册的限流策略一并实现。
+> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 20 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是免费探测面。`POST /oauth/exchange-code` 按 IP 限流（默认 30 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先免费拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可烧掉他人活跃凭证。两处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+>
+> 回调端点（`/oauth/{github,lark}/callback`）不单独限流：它需要一个有效的一次性 `oauth_state` 才能推进，而该 state 由已限流的授权端点签发。
 
 ### 2.1 GitHub 登录
 
@@ -751,6 +757,10 @@ PUT /user/avatar
 ```
 GET /card/:id
 ```
+
+> **限流**：按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_CARD_RPM`）。本端点无认证且路径参数是连续的用户 ID，不限流即等于开放全站公开卡片的抓取。限流检查排在 ID 合法性校验**之前**——无效 ID 得到的 `404` 本身就是枚举者要读的信号。
+>
+> 配额按「共享出口 IP 下的成员墙」定档：一页渲染数十张卡片，不能让一位访客耗尽整个 NAT 当分钟的额度。这一档只能减缓而非阻止抓取——公开卡片的批量读取应交由反向代理缓存承担，容量防线本就在那一层。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 
 **Path Parameters**:
 
@@ -1263,7 +1273,7 @@ token=rt_abc123...&token_type_hint=refresh_token&client_id=9f3a1c7d2e5b40a8c6d1f
 
 > **实现状态**：本章全部端点已注册。
 >
-> 以下三处对 OpenAPI 契约做了收紧，实现按本文档为准：
+> 以下四处对 OpenAPI 契约做了收紧，实现按本文档为准：
 >
 > 1. **`PUT /admin/users/:id` 不接受 `state: is_deleted`**，返回 `422`。注销必须走 `DELETE`，恢复必须走 `PUT .../restore` —— 只有这两条路径会在同一事务内撤销该用户的全部 Token。若允许 PUT 直接置为 `is_deleted`，会留下「账号已注销但 Refresh Token 仍可换新 Access Token」的窗口。对已注销用户执行 PUT 同样返回 `422`，需先恢复。
 > 2. **`email_type` 只能与 `login_email` 一同提交，且必须与其域名一致**，否则返回 `400`。V001 触发器 `auto_set_email_type` 仅在 `login_email` 出现在 UPDATE 列中时才重算该字段，单独提交 `email_type` 会写入与邮箱域名矛盾的值。

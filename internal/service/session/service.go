@@ -52,7 +52,15 @@ type Service struct {
 	// UnbindLimiter is separate from Limiter because checkEndpointLimit reads the
 	// quota off the instance, not the endpoint name — sharing one would give unbind
 	// the login budget.
-	UnbindLimiter    EndpointLimiter
+	UnbindLimiter EndpointLimiter
+	// RegisterLimiter throttles POST /auth/register per caller IP. A valid
+	// Register-Ticket is required to reach the write, so this bounds cost rather
+	// than guessing: every accepted call runs a 600k-iteration PBKDF2 derivation.
+	RegisterLimiter EndpointLimiter
+	// CardLimiter throttles the unauthenticated GET /card/:id per caller IP. The
+	// path parameter is a sequential user ID, so an uncapped endpoint is a scrape
+	// of every public card.
+	CardLimiter      EndpointLimiter
 	ForgotPasswords  ForgotPasswordDispatcher
 	InternalClientID string
 	JWT              *auth.JWTManager
@@ -168,10 +176,11 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			return nil, newError(ErrInternal, "撤销被重放的 Refresh Token 家族失败", revokeErr)
 		}
 		s.deliverBlacklist(ctx, entries, s.now())
-		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, input)
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	if !current.ExpiresAt.After(s.now()) {
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeExpired, input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	client, err := s.findInternalClient(ctx)
@@ -179,6 +188,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		return nil, err
 	}
 	if current.ClientID != client.ID {
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeClientMismatch, input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 与客户端不匹配", nil)
 	}
 	user, err := s.Users.FindByID(ctx, current.UserID)
@@ -205,12 +215,12 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 				return nil, newError(ErrInternal, "轮换失败后撤销 Refresh Token 家族失败", revokeErr)
 			}
 			s.deliverBlacklist(ctx, entries, s.now())
-			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, input)
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
 			return nil, newError(ErrInvalidToken, "Refresh Token 无效", rotateErr)
 		}
 		return nil, newError(ErrInternal, "轮换 Refresh Token 失败", rotateErr)
 	}
-	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, input)
+	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, refreshOutcomeRotated, input)
 	return &RefreshResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -460,6 +470,21 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	}
 	if exists {
 		return nil, newError(ErrStudentIDOccupied, "学号已被占用", nil)
+	}
+
+	// Throttled here rather than at the top of the function: the cap exists to
+	// bound PBKDF2 derivations, and this is the last point before the flow starts
+	// spending things. Every rejection above — a short password, a bad college, an
+	// occupied student ID — costs nothing to produce, so charging quota for it
+	// would let a user lock themselves out by mistyping their own form. It still
+	// precedes the registration_state consumption below, so a throttled call
+	// spends neither one-time credential.
+	//
+	// The subject is the Register-Ticket, not the caller IP. The ticket is one
+	// verified email address, which is what the derivation cost should be metered
+	// against; an IP key would put an entire campus NAT behind a single counter.
+	if err = s.checkEndpointLimit(ctx, s.RegisterLimiter, "register", "ticket:"+ticket); err != nil {
+		return nil, err
 	}
 
 	// The parked OAuth identity is resolved last among the rejectable checks, so
@@ -989,16 +1014,51 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 	return newError(sentinel, message, cause)
 }
 
+// Refresh audit outcomes. These name why a rotation ended, which the action and
+// error code alone cannot: every failure carries the same invalid-token code, and
+// only some of them mean an attack.
+const (
+	// refreshOutcomeRotated is a successful rotation.
+	refreshOutcomeRotated = "rotated"
+	// refreshOutcomeReplayed is a presented token that was already revoked or
+	// rotated. This is the replay defense firing, and it revoked the whole
+	// family — the one outcome here that needs to be searchable on its own.
+	refreshOutcomeReplayed = "refresh_replayed"
+	// refreshOutcomeExpired is a token that aged out. Benign on its own, but it
+	// has to be in the log for refresh_replayed to be meaningful: without the
+	// mundane outcomes recorded, a replay row cannot be told apart from the
+	// failures nobody wrote down.
+	refreshOutcomeExpired = "expired"
+	// refreshOutcomeClientMismatch is a token presented against a client other
+	// than the one it was issued to. Not reachable through the first-party flow,
+	// so it means either a misrouted client or a token being probed.
+	refreshOutcomeClientMismatch = "client_mismatch"
+)
+
 // auditRefresh records a refresh rotation outcome. Failures mean the token
 // family was revoked as a replay defense, so they carry the invalid-token code;
 // the audit itself is fail-open like every other audit call in this service.
-func (s Service) auditRefresh(ctx context.Context, userID int64, familyID *string, success bool, input RefreshInput) {
+//
+// The outcome is recorded because the action and error code alone do not say why
+// a rotation failed: every failed row carries the same invalid-token code, and
+// the name is what separates a replay — a leaked token, family cut in response —
+// from an ordinary rejection. It matches the oauth service's refresh_replayed
+// outcome so a reviewer can filter both token paths with one query.
+func (s Service) auditRefresh(
+	ctx context.Context,
+	userID int64,
+	familyID *string,
+	success bool,
+	outcome string,
+	input RefreshInput,
+) {
 	errCode := 0
 	if !success {
 		errCode = errcode.CodeAccessTokenInvalid
 	}
-	if auditErr := s.audit(ctx, &userID, "refresh", "session", familyID, success, errCode, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
-		slog.Error("audit refresh", "family_id", familyID, "error", auditErr)
+	detail := map[string]any{"outcome": outcome}
+	if auditErr := s.audit(ctx, &userID, "refresh", "session", familyID, success, errCode, input.ClientIP, input.UserAgent, detail); auditErr != nil {
+		slog.Error("audit refresh", "family_id", familyID, "outcome", outcome, "error", auditErr)
 	}
 }
 

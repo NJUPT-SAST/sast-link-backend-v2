@@ -29,7 +29,10 @@ func (h Handler) Card(c *gin.Context) {
 		response.Error(c, notFound(errcode.CodeUserNotFound, "用户不存在"))
 		return
 	}
-	result, err := h.Service.Card(c.Request.Context(), session.CardInput{UserID: userID})
+	result, err := h.Service.Card(c.Request.Context(), session.CardInput{
+		UserID:   userID,
+		ClientIP: c.ClientIP(),
+	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))
 		return

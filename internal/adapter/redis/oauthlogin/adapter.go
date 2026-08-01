@@ -18,6 +18,22 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauthlogin"
 )
 
+// EndpointLimiter adapts the fixed-window limiter to the oauthlogin service
+// port. Unlike the stores in this package it is fail-open: the service logs a
+// limiter outage and proceeds, per PRD §6.0.
+type EndpointLimiter struct {
+	Limiter internalredis.FixedWindowLimiter
+}
+
+// Allow reports the rate-limit decision for one endpoint and subject.
+func (l EndpointLimiter) Allow(ctx context.Context, endpoint, subject string) (oauthlogin.LimitResult, error) {
+	result, err := l.Limiter.Allow(ctx, endpoint, subject)
+	if err != nil {
+		return oauthlogin.LimitResult{}, err
+	}
+	return oauthlogin.LimitResult{Allowed: result.Allowed, RetryAfter: result.RetryAfter}, nil
+}
+
 // StateStore persists the CSRF state for one authorization round trip.
 type StateStore struct {
 	Store internalredis.Store

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
@@ -393,5 +394,133 @@ func TestExchangeCodeAuditsTheSession(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("audit actions = %v, want an oauth_login_exchange entry", actions)
+	}
+}
+
+func TestAuthorizeThrottlesPerIP(t *testing.T) {
+	service, doubles := newTestService(t)
+	limiter := &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: 30 * time.Second}}
+	service.AuthorizeLimiter = limiter
+
+	_, err := service.Authorize(context.Background(), AuthorizeInput{
+		Provider: model.LoginMethodGitHub,
+		ClientIP: "203.0.113.7",
+	})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+
+	var serviceErr *Error
+	if !errors.As(err, &serviceErr) {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if serviceErr.RetryAfter != 30*time.Second {
+		t.Fatalf("RetryAfter = %v, want 30s", serviceErr.RetryAfter)
+	}
+	if got, want := limiter.calls[0], "oauth_login:ip:203.0.113.7"; got != want {
+		t.Fatalf("limiter call = %q, want %q", got, want)
+	}
+	// A throttled call must not reach the state store, or the cap would still let
+	// the keyspace fill.
+	if len(doubles.States.states) != 0 {
+		t.Fatalf("states = %d, want none written by a throttled call", len(doubles.States.states))
+	}
+}
+
+// A disabled provider's route stays registered and answers 40000. The limiter
+// must run before that check, otherwise it is an unthrottled probe.
+func TestAuthorizeThrottlesBeforeResolvingProvider(t *testing.T) {
+	service, _ := newTestService(t)
+	limiter := &fakeLimiter{}
+	service.AuthorizeLimiter = limiter
+
+	_, err := service.Authorize(context.Background(), AuthorizeInput{
+		Provider: model.LoginMethodLark,
+		ClientIP: "203.0.113.7",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if len(limiter.calls) != 1 {
+		t.Fatalf("limiter calls = %v, want the cap applied before the provider check", limiter.calls)
+	}
+}
+
+func TestAuthorizeAllowsWhenLimiterUnavailable(t *testing.T) {
+	service, _ := newTestService(t)
+	service.AuthorizeLimiter = &fakeLimiter{err: errors.New("redis unavailable")}
+
+	if _, err := service.Authorize(context.Background(), AuthorizeInput{
+		Provider: model.LoginMethodGitHub,
+		ClientIP: "203.0.113.7",
+	}); err != nil {
+		t.Fatalf("Authorize with a broken limiter = %v, want fail-open", err)
+	}
+}
+
+// No client IP means no usable key. Sharing one bucket would let a caller whose
+// IP could not be determined lock out every other such caller.
+func TestAuthorizeSkipsLimiterWithoutClientIP(t *testing.T) {
+	service, _ := newTestService(t)
+	limiter := &fakeLimiter{result: LimitResult{Allowed: false}}
+	service.AuthorizeLimiter = limiter
+
+	if _, err := service.Authorize(context.Background(), AuthorizeInput{
+		Provider: model.LoginMethodGitHub,
+	}); err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if len(limiter.calls) != 0 {
+		t.Fatalf("limiter calls = %v, want none without a client IP", limiter.calls)
+	}
+}
+
+func TestExchangeCodeThrottlesPerIP(t *testing.T) {
+	service, doubles := newTestService(t)
+	limiter := &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: 15 * time.Second}}
+	service.ExchangeLimiter = limiter
+	doubles.Users.byID[42] = activeUser(42)
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+		t.Fatalf("seed login code: %v", err)
+	}
+
+	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{
+		Code:     "lc_abc",
+		ClientIP: "203.0.113.9",
+	})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+	if got, want := limiter.calls[0], "oauth_exchange_code:ip:203.0.113.9"; got != want {
+		t.Fatalf("limiter call = %q, want %q", got, want)
+	}
+	// The code must survive a throttled attempt: consuming it would let an
+	// attacker burn a victim's live code by tripping the limit.
+	if _, found, _ := doubles.LoginCodes.ConsumeLoginCode(context.Background(), "lc_abc"); !found {
+		t.Fatal("login_code was consumed by a throttled call")
+	}
+}
+
+// An empty code is the cheapest possible probe, so the cap has to apply to it
+// too — otherwise the expensive path stays reachable by alternating inputs.
+func TestExchangeCodeThrottlesBeforeRejectingEmptyCode(t *testing.T) {
+	service, _ := newTestService(t)
+	limiter := &fakeLimiter{}
+	service.ExchangeLimiter = limiter
+
+	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{ClientIP: "203.0.113.9"})
+	assertKind(t, err, KindInvalidToken, errcode.CodeLoginCodeInvalid)
+	if len(limiter.calls) != 1 {
+		t.Fatalf("limiter calls = %v, want the cap applied before the empty-code check", limiter.calls)
+	}
+}
+
+func TestExchangeCodeAllowsWhenLimiterUnavailable(t *testing.T) {
+	service, doubles := newTestService(t)
+	service.ExchangeLimiter = &fakeLimiter{err: errors.New("redis unavailable")}
+	doubles.Users.byID[42] = activeUser(42)
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+		t.Fatalf("seed login code: %v", err)
+	}
+
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{
+		Code:     "lc_abc",
+		ClientIP: "203.0.113.9",
+	}); err != nil {
+		t.Fatalf("ExchangeCode with a broken limiter = %v, want fail-open", err)
 	}
 }

@@ -417,4 +417,23 @@ type testDoubles struct {
 	Audits       *fakeAuditRepository
 }
 
+// fakeLimiter records the (endpoint, subject) pairs it was asked about so tests
+// can assert the key shape, not just the decision.
+type fakeLimiter struct {
+	result LimitResult
+	err    error
+	calls  []string
+}
+
+func (f *fakeLimiter) Allow(_ context.Context, endpoint, subject string) (LimitResult, error) {
+	f.calls = append(f.calls, endpoint+":"+subject)
+	if f.err != nil {
+		return LimitResult{}, f.err
+	}
+	if f.result == (LimitResult{}) {
+		return LimitResult{Allowed: true}, nil
+	}
+	return f.result, nil
+}
+
 func boolPtr(value bool) *bool { return &value }

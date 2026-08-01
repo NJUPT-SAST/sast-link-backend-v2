@@ -688,6 +688,9 @@ oauth_authorizations.family_id
 
 ### 定时清理
 
+> **目标设计，尚未接入**：本节的 SQL 不在 `migrations/` 的任何版本中，生产库当前没有
+> 任何 `cron.schedule` 任务，过期数据不会被自动清理。落地前请视为设计稿而非现状。
+
 使用 `pg_cron` 在 PostgreSQL 内部调度，无多实例重复执行问题。
 
 #### 前置：安装扩展

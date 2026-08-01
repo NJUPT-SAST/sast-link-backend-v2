@@ -108,6 +108,22 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Window: cfg.RateLimitUnbindWindow,
 		},
 	}
+	registerLimiter := sessionredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitRegisterAttempts,
+			Window: cfg.RateLimitRegisterWindow,
+		},
+	}
+	cardLimiter := sessionredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitCardRPM,
+			Window: cfg.RateLimitCardWindow,
+		},
+	}
 	emailer := mailer.New(mailer.Config{
 		Host:          cfg.SMTPHost,
 		Port:          cfg.SMTPPort,
@@ -138,6 +154,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		// callback's parked identity can be redeemed by POST /auth/register.
 		OAuthRegistration: sessionredis.OAuthRegistrationStore{Store: store},
 		UnbindLimiter:     unbindLimiter,
+		RegisterLimiter:   registerLimiter,
+		CardLimiter:       cardLimiter,
 		ForgotPasswords:   forgotPasswords,
 		InternalClientID:  cfg.InternalOAuthClientID,
 		JWT:               jwtManager,
@@ -215,8 +233,26 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			TenantKey: cfg.OAuthLarkTenantKey,
 		}, nil, nil)
 	}
+	oauthLoginAuthorizeLimiter := oauthloginredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitOAuthLoginRPM,
+			Window: cfg.RateLimitOAuthLoginWindow,
+		},
+	}
+	oauthLoginExchangeLimiter := oauthloginredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitExchangeCodeRPM,
+			Window: cfg.RateLimitExchangeCodeWindow,
+		},
+	}
 	oauthLoginService := oauthlogin.Service{
 		Providers:         loginProviders,
+		AuthorizeLimiter:  oauthLoginAuthorizeLimiter,
+		ExchangeLimiter:   oauthLoginExchangeLimiter,
 		Users:             users,
 		Identities:        identities,
 		Clients:           clients,

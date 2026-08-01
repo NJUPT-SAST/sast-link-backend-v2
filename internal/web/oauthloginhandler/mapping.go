@@ -37,6 +37,9 @@ func mapServiceError(err error) error {
 	switch serviceErr.Kind {
 	case oauthlogin.KindInvalidInput, oauthlogin.KindInvalidState:
 		status = http.StatusBadRequest
+	case oauthlogin.KindRateLimited:
+		message = "请求过于频繁，请稍后重试"
+		status = http.StatusTooManyRequests
 	case oauthlogin.KindInvalidToken:
 		status = http.StatusUnauthorized
 	case oauthlogin.KindUserDeleted, oauthlogin.KindForbidden:
@@ -66,13 +69,20 @@ func mapServiceError(err error) error {
 	if code == 0 {
 		code = defaultCode(serviceErr.Kind)
 	}
-	return &response.BusinessError{HTTPStatus: status, Code: code, Message: message}
+	return &response.BusinessError{
+		HTTPStatus: status,
+		Code:       code,
+		Message:    message,
+		RetryAfter: serviceErr.RetryAfter,
+	}
 }
 
 func defaultCode(kind oauthlogin.Kind) int {
 	switch kind {
 	case oauthlogin.KindInvalidInput, oauthlogin.KindInvalidState:
 		return errcode.CodeBadRequest
+	case oauthlogin.KindRateLimited:
+		return errcode.CodeRateLimited
 	case oauthlogin.KindInvalidToken:
 		return errcode.CodeLoginCodeInvalid
 	case oauthlogin.KindUserDeleted:
@@ -94,6 +104,8 @@ func defaultMessage(kind oauthlogin.Kind) string {
 	switch kind {
 	case oauthlogin.KindInvalidInput:
 		return "请求参数错误"
+	case oauthlogin.KindRateLimited:
+		return "请求过于频繁，请稍后重试"
 	case oauthlogin.KindInvalidState:
 		return "state 无效或已过期，请重新登录"
 	case oauthlogin.KindInvalidToken:

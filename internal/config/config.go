@@ -23,6 +23,12 @@ const (
 	maxOAuthCodeTTL = 15 * time.Minute
 	// maxOAuthAuthorizeRequestTTL caps how long a pending consent decision waits.
 	maxOAuthAuthorizeRequestTTL = time.Hour
+	// registerTicketTTL mirrors session.verificationTTL, which bounds the
+	// Register-Ticket. It is duplicated rather than imported because config must
+	// not depend on a service package; the register limiter's window is validated
+	// against it, since a window outliving the ticket leaves a throttled caller
+	// nothing to retry with. Keep the two in step.
+	registerTicketTTL = 5 * time.Minute
 )
 
 // Config holds all runtime configuration for the service.
@@ -130,6 +136,41 @@ type Config struct {
 	// clients can share an egress IP. Fail-open, per PRD §6.0.
 	RateLimitTokenRPM    int           `env:"RATE_LIMIT_TOKEN_RPM" envDefault:"60"`
 	RateLimitTokenWindow time.Duration `env:"RATE_LIMIT_TOKEN_WINDOW" envDefault:"60s"`
+	// Throttles GET /oauth/github and GET /oauth/lark per caller IP. Same shape as
+	// the authorize endpoint above — unauthenticated, and every call writes one
+	// oauth_state key — so it carries the same cap. Fail-open, per PRD §6.0.
+	RateLimitOAuthLoginRPM    int           `env:"RATE_LIMIT_OAUTH_LOGIN_RPM" envDefault:"20"`
+	RateLimitOAuthLoginWindow time.Duration `env:"RATE_LIMIT_OAUTH_LOGIN_WINDOW" envDefault:"60s"`
+	// Throttles POST /oauth/exchange-code per caller IP. Unauthenticated by
+	// design — redeeming a login_code is how a session is obtained — so without a cap
+	// the code space can be probed for free. Higher than the login cap: one login
+	// legitimately redeems once, but a shared egress IP multiplies that.
+	RateLimitExchangeCodeRPM    int           `env:"RATE_LIMIT_EXCHANGE_CODE_RPM" envDefault:"30"`
+	RateLimitExchangeCodeWindow time.Duration `env:"RATE_LIMIT_EXCHANGE_CODE_WINDOW" envDefault:"60s"`
+	// Throttles POST /auth/register per Register-Ticket, not per IP. Each accepted
+	// call runs one PBKDF2-SHA512 derivation at 600k iterations, so what needs
+	// bounding is derivations per verified email — and the ticket is exactly that
+	// credential. Keying on IP instead would put a whole campus NAT behind one
+	// counter, which is the shape of the traffic this endpoint sees during
+	// enrollment. Ticket acquisition is already capped upstream by the send-email
+	// limiters, so this does not leave the cost unbounded.
+	//
+	// The window must not exceed the ticket's own 5-minute TTL: a longer one would
+	// still be closed when the ticket it throttles has already expired, leaving the
+	// caller nothing to retry with. Fail-open, per PRD §6.0.
+	RateLimitRegisterAttempts int           `env:"RATE_LIMIT_REGISTER_ATTEMPTS" envDefault:"5"`
+	RateLimitRegisterWindow   time.Duration `env:"RATE_LIMIT_REGISTER_WINDOW" envDefault:"5m"`
+	// Throttles GET /card/:id per caller IP. Unauthenticated, one DB read per call,
+	// and the path parameter is enumerable, so an uncapped endpoint hands out a
+	// full scrape of every public card.
+	//
+	// Set for a member wall behind a shared egress: a page that renders dozens of
+	// cards must not spend a whole NAT's minute on one visitor. A cap this loose
+	// only slows a scrape rather than preventing it — bulk reads of public cards
+	// belong behind the proxy's cache, which is also where the capacity defense
+	// lives. Fail-open, per PRD §6.0.
+	RateLimitCardRPM    int           `env:"RATE_LIMIT_CARD_RPM" envDefault:"300"`
+	RateLimitCardWindow time.Duration `env:"RATE_LIMIT_CARD_WINDOW" envDefault:"60s"`
 
 	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
 	// beyond this queues at the hasher instead of saturating every CPU core.
@@ -279,6 +320,27 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_TOKEN_RPM must be positive")
 	case c.RateLimitTokenWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_TOKEN_WINDOW must be at least 1s")
+	case c.RateLimitOAuthLoginRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_LOGIN_RPM must be positive")
+	case c.RateLimitOAuthLoginWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_LOGIN_WINDOW must be at least 1s")
+	case c.RateLimitExchangeCodeRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_EXCHANGE_CODE_RPM must be positive")
+	case c.RateLimitExchangeCodeWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_EXCHANGE_CODE_WINDOW must be at least 1s")
+	case c.RateLimitRegisterAttempts <= 0:
+		return fmt.Errorf("RATE_LIMIT_REGISTER_ATTEMPTS must be positive")
+	case c.RateLimitRegisterWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_REGISTER_WINDOW must be at least 1s")
+	// A window longer than the Register-Ticket TTL would still be closed once the
+	// ticket it throttles has expired, so a throttled caller would have nothing
+	// left to retry with and the documented retry would be impossible.
+	case c.RateLimitRegisterWindow > registerTicketTTL:
+		return fmt.Errorf("RATE_LIMIT_REGISTER_WINDOW must not exceed the Register-Ticket TTL (%s)", registerTicketTTL)
+	case c.RateLimitCardRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_CARD_RPM must be positive")
+	case c.RateLimitCardWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_CARD_WINDOW must be at least 1s")
 	// The consent URL has no default: guessing one would make a deployment that
 	// forgot it redirect every third-party authorization to a page that does not
 	// exist, and the failure would only surface for the end user mid-flow.

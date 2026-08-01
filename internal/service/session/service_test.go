@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sort"
@@ -2657,4 +2658,209 @@ func TestRegisterReportsAbandonedHashingAsDependencyUnavailable(t *testing.T) {
 	if _, ok := tickets.tickets["reg_x"]; !ok {
 		t.Fatal("Register-Ticket was consumed by an abandoned request")
 	}
+}
+
+func TestRegisterThrottlesPerRegisterTicket(t *testing.T) {
+	service := newRegisterService(t)
+	limiter := &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: time.Minute}}
+	service.RegisterLimiter = limiter
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "New User",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+		ClientIP:       "198.51.100.7",
+	})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+	// Keyed by ticket, not IP: a campus NAT puts an entire building behind one
+	// egress address, so an IP key would make enrollment traffic lock itself out.
+	if got, want := limiter.calls[0], "register:ticket:reg_xxx"; got != want {
+		t.Fatalf("limiter call = %q, want %q", got, want)
+	}
+	// A throttled call must leave the ticket spendable: the whole point of the
+	// ticket surviving rejections is that the client can retry with it.
+	if _, found, _ := tickets.PeekRegisterTicket(context.Background(), "reg_xxx"); !found {
+		t.Fatal("Register-Ticket was consumed by a throttled call")
+	}
+}
+
+// The cap bounds PBKDF2 cost, so it must not charge for rejections that never
+// reach a derivation — otherwise a user mistyping their own form locks themselves
+// out of the endpoint.
+func TestRegisterDoesNotSpendQuotaOnCheapRejections(t *testing.T) {
+	service := newRegisterService(t)
+	limiter := &fakeLimiter{}
+	service.RegisterLimiter = limiter
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "short",
+		Name:           "New User",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+		ClientIP:       "198.51.100.7",
+	})
+	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
+	if len(limiter.calls) != 0 {
+		t.Fatalf("limiter calls = %v, want none for a rejection that never hashes", limiter.calls)
+	}
+}
+
+func TestRegisterAllowsWhenLimiterUnavailable(t *testing.T) {
+	service := newRegisterService(t)
+	service.RegisterLimiter = &fakeLimiter{err: errors.New("redis unavailable")}
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	if _, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "New User",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+		ClientIP:       "198.51.100.7",
+	}); err != nil {
+		t.Fatalf("Register with a broken limiter = %v, want fail-open", err)
+	}
+}
+
+// A replayed refresh token and an ordinary rotation share one action and, on
+// failure, one error code. The outcome is what separates "a token leaked and we
+// cut the family" from the mundane failures, so it has to be in the row.
+func TestRefreshAuditRecordsReplayOutcome(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	refresh, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeRotated {
+		t.Fatalf("successful refresh outcome = %q, want %q", got, refreshOutcomeRotated)
+	}
+
+	// Replay the token that was just rotated away.
+	tokens.rotateErr = repository.ErrTokenReplay
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: refresh.RefreshToken}); err == nil {
+		t.Fatal("Refresh accepted a replayed token")
+	}
+	entry := lastAuditAction(t, audit, "refresh")
+	if got := auditOutcome(t, entry); got != refreshOutcomeReplayed {
+		t.Fatalf("replayed refresh outcome = %q, want %q", got, refreshOutcomeReplayed)
+	}
+	// The family ID must travel with it, or the row cannot be tied to the tokens
+	// that were revoked in response.
+	if entry.ResourceID == nil || *entry.ResourceID == "" {
+		t.Fatalf("audit entry = %+v, want the revoked family_id recorded", entry)
+	}
+}
+
+// The already-revoked branch is a separate code path from the rotation-error
+// branch above, and it is the one a stolen-then-reused token hits.
+func TestRefreshAuditRecordsReplayOutcomeForRevokedToken(t *testing.T) {
+	service, _, _, _, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	// The original token is now revoked; presenting it again is the replay.
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err == nil {
+		t.Fatal("Refresh accepted a revoked token")
+	}
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeReplayed {
+		t.Fatalf("revoked-token outcome = %q, want %q", got, refreshOutcomeReplayed)
+	}
+}
+
+// An expired refresh token is benign, but it has to reach the log anyway: if only
+// replays were recorded, a refresh_replayed row could not be told apart from the
+// failures nobody wrote down.
+func TestRefreshAuditRecordsExpiredOutcome(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	// Age the stored token out against the service's fixed clock.
+	for _, stored := range tokens.refreshByHash {
+		stored.ExpiresAt = service.now().Add(-time.Minute)
+	}
+
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err == nil {
+		t.Fatal("Refresh accepted an expired token")
+	}
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeExpired {
+		t.Fatalf("expired refresh outcome = %q, want %q", got, refreshOutcomeExpired)
+	}
+}
+
+// A token presented against a different client is unreachable through the
+// first-party flow, so it means a misrouted client or a token being probed.
+func TestRefreshAuditRecordsClientMismatchOutcome(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	for _, stored := range tokens.refreshByHash {
+		stored.ClientID = 999
+	}
+
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err == nil {
+		t.Fatal("Refresh accepted a token issued to another client")
+	}
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeClientMismatch {
+		t.Fatalf("client-mismatch outcome = %q, want %q", got, refreshOutcomeClientMismatch)
+	}
+}
+
+func lastAuditAction(t *testing.T, audit *fakeAudit, action string) model.AuditLog {
+	t.Helper()
+	for i := len(audit.entries) - 1; i >= 0; i-- {
+		if audit.entries[i].Action == action {
+			return audit.entries[i]
+		}
+	}
+	t.Fatalf("no audit entry with action %q in %#v", action, audit.entries)
+	return model.AuditLog{}
+}
+
+func auditOutcome(t *testing.T, entry model.AuditLog) string {
+	t.Helper()
+	if len(entry.Detail) == 0 {
+		t.Fatalf("audit entry %+v has no detail", entry)
+	}
+	var detail struct {
+		Outcome string `json:"outcome"`
+	}
+	if err := json.Unmarshal(entry.Detail, &detail); err != nil {
+		t.Fatalf("unmarshal audit detail %s: %v", entry.Detail, err)
+	}
+	return detail.Outcome
 }
