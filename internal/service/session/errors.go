@@ -107,9 +107,6 @@ var (
 	// avatar. Distinct from the generic validation code so the client can tell a
 	// policy rejection from a malformed request.
 	ErrAvatarRejected = &Error{Kind: KindValidationFailed, Code: errcode.CodeAvatarRejected}
-	// ErrValidationFailed is the generic 42200 for business rules that do not
-	// have a dedicated code.
-	ErrValidationFailed = &Error{Kind: KindValidationFailed, Code: errcode.CodeValidationFailed}
 	// ErrObjectUploadFailed reports a failed object-storage upload. The content
 	// review has its own failure path (ErrDependencyUnavailable, fail-closed):
 	// an image that was not reviewed must not be served as cleared.
