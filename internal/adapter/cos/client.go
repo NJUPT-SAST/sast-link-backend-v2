@@ -11,11 +11,19 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/tencentyun/cos-go-sdk-v5"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/objectstore"
 )
+
+// cosIOTimeout bounds a single COS round trip. Wider than provider.httpIOTimeout
+// (10s for small token exchanges): an avatar upload carries a 5MB PUT plus the
+// synchronous CI review, both over the public network. The bound still prevents
+// a hung COS side from pinning a request goroutine forever when the caller
+// never cancels the context.
+const cosIOTimeout = 30 * time.Second
 
 // Config carries the COS connection settings. Validate was already applied by
 // internal/config; this struct only fails when the values cannot form a client.
@@ -66,6 +74,7 @@ func New(cfg Config) (*Client, error) {
 			SecretID:  strings.TrimSpace(cfg.AccessKey),
 			SecretKey: strings.TrimSpace(cfg.SecretKey),
 		},
+		Timeout: cosIOTimeout,
 	})
 	return &Client{
 		client:  sdkClient,
