@@ -7,6 +7,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
+	cosadapter "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/cos"
 	oauthredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/oauth"
 	oauthloginredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/oauthlogin"
 	sessionredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/session"
@@ -14,6 +15,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/objectstore"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/provider"
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -125,6 +127,36 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Window: cfg.RateLimitCardWindow,
 		},
 	}
+	avatarLimiter := sessionredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitUploadAvatarRPM,
+			Window: cfg.RateLimitUploadAvatarWindow,
+		},
+	}
+	// Object storage is optional: an unconfigured deployment keeps every other
+	// endpoint and answers 50002 on PUT /user/avatar. When configured, the COS
+	// client also carries the image review (fail-closed by default).
+	var avatarStore objectstore.ObjectStore
+	var avatarAuditor objectstore.AvatarAuditor
+	if cfg.StorageConfigured() {
+		storage, storageErr := cosadapter.New(cosadapter.Config{
+			Endpoint:  cfg.StorageEndpoint,
+			Region:    cfg.StorageRegion,
+			Bucket:    cfg.StorageBucket,
+			AccessKey: cfg.StorageAccessKey,
+			SecretKey: cfg.StorageSecretKey,
+			BaseURL:   cfg.StorageBaseURL,
+		})
+		if storageErr != nil {
+			return nil, fmt.Errorf("construct object storage client: %w", storageErr)
+		}
+		avatarStore = storage
+		if cfg.StorageAuditEnabled {
+			avatarAuditor = storage
+		}
+	}
 	emailer := mailer.New(mailer.Config{
 		Host:          cfg.SMTPHost,
 		Port:          cfg.SMTPPort,
@@ -157,6 +189,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		UnbindLimiter:     unbindLimiter,
 		RegisterLimiter:   registerLimiter,
 		CardLimiter:       cardLimiter,
+		AvatarLimiter:     avatarLimiter,
+		AvatarStore:       avatarStore,
+		AvatarAuditor:     avatarAuditor,
 		ForgotPasswords:   forgotPasswords,
 		InternalClientID:  cfg.InternalOAuthClientID,
 		JWT:               jwtManager,
