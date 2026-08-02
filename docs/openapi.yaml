@@ -3509,7 +3509,7 @@ components:
                 type: string
                 description: 错误描述
               data:
-                type: "null"
+                nullable: true
             required:
               - code
               - message
@@ -3545,7 +3545,7 @@ components:
               message:
                 type: string
               data:
-                type: "null"
+                nullable: true
             required:
               - code
               - message
@@ -3593,7 +3593,7 @@ components:
               message:
                 type: string
               data:
-                type: "null"
+                nullable: true
             required:
               - code
               - message
@@ -3623,7 +3623,7 @@ components:
               message:
                 type: string
               data:
-                type: "null"
+                nullable: true
             required:
               - code
               - message
@@ -3653,7 +3653,7 @@ components:
               message:
                 type: string
               data:
-                type: "null"
+                nullable: true
             required:
               - code
               - message
@@ -3689,7 +3689,7 @@ components:
               message:
                 type: string
               data:
-                type: "null"
+                nullable: true
             required:
               - code
               - message
@@ -3723,7 +3723,7 @@ components:
               message:
                 type: string
               data:
-                type: "null"
+                nullable: true
             required:
               - code
               - message
@@ -3747,7 +3747,7 @@ components:
               message:
                 type: string
               data:
-                type: "null"
+                nullable: true
             required:
               - code
               - message
