@@ -38,7 +38,7 @@
 ```
 
 | 字段 | 类型 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `code` | int | 业务状态码，`0` 表示成功，非 `0` 表示错误 |
 | `message` | string | 可读的描述信息，成功时为 `"ok"`，错误时为具体错误原因 |
 | `data` | object\|array\|null | 业务数据载荷，错误时为 `null` |
@@ -55,6 +55,7 @@
 - `/.well-known/jwks.json`：直出 JWKS JSON。
 
 `/oauth/authorize/consent` 是 SAST Link 自有端点而非 RFC 定义端点，**使用标准信封**，不在上述例外之列。
+
 - `/health`：直出 `{ "status", "db", "redis" }`。
 - `/card/{id}`：直出公开 profile 字段。
 
@@ -80,7 +81,7 @@
 #### 参数错误（400xx）
 
 | 业务码 | 说明 |
-|--------|------|
+| -------- | ------ |
 | `40000` | 请求参数错误 |
 | `40001` | 缺少必要参数 |
 | `40002` | 参数格式错误 |
@@ -92,7 +93,7 @@
 #### 认证错误（401xx）
 
 | 业务码 | 说明 |
-|--------|------|
+| -------- | ------ |
 | `40100` | 未登录（缺少或无效 Authorization Header） |
 | `40101` | Access Token 已过期 |
 | `40102` | Access Token 无效或已被撤销 |
@@ -105,7 +106,7 @@
 #### 权限错误（403xx）
 
 | 业务码 | 说明 |
-|--------|------|
+| -------- | ------ |
 | `40300` | 无权限（需 admin / lecturer 角色） |
 | `40301` | 账号已注销（`state = is_deleted`） |
 | `40302` | 非 SAST 企业飞书用户 |
@@ -113,7 +114,7 @@
 #### 资源不存在（404xx）
 
 | 业务码 | 说明 |
-|--------|------|
+| -------- | ------ |
 | `40400` | 资源不存在 |
 | `40401` | 用户不存在 |
 | `40402` | OAuth 客户端不存在 |
@@ -121,7 +122,7 @@
 #### 资源冲突（409xx）
 
 | 业务码 | 说明 |
-|--------|------|
+| -------- | ------ |
 | `40900` | 资源已存在 |
 | `40901` | 邮箱已被注册 |
 | `40902` | 学号已被占用 |
@@ -132,11 +133,10 @@
 #### 业务校验失败（422xx）
 
 | 业务码 | 说明 |
-|--------|------|
+| -------- | ------ |
 | `42200` | 业务校验失败 |
 | `42201` | 密码长度不足（最短 8 位） |
 | `42202` | 新旧密码不能相同 |
-
 
 #### 频率限制（429xx）
 
@@ -149,7 +149,7 @@
 #### 服务端错误（500xx）
 
 | 业务码 | 说明 |
-|--------|------|
+| -------- | ------ |
 | `50000` | 服务器内部错误 |
 | `50001` | 邮件发送失败 |
 | `50002` | 对象存储上传失败 |
@@ -178,6 +178,7 @@ POST /auth/register/send-code
 ```
 
 **Request**:
+
 ```json
 {
   "login_email": "b2404****@njupt.edu.cn"
@@ -185,6 +186,7 @@ POST /auth/register/send-code
 ```
 
 **Response** `200`:
+
 ```json
 {
   "message": "验证码已发送至邮箱",
@@ -205,6 +207,7 @@ POST /auth/register/verify-code
 ```
 
 **Request**:
+
 ```json
 {
   "login_email": "b2404****@njupt.edu.cn",
@@ -213,6 +216,7 @@ POST /auth/register/verify-code
 ```
 
 **Response** `200`:
+
 ```json
 {
   "register_ticket": "reg_abc123def456...",
@@ -221,6 +225,7 @@ POST /auth/register/verify-code
 ```
 
 **说明**:
+
 - Register-Ticket 存储在 Redis，有效期 5 分钟，一次性使用
 - Ticket 内携带已验证的邮箱，第二步凭 Ticket 完成注册，无需再次传入 `login_email`
 - 校验邮箱域名必须为 `@njupt.edu.cn` 或 `@sast.fun`
@@ -240,6 +245,7 @@ POST /auth/register
 ```
 
 **Request**:
+
 ```json
 {
   "register_ticket": "reg_abc123def456...",
@@ -256,7 +262,7 @@ POST /auth/register
 ```
 
 | 字段 | 必填 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `register_ticket` | 是 | 注册验证码校验后获得的票据 |
 | `password` | 是 | 密码，最短 8 位 |
 | `name` | 是 | 姓名 |
@@ -269,6 +275,7 @@ POST /auth/register
 | `oauth_state` | 否 | 原始 OAuth 授权 state 参数（CSRF 校验值），需与 registration_state 内暂存值匹配 |
 
 **Response** `201`:
+
 ```json
 {
   "access_token": "eyJhbGciOiJSUzI1NiIs...",
@@ -308,6 +315,7 @@ POST /user/login
 ```
 
 **Request**:
+
 ```json
 {
   "login_email": "b2404****@njupt.edu.cn",
@@ -316,6 +324,7 @@ POST /user/login
 ```
 
 **Response** `200`:
+
 ```json
 {
   "access_token": "eyJhbGciOiJSUzI1NiIs...",
@@ -335,6 +344,7 @@ POST /user/login
 ```
 
 **说明**:
+
 - 教育邮箱（`@njupt.edu.cn` / `@sast.fun`）查 `user.login_email` 后验证 `user.password`
 - 第三方邮箱查 `identities` 表 `provider = 'other_mail'` 的 `provider_id` 反查 `user_id`，同样验证 `user.password`
 - 所有密码登录共用同一套密码（`user.password`），第三方邮箱仅作为登录标识
@@ -348,6 +358,7 @@ POST /auth/refresh
 ```
 
 **Request**:
+
 ```json
 {
   "refresh_token": "rt_abc123..."
@@ -355,6 +366,7 @@ POST /auth/refresh
 ```
 
 **Response** `200`:
+
 ```json
 {
   "access_token": "eyJhbGciOiJSUzI1NiIs...",
@@ -365,6 +377,7 @@ POST /auth/refresh
 ```
 
 **说明**:
+
 - Refresh Token 旋转机制 — 每次使用后旧 token 立即撤销，下发新 token
 - 此端点用于内部登录（密码/第三方）的 token 刷新；OAuth 客户端刷新请使用 `POST /oauth/token`（grant_type=refresh_token）
 
@@ -379,6 +392,7 @@ POST /auth/logout
 **Headers**: `Authorization: Bearer <access_token>`
 
 **Request**:
+
 ```json
 {
   "refresh_token": "rt_abc123..."
@@ -386,6 +400,7 @@ POST /auth/logout
 ```
 
 **Response** `200`:
+
 ```json
 {
   "message": "已登出"
@@ -405,6 +420,7 @@ POST /auth/change-password
 **Headers**: `Authorization: Bearer <access_token>`
 
 **Request**:
+
 ```json
 {
   "old_password": "old_password",
@@ -413,6 +429,7 @@ POST /auth/change-password
 ```
 
 **Response** `200`:
+
 ```json
 {
   "message": "密码修改成功"
@@ -432,6 +449,7 @@ POST /auth/forgot-password/send-code
 ```
 
 **Request**:
+
 ```json
 {
   "login_email": "b2404****@njupt.edu.cn"
@@ -439,6 +457,7 @@ POST /auth/forgot-password/send-code
 ```
 
 **Response** `200`:
+
 ```json
 {
   "message": "重置密码请求已受理",
@@ -459,6 +478,7 @@ POST /auth/reset-password
 ```
 
 **Request**:
+
 ```json
 {
   "login_email": "b2404****@njupt.edu.cn",
@@ -468,6 +488,7 @@ POST /auth/reset-password
 ```
 
 **Response** `200`:
+
 ```json
 {
   "message": "密码重置成功，请重新登录"
@@ -513,6 +534,7 @@ GET /oauth/github/callback?code=...&state=...
 **Response** `302` 重定向至前端。
 
 **处理分支**:
+
 - 已有绑定 → 签发一次性 `login_code`（Redis，60s），302 重定向至前端 `?code=<login_code>`
 - 无绑定 → 生成 `registration_state`（Redis，15min，暂存 provider + provider_id + identity_data + oauth_state），302 重定向至注册补全页 `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=github&name=<login>&avatar=<url>`
 
@@ -539,6 +561,7 @@ GET /oauth/lark/callback?code=...&state=...
 **约束**: 仅限 SAST 企业内飞书用户。
 
 **处理分支**:
+
 - 已有绑定 → 签发一次性 `login_code`（Redis，60s），302 重定向至前端 `?code=<login_code>`
 - 无绑定 → 生成 `registration_state`（Redis，15min，暂存 provider + provider_id + identity_data + oauth_state），302 重定向至注册补全页 `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=lark&name=<name>&avatar=<url>`
 - 非 SAST 企业用户 → 拒绝，提示"仅限 SAST 成员登录"
@@ -558,6 +581,7 @@ POST /oauth/exchange-code
 ```
 
 **Request**:
+
 ```json
 {
   "code": "lc_abc123..."
@@ -565,6 +589,7 @@ POST /oauth/exchange-code
 ```
 
 **Response** `200`:
+
 ```json
 {
   "access_token": "eyJhbGciOiJSUzI1NiIs...",
@@ -600,6 +625,7 @@ GET /user/profile
 **Headers**: `Authorization: Bearer <access_token>`
 
 **Response** `200`:
+
 ```json
 {
   "id": 1,
@@ -664,6 +690,7 @@ PUT /user/profile
 更新当前登录用户可自助维护的个人信息。未传字段保持不变；`login_email`、`role`、`state`、`email_type` 等身份与权限字段不可通过此接口修改，传入未知字段返回 `40000`。
 
 **Request**（所有字段均可选，至少传一个）:
+
 ```json
 {
   "name": "张三",
@@ -684,7 +711,7 @@ PUT /user/profile
 **字段语义**:
 
 | 字段组 | 归属 | 传空字符串 |
-|--------|------|-----------|
+| -------- | ------ | ----------- |
 | `nickname` / `department` / `intro` / `email` / `blog_url` / `github_url` | `profile`（可空） | 清空为 `null` |
 | `name` / `student_id` / `phone_number` / `qq_number` / `college` / `major` | `user`（NOT NULL） | 返回 `40000` |
 
@@ -703,6 +730,7 @@ PUT /user/profile
 审计日志 `update_profile` 的 `detail.changed_fields` 记录本次实际写入的字段名。
 
 **Response** `200`:
+
 ```json
 {
   "message": "个人信息更新成功",
@@ -730,8 +758,6 @@ PUT /user/profile
 
 ### 3.3 上传头像
 
-> **尚未实现**：路由未注册，调用会得到 `404`。依赖 `.env.example` 中同样未接入的 `STORAGE_*` 对象存储配置。
-
 ```
 PUT /user/avatar
 ```
@@ -739,12 +765,17 @@ PUT /user/avatar
 **Headers**: `Authorization: Bearer <access_token>`
 **Content-Type**: `multipart/form-data`
 
-**Request**: `file` 字段（图片，限制 5MB，格式 jpg/png/webp）
+**Request**: `file` 字段（图片，限制 5MB，格式 jpg/png/webp；按魔数检测，不信任文件名与 Content-Type）
+
+上传链路：后端接收图片 → 上传腾讯云 COS（公开读）→ COS 内容审核（`STORAGE_AUDIT_ENABLED` 开启时）→ 写入 `profile.avatar` → 返回公开 URL。审核 fail-closed：审核服务不可用时上传失败，未审核图片不放行。旧头像对象在写库成功后删除（失败仅记日志，不影响响应）。
+
+**错误码**: `40000`（非 jpg/png/webp、超 5MB、文件损坏或为空、缺少 `file` 字段）、`42200`（头像未通过内容审核）、`42900`（请求过于频繁，按用户限流）、`40102`（未认证）、`40301`（账号已注销）、`50002`（对象存储未配置/上传失败/审核服务不可用）、`50003`（数据库错误）
 
 **Response** `200`:
+
 ```json
 {
-  "avatar_url": "https://cos.example.com/avatar/1.jpg"
+  "avatar_url": "https://cos.example.com/avatar/1/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.jpg"
 }
 ```
 
@@ -769,6 +800,7 @@ GET /card/:id
 | `id` | 用户 ID |
 
 **Response** `200`:
+
 ```json
 {
   "id": 1,
@@ -800,6 +832,7 @@ GET /user/identities
 **Headers**: `Authorization: Bearer <access_token>`
 
 **Response** `200`:
+
 ```json
 {
   "identities": [
@@ -866,6 +899,7 @@ POST /user/identities/lark
 | `redirect_uri` | 否 | 签发该 `code` 时使用的回调地址，即前端的绑定回调页。RFC 6749 §4.1.3 要求 token 交换重复这个值，飞书注册了多条回调时不一致会返回 `invalid_grant`。省略时回退到 `OAUTH_FEISHU_REDIRECT_URI`（登录回调），仅在绑定与登录共用同一回调地址时才适用 |
 
 **Response** `200`:
+
 ```json
 {
   "message": "飞书账号绑定成功",
@@ -901,6 +935,7 @@ POST /user/identities/github
 | `redirect_uri` | 否 | 签发该 `code` 时使用的回调地址，即前端的绑定回调页。省略时回退到 `OAUTH_GITHUB_REDIRECT_URI`（登录回调）。GitHub 在 token 交换阶段用它校验与签发 code 时是否一致，见 §4.2 的回调说明 |
 
 **Response** `200`:
+
 ```json
 {
   "message": "GitHub 账号绑定成功",
@@ -929,6 +964,7 @@ POST /user/identities/email
 **Headers**: `Authorization: Bearer <access_token>`
 
 **Request**:
+
 ```json
 {
   "email": "myemail@qq.com"
@@ -936,6 +972,7 @@ POST /user/identities/email
 ```
 
 **Response** `200`:
+
 ```json
 {
   "bind_ticket": "be_abc123def456...",
@@ -956,6 +993,7 @@ POST /user/identities/email/verify
 **Headers**: `Authorization: Bearer <access_token>`
 
 **Request**:
+
 ```json
 {
   "bind_ticket": "be_abc123def456...",
@@ -964,6 +1002,7 @@ POST /user/identities/email/verify
 ```
 
 **Response** `200`:
+
 ```json
 {
   "message": "邮箱绑定成功",
@@ -992,6 +1031,7 @@ DELETE /user/identities/:id
 **Headers**: `Authorization: Bearer <access_token>`
 
 **Request**:
+
 ```json
 {
   "password": "current_password"
@@ -999,6 +1039,7 @@ DELETE /user/identities/:id
 ```
 
 **Response** `200`:
+
 ```json
 {
   "message": "解绑成功"
@@ -1006,6 +1047,7 @@ DELETE /user/identities/:id
 ```
 
 **约束**:
+
 - 必须输入当前密码进行二次确认——仅凭 Access Token 不足以摘除账号的登录方式
 - 主邮箱（`user.login_email`）不在 identities 中，不可通过此接口解绑
 - 不能解绑唯一登录方式（解绑后无其他登录手段则拒绝）
@@ -1029,7 +1071,7 @@ GET /oauth/authorize
 **Query Parameters**:
 
 | 参数 | 必填 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `response_type` | 是 | 固定 `code` |
 | `client_id` | 是 | 客户端标识 |
 | `redirect_uri` | 是 | 回调地址 |
@@ -1088,6 +1130,7 @@ POST /oauth/authorize/consent
 **Content-Type**: `application/json`
 
 **Request**:
+
 ```json
 {
   "request_id": "ar_3f2a1b...",
@@ -1101,6 +1144,7 @@ POST /oauth/authorize/consent
 | `approve` | 是 | 用户决定。字段缺失返回 `40000`，不默认为拒绝 |
 
 **Response** `200`:
+
 ```json
 {
   "code": 0,
@@ -1155,6 +1199,7 @@ grant_type=authorization_code&code=auth_code_abc123...&redirect_uri=https%3A%2F%
 ```
 
 **Response** `200`:
+
 ```json
 {
   "access_token": "eyJhbGciOiJSUzI1NiIs...",
@@ -1200,7 +1245,7 @@ grant_type=refresh_token&refresh_token=rt_abc123...&client_id=9f3a1c7d2e5b40a8c6
 ```
 
 | HTTP | `error` | 触发条件 |
-|------|---------|----------|
+| ------ | --------- | ---------- |
 | `400` | `invalid_request` | 缺少必填参数、Content-Type 非 `application/x-www-form-urlencoded`、重复参数 |
 | `400` | `invalid_grant` | 授权码无效/已过期/已使用、PKCE 校验失败、`redirect_uri` 不一致、授权码或 refresh token 不属于该客户端、refresh token 已撤销或过期、账号已注销 |
 | `400` | `unsupported_grant_type` | `grant_type` 非 `authorization_code` / `refresh_token` |
@@ -1248,7 +1293,7 @@ token=rt_abc123...&token_type_hint=refresh_token&client_id=9f3a1c7d2e5b40a8c6d1f
 ```
 
 | 参数 | 必填 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `token` | 是 | 待撤销的 refresh token 或 access token |
 | `token_type_hint` | 否 | `refresh_token` / `access_token`，仅调整查找顺序 |
 | `client_id` | 是 | 客户端标识 |
@@ -1295,7 +1340,7 @@ GET /admin/users
 **Query Parameters**:
 
 | 参数 | 说明 |
-|------|------|
+| ------ | ------ |
 | `page` | 页码，默认 1 |
 | `page_size` | 每页条数，默认 20，最大 100 |
 | `role` | 筛选角色：freshman / member / lecturer / admin |
@@ -1309,6 +1354,7 @@ GET /admin/users
 **错误码**：`40000`（分页参数非法 / `role`、`state`、`department` 取值非法）、`40100`、`40300`。
 
 **Response** `200`:
+
 ```json
 {
   "users": [
@@ -1350,6 +1396,7 @@ GET /admin/users/:id
 **错误码**：`40100`、`40300`、`40401`。
 
 **Response** `200`:
+
 ```json
 {
   "id": 1,
@@ -1381,6 +1428,7 @@ PUT /admin/users/:id
 **Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
 
 **Request**（所有字段可选，仅传需要修改的字段）:
+
 ```json
 {
   "name": "张三",
@@ -1397,6 +1445,7 @@ PUT /admin/users/:id
 ```
 
 **说明**：
+
 - 至少传一个字段，否则返回 `400`。未知字段（含 `password`、`token_version`、`id`、`profile`）一律返回 `400`，不静默忽略。
 - `name` / `phone_number` / `qq_number` / `student_id` 不可传空串（列为 `NOT NULL`）；`major` 可置空。长度按 V001 列宽校验，中文按字符数而非字节数计。
 - `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。
@@ -1406,6 +1455,7 @@ PUT /admin/users/:id
 **错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
 
 **Response** `200`:
+
 ```json
 {
   "message": "用户信息更新成功"
@@ -1423,6 +1473,7 @@ DELETE /admin/users/:id
 **Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
 
 **Response** `200`:
+
 ```json
 {
   "message": "用户已注销"
@@ -1446,6 +1497,7 @@ PUT /admin/users/:id/restore
 **Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
 
 **Response** `200`:
+
 ```json
 {
   "message": "用户已恢复"
@@ -1469,6 +1521,7 @@ GET /admin/oauth-clients
 **Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
 
 **Response** `200`:
+
 ```json
 {
   "clients": [
@@ -1499,6 +1552,7 @@ POST /admin/oauth-clients
 **Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
 
 **Request**:
+
 ```json
 {
   "client_name": "新应用",
@@ -1510,6 +1564,7 @@ POST /admin/oauth-clients
 ```
 
 **Response** `201`:
+
 ```json
 {
   "id": 3,
@@ -1553,6 +1608,7 @@ PUT /admin/oauth-clients/:id
 **Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
 
 **Request**:
+
 ```json
 {
   "client_name": "已更名应用",
@@ -1562,6 +1618,7 @@ PUT /admin/oauth-clients/:id
 ```
 
 **Response** `200`:
+
 ```json
 {
   "message": "客户端信息更新成功"
@@ -1600,7 +1657,7 @@ GET /admin/audit-logs
 **Query Parameters**:
 
 | 参数 | 说明 |
-|------|------|
+| ------ | ------ |
 | `page` | 页码，默认 1 |
 | `page_size` | 每页条数，默认 50，最大 100 |
 | `user_id` | 按用户筛选（正整数） |
@@ -1617,6 +1674,7 @@ GET /admin/audit-logs
 **错误码**：`40000`（参数格式非法 / 时间窗口倒置）、`40100`、`40300`。
 
 **Response** `200`:
+
 ```json
 {
   "logs": [
@@ -1651,6 +1709,7 @@ GET /health
 ```
 
 **Response** `200`:
+
 ```json
 {
   "status": "ok",
@@ -1672,7 +1731,7 @@ GET /health
 `db` 检查失败时返回 `500`，`status` 与 `db` 均为 `error`。
 
 | 字段 | 取值 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `status` | `ok` / `error` | 仅由必需依赖决定；`error` 时 HTTP 500 |
 | `db` | `ok` / `error` | PostgreSQL，必需依赖 |
 | `redis` | `ok` / `degraded` | Redis，可选依赖，故障不影响 `status` |
@@ -1805,6 +1864,7 @@ POST /userinfo
 ```
 
 **说明**：
+
 - `sub` 为用户唯一标识（`user.id` 字符串），始终返回
 - `email` 为注册邮箱（非对外展示邮箱）。`email_verified` 固定为 `true`（SAST Link 注册时已校验邮箱）
 - `updated_at` 为 Unix timestamp
@@ -1874,7 +1934,7 @@ Content-Type: application/json
 **ID Token Claims 说明**：
 
 | Claim | Scope 要求 | 说明 |
-|-------|-----------|------|
+| ------- | ----------- | ------ |
 | `iss` | — | Issuer，固定为 `https://link.sast.fun/v2` |
 | `sub` | `openid` | 用户唯一标识（`user.id` 字符串） |
 | `aud` | — | 客户端 `client_id` |
@@ -1967,7 +2027,7 @@ RP (Relying Party)          浏览器 / 前端授权页          SAST Link v2 (O
 ### A. 枚举值参考
 
 | 枚举类型 | 值 |
-|----------|-----|
+| ---------- | ----- |
 | `user_role` | `freshman` / `member` / `lecturer` / `admin` |
 | `state` | `njupter` / `on_sast` / `retired_sast` / `is_deleted` |
 | `department` | `software` / `media` |
@@ -1978,7 +2038,7 @@ RP (Relying Party)          浏览器 / 前端授权页          SAST Link v2 (O
 ### B. HTTP 状态码与业务码对应
 
 | HTTP 状态码 | 说明 | 对应业务码段 |
-|-------------|------|-------------|
+| ------------- | ------ | ------------- |
 | 200 | 成功 | `0` |
 | 201 | 创建成功 | `0` |
 | 204 | 无内容（删除成功） | `0` |
@@ -1996,7 +2056,7 @@ RP (Relying Party)          浏览器 / 前端授权页          SAST Link v2 (O
 ### C. Token 生命周期
 
 | Token 类型 | 有效期 |
-|------------|--------|
+| ------------ | -------- |
 | Access Token (JWT) | 1 小时 |
 | Refresh Token | 30 天 |
 | Register-Ticket（Redis） | 5 分钟 |
