@@ -37,6 +37,7 @@ type fakeService struct {
 	bindEmailSendCodeResult  *session.BindEmailSendCodeResult
 	bindEmailVerifyResult    *session.BindEmailVerifyResult
 	updateProfileResult      *session.UpdateProfileResult
+	uploadAvatarResult       *session.UploadAvatarResult
 	listIdentitiesResult     *session.ListIdentitiesResult
 	unbindIdentityResult     *session.UnbindIdentityResult
 	cardResult               *session.CardResult
@@ -53,6 +54,7 @@ type fakeService struct {
 	bindEmailSendCodeErr     error
 	bindEmailVerifyErr       error
 	updateProfileErr         error
+	uploadAvatarErr          error
 	listIdentitiesErr        error
 	unbindIdentityErr        error
 	cardErr                  error
@@ -69,10 +71,12 @@ type fakeService struct {
 	bindEmailSendCodeInput   session.BindEmailSendCodeInput
 	bindEmailVerifyInput     session.BindEmailVerifyInput
 	updateProfileInput       session.UpdateProfileInput
+	uploadAvatarInput        session.UploadAvatarInput
 	listIdentitiesInput      session.ListIdentitiesInput
 	unbindIdentityInput      session.UnbindIdentityInput
 	cardInput                session.CardInput
 	updateProfileCalls       int
+	uploadAvatarCalls        int
 	unbindIdentityCalls      int
 	cardCalls                int
 	loginCalls               int
@@ -153,6 +157,12 @@ func (s *fakeService) UpdateProfile(_ context.Context, input session.UpdateProfi
 	s.updateProfileCalls++
 	s.updateProfileInput = input
 	return s.updateProfileResult, s.updateProfileErr
+}
+
+func (s *fakeService) UploadAvatar(_ context.Context, input session.UploadAvatarInput) (*session.UploadAvatarResult, error) {
+	s.uploadAvatarCalls++
+	s.uploadAvatarInput = input
+	return s.uploadAvatarResult, s.uploadAvatarErr
 }
 
 func TestLoginReturnsEnvelopeDTOAndInput(t *testing.T) {

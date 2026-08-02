@@ -69,6 +69,9 @@ func mapServiceError(err error) error {
 	case session.KindEmailFailed:
 		message = "邮件发送失败，请稍后重试"
 		status = http.StatusInternalServerError
+	case session.KindObjectUploadFailed:
+		message = "头像上传失败，请稍后重试"
+		status = http.StatusInternalServerError
 	case session.KindConflict:
 		status = http.StatusConflict
 	case session.KindValidationFailed:
@@ -114,6 +117,8 @@ func defaultCode(kind session.Kind) int {
 		return errcode.CodeNotFound
 	case session.KindDependencyUnavailable:
 		return errcode.CodeDependencyUnavailable
+	case session.KindObjectUploadFailed:
+		return errcode.CodeObjectUploadFailed
 	default:
 		return errcode.CodeInternal
 	}
