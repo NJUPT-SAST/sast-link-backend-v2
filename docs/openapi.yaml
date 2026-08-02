@@ -858,7 +858,7 @@ paths:
           description: 未认证（401xx）
         "422":
           description: >-
-            业务校验失败（42200，头像未通过内容审核）
+            头像未通过内容审核（42203）
           content:
             application/json:
               schema:
@@ -869,6 +869,12 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
           description: 服务端错误（500xx，含 50002 对象存储失败）
+        "503":
+          description: 内容审核服务不可用（50300，fail-closed）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
       security:
         - bearerAuth: []
   /card/{id}:

@@ -101,15 +101,16 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 		verdict, auditErr := s.AvatarAuditor.AuditImage(ctx, key)
 		if auditErr != nil {
 			// Fail-closed: an unreachable review must not let an unvetted image
-			// through. The caller sees the upload failed and can retry.
-			return nil, cleanup(newError(ErrObjectUploadFailed, "头像审核服务暂不可用，请稍后重试", auditErr))
+			// through. 50300 (dependency unavailable) tells the caller to retry,
+			// matching the other fail-closed Redis-backed dependencies.
+			return nil, cleanup(newError(ErrDependencyUnavailable, "头像审核服务暂不可用，请稍后重试", auditErr))
 		}
 		if verdict.Sensitive {
-			if err := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), false, errcode.CodeValidationFailed,
+			if err := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), false, errcode.CodeAvatarRejected,
 				input.ClientIP, input.UserAgent, map[string]any{"label": verdict.Label}); err != nil {
 				slog.Error("audit avatar rejection", "user_id", input.UserID, "error", err)
 			}
-			return nil, cleanup(newError(ErrValidationFailed, "头像未通过内容审核", nil))
+			return nil, cleanup(newError(ErrAvatarRejected, "头像未通过内容审核", nil))
 		}
 	}
 

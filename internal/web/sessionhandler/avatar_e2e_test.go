@@ -217,8 +217,8 @@ func TestAvatarE2ERejectsSensitiveContent(t *testing.T) {
 	if audit.Success != nil && *audit.Success {
 		t.Fatal("audit success = true, want false for rejected review")
 	}
-	if audit.ErrCode == nil || *audit.ErrCode != errcode.CodeValidationFailed {
-		t.Fatalf("audit err_code = %v, want 42200", audit.ErrCode)
+	if audit.ErrCode == nil || *audit.ErrCode != errcode.CodeAvatarRejected {
+		t.Fatalf("audit err_code = %v, want 42203", audit.ErrCode)
 	}
 }
 

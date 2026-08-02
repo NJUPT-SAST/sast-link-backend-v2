@@ -103,12 +103,16 @@ var (
 	// ErrLastLoginMethod rejects unbinding the caller's only remaining login
 	// method, which would lock them out of their own account.
 	ErrLastLoginMethod = &Error{Kind: KindValidationFailed, Code: errcode.CodeValidationFailed}
+	// ErrAvatarRejected reports that the content review refused the uploaded
+	// avatar. Distinct from the generic validation code so the client can tell a
+	// policy rejection from a malformed request.
+	ErrAvatarRejected = &Error{Kind: KindValidationFailed, Code: errcode.CodeAvatarRejected}
 	// ErrValidationFailed is the generic 42200 for business rules that do not
-	// have a dedicated code, such as a rejected content review.
+	// have a dedicated code.
 	ErrValidationFailed = &Error{Kind: KindValidationFailed, Code: errcode.CodeValidationFailed}
-	// ErrObjectUploadFailed reports a failed object-storage upload or content
-	// review. The review failure is deliberately fail-closed: an image that was
-	// not reviewed must not be served as cleared.
+	// ErrObjectUploadFailed reports a failed object-storage upload. The content
+	// review has its own failure path (ErrDependencyUnavailable, fail-closed):
+	// an image that was not reviewed must not be served as cleared.
 	ErrObjectUploadFailed = &Error{Kind: KindObjectUploadFailed, Code: errcode.CodeObjectUploadFailed}
 	// ErrDatabase reports a persistence failure with the documented 50003 code.
 	ErrDatabase = &Error{Kind: KindInternal, Code: errcode.CodeDatabaseFailed}

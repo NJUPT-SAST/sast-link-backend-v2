@@ -268,8 +268,8 @@ func TestUploadAvatarRejectsSensitiveContent(t *testing.T) {
 		UserID: 42, Content: bytes.NewReader(imageData), Size: int64(len(imageData)),
 	})
 	var serviceErr *Error
-	if !errors.As(err, &serviceErr) || serviceErr.Code != errcode.CodeValidationFailed {
-		t.Fatalf("error = %v, want validation-failed code", err)
+	if !errors.As(err, &serviceErr) || serviceErr.Code != errcode.CodeAvatarRejected {
+		t.Fatalf("error = %v, want avatar-rejected code", err)
 	}
 	if len(store.uploads) != 0 {
 		t.Fatalf("store still has %d objects, want 0 after rejection", len(store.uploads))
@@ -278,8 +278,8 @@ func TestUploadAvatarRejectsSensitiveContent(t *testing.T) {
 		t.Fatalf("profile.avatar = %v, want nil after rejection", *got)
 	}
 	entry := audit.entries[len(audit.entries)-1]
-	if entry.Action != "upload_avatar" || entry.Success == nil || *entry.Success || entry.ErrCode == nil || *entry.ErrCode != errcode.CodeValidationFailed {
-		t.Fatalf("audit entry = %+v, want failed upload_avatar with 42200", entry)
+	if entry.Action != "upload_avatar" || entry.Success == nil || *entry.Success || entry.ErrCode == nil || *entry.ErrCode != errcode.CodeAvatarRejected {
+		t.Fatalf("audit entry = %+v, want failed upload_avatar with 42203", entry)
 	}
 	if !strings.Contains(string(entry.Detail), "Porn") {
 		t.Fatalf("audit detail = %s, want rejected label", entry.Detail)
@@ -297,8 +297,8 @@ func TestUploadAvatarFailClosedWhenAuditUnavailable(t *testing.T) {
 		UserID: 42, Content: bytes.NewReader(imageData), Size: int64(len(imageData)),
 	})
 	var serviceErr *Error
-	if !errors.As(err, &serviceErr) || serviceErr.Code != errcode.CodeObjectUploadFailed {
-		t.Fatalf("error = %v, want object-upload-failed code", err)
+	if !errors.As(err, &serviceErr) || serviceErr.Code != errcode.CodeDependencyUnavailable {
+		t.Fatalf("error = %v, want dependency-unavailable code", err)
 	}
 	if len(store.uploads) != 0 {
 		t.Fatalf("store still has %d objects, want 0 after fail-closed rejection", len(store.uploads))
