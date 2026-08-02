@@ -751,3 +751,18 @@ func TestValidateAPIAuthRejectsBadAvatarRateLimit(t *testing.T) {
 		})
 	}
 }
+
+// The endpoint is prefixed with https:// by the COS adapter, so a value that
+// already carries a scheme would produce an unrecoverable URL at upload time.
+func TestLoadRejectsSchemeInStorageEndpoint(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	setStorageEnv(t)
+	t.Setenv("STORAGE_ENDPOINT", "https://sast-link-1250000000.cos.ap-nanjing.myqcloud.com")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err = cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), "bare host") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want endpoint scheme rejection", err)
+	}
+}

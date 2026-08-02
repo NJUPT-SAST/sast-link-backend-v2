@@ -102,6 +102,29 @@ func TestUploadAvatarHandlerMissingFile(t *testing.T) {
 	}
 }
 
+// A body past the multipart ceiling must be rejected during parsing, before the
+// service ever sees it: without the MaxBytesReader guard an oversized stream
+// would be fully read (to a temp file) before the service's 5MB check runs.
+func TestUploadAvatarHandlerRejectsOversizedBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{uploadAvatarResult: &session.UploadAvatarResult{AvatarURL: "https://cdn.example.com/a.png"}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: time.Now()}}, allowAuth())
+
+	// The file part itself exceeds the 6MB ceiling, so multipart parsing fails.
+	content := bytes.Repeat([]byte{0xFF}, maxAvatarRequestBodySize+1024)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, avatarMultipartRequest(t, content))
+
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusBadRequest || body.Code != errcode.CodeBadRequest {
+		t.Fatalf("response = %d %#v, want 40000", recorder.Code, body)
+	}
+	if service.uploadAvatarCalls != 0 {
+		t.Fatalf("upload calls = %d, want 0 (body rejected during parsing)", service.uploadAvatarCalls)
+	}
+}
+
 // Service errors are mapped through the shared mapper like every other endpoint.
 func TestUploadAvatarHandlerMapsServiceError(t *testing.T) {
 	gin.SetMode(gin.TestMode)

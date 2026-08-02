@@ -106,7 +106,7 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 		}
 		if verdict.Sensitive {
 			if err := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), false, errcode.CodeValidationFailed,
-				input.ClientIP, "", map[string]any{"label": verdict.Label}); err != nil {
+				input.ClientIP, input.UserAgent, map[string]any{"label": verdict.Label}); err != nil {
 				slog.Error("audit avatar rejection", "user_id", input.UserID, "error", err)
 			}
 			return nil, cleanup(newError(ErrValidationFailed, "头像未通过内容审核", nil))
@@ -128,7 +128,11 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 	}
 
 	// Retire the superseded object best-effort: a leftover is a storage leak,
-	// not a correctness problem, so a failed delete logs and moves on.
+	// not a correctness problem, so a failed delete logs and moves on. The
+	// previous value is the pre-write snapshot, so two concurrent uploads can
+	// each retire only what they saw before their own write; an object that was
+	// superseded between the snapshot and the write stays until the next upload
+	// or the bucket's lifecycle policy.
 	if previousAvatar != nil && *previousAvatar != avatarURL {
 		if oldKey := avatarKeyFromURL(*previousAvatar, avatarURL, key); oldKey != "" {
 			if deleteErr := s.AvatarStore.Delete(context.WithoutCancel(ctx), oldKey); deleteErr != nil {
@@ -138,7 +142,7 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 	}
 
 	if auditErr := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), true, 0,
-		input.ClientIP, "", map[string]any{"avatar_url": avatarURL}); auditErr != nil {
+		input.ClientIP, input.UserAgent, map[string]any{"avatar_url": avatarURL}); auditErr != nil {
 		slog.Error("audit avatar upload", "user_id", input.UserID, "error", auditErr)
 	}
 	return &UploadAvatarResult{AvatarURL: avatarURL}, nil
@@ -185,6 +189,11 @@ func readAvatar(content io.Reader, declaredSize int64) ([]byte, string, error) {
 // old URL does not belong to this service's storage (e.g. a migrated external
 // URL), which must be left alone rather than deleted by guesswork.
 func avatarKeyFromURL(previousURL, newURL, newKey string) string {
+	// The new URL is expected to end with the fresh key; guard the slice below
+	// against an Upload implementation that returns something else.
+	if !strings.HasSuffix(newURL, newKey) {
+		return ""
+	}
 	if !strings.HasPrefix(previousURL, newURL[:len(newURL)-len(newKey)]) {
 		return ""
 	}

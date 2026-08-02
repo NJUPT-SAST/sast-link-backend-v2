@@ -531,6 +531,11 @@ func (c *Config) validateStorage() error {
 	if strings.TrimSpace(c.StorageBaseURL) != "" && !isAbsoluteHTTPURL(c.StorageBaseURL) {
 		return fmt.Errorf("STORAGE_BASE_URL must be an absolute http(s) URL")
 	}
+	// The endpoint is prefixed with https:// by the COS adapter, so a value that
+	// already carries a scheme would produce an unrecoverable URL at upload time.
+	if strings.Contains(c.StorageEndpoint, "://") {
+		return fmt.Errorf("STORAGE_ENDPOINT must be a bare host (no scheme)")
+	}
 	return nil
 }
 
