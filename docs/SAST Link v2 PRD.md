@@ -343,7 +343,7 @@ OAuth 端点不遵循 SAST Link 标准响应信封：
 
 SAST Link 基于 OAuth 2.1 提供 OpenID Connect 1.0 兼容的身份认证层。
 
-#### 端点
+#### OIDC 端点
 
 | 端点 | 说明 |
 | ------ | ------ |

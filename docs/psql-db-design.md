@@ -188,8 +188,8 @@ identity_data JSON 结构
 
 |Provider|JSON 结构|说明|
 |---|---|---|
-|`github`|`{"login": "github_username"}`|OAuth 流程：https://docs.github.com/zh/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps|
-|`lark`|见下方示例|获取用户信息：https://open.feishu.cn/document/server-docs/authentication-management/login-state-management/get<br><br>**provider_id 存储 `union_id`**（非 `open_id`）。`union_id` 在同一租户下跨应用一致，`open_id` 按应用变化，仅作为 identity_data 的一部分存储。|
+|`github`|`{"login": "github_username"}`|OAuth 流程：<https://docs.github.com/zh/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps>|
+|`lark`|见下方示例|获取用户信息：<https://open.feishu.cn/document/server-docs/authentication-management/login-state-management/get><br><br>**provider_id 存储 `union_id`**（非 `open_id`）。`union_id` 在同一租户下跨应用一致，`open_id` 按应用变化，仅作为 identity_data 的一部分存储。|
 |`other_mail`|`{"email": "xxx@example.com"}`|额外绑定邮箱，`provider_id` 同时存该邮箱地址。每行一条，最多 2 行|
 
 `lark` 示例（存储飞书 API 返回的 `data` 对象，不含外层 `code`/`msg` 包）：
@@ -584,6 +584,7 @@ $$ LANGUAGE plpgsql;
 **check_other_mail_limit**
 
 > 已知限制：
+>
 > 1. 并发竞态：READ COMMITTED 下两个并发事务各自 COUNT 可能都为 1，同时放行，最终 >2 条。对于 SAST 内部系统规模可接受，`uq_identities_provider_provider_id` 至少能防完全重复行。
 > 2. UPDATE 场景：触发器仅绑定 `BEFORE INSERT`，`UPDATE` 改 provider 为 `other_mail` 的场景由应用层兜底。
 
@@ -661,7 +662,7 @@ CREATE TRIGGER trg_user_email_domain
 ```
 
 > `oauth_authorizations`、`oauth_access_tokens`、`oauth_refresh_tokens`、`token_blacklist_outbox`、`audit_logs` 无 `updated_at`，不需要自动更新触发器。
-
+>
 > `check_other_mail_limit` 仅检查 INSERT（存在并发竞态，见函数注释）。UPDATE 改 provider 为 `other_mail` 的场景由应用层兜底。
 
 ---
@@ -762,4 +763,3 @@ oauth_authorizations.family_id
 13. 所有触发器
 
 14. pg_cron 扩展 + 定时清理任务调度
-

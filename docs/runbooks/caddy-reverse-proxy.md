@@ -23,24 +23,24 @@ GET  /health
 
 ```caddy
 link.sast.fun {
-	encode zstd gzip
+ encode zstd gzip
 
-	# 第三方绑定回调必须先于 /v2/* 声明其意图：它是前端页面，不是 API 路由。
-	# 后端没有 /oauth/bind/* 这个路由，落到后端只会得到 404。
-	handle /v2/oauth/bind/* {
-		reverse_proxy frontend:3000
-	}
+ # 第三方绑定回调必须先于 /v2/* 声明其意图：它是前端页面，不是 API 路由。
+ # 后端没有 /oauth/bind/* 这个路由，落到后端只会得到 404。
+ handle /v2/oauth/bind/* {
+  reverse_proxy frontend:3000
+ }
 
-	# 其余 /v2/* 是 API。handle_path 会剥掉 /v2 前缀，后端收到的是
-	# /oauth/github/callback 这样的根路径。
-	handle_path /v2/* {
-		reverse_proxy api:8080
-	}
+ # 其余 /v2/* 是 API。handle_path 会剥掉 /v2 前缀，后端收到的是
+ # /oauth/github/callback 这样的根路径。
+ handle_path /v2/* {
+  reverse_proxy api:8080
+ }
 
-	# 其余一切归前端。
-	handle {
-		reverse_proxy frontend:3000
-	}
+ # 其余一切归前端。
+ handle {
+  reverse_proxy frontend:3000
+ }
 }
 ```
 
