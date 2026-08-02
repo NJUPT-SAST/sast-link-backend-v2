@@ -639,3 +639,115 @@ func TestValidateAPIAuthRejectsBadTokenRateLimit(t *testing.T) {
 		})
 	}
 }
+
+func setStorageEnv(t *testing.T) {
+	t.Setenv("STORAGE_PROVIDER", "cos")
+	t.Setenv("STORAGE_REGION", "ap-nanjing")
+	t.Setenv("STORAGE_BUCKET", "sast-link-1250000000")
+	t.Setenv("STORAGE_ACCESS_KEY", "AKIDtest")
+	t.Setenv("STORAGE_SECRET_KEY", "secret")
+}
+
+// A partially filled STORAGE_* group is the misconfiguration that would only
+// surface at upload time, so it must fail at boot.
+func TestLoadRejectsPartialStorageConfiguration(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("STORAGE_REGION", "ap-nanjing")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err = cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), "must be all set or all empty") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want partial-storage rejection", err)
+	}
+}
+
+func TestLoadRejectsNonCosStorageProvider(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	setStorageEnv(t)
+	t.Setenv("STORAGE_PROVIDER", "minio")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err = cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), "STORAGE_PROVIDER must be") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want provider rejection", err)
+	}
+}
+
+func TestLoadRejectsBucketWithoutAppID(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	setStorageEnv(t)
+	t.Setenv("STORAGE_BUCKET", "sastlink")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err = cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), "{name}-{appid}") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want bucket-shape rejection", err)
+	}
+}
+
+func TestLoadRejectsBadStorageBaseURL(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	setStorageEnv(t)
+	t.Setenv("STORAGE_BASE_URL", "cdn.example.com/avatars")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err = cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), "STORAGE_BASE_URL must be") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want base URL rejection", err)
+	}
+}
+
+// The whole group empty is a legitimate deployment shape: every other endpoint
+// keeps working and avatar upload answers 50002.
+func TestLoadAllowsEmptyStorageConfiguration(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.StorageConfigured() {
+		t.Fatal("StorageConfigured() = true, want false with empty STORAGE_*")
+	}
+}
+
+func TestLoadAcceptsFullStorageConfiguration(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	setStorageEnv(t)
+	t.Setenv("STORAGE_BASE_URL", "https://cdn.sast.fun")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.StorageConfigured() {
+		t.Fatal("StorageConfigured() = false, want true with full STORAGE_*")
+	}
+	// Content review is on by default (fail-closed), per the PLAN decision.
+	if !cfg.StorageAuditEnabled {
+		t.Fatal("StorageAuditEnabled = false, want true by default")
+	}
+}
+
+func TestValidateAPIAuthRejectsBadAvatarRateLimit(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"RATE_LIMIT_UPLOAD_AVATAR_RPM", "0", "RATE_LIMIT_UPLOAD_AVATAR_RPM must be positive"},
+		{"RATE_LIMIT_UPLOAD_AVATAR_WINDOW", "100ms", "RATE_LIMIT_UPLOAD_AVATAR_WINDOW must be at least 1s"},
+	} {
+		t.Run(test.key, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
