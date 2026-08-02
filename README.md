@@ -10,7 +10,7 @@ OAuth/OIDC Provider 部分已完成两段式授权端点（`GET /oauth/authorize
 
 第三方 OAuth 登录已完成：GitHub 与飞书的授权跳转与回调、`login_code` 交换（回调只投递一次性 code，Token 绝不出现在重定向 URL 中）、登录态下的绑定接口，以及 `registration_state` + `oauth_state` 双重校验的注册补全（账号、资料、第三方绑定与首个会话在同一事务内提交）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验。
 
-头像上传已完成：`PUT /user/avatar`（multipart/form-data，≤5MB，jpg/png/webp 魔数检测 + 解码校验），上传至腾讯云 COS（`internal/adapter/cos`，`STORAGE_*` 配置，未配置时端点返回 `50002`），默认开启 COS 内容审核（fail-closed：审核服务不可用时拒绝上传，敏感内容删除对象并返回 `42200`），成功后将公开 URL 写入 `profile.avatar` 并删除旧头像对象（失败仅记日志），按用户限流（`RATE_LIMIT_UPLOAD_AVATAR_*`），审计 `upload_avatar`。`STORAGE_*` 全空 = 未配置（其他端点不受影响）；半配置 = 启动报错。
+头像上传已完成：`PUT /user/avatar`（multipart/form-data，≤5MB，jpg/png/webp 魔数检测 + 解码校验），上传至腾讯云 COS（`internal/adapter/cos`，`STORAGE_*` 配置，未配置时端点返回 `50002`），默认开启 COS 内容审核（fail-closed：审核服务不可用时返回 `50300` 拒绝上传，敏感内容删除对象并返回 `42203`），成功后将公开 URL 写入 `profile.avatar` 并删除旧头像对象（失败仅记日志），按用户限流（`RATE_LIMIT_UPLOAD_AVATAR_*`），审计 `upload_avatar`。`STORAGE_*` 全空 = 未配置（其他端点不受影响）；半配置 = 启动报错。
 
 设备管理仍待接入。
 
