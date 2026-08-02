@@ -25,6 +25,10 @@ const (
 	KindValidationFailed  Kind = "validation_failed"
 	KindNotFound          Kind = "not_found"
 	KindInternal          Kind = "internal"
+	// KindObjectUploadFailed reports that an object-storage upload or review
+	// failed (errcode 50002). Distinct from KindInternal so the HTTP layer maps
+	// the documented code without a code-override case.
+	KindObjectUploadFailed Kind = "object_upload_failed"
 	// KindDependencyUnavailable is for fail-closed dependencies (verification
 	// codes, tickets) that cannot be validated when their Redis store is down.
 	// It maps to HTTP 503 so a Redis outage does not surface as a server bug.
@@ -99,7 +103,16 @@ var (
 	// ErrLastLoginMethod rejects unbinding the caller's only remaining login
 	// method, which would lock them out of their own account.
 	ErrLastLoginMethod = &Error{Kind: KindValidationFailed, Code: errcode.CodeValidationFailed}
-	ErrInternal        = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	// ErrValidationFailed is the generic 42200 for business rules that do not
+	// have a dedicated code, such as a rejected content review.
+	ErrValidationFailed = &Error{Kind: KindValidationFailed, Code: errcode.CodeValidationFailed}
+	// ErrObjectUploadFailed reports a failed object-storage upload or content
+	// review. The review failure is deliberately fail-closed: an image that was
+	// not reviewed must not be served as cleared.
+	ErrObjectUploadFailed = &Error{Kind: KindObjectUploadFailed, Code: errcode.CodeObjectUploadFailed}
+	// ErrDatabase reports a persistence failure with the documented 50003 code.
+	ErrDatabase = &Error{Kind: KindInternal, Code: errcode.CodeDatabaseFailed}
+	ErrInternal = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 	// ErrDependencyUnavailable reports that a fail-closed Redis-backed store
 	// (verification codes, register/bind tickets) is unreachable. Per PRD §6.0
 	// these flows must reject the request so the user can retry, not mask the

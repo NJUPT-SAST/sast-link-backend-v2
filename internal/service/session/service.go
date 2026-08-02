@@ -11,6 +11,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/objectstore"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
@@ -69,6 +70,17 @@ type Service struct {
 	Clock            Clock
 	AccessTTL        time.Duration
 	RefreshTTL       time.Duration
+
+	// AvatarStore persists avatar objects; AvatarAuditor reviews them. Both are
+	// optional: a nil store means object storage is not configured and avatar
+	// upload answers 50002, keeping every other endpoint alive on a deployment
+	// without storage.
+	AvatarStore   objectstore.ObjectStore
+	AvatarAuditor objectstore.AvatarAuditor
+	// AvatarLimiter throttles PUT /user/avatar per caller. Separate from
+	// Limiter because checkEndpointLimit reads the quota off the instance, not
+	// the endpoint name.
+	AvatarLimiter EndpointLimiter
 }
 
 func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, error) {
