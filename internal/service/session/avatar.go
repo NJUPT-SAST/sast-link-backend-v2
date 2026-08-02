@@ -76,6 +76,9 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 
 	data, mime, err := readAvatar(input.Content, input.Size)
 	if err != nil {
+		// The multipart filename is client-supplied, so it only ever reaches a
+		// log line — never storage or a URL — and only on the rejection path.
+		slog.WarnContext(ctx, "reject avatar upload", "filename", input.Filename, "error", err)
 		return nil, err
 	}
 
@@ -177,6 +180,13 @@ func readAvatar(content io.Reader, declaredSize int64) ([]byte, string, error) {
 	// Confirm the file actually decodes as the image it claims to be. webp is
 	// registered into the stdlib image package by golang.org/x/image/webp, so one
 	// DecodeConfig call covers all three accepted formats.
+	//
+	// DecodeConfig deliberately reads only the header, not the pixel data: a full
+	// Decode of a 5MB image can expand to hundreds of megabytes of pixels, which
+	// any logged-in user could weaponize as a memory bomb. A file with a valid
+	// header but corrupt payload can therefore slip through here; the COS content
+	// review (or a broken render on the client) is what catches those, and
+	// paying the full decode cost on every upload is not worth preempting them.
 	if _, _, err := image.DecodeConfig(bytes.NewReader(data)); err != nil {
 		return nil, "", newError(ErrInvalidInput, "头像文件已损坏或不是有效图片", nil)
 	}
