@@ -262,6 +262,7 @@ func (f *fakeUsers) UpdateProfile(_ context.Context, userID int64, update reposi
 	applyNullable(&user.Profile.Nickname, update.Nickname)
 	applyNullable(&user.Profile.Intro, update.Intro)
 	applyNullable(&user.Profile.Email, update.Email)
+	applyNullable(&user.Profile.Avatar, update.Avatar)
 	applyNullable(&user.Profile.BlogURL, update.BlogURL)
 	applyNullable(&user.Profile.GitHubURL, update.GitHubURL)
 	if update.Department != nil {

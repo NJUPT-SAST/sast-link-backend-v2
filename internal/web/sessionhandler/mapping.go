@@ -55,6 +55,11 @@ func mapServiceError(err error) error {
 		// ("业务校验失败") drops the one thing the client needs to know: which rule
 		// it broke.
 		message = "不能解绑唯一的登录方式"
+	case errcode.CodeAvatarRejected:
+		// The audit rejection is a policy verdict, not a malformed request; the
+		// dedicated code needs its own message instead of the generic
+		// "业务校验失败".
+		message = "头像未通过内容审核"
 	}
 	var status int
 	switch serviceErr.Kind {
@@ -68,6 +73,9 @@ func mapServiceError(err error) error {
 		status = http.StatusForbidden
 	case session.KindEmailFailed:
 		message = "邮件发送失败，请稍后重试"
+		status = http.StatusInternalServerError
+	case session.KindObjectUploadFailed:
+		message = "头像上传失败，请稍后重试"
 		status = http.StatusInternalServerError
 	case session.KindConflict:
 		status = http.StatusConflict
@@ -114,6 +122,8 @@ func defaultCode(kind session.Kind) int {
 		return errcode.CodeNotFound
 	case session.KindDependencyUnavailable:
 		return errcode.CodeDependencyUnavailable
+	case session.KindObjectUploadFailed:
+		return errcode.CodeObjectUploadFailed
 	default:
 		return errcode.CodeInternal
 	}

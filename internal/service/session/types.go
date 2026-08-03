@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
@@ -427,6 +428,28 @@ type UpdateProfileResult struct {
 	// ChangedFields lists the request fields that were applied, in contract
 	// order. It feeds the update_profile audit detail defined in PRD §4.13.
 	ChangedFields []string
+}
+
+// UploadAvatarInput is the PUT /user/avatar request. The file content is passed
+// as a reader so the handler owns multipart parsing while the service owns every
+// size and format rule. Filename is only used for diagnostics.
+//
+// Size is the declared content length from the multipart part header. The
+// service still reads through a LimitReader: the declared size is trusted for
+// nothing beyond an early rejection, because the actual stream is what gets
+// stored.
+type UploadAvatarInput struct {
+	UserID    int64
+	Filename  string
+	Content   io.Reader
+	Size      int64
+	ClientIP  string
+	UserAgent string
+}
+
+type UploadAvatarResult struct {
+	// AvatarURL is the public URL now stored in profile.avatar.
+	AvatarURL string
 }
 
 type UserProfileDTO struct {

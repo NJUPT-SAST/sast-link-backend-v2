@@ -25,6 +25,10 @@ const (
 	KindValidationFailed  Kind = "validation_failed"
 	KindNotFound          Kind = "not_found"
 	KindInternal          Kind = "internal"
+	// KindObjectUploadFailed reports that an object-storage upload or review
+	// failed (errcode 50002). Distinct from KindInternal so the HTTP layer maps
+	// the documented code without a code-override case.
+	KindObjectUploadFailed Kind = "object_upload_failed"
 	// KindDependencyUnavailable is for fail-closed dependencies (verification
 	// codes, tickets) that cannot be validated when their Redis store is down.
 	// It maps to HTTP 503 so a Redis outage does not surface as a server bug.
@@ -99,7 +103,17 @@ var (
 	// ErrLastLoginMethod rejects unbinding the caller's only remaining login
 	// method, which would lock them out of their own account.
 	ErrLastLoginMethod = &Error{Kind: KindValidationFailed, Code: errcode.CodeValidationFailed}
-	ErrInternal        = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	// ErrAvatarRejected reports that the content review refused the uploaded
+	// avatar. Distinct from the generic validation code so the client can tell a
+	// policy rejection from a malformed request.
+	ErrAvatarRejected = &Error{Kind: KindValidationFailed, Code: errcode.CodeAvatarRejected}
+	// ErrObjectUploadFailed reports a failed object-storage upload. The content
+	// review has its own failure path (ErrDependencyUnavailable, fail-closed):
+	// an image that was not reviewed must not be served as cleared.
+	ErrObjectUploadFailed = &Error{Kind: KindObjectUploadFailed, Code: errcode.CodeObjectUploadFailed}
+	// ErrDatabase reports a persistence failure with the documented 50003 code.
+	ErrDatabase = &Error{Kind: KindInternal, Code: errcode.CodeDatabaseFailed}
+	ErrInternal = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 	// ErrDependencyUnavailable reports that a fail-closed Redis-backed store
 	// (verification codes, register/bind tickets) is unreachable. Per PRD §6.0
 	// these flows must reject the request so the user can retry, not mask the

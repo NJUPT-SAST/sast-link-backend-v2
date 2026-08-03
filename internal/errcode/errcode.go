@@ -38,6 +38,7 @@ const (
 	CodeValidationFailed  = 42200 // 业务校验失败
 	CodePasswordTooShort  = 42201 // 密码长度不足
 	CodePasswordUnchanged = 42202 // 新旧密码相同
+	CodeAvatarRejected    = 42203 // 头像未通过内容审核
 
 	CodeRateLimited = 42900 // 请求过于频繁
 

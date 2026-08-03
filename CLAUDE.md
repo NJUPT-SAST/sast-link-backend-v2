@@ -12,7 +12,7 @@ It also serves the OAuth 2.1 / OIDC provider: `GET /.well-known/openid-configura
 
 It serves the third-party OAuth login flow (SAST Link as an OAuth *client*, the opposite direction from the provider endpoints above): `GET /oauth/github`, `GET /oauth/github/callback`, `GET /oauth/lark`, `GET /oauth/lark/callback`, `POST /oauth/exchange-code`, and — behind the JWT middleware — `POST /user/identities/github` and `POST /user/identities/lark`. Each provider is gated by its own `OAUTH_GITHUB_ENABLED` / `OAUTH_FEISHU_ENABLED` flag; a disabled provider's routes stay registered and answer `40000` rather than 404, so the contract does not change with configuration.
 
-`docs/openapi.yaml` documents one path that is not registered yet, so treat it as the target contract rather than an inventory: `PUT /user/avatar`. The admin console is now fully registered, but its implementation deliberately tightens the contract in three places — see the status note at the top of `docs/API文档.md` §6: `PUT /admin/users/:id` refuses `state: is_deleted` (422), `email_type` is only accepted alongside a matching `login_email` (400), and `page_size` is capped at 100 everywhere.
+`docs/openapi.yaml` is the target contract rather than an inventory: every path is now registered. The admin console's implementation deliberately tightens the contract in three places — see the status note at the top of `docs/API文档.md` §6: `PUT /admin/users/:id` refuses `state: is_deleted` (422), `email_type` is only accepted alongside a matching `login_email` (400), and `page_size` is capped at 100 everywhere.
 
 It never performs DDL or schema migrations at startup. `cmd/migrate` is the only command that inspects or changes schema migration state.
 

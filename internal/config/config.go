@@ -214,6 +214,31 @@ type Config struct {
 	SMTPUseTLS bool   `env:"SMTP_USE_TLS" envDefault:"false"`
 	// SMTPMaxConcurrent caps simultaneous SMTP sends; see mailer.Config.
 	SMTPMaxConcurrent int `env:"SMTP_MAX_CONCURRENT" envDefault:"32"`
+
+	// Object storage backs PUT /user/avatar (PRD §4.9). The provider is Tencent
+	// Cloud COS; the whole group is optional — an empty STORAGE_* set means avatar
+	// upload is disabled and the endpoint answers 50002 — but a partially filled
+	// set is a startup error, because a bucket that looks configured and is not
+	// would only fail on the first upload.
+	StorageProvider  string `env:"STORAGE_PROVIDER" envDefault:"cos"`
+	StorageEndpoint  string `env:"STORAGE_ENDPOINT"`
+	StorageRegion    string `env:"STORAGE_REGION"`
+	StorageBucket    string `env:"STORAGE_BUCKET"`
+	StorageAccessKey string `env:"STORAGE_ACCESS_KEY"`
+	StorageSecretKey string `env:"STORAGE_SECRET_KEY"`
+	// StorageBaseURL prefixes stored avatar URLs when set (typically a CDN
+	// domain). Empty falls back to the bucket access host.
+	StorageBaseURL string `env:"STORAGE_BASE_URL"`
+	// StorageAuditEnabled turns on the COS image review for avatars. Fail-closed:
+	// while enabled, an unreachable review service rejects the upload rather than
+	// letting unvetted images through. On by default; disable only when the
+	// bucket has no data-cos (CI) capability enabled.
+	StorageAuditEnabled bool `env:"STORAGE_AUDIT_ENABLED" envDefault:"true"`
+	// Avatar upload throttling is per caller: one COS PUT (and one paid review)
+	// per accepted request, and the subject is the authenticated user, so keying
+	// by user is exact. Fail-open, per PRD §6.0.
+	RateLimitUploadAvatarRPM    int           `env:"RATE_LIMIT_UPLOAD_AVATAR_RPM" envDefault:"10"`
+	RateLimitUploadAvatarWindow time.Duration `env:"RATE_LIMIT_UPLOAD_AVATAR_WINDOW" envDefault:"60s"`
 }
 
 // Load parses configuration from environment variables and validates required fields.
@@ -429,8 +454,18 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("OAUTH_LOGIN_REGISTRATION_STATE_TTL must be positive")
 	case c.OAuthLoginCodeTTL <= 0:
 		return fmt.Errorf("OAUTH_LOGIN_CODE_TTL must be positive")
+	case c.RateLimitUploadAvatarRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_UPLOAD_AVATAR_RPM must be positive")
+	case c.RateLimitUploadAvatarWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_UPLOAD_AVATAR_WINDOW must be at least 1s")
 	}
 	if err := c.validateThirdPartyLogin(); err != nil {
+		return err
+	}
+	// Storage is optional but all-or-nothing. The shape check runs on the API
+	// startup path (not on Load, which cmd/migrate also uses) so a half-filled
+	// STORAGE_* group fails at boot, not on the first upload.
+	if err := c.validateStorage(); err != nil {
 		return err
 	}
 	normalizedProxies, err := normalizeTrustedProxies(c.TrustedProxies)
@@ -446,6 +481,61 @@ func (c *Config) ValidateAPIAuth() error {
 	// byte-identical, so a conforming relying party rejects every ID Token. Trimming
 	// once at the boundary keeps that impossible instead of relying on each consumer.
 	c.JWTIssuer = strings.TrimRight(strings.TrimSpace(c.JWTIssuer), "/")
+	return nil
+}
+
+// StorageConfigured reports whether object storage settings are present. The
+// whole group is optional: a deployment without storage keeps every other
+// endpoint working, and PUT /user/avatar answers 50002 instead of failing at
+// boot. The setter of that contract is validateStorage, which rejects any
+// partial configuration at startup.
+//
+// StorageProvider is excluded from the emptiness check: it carries an
+// envDefault of "cos", so it is never empty even when nothing is configured.
+func (c *Config) StorageConfigured() bool {
+	return strings.TrimSpace(c.StorageRegion) != "" &&
+		strings.TrimSpace(c.StorageBucket) != "" &&
+		strings.TrimSpace(c.StorageAccessKey) != "" &&
+		strings.TrimSpace(c.StorageSecretKey) != ""
+}
+
+// validateStorage enforces the all-or-nothing shape of the STORAGE_* group.
+// Every value empty means avatar upload is off; a half-filled set is the one
+// misconfiguration that would surface only at upload time, so it fails here.
+// StorageProvider is not part of the emptiness count because envDefault keeps
+// it populated at "cos" even when the group is entirely unset.
+func (c *Config) validateStorage() error {
+	set := 0
+	for _, value := range []string{
+		c.StorageRegion, c.StorageBucket, c.StorageAccessKey, c.StorageSecretKey,
+	} {
+		if strings.TrimSpace(value) != "" {
+			set++
+		}
+	}
+	switch {
+	case set == 0:
+		return nil
+	case set < 4:
+		return fmt.Errorf("STORAGE_REGION/STORAGE_BUCKET/STORAGE_ACCESS_KEY/STORAGE_SECRET_KEY must be all set or all empty")
+	}
+	if strings.TrimSpace(c.StorageProvider) != "cos" {
+		return fmt.Errorf("STORAGE_PROVIDER must be \"cos\" (S3/MinIO are not supported by this build)")
+	}
+	// The bucket hosts the object URLs when STORAGE_BASE_URL is empty, and it is
+	// signed against for every upload, so its shape is validated at boot rather
+	// than on the first PUT /user/avatar.
+	if !strings.Contains(c.StorageBucket, "-") {
+		return fmt.Errorf("STORAGE_BUCKET must be in {name}-{appid} form")
+	}
+	if strings.TrimSpace(c.StorageBaseURL) != "" && !isAbsoluteHTTPURL(c.StorageBaseURL) {
+		return fmt.Errorf("STORAGE_BASE_URL must be an absolute http(s) URL")
+	}
+	// The endpoint is prefixed with https:// by the COS adapter, so a value that
+	// already carries a scheme would produce an unrecoverable URL at upload time.
+	if strings.Contains(c.StorageEndpoint, "://") {
+		return fmt.Errorf("STORAGE_ENDPOINT must be a bare host (no scheme)")
+	}
 	return nil
 }
 

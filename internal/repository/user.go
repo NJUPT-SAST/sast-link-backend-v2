@@ -291,6 +291,7 @@ type ProfileUpdate struct {
 	Department *model.Department
 	Intro      *string
 	Email      *string
+	Avatar     *string
 	BlogURL    *string
 	GitHubURL  *string
 }
@@ -313,10 +314,11 @@ func (u ProfileUpdate) userColumns() map[string]any {
 // A non-nil pointer to "" writes SQL NULL: the columns are nullable display
 // fields, and the API expresses "clear my intro" as an empty string.
 func (u ProfileUpdate) profileColumns() map[string]any {
-	columns := make(map[string]any, 6)
+	columns := make(map[string]any, 7)
 	assignNullable(columns, "nickname", u.Nickname)
 	assignNullable(columns, "intro", u.Intro)
 	assignNullable(columns, "email", u.Email)
+	assignNullable(columns, "avatar", u.Avatar)
 	assignNullable(columns, "blog_url", u.BlogURL)
 	assignNullable(columns, "github_url", u.GitHubURL)
 	if u.Department != nil {

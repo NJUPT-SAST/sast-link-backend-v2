@@ -9,6 +9,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 ### 1.2 目标
 
 作为 SAST 基础设施的统一身份认证中心：
+
 - 对内：提供密码 / GitHub / 飞书 多种登录方式，统一 SAST 内部应用的认证入口
 - 对外：作为 OAuth 2.1 授权服务 + OIDC Provider，向第三方应用提供标准化认证
 
@@ -19,7 +20,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 ### 2.1 用户端
 
 | 模块 | 功能 |
-|------|------|
+| ------ | ------ |
 | 账号注册 | 使用 `@njupt.edu.cn` 或 `@sast.fun` 邮箱注册；注册流程两步（验证码 → 补充信息）；可选通过 OAuth 回调的 `registration_state` 同时绑定第三方账号 |
 | 账号登录 | 邮箱密码登录；GitHub OAuth 登录；飞书 OAuth 登录（限 SAST 企业内用户） |
 | 第三方绑定 | 已登录用户可绑定 GitHub / 飞书 / 第三方邮箱（最多 2 个）；绑定后可对应方式登录 |
@@ -29,12 +30,12 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 ### 2.2 管理端
 
 | 模块 | 功能 | 角色要求 |
-|------|------|----------|
+| ------ | ------ | ---------- |
 | 用户管理 | 用户列表（分页/筛选/搜索）、查看详情、编辑信息、软删除、恢复已注销用户 | admin / lecturer（只读）；admin（写） |
 | OAuth 客户端管理 | 注册/查看/更新/停用 OAuth 客户端 | admin |
 | 审计日志 | 分页查询，按用户/操作/时间/成功状态筛选 | admin |
 | 限流与防刷 | 全局 + 按端点 + 按 IP 的多级限流中间件 | — |
-| 头像内容审核 | 接入腾讯云 COS 内容审核（后期） | — |
+| 头像内容审核 | 接入腾讯云 COS 内容审核（已实现，`STORAGE_AUDIT_ENABLED` 默认开启） | — |
 
 ---
 
@@ -43,7 +44,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 ### 3.1 技术栈
 
 | 层 | 技术 | 细节 |
-|---|---|------|
+| --- | --- | ------ |
 | 语言 | Go | 1.26.5 |
 | Web 框架 | Gin | v1.12.0 |
 | ORM | GORM | v1.31.1 |
@@ -89,7 +90,7 @@ SAST Link 内部使用 JWT RS256 签名 Access Token + opaque Refresh Token：
 SAST Link 同时作为 OAuth 2.1 授权服务器和 OIDC Provider：
 
 | 层面 | 标准 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | 授权框架 | OAuth 2.1 | PKCE-S256 强制（即使第三方应用），state 参数强制 |
 | 身份层 | OpenID Connect | 当 scope 含 `openid` 时返回 ID Token（RS256 JWT） |
 | 客户端认证 | PKCE（第一方）/ client_secret_post（第三方） | 第一方应用无 client_secret；第三方应用注册后获取 client_secret（bcrypt 存储） |
@@ -108,6 +109,7 @@ SAST Link 同时作为 OAuth 2.1 授权服务器和 OIDC Provider：
 **可选 registration_state 绑定**：传入 `registration_state` + `oauth_state`（OAuth 标准 state 参数）时，注册成功后 * 并消费 `registration_state` + `oauth_state` → 验证双值匹配 → 自动创建 identities 记录。用于第三方 OAuth 首次登录的无绑定分支——用户先经 OAuth 回调拿到 `registration_state`，再走注册流程，注册后自动绑定
 
 **约束**：
+
 - 注册邮箱域名仅限 `@njupt.edu.cn` / `@sast.fun`
 - PG 触发器 `auto_set_email_type` 自动根据域名设置 `email_type`
 - 学号唯一（`student_id UNIQUE`），重复注册返回 40902
@@ -119,6 +121,7 @@ POST /user/login
 ```
 
 **流程**：
+
 1. 校验邮箱格式 — `@njupt.edu.cn` / `@sast.fun` 查 `user.login_email`；第三方邮箱查 `identities(provider='other_mail').provider_id` 反查 user
 2. 检查登录失败次数（Redis `sastlink:auth:login_failure:{email}`，15min 窗口 ≥ 10 次则锁定）
 3. 查用户是否存在：不存在返回 40106（邮箱不存在）；存在则执行 PBKDF2-SHA512 密码哈希校验
@@ -143,6 +146,7 @@ GET /oauth/lark/callback?code=...&state=...
 **已有绑定用户**：签发一次性 `login_code`（`lc_` + 32 位 hex，Redis，60s），302 重定向至前端 `?code=<login_code>`，前端调用 `POST /oauth/exchange-code` 换取 Token Pair
 
 **无绑定用户**：
+
 1. 生成 `registration_state`（Redis，15min，暂存 `provider` + `provider_id` + `identity_data` + `oauth_state`），其中 `oauth_state` 为原始 OAuth 回调的 CSRF `state` 参数
 2. 302 重定向至注册补全页 `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=xxx&name=xxx&avatar=xxx`
 3. 用户在注册补全页完成注册，`POST /auth/register` 时传入 `registration_state` + `oauth_state`（两者均从回调重定向的 URL 取）
@@ -151,6 +155,7 @@ GET /oauth/lark/callback?code=...&state=...
 4. 服务端 GetDel 消费 `registration_state`，校验其内的 `oauth_state` 与传入的 `oauth_state` 匹配 → 注册成功 + 自动创建 identities 绑定
 
 **安全约束 — 防账号接管**：
+
 - 飞书登录仅限 SAST 企业内用户（校验 tenant_key），非 SAST 企业用户拒绝（40302）
 - `registration_state` 仅能用于新建用户注册绑定，**不可**用于已存在用户的追加绑定——已存在用户的绑定必须走 `POST /user/identities/*` 接口（需登录态）
 - `registration_state` 为 GetDel 一次性消费，与 Register-Ticket/Bind-Ticket 一致，防重放
@@ -160,7 +165,7 @@ GET /oauth/lark/callback?code=...&state=...
 ### 4.6 Token 管理
 
 | Token 类型 | 格式 | 有效期 | 说明 |
-|------------|------|--------|------|
+| ------------ | ------ | -------- | ------ |
 | Access Token | RS256 JWT | 1h | 自包含，含 jti/sub/role/state/token_version/scope/azp；kid 支持密钥轮换 |
 | Refresh Token | opaque string | 30d | HMAC-SHA256 hash 存 DB（`oauth_refresh_tokens.token_hash`） |
 | Register-Ticket | opaque string (`reg_` 前缀) | 5min | Redis 存储，一次性使用 |
@@ -230,7 +235,7 @@ POST /auth/reset-password             →  校验验证码 + 新密码
 #### 已登录用户绑定
 
 | 绑定类型 | 端点 | 方式 | 约束 |
-|----------|------|------|------|
+| ---------- | ------ | ------ | ------ |
 | 飞书 | `POST /user/identities/lark?code=xxx&redirect_uri=xxx` | 飞书 OAuth 授权码 | 每用户 1 个飞书；每飞书账号 1 个用户；限 SAST 企业用户 |
 | GitHub | `POST /user/identities/github?code=xxx&redirect_uri=xxx` | GitHub OAuth 授权码 | 每用户 1 个 GitHub；每 GitHub 账号 1 个用户 |
 | 第三方邮箱 | `POST /user/identities/email` → `POST /user/identities/email/verify` | 两步：获取 Bind-Ticket → 验证码确认 | 每用户最多 2 个；`provider='other_mail'`；provider_id = 邮箱地址 |
@@ -259,7 +264,7 @@ Body: { "password": "current_password" }
 #### 字段归属
 
 | 表 | 字段 | 可修改途径 |
-|----|------|-----------|
+| ---- | ------ | ----------- |
 | `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin） |
 | `user` | login_email, role, state, email_type | 仅 `PUT /admin/users/:id`（admin） |
 | `profile` | nickname, department, intro, email, blog_url, github_url | `PUT /user/profile`（本人，department 仅 software/media 有值可设） |
@@ -267,15 +272,15 @@ Body: { "password": "current_password" }
 
 #### 头像上传
 
-- 上传至腾讯云 COS，返回 URL 写入 `profile.avatar`
-- 后期接入 COS 内容审核（不良信息识别）
+- 上传至腾讯云 COS（`STORAGE_*` 配置；未配置时端点返回 `50002`），返回 URL 写入 `profile.avatar`
+- COS 内容审核（不良信息识别）已接入：`STORAGE_AUDIT_ENABLED` 默认开启，fail-closed——审核服务不可用时返回 `50300` 拒绝上传，敏感内容删除对象并返回 `42203`；旧头像对象在写库成功后删除
 
 ### 4.10 OAuth 2.1 授权服务
 
 #### 端点
 
 | 端点 | 方法 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `/oauth/authorize` | GET | 授权端点，**无认证**。强制参数：response_type=code / client_id / redirect_uri / scope / state / code_challenge / code_challenge_method；可选：nonce（OIDC） |
 | `/oauth/authorize/consent` | POST | 授权确认端点，Bearer 认证。SAST Link 自有端点，使用标准信封 |
 | `/oauth/token` | POST | Token 端点。支持 grant_type: authorization_code / refresh_token。第一方用 PKCE（无 client_secret），第三方用 client_secret_post。scope 含 openid 时额外返回 id_token |
@@ -338,10 +343,10 @@ OAuth 端点不遵循 SAST Link 标准响应信封：
 
 SAST Link 基于 OAuth 2.1 提供 OpenID Connect 1.0 兼容的身份认证层。
 
-#### 端点
+#### OIDC 端点
 
 | 端点 | 说明 |
-|------|------|
+| ------ | ------ |
 | `GET /.well-known/openid-configuration` | Discovery 文档，含 issuer、各端点 URL、支持的 scope/claim/alg |
 | `GET /.well-known/jwks.json` | RS256 公钥集（JWKS），`kid` 与 JWT Header 匹配 |
 | `GET /userinfo` / `POST /userinfo` | UserInfo 端点，Bearer Token 认证 |
@@ -374,7 +379,7 @@ Payload: {
 #### Scope → Claims 映射
 
 | Scope | ID Token / UserInfo Claims |
-|-------|---------------------------|
+| ------- | --------------------------- |
 | `openid`（必选） | `sub` |
 | `profile` | `name`, `picture`, `preferred_username`, `profile`, `updated_at` |
 | `email` | `email`, `email_verified` |
@@ -393,7 +398,7 @@ Payload: {
 ### 4.12 管理后台
 
 | 端点 | 方法 | 角色 | 说明 |
-|------|------|------|------|
+| ------ | ------ | ------ | ------ |
 | `/admin/users` | GET | admin / lecturer | 分页列表，支持按 role / state / department / student_id / keyword 筛选 |
 | `/admin/users/:id` | GET | admin / lecturer | 用户详情（含 profile + identities） |
 | `/admin/users/:id` | PUT | admin | 更新用户信息（含 role / state / email_type） |
@@ -407,7 +412,7 @@ Payload: {
 #### 角色权限矩阵
 
 | 操作 | freshman | member | lecturer | admin |
-|------|----------|--------|----------|-------|
+| ------ | ---------- | -------- | ---------- | ------- |
 | 本人信息读写 | ✓ | ✓ | ✓ | ✓ |
 | 绑定/解绑 | ✓ | ✓ | ✓ | ✓ |
 | 查看用户列表/详情 | — | — | ✓ | ✓ |
@@ -423,7 +428,7 @@ Payload: {
 **管理员自我保护**（契约未写明，实现补充，均返回 `403`）：
 
 | 规则 | 理由 |
-|------|------|
+| ------ | ------ |
 | 不可修改自己的 `role` | 自我降权不可自行恢复 —— 能撤销该操作的端点正是被交出的那一个 |
 | 不可注销自己的账号 | 同上，注销后无法调用恢复端点 |
 | 不可降权或注销最后一名活跃管理员 | 系统将无人可管理，只能直连数据库恢复 |
@@ -441,7 +446,7 @@ Payload: {
 所有认证相关操作写入 `audit_logs`：
 
 | 操作类型 | 触发场景 |
-|----------|----------|
+| ---------- | ---------- |
 | `register` | 用户注册成功 |
 | `login` | 密码登录 / OAuth 登录成功/失败 |
 | `logout` | 用户登出 |
@@ -457,7 +462,7 @@ Payload: {
 **detail JSONB 结构**（按 action 类型）：
 
 | action | detail 内容 |
-|--------|-----------|
+| -------- | ----------- |
 | `register` | `{"login_email": "xxx@njupt.edu.cn"}` |
 | `login` | `{"method": "password" \| "github" \| "lark" \| "other_mail"}` |
 | `logout` | `{}` |
@@ -484,7 +489,7 @@ Payload: {
 详见 `docs\psql-db-design.md`。核心表：
 
 | 表 | 用途 | 关键设计 |
-|----|------|----------|
+| ---- | ------ | ---------- |
 | `user` | 用户主表 | `token_version` 支持全局 Token 失效；`state` 状态机驱动 |
 | `profile` | 用户展示资料 | 1:1 关联 user，department 用于权限隔离 |
 | `identities` | 第三方账号绑定 | provider + provider_id 全局唯一；github/lark 每用户仅 1 条（partial unique index）；other_mail 最多 2 条（触发器 + 应用层双重校验） |
@@ -508,7 +513,7 @@ is_deleted ──(恢复)──► njupter
 ## 6. Redis 场景
 
 | 场景 | Key | TTL | 数据结构 | 说明 |
-|------|-----|-----|----------|------|
+| ------ | ----- | ----- | ---------- | ------ |
 | 验证码 | `sastlink:verify:{purpose}:{email}` | 5min | String（Lua 原子比对，匹配后 DEL） | `purpose` ∈ `register` / `reset_password` / `bind_email`。按用途分键，使某一流程签发的验证码无法用于另一流程。填错不删除验证码（否则任何人都能用一次错误提交作废他人验证码），改为累计失败次数 |
 | 验证码失败计数 | `sastlink:verify:attempt:{purpose}:{email}` | 跟随验证码剩余 TTL | String（INCR） | 每个验证码最多 5 次尝试，用尽即连同验证码一并删除，避免 6 位码被无限爆破。重新发码时清零 |
 | 限流 | `sastlink:ratelimit:{ip}:{endpoint}` | 30s~15min | String（INCR 计数器 + EXPIRE） | 固定窗口计数器，按端点差异化配置（登录 15min/发验证码 60s 等） |
@@ -558,7 +563,7 @@ sastlink:device:{device_id}   Hash          {ua, ip, login_time, last_seen}
 ### 7.1 防攻击措施
 
 | 威胁 | 措施 |
-|------|------|
+| ------ | ------ |
 | 暴力破解 | 15min 内 10 次失败锁定；限流中间件按 IP 限制频率 |
 | CSRF | OAuth state 参数强制；JWT 不存 cookie，不存在 CSRF 攻击面。授权确认走两段式 + Bearer 认证（§4.10）而非 cookie session，正是为了维持这一前提 |
 | Open redirect | `/oauth/authorize` 的错误只在 `client_id` 与 `redirect_uri` 均校验通过后才允许重定向到客户端；`redirect_uri` 精确字符串匹配注册值（§4.10） |
@@ -579,7 +584,7 @@ sastlink:device:{device_id}   Hash          {ua, ip, login_time, last_seen}
 ### 7.2 安全响应头
 
 | Header | 值 |
-|--------|-----|
+| -------- | ----- |
 | `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` |
 | `X-Content-Type-Options` | `nosniff` |
 | `X-Frame-Options` | `DENY` |
@@ -599,7 +604,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ## 8. 可观测性
 
 | 维度 | 方案 |
-|------|------|
+| ------ | ------ |
 | 日志 | JSON 结构化日志（slog），含 trace_id / user_id / client_ip / method / path / status / latency |
 | 健康检查 | `GET /health` → `{ "status": "ok", "db": "ok", "redis": "ok" }`；Redis 故障时返回 200 且 `redis` 为 `degraded`（见 §6.0），仅 `db` 故障返回 500 |
 | 审计追踪 | `audit_logs` 表记录所有认证操作 |
@@ -617,7 +622,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 `pg_try_advisory_lock` 协调，每轮只有一个实例执行。窗口均可通过 `RETENTION_*` 环境变量调整。
 
 | 清理对象 | 默认窗口 | 说明 |
-|---------|---------|------|
+| --------- | --------- | ------ |
 | `oauth_authorizations` 已过期（无论是否使用） | +1h | V006 增设全量 `expires_at` 索引，因 V001 的索引是 `WHERE is_used = FALSE` 的部分索引，而已兑换才是常态 |
 | `oauth_access_tokens` 已过期元数据 | +24h | 中间件对「JTI 不存在」与「已撤销」返回同一个 401，窗口过短会把仅仅过期的 token 呈现为已撤销，客户端读成被强制登出而不去刷新。校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的值 |
 | `oauth_refresh_tokens` 已撤销、已过期且 `sequence > 0` | +24h | 每个 family 的 sequence-0 行永久保留：它是 ID Token `auth_time` 的来源，且从首次轮换起即带 `revoked_at`；删掉会让活跃 family 的刷新返回 500 |
@@ -660,7 +665,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ## 附录 A：业务码速查
 
 | 码段 | 类别 | 示例 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `0` | 成功 | — |
 | `400xx` | 参数错误 | 40000 参数错误 / 40010 验证码错误 / 40020 邮箱域名不允许 |
 | `401xx` | 认证错误 | 40100 未登录 / 40105 密码错误 / 40106 邮箱不存在 |
@@ -674,7 +679,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ## 附录 B：枚举值速查
 
 | 枚举 | 值 |
-|------|-----|
+| ------ | ----- |
 | `user_role` | `freshman` / `member` / `lecturer` / `admin` |
 | `state` | `njupter` / `on_sast` / `retired_sast` / `is_deleted` |
 | `department` | `software` / `media` |
@@ -686,13 +691,13 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ## 附录 C：实现状态追踪
 
 | 模块 | 状态 |
-|------|------|
+| ------ | ------ |
 | Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
 | 数据基础层 | 已完成 — V001–V005 SQL migrations、固定内置 `sast-link-web` first-party Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
 | 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI 黑名单/登录失败计数与 fixed-window limiter |
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流，以及登录 / 登出 / 刷新审计接入（刷新以 `outcome` 区分 `rotated` 与 `refresh_replayed`，后者即重放防御触发并级联撤销整个 token family） |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
-| 用户资料管理 | 部分完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）已完成；头像上传待实现（依赖对象存储接入） |
+| 用户资料管理 | 已完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）、头像上传（`PUT /user/avatar`，腾讯云 COS + 内容审核，`STORAGE_*` 配置，未配置时返回 50002） |
 | OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
 | 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）与审计日志查询，读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
 | 其余运维接入 | 待实现 — 设备管理。endpoint 限流已全量接入（见 §11）。数据保留清理已接入：由 `internal/worker/retention.go` 在 API 进程内按 ticker 执行，多实例用 advisory lock 协调；不用 pg_cron（生产库未装扩展，测试镜像亦无法加载），详见 §9.1 |
@@ -705,12 +710,12 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
 - [x] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码 / 第三方邮箱绑定）
 - [x] 用户资料自助管理（资料编辑 / 绑定列表 / 解绑 / 公开个人卡片）
-- [ ] 头像上传（依赖对象存储接入，与内容审核一并实现）
+- [x] 头像上传（腾讯云 COS + `STORAGE_*` 配置，≤5MB jpg/png/webp 魔数与解码校验，旧头像清理，按用户限流，审计 `upload_avatar`；未配置时端点返回 50002）
 - [x] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [x] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
 - [x] 限流与防刷扩展（登录、验证码发信（邮箱 + IP 双键）、解绑、`/oauth/authorize`、`/oauth/token` + `/oauth/revoke`、`GET /oauth/{github,lark}`、`/oauth/exchange-code`、`POST /auth/register`、`GET /card/:id` 均已接入。全部按具名端点在 service 内生效，没有全局中间件——新增路由不会自动继承任何配额，必须显式声明。键的选择按端点实际承压对象而非一律按 IP：注册按 Register-Ticket（计量 PBKDF2 成本的单位），解绑按 user，其余无认证端点只有 IP 可用。校园网 NAT 是这一取舍的主因——整栋楼共享一个出口 IP，按 IP 给注册设小额度等于全校每窗口只能注册数次。默认值按端点形状推定，尚未据真实流量校准）
 - [x] 审计日志扩展（登录/登出/刷新、注册三步、改密与重置、邮箱与第三方绑定/解绑、资料修改、`oauth_authorize` / `oauth_token` / `oauth_revoke`、第三方登录与 `login_code` 交换、管理后台用户与客户端变更均已接入。Token 重放在两条路径上均以 `outcome: refresh_replayed` / `code_replayed` 落库，可单独检索——同一 action 同一错误码下，只有 outcome 能区分「令牌泄露并已级联撤销」与普通失败）
-- [ ] 头像内容审核（腾讯云 COS）
+- [x] 头像内容审核（腾讯云 COS 图片审核，`STORAGE_AUDIT_ENABLED` 默认开启，fail-closed：审核服务不可用返回 50300 拒绝上传，敏感内容删除对象并返回 42203）
 - [x] OAuth 2.1 授权服务端（两段式 authorize / consent / token / revoke + PKCE-S256 + 重放级联撤销）
 - [x] OIDC Provider（discovery / JWKS / UserInfo / ID Token）
 - [x] OAuth 客户端注册 API（`/admin/oauth-clients` 列表 / 注册 / 更新，打通第三方客户端创建入口与 `client_secret` 校验路径）
