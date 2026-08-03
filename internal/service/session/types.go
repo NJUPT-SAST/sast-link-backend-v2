@@ -44,6 +44,36 @@ type TokenBlacklist interface {
 	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
 }
 
+// DeviceRecord is one logged-in device of a user, as derived from Redis device
+// state. Device records are operational, not authoritative: they live only in
+// Redis, expire after the device TTL, and may be briefly inconsistent across
+// instance scaling (PRD §6.1).
+type DeviceRecord struct {
+	DeviceID  string
+	UA        string
+	IP        string
+	LoginTime time.Time
+	LastSeen  time.Time
+}
+
+// DeviceStore persists per-user device records in Redis. The device ID is the
+// token family ID, so a device dies exactly when its session dies (logout
+// revokes the family first, then removes the record).
+//
+// Every method is fail-open for the session flows that call it (Login/Refresh/
+// Logout/ChangePassword/ResetPassword record device state as a side effect and
+// must not fail the main operation because Redis hiccuped), except
+// DeviceOwnedBy, which gates "logout a specific device" and fails closed: an
+// unreadable set proves nothing and must not authorize a family revoke.
+type DeviceStore interface {
+	RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) error
+	TouchDevice(ctx context.Context, userID int64, deviceID string, now time.Time) error
+	RemoveDevice(ctx context.Context, userID int64, deviceID string) error
+	RemoveAllDevices(ctx context.Context, userID int64) error
+	ListDevices(ctx context.Context, userID int64) ([]DeviceRecord, error)
+	DeviceOwnedBy(ctx context.Context, userID int64, deviceID string) (bool, error)
+}
+
 type UserRepository interface {
 	FindByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error)
 	FindByID(ctx context.Context, userID int64) (*model.User, error)

@@ -99,7 +99,11 @@ var (
 	// user. They deliberately share a code so an authenticated caller cannot probe
 	// which identity IDs exist outside their own account.
 	ErrIdentityNotFound = &Error{Kind: KindNotFound, Code: errcode.CodeNotFound}
-	ErrUserNotFound     = &Error{Kind: KindNotFound, Code: errcode.CodeUserNotFound}
+	// ErrDeviceNotFound covers both a missing device and one owned by another
+	// user: the ownership gate already ran, so anything past it that is not owned
+	// is reported identically without leaking existence.
+	ErrDeviceNotFound = &Error{Kind: KindNotFound, Code: errcode.CodeNotFound}
+	ErrUserNotFound   = &Error{Kind: KindNotFound, Code: errcode.CodeUserNotFound}
 	// ErrLastLoginMethod rejects unbinding the caller's only remaining login
 	// method, which would lock them out of their own account.
 	ErrLastLoginMethod = &Error{Kind: KindValidationFailed, Code: errcode.CodeValidationFailed}

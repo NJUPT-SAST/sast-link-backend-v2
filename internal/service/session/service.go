@@ -81,6 +81,17 @@ type Service struct {
 	// Limiter because checkEndpointLimit reads the quota off the instance, not
 	// the endpoint name.
 	AvatarLimiter EndpointLimiter
+
+	// Devices persists per-user device records in Redis (PRD §6.1). Device
+	// records are operational state, so every session-flow write through this
+	// port is fail-open: a hiccup must not fail a login, refresh, logout or
+	// password change. DeviceOwnedBy is the exception and fails closed, gating
+	// "logout a specific device" against cross-user family revokes.
+	Devices DeviceStore
+	// DeviceLimiter throttles DELETE /user/devices/:id per user, like the unbind
+	// limiter — the subject is the user, not the IP, because the device list
+	// belongs to an authenticated account.
+	DeviceLimiter EndpointLimiter
 }
 
 func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, error) {
@@ -155,6 +166,16 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	}
 	if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)}); auditErr != nil {
 		return nil, compensate("audit login success", auditErr)
+	}
+	// Device registration happens after every compensable step: the family is
+	// committed and audited by this point, so a failed record write only costs a
+	// WARN and the device shows up on the next login. Registering before the
+	// audit would leave an orphan record for every session the compensate path
+	// revokes.
+	if s.Devices != nil {
+		if err := s.Devices.RegisterDevice(ctx, user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now()); err != nil {
+			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
+		}
 	}
 	return &LoginResult{
 		AccessToken:      pair.accessToken,
@@ -233,6 +254,14 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		return nil, newError(ErrInternal, "轮换 Refresh Token 失败", rotateErr)
 	}
 	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, refreshOutcomeRotated, input)
+	// The refresh proves the device is alive; update last_seen without extending
+	// the device TTL, so an abandoned device ages out instead of being kept
+	// alive by refreshes. Fail-open: the rotated pair is already committed.
+	if s.Devices != nil {
+		if err := s.Devices.TouchDevice(ctx, current.UserID, current.FamilyID, s.now()); err != nil {
+			slog.WarnContext(ctx, "touch device failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", err)
+		}
+	}
 	return &RefreshResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -282,6 +311,14 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 		return nil, newError(ErrInternal, "撤销 Token 家族失败", revokeErr)
 	}
 	s.deliverBlacklist(ctx, entries, now)
+	// The family is revoked; drop its device record so the device list reflects
+	// what can actually authenticate. Fail-open: the session is already dead and
+	// a leftover record expires on its own.
+	if s.Devices != nil {
+		if err := s.Devices.RemoveDevice(ctx, input.PrincipalUserID, familyID); err != nil {
+			slog.WarnContext(ctx, "remove device on logout failed", "user_id", input.PrincipalUserID, "device_id", familyID, "error", err)
+		}
+	}
 	if auditErr := s.audit(ctx, &input.PrincipalUserID, "logout", "session", &familyID, true, 0, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
 		slog.Error("audit logout", "family_id", familyID, "error", auditErr)
 	}
@@ -590,6 +627,14 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if auditErr := s.audit(ctx, &user.ID, "register", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit register", "user_id", user.ID, "error", auditErr)
 	}
+	// Registration is the user's first login, so the initial session registers
+	// as a device exactly like a password login. Fail-open: the account and its
+	// session already committed.
+	if s.Devices != nil {
+		if err := s.Devices.RegisterDevice(ctx, user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now()); err != nil {
+			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
+		}
+	}
 	return &RegisterResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -670,6 +715,13 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	}
 	s.deliverBlacklist(ctx, entries, now)
 	s.clearLoginFailures(ctx, user, email)
+	// Same device cleanup as ChangePassword: reset revokes every session, so the
+	// device set must not survive it.
+	if s.Devices != nil {
+		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
+			slog.WarnContext(ctx, "remove all devices on password reset failed", "user_id", user.ID, "error", err)
+		}
+	}
 	if auditErr := s.audit(ctx, &user.ID, "reset_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit reset password", "user_id", user.ID, "error", auditErr)
 	}
@@ -721,6 +773,14 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	}
 	s.deliverBlacklist(ctx, entries, now)
 	s.clearLoginFailures(ctx, user, user.LoginEmail)
+	// Every session of the user was just revoked, so the device set must die
+	// with it (PRD §6.1: 设备记录清除). Fail-open: the revocation is durable in
+	// PostgreSQL and a leftover device record cannot authenticate anything.
+	if s.Devices != nil {
+		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
+			slog.WarnContext(ctx, "remove all devices on password change failed", "user_id", user.ID, "error", err)
+		}
+	}
 	if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, nil); auditErr != nil {
 		slog.Error("audit change password", "user_id", user.ID, "error", auditErr)
 	}
