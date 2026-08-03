@@ -15,7 +15,7 @@ import (
 // its own client, not a reconfigured one.
 const (
 	githubAuthorizeURL = "https://github.com/login/oauth/authorize"
-	githubTokenURL     = "https://github.com/login/oauth/access_token" //nolint:gosec // Public GitHub endpoint URL, not a credential.
+	githubTokenURL     = "https://github.com/login/oauth/access_token" // #nosec G101 // Public GitHub endpoint URL, not a credential.
 	githubUserURL      = "https://api.github.com/user"
 )
 
