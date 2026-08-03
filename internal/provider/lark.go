@@ -14,8 +14,8 @@ import (
 // Lark (飞书) endpoint URLs.
 const (
 	larkAuthorizeURL      = "https://open.feishu.cn/open-apis/authen/v1/authorize"
-	larkAppAccessTokenURL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal" //nolint:gosec // Public Lark endpoint URL, not a credential.
-	larkUserTokenURL      = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"             //nolint:gosec // Public Lark endpoint URL, not a credential.
+	larkAppAccessTokenURL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal" // #nosec G101 // Public Lark endpoint URL, not a credential.
+	larkUserTokenURL      = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"             // #nosec G101 // Public Lark endpoint URL, not a credential.
 	larkUserInfoURL       = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 )
 
