@@ -84,3 +84,44 @@ func TestBlacklistStoreRoundTrip(t *testing.T) {
 		t.Fatalf("unknown JTI blacklisted=%v err=%v, want not blacklisted", listed, err)
 	}
 }
+
+func TestDeviceStoreRoundTrip(t *testing.T) {
+	devices := DeviceStore{Store: newTestStore(t)}
+	ctx := context.Background()
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+
+	if err := devices.RegisterDevice(ctx, 42, "family-1", "browser/5", "10.0.0.1", now); err != nil {
+		t.Fatalf("RegisterDevice returned error: %v", err)
+	}
+	owned, err := devices.DeviceOwnedBy(ctx, 42, "family-1")
+	if err != nil || !owned {
+		t.Fatalf("DeviceOwnedBy=%v err=%v, want owned", owned, err)
+	}
+	owned, err = devices.DeviceOwnedBy(ctx, 7, "family-1")
+	if err != nil || owned {
+		t.Fatalf("cross-user DeviceOwnedBy=%v err=%v, want not owned", owned, err)
+	}
+
+	later := now.Add(time.Minute)
+	if err := devices.TouchDevice(ctx, 42, "family-1", later); err != nil {
+		t.Fatalf("TouchDevice returned error: %v", err)
+	}
+	records, err := devices.ListDevices(ctx, 42)
+	if err != nil {
+		t.Fatalf("ListDevices returned error: %v", err)
+	}
+	if len(records) != 1 || records[0].DeviceID != "family-1" || !records[0].LastSeen.Equal(later) {
+		t.Fatalf("records = %#v, want family-1 with last_seen %v", records, later)
+	}
+
+	if err := devices.RemoveDevice(ctx, 42, "family-1"); err != nil {
+		t.Fatalf("RemoveDevice returned error: %v", err)
+	}
+	records, err = devices.ListDevices(ctx, 42)
+	if err != nil {
+		t.Fatalf("ListDevices returned error: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %#v, want empty after remove", records)
+	}
+}
