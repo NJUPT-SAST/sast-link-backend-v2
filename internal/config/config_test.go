@@ -209,6 +209,12 @@ func TestLoadValidConfig(t *testing.T) {
 	if cfg.RateLimitUnbindWindow != time.Minute {
 		t.Errorf("RateLimitUnbindWindow = %s, want 60s", cfg.RateLimitUnbindWindow)
 	}
+	if cfg.RateLimitDeviceRPM != 3 {
+		t.Errorf("RateLimitDeviceRPM = %d, want 3", cfg.RateLimitDeviceRPM)
+	}
+	if cfg.RateLimitDeviceWindow != time.Minute {
+		t.Errorf("RateLimitDeviceWindow = %s, want 60s", cfg.RateLimitDeviceWindow)
+	}
 }
 
 func TestLoadAllowsMigrateWithoutCryptoMaterial(t *testing.T) {

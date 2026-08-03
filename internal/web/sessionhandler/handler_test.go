@@ -41,6 +41,8 @@ type fakeService struct {
 	listIdentitiesResult     *session.ListIdentitiesResult
 	unbindIdentityResult     *session.UnbindIdentityResult
 	cardResult               *session.CardResult
+	listDevicesResult        *session.ListDevicesResult
+	logoutDeviceResult       *session.LogoutDeviceResult
 	loginErr                 error
 	refreshErr               error
 	logoutErr                error
@@ -58,6 +60,8 @@ type fakeService struct {
 	listIdentitiesErr        error
 	unbindIdentityErr        error
 	cardErr                  error
+	listDevicesErr           error
+	logoutDeviceErr          error
 	loginInput               session.LoginInput
 	refreshInput             session.RefreshInput
 	logoutInput              session.LogoutInput
@@ -75,10 +79,14 @@ type fakeService struct {
 	listIdentitiesInput      session.ListIdentitiesInput
 	unbindIdentityInput      session.UnbindIdentityInput
 	cardInput                session.CardInput
+	listDevicesInput         session.ListDevicesInput
+	logoutDeviceInput        session.LogoutDeviceInput
 	updateProfileCalls       int
 	uploadAvatarCalls        int
 	unbindIdentityCalls      int
 	cardCalls                int
+	listDevicesCalls         int
+	logoutDeviceCalls        int
 	loginCalls               int
 	refreshCalls             int
 	logoutCalls              int
@@ -776,4 +784,16 @@ func (s *fakeService) UnbindIdentity(_ context.Context, input session.UnbindIden
 	s.unbindIdentityCalls++
 	s.unbindIdentityInput = input
 	return s.unbindIdentityResult, s.unbindIdentityErr
+}
+
+func (s *fakeService) ListDevices(_ context.Context, input session.ListDevicesInput) (*session.ListDevicesResult, error) {
+	s.listDevicesCalls++
+	s.listDevicesInput = input
+	return s.listDevicesResult, s.listDevicesErr
+}
+
+func (s *fakeService) LogoutDevice(_ context.Context, input session.LogoutDeviceInput) (*session.LogoutDeviceResult, error) {
+	s.logoutDeviceCalls++
+	s.logoutDeviceInput = input
+	return s.logoutDeviceResult, s.logoutDeviceErr
 }

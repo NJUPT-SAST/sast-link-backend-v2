@@ -31,6 +31,8 @@ type Service interface {
 	UploadAvatar(ctx context.Context, input session.UploadAvatarInput) (*session.UploadAvatarResult, error)
 	ListIdentities(ctx context.Context, input session.ListIdentitiesInput) (*session.ListIdentitiesResult, error)
 	UnbindIdentity(ctx context.Context, input session.UnbindIdentityInput) (*session.UnbindIdentityResult, error)
+	ListDevices(ctx context.Context, input session.ListDevicesInput) (*session.ListDevicesResult, error)
+	LogoutDevice(ctx context.Context, input session.LogoutDeviceInput) (*session.LogoutDeviceResult, error)
 	Card(ctx context.Context, input session.CardInput) (*session.CardResult, error)
 }
 
@@ -221,6 +223,8 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	protected.POST("/user/identities/email", h.BindEmailSendCode)
 	protected.POST("/user/identities/email/verify", h.BindEmailVerify)
 	protected.DELETE("/user/identities/:id", h.UnbindIdentity)
+	protected.GET("/user/devices", h.ListDevices)
+	protected.DELETE("/user/devices/:id", h.LogoutDevice)
 }
 
 func (h Handler) Login(c *gin.Context) {
