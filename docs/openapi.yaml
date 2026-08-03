@@ -1188,6 +1188,85 @@ paths:
           $ref: "#/components/responses/InternalError"
       security:
         - bearerAuth: []
+  /user/devices:
+    get:
+      summary: 设备列表
+      deprecated: false
+      description: >-
+        返回当前用户的已登录设备列表，按最近登录时间倒序（最新在前）。
+        设备 ID 即 token family_id：一次登录（或注册）即一台设备，最多 5 台，超出淘汰最旧。
+        Redis 不可用时降级返回空列表（fail-open），不影响登录能力。
+      operationId: userListDevices
+      tags:
+        - Devices
+      parameters: []
+      responses:
+        "200":
+          description: 设备列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DevicesListResponse"
+          headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 账号已注销（40301）
+        "500":
+          $ref: "#/components/responses/InternalError"
+      security:
+        - bearerAuth: []
+  /user/devices/{id}:
+    delete:
+      summary: 登出指定设备
+      deprecated: false
+      description: >-
+        登出指定设备：校验设备归属当前用户（Redis 归属校验，fail-closed）→ 撤销该设备
+        所属 token family 的全部令牌 → 删除设备记录 → 审计 logout_device。
+        设备不存在或不属于当前用户均返回 40400，不区分两者。按用户限流，60s 内最多 3 次
+        （42900，带 Retry-After）。当前设备请使用 POST /auth/logout。
+      operationId: userLogoutDevice
+      tags:
+        - Devices
+      parameters:
+        - name: id
+          in: path
+          description: 设备 ID（token family_id，UUID）
+          required: true
+          example: 6da1d5dd-02ec-4fc6-840e-67dc0dae52ac
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 登出成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceLogoutResponse"
+          headers: {}
+        "400":
+          $ref: "#/components/responses/BadRequest"
+          description: 参数无效（40000）
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 账号已注销（40301）
+        "404":
+          $ref: "#/components/responses/NotFound"
+          description: 设备不存在或不属于当前用户（40400）
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+          description: 操作过于频繁（42900），60s 内最多 3 次，按用户限流
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: 设备服务暂不可用（50300，fail-closed：无法校验归属时不执行撤销）
+      security:
+        - bearerAuth: []
   /oauth/authorize:
     get:
       summary: 授权端点
@@ -2972,6 +3051,66 @@ components:
               description: 第三方账号绑定列表
               items:
                 $ref: "#/components/schemas/Identity"
+    Device:
+      type: object
+      description: 已登录设备
+      properties:
+        device_id:
+          type: string
+          description: 设备 ID（token family_id，UUID）
+        ua:
+          type: string
+          description: 登录时的 User-Agent
+        ip:
+          type: string
+          description: 登录时的 IP
+        login_time:
+          type: string
+          format: date-time
+          description: 登录时间
+        last_seen:
+          type: string
+          format: date-time
+          description: 最近一次刷新 Token 的时间（刷新不续期设备 TTL）
+    DevicesListResponse:
+      type: object
+      description: 设备列表响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            devices:
+              type: array
+              description: 已登录设备列表（按最近登录倒序；Redis 不可用时为空数组）
+              items:
+                $ref: "#/components/schemas/Device"
+    DeviceLogoutResponse:
+      type: object
+      description: 登出指定设备响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+              description: 登出结果描述
+              example: 该设备已登出
     IdentityBindResponse:
       type: object
       description: 第三方账号绑定响应
