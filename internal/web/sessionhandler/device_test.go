@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 )
 
@@ -82,13 +83,19 @@ func TestLogoutDeviceCallsServiceAndReplies(t *testing.T) {
 
 func TestLogoutDeviceMapsServiceErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	service := &fakeService{logoutDeviceErr: session.ErrDeviceNotFound}
+	// The service raises a wrapped error carrying the device-specific message
+	// (newError(ErrDeviceNotFound, "设备不存在", nil)); the sentinel alone has
+	// no message, so the fake must mirror the real path.
+	service := &fakeService{logoutDeviceErr: &session.Error{Kind: session.KindNotFound, Code: errcode.CodeNotFound, Message: "设备不存在"}}
 	router := authedRouter(service)
 	recorder := doJSON(router, http.MethodDelete, "/user/devices/nope", "")
 
 	body := decodeBody(t, recorder)
 	if recorder.Code != http.StatusNotFound || body.Code != 40400 {
 		t.Fatalf("response = %d %#v, want 404 40400", recorder.Code, body)
+	}
+	if body.Message != "设备不存在" {
+		t.Fatalf("message = %q, want the device-specific message (not the unbind one)", body.Message)
 	}
 }
 

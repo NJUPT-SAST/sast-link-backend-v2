@@ -76,8 +76,8 @@ func setupDeviceE2E(t *testing.T) *deviceE2EHarness {
 		EmailType:    model.EmailTypeNJUpt,
 		College:      model.CollegeOther,
 	}
-	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
-		t.Fatalf("create user: %v", err)
+	if createErr := users.CreateWithProfile(context.Background(), user, &model.Profile{}); createErr != nil {
+		t.Fatalf("create user: %v", createErr)
 	}
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -146,6 +146,47 @@ func decodeE2EList(t *testing.T, recorder *httptest.ResponseRecorder) []map[stri
 	return body.Data.Devices
 }
 
+// The per-user cap is enforced at the session level, not just in the device
+// list: logging in a sixth device evicts the oldest record and revokes its
+// whole token family, so the displaced session cannot keep refreshing.
+func TestDeviceE2EEvictionRevokesOldestFamily(t *testing.T) {
+	harness := setupDeviceE2E(t)
+	ctx := context.Background()
+
+	logins := make([]*session.LoginResult, 0, 6)
+	for i := 0; i < 6; i++ {
+		result, err := harness.service.Login(ctx, session.LoginInput{
+			Identifier: "device-e2e@njupt.edu.cn",
+			Password:   "secret-pass",
+			ClientIP:   "10.0.0." + string(rune('1'+i)),
+			UserAgent:  "device/" + string(rune('1'+i)),
+		})
+		if err != nil {
+			t.Fatalf("login %d: %v", i+1, err)
+		}
+		logins = append(logins, result)
+	}
+
+	// The list caps at 5; the sixth login evicted the first device.
+	devices := harness.listDevices(t)
+	if len(devices) != 5 {
+		t.Fatalf("devices = %#v, want 5 after six logins", devices)
+	}
+
+	// The evicted device's refresh token must be dead.
+	if _, err := harness.service.Refresh(ctx, session.RefreshInput{RefreshToken: logins[0].RefreshToken}); err == nil {
+		t.Fatal("refresh with the evicted device's token succeeded, want rejection")
+	}
+	// The newest device's session keeps working.
+	rotated, err := harness.service.Refresh(ctx, session.RefreshInput{RefreshToken: logins[5].RefreshToken})
+	if err != nil {
+		t.Fatalf("refresh with the newest device's token failed: %v", err)
+	}
+	if rotated.AccessToken == "" {
+		t.Fatal("newest refresh produced no access token")
+	}
+}
+
 func TestDeviceE2ELogoutRevokesFamilyAndKeepsOthers(t *testing.T) {
 	harness := setupDeviceE2E(t)
 	ctx := context.Background()
@@ -183,7 +224,7 @@ func TestDeviceE2ELogoutRevokesFamilyAndKeepsOthers(t *testing.T) {
 	}
 
 	// The revoked family's refresh token must be dead…
-	if _, err := harness.service.Refresh(ctx, session.RefreshInput{RefreshToken: first.RefreshToken}); err == nil {
+	if _, refreshErr := harness.service.Refresh(ctx, session.RefreshInput{RefreshToken: first.RefreshToken}); refreshErr == nil {
 		t.Fatal("refresh with the logged-out device's token succeeded, want rejection")
 	}
 	// …while the other device's session keeps working.

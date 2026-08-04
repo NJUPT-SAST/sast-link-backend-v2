@@ -307,6 +307,11 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		States:            oauthLoginStates,
 		RegistrationState: oauthRegistrations,
 		LoginCodes:        oauthLoginCodes,
+		// Third-party logins register as devices in the same Redis store as
+		// password logins, so they count against the 5-device cap and appear in
+		// the device list.
+		Devices:   sessionredis.DeviceStore{Store: store},
+		Blacklist: blacklist,
 		Issuer: tokenissue.Issuer{
 			JWT:     jwtManager,
 			Refresh: refreshManager,
@@ -329,6 +334,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Users:     users,
 		Audit:     audit,
 		Blacklist: oauthredis.BlacklistStore{Store: store},
+		// Admin session-killing actions clear the user's device records in the
+		// same Redis store, so a demoted/closed account leaves no ghost logins.
+		Devices: sessionredis.DeviceStore{Store: store},
 	}
 
 	adminClientService := adminclient.Service{
