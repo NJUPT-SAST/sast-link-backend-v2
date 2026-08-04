@@ -234,6 +234,13 @@ func TestTouchDeviceRebuildsMissingHashFully(t *testing.T) {
 	if devices[0].LoginTime.IsZero() {
 		t.Fatalf("login_time is zero, want it rebuilt by the touch")
 	}
+	// The rebuilt login_time must come from the ZSET score (the original login
+	// instant), not the touch time: the list sorts by score, so a record whose
+	// displayed login_time jumped to "now" would contradict its own position.
+	if !devices[0].LoginTime.Equal(now) {
+		t.Fatalf("login_time = %v, want the original login %v, not the touch time %v",
+			devices[0].LoginTime, now, later)
+	}
 }
 
 // A refresh that arrives after the record TTL already expired resurrects the

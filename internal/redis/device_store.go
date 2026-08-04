@@ -180,13 +180,44 @@ func (s Store) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip s
 // is still never extended by refreshes (PRD §6.1). The same guard covers the
 // sorted set, so a member cannot outlive its record as a zombie.
 //
+// When the live branch rebuilds a Hash whose key was lost, login_time is
+// restored from the ZSET score (the original login timestamp) rather than the
+// current time: the score is what ListDevices sorts by, so a rebuilt record
+// whose displayed login_time jumped to "now" while its sort position stayed at
+// the old login would present an ordering that contradicts its own timestamps.
+//
 // The resurrect branch sweeps phantom members (set members whose Hash is gone)
 // before the cap check, like RegisterDevice: they must not occupy cap slots
 // and push a real device out.
 const touchDeviceScript = `
-if redis.call("ZSCORE", KEYS[1], ARGV[1]) then
+local score = redis.call("ZSCORE", KEYS[1], ARGV[1])
+-- unix_ms_to_rfc3339 renders a Unix-millis score back into the RFC3339
+-- "2006-01-02T15:04:05Z" shape Go stores in the Hash, so a rebuilt login_time
+-- matches the sort score exactly (Redis Lua has no os.date; this is the
+-- civil-from-days algorithm).
+local function unix_ms_to_rfc3339(ms)
+  local sec = math.floor(ms / 1000)
+  local days = math.floor(sec / 86400)
+  local sod = sec % 86400
+  local z = days + 719468
+  local era = math.floor(z / 146097)
+  local doe = z - era * 146097
+  local yoe = math.floor((doe - math.floor(doe / 1460) + math.floor(doe / 36524) - math.floor(doe / 146096)) / 365)
+  local y = yoe + era * 400
+  local doy = doe - (365 * yoe + math.floor(yoe / 4) - math.floor(yoe / 100))
+  local mp = math.floor((5 * doy + 2) / 153)
+  local d = doy - math.floor((153 * mp + 2) / 5) + 1
+  local m = mp + 3 - 12 * math.floor(mp / 10)
+  y = y + math.floor(mp / 10)
+  local hh = math.floor(sod / 3600)
+  local mm = math.floor((sod % 3600) / 60)
+  local ss = sod % 60
+  return string.format("%04d-%02d-%02dT%02d:%02d:%02dZ", y, m, d, hh, mm, ss)
+end
+if score then
   if redis.call("EXISTS", KEYS[2]) == 0 then
-    redis.call("HSET", KEYS[2], "ua", ARGV[4], "ip", ARGV[5], "login_time", ARGV[2], "last_seen", ARGV[2])
+    local login_time = unix_ms_to_rfc3339(score)
+    redis.call("HSET", KEYS[2], "ua", ARGV[4], "ip", ARGV[5], "login_time", login_time, "last_seen", ARGV[2])
   else
     redis.call("HSET", KEYS[2], "last_seen", ARGV[2])
   end

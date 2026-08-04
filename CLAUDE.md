@@ -114,7 +114,9 @@ Redis is used for short-lived and operational state, not durable source-of-truth
 Every Redis-backed check must declare its behavior when Redis is unavailable, following one of two classes:
 
 - **Fail-closed (Redis is the only store)**: verification codes, OAuth `state`, `registration_state`, `login_code`, Register/Bind-Tickets, and idempotency keys. A missing value cannot be treated as valid, so the flow must be rejected and restarted by the user.
-- **Fail-open (PostgreSQL is authoritative, or loss only widens a rate window)**: the JTI blacklist, login-failure counters/lockout, and endpoint rate limits. These log at WARN and continue. The JTI blacklist is safe to skip because every blacklisted JTI is written in the same transaction that sets `oauth_access_tokens.revoked_at`, and the auth middleware always performs that DB check.
+- **Fail-open (PostgreSQL is authoritative, or loss only widens a rate window)**: the JTI blacklist, login-failure counters/lockout, endpoint rate limits, and device records. These log at WARN and continue. The JTI blacklist is safe to skip because every blacklisted JTI is written in the same transaction that sets `oauth_access_tokens.revoked_at`, and the auth middleware always performs that DB check.
+
+  Device records (PRD §6.1) are the one exception to "Redis is the only store ⇒ fail-closed". They are Redis-only operational state: a session's validity lives in `oauth_refresh_tokens` / `oauth_access_tokens`, and every device-killing path revokes there in a transaction before touching the record, so an outage costs the user the device *view* (an empty list) and temporarily under-enforces the 5-device cap — never the ability to log in or log out. The one device check that gates a destructive action, `DeviceOwnedBy` ("logout this specific device"), fails closed: an unreadable set proves nothing and must not authorize a family revoke.
 
 Do not make a fail-open dependency return `ErrInternal`; that turns an optional cache into a single point of failure for authentication.
 

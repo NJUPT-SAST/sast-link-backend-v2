@@ -1246,9 +1246,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/DeviceLogoutResponse"
           headers: {}
-        "400":
-          $ref: "#/components/responses/BadRequest"
-          description: 参数无效（40000）
         "401":
           $ref: "#/components/responses/Unauthorized"
           description: 未认证（401xx）
@@ -1257,7 +1254,10 @@ paths:
           description: 账号已注销（40301）
         "404":
           $ref: "#/components/responses/NotFound"
-          description: 设备不存在或不属于当前用户（40400）
+          description: >-
+            设备不存在或不属于当前用户（40400）。空/空白的 id 也走这一条：
+            handler 先 trim 再判断，区分 40000 与 40400 对调用方没有可确认的信息，
+            反而可能帮助探测他人的会话，所以本端点不产生 40000。
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: 操作过于频繁（42900），60s 内最多 3 次，按用户限流

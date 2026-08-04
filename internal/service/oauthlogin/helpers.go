@@ -92,12 +92,15 @@ func (s Service) now() time.Time {
 
 // audit writes one audit row. Audit failures never fail the caller's flow; the
 // caller logs them. Mirrors session.Service.audit so both services produce
-// identically shaped rows.
+// identically shaped rows, including the resourceID the session service carries
+// on evict_device rows — a third-party login eviction must leave the same trail
+// as a password-login one.
 func (s Service) audit(
 	ctx context.Context,
 	userID *int64,
 	action string,
 	resource string,
+	resourceID *string,
 	success bool,
 	errCode int,
 	clientIP string,
@@ -129,15 +132,16 @@ func (s Service) audit(
 	}
 	successValue := success
 	return s.Audits.Create(ctx, &model.AuditLog{
-		UserID:    userID,
-		Action:    action,
-		Resource:  resource,
-		Detail:    detailValue,
-		ClientIP:  clientIPPtr,
-		UserAgent: userAgentPtr,
-		Success:   &successValue,
-		ErrCode:   errCodePtr,
-		CreatedAt: s.now(),
+		UserID:     userID,
+		Action:     action,
+		Resource:   resource,
+		ResourceID: resourceID,
+		Detail:     detailValue,
+		ClientIP:   clientIPPtr,
+		UserAgent:  userAgentPtr,
+		Success:    &successValue,
+		ErrCode:    errCodePtr,
+		CreatedAt:  s.now(),
 	})
 }
 
@@ -172,7 +176,7 @@ func (s Service) auditLogin(
 		"provider":    string(input.Provider),
 		"provider_id": providerID,
 	}
-	if err := s.audit(ctx, userID, "oauth_login", "session", success, errCode,
+	if err := s.audit(ctx, userID, "oauth_login", "session", nil, success, errCode,
 		input.ClientIP, input.UserAgent, detail); err != nil {
 		logAuditFailure(ctx, "oauth_login", err)
 	}

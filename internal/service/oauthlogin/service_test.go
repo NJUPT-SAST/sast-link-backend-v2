@@ -390,9 +390,10 @@ func TestExchangeCodeRevokesEvictedFamily(t *testing.T) {
 	if len(devices.removed) != 1 || devices.removed[0] != "family-oldest" {
 		t.Fatalf("removed = %#v, want the displaced record cleaned after the revoke", devices.removed)
 	}
-	// The eviction is a session-killing event; it must be audited. This
-	// package's audit helper has no resourceID parameter, so the device ID
-	// rides in the detail JSON.
+	// The eviction is a session-killing event; it must be audited, and the
+	// resource_id must carry the displaced family just like the session
+	// service's evict_device rows, so a third-party-login eviction leaves the
+	// same trail as a password-login one.
 	var evictedAudit *model.AuditLog
 	for i := range doubles.Audits.entries {
 		if doubles.Audits.entries[i].Action == "evict_device" {
@@ -401,6 +402,9 @@ func TestExchangeCodeRevokesEvictedFamily(t *testing.T) {
 	}
 	if evictedAudit == nil || evictedAudit.Success == nil || !*evictedAudit.Success {
 		t.Fatalf("evict_device audit = %+v, want a success entry", evictedAudit)
+	}
+	if evictedAudit.ResourceID == nil || *evictedAudit.ResourceID != "family-oldest" {
+		t.Fatalf("evict_device audit resource_id = %v, want the displaced family id", evictedAudit.ResourceID)
 	}
 	if detail := string(evictedAudit.Detail); !strings.Contains(detail, "family-oldest") {
 		t.Fatalf("evict_device audit detail = %s, want the displaced family id", detail)

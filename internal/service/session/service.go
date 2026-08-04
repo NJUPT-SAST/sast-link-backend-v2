@@ -274,12 +274,30 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	// Running it after the commit would open exactly that window — the
 	// resurrect branch re-registers the record and the terminated session stays
 	// visible (and occupying a cap slot) until a manual delete or the TTL.
+	//
+	// The touch's eviction side-effect is deferred until AFTER the rotation
+	// commits, though: revoking the displaced family is the "最多 5 台" cap
+	// enforcement, and it must only fire for a refresh that actually landed. A
+	// refresh whose family was revoked between the pre-checks above and the
+	// rotate (a concurrent logout or eviction) still resurrects and evicts
+	// through the touch — the resurrect branch cannot know the family is doomed —
+	// but revoking a different, healthy device's family as collateral for a
+	// rotation that then fails would log the user out of a session they never
+	// touched. Deferring the revoke makes a doomed refresh non-destructive.
+	//
+	// The residual cost of deferral: the touch already removed the displaced
+	// device's record from the set, and skipping the family revoke leaves that
+	// device briefly invisible in the list while its session stays live — a
+	// ghost that reappears on its own next refresh (the resurrect branch
+	// re-registers it). Acceptable: strictly better than logging the user out
+	// of a device they never touched, and it self-heals.
+	var evicted string
 	if s.Devices != nil {
-		evicted, err := s.Devices.TouchDevice(ctx, current.UserID, current.FamilyID, input.UserAgent, input.ClientIP, s.now())
+		var err error
+		evicted, err = s.Devices.TouchDevice(ctx, current.UserID, current.FamilyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
 			slog.WarnContext(ctx, "touch device failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", err)
 		}
-		s.revokeEvictedDevice(ctx, current.UserID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	}
 	if rotateErr := s.Tokens.RotateRefreshToken(ctx, tokenHash, pair.access, pair.refresh); rotateErr != nil {
 		if errors.Is(rotateErr, repository.ErrTokenReplay) || errors.Is(rotateErr, repository.ErrTokenExpired) || errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) {
@@ -302,6 +320,10 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		}
 		return nil, newError(ErrInternal, "轮换 Refresh Token 失败", rotateErr)
 	}
+	// The rotation committed: the refresh is real, so the touch's displaced
+	// device (if any) must be evicted exactly like a login eviction. revokeEvictedDevice
+	// no-ops on an empty ID (a live-record touch that evicted nothing).
+	s.revokeEvictedDevice(ctx, current.UserID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, refreshOutcomeRotated, input)
 	return &RefreshResult{
 		AccessToken:      pair.accessToken,

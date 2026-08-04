@@ -186,8 +186,12 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 	s.auditUpdate(ctx, input, true, 0, validated.changed)
 	// Report what the transaction actually revoked rather than what this layer
 	// predicted: the repository judges the role change against the locked row, so its
-	// answer is the only one that matches what happened.
-	return &UpdateUserResult{ChangedFields: validated.changed, RevokedSessions: len(entries) > 0}, nil
+	// answer is the only one that matches what happened. That authoritative flag is
+	// sessionsRevoked, not len(entries) — the entries only collect still-live access
+	// tokens for blacklist delivery, so a demotion of a user idle for over an hour
+	// revokes every refresh token while returning zero entries, and reporting
+	// "no sessions revoked" for that would contradict the device-set cleanup above.
+	return &UpdateUserResult{ChangedFields: validated.changed, RevokedSessions: sessionsRevoked}, nil
 }
 
 // DeleteUser closes an account and cuts every session it holds.

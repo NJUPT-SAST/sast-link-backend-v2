@@ -9,6 +9,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
 type fakeDevices struct {
@@ -303,6 +304,37 @@ func TestRefreshSucceedsWhenEvictedRevokeFails(t *testing.T) {
 	tokens.revokeErr = errors.New("db down")
 	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: pair.RefreshToken}); err != nil {
 		t.Fatalf("Refresh returned error, want fail-open rotation: %v", err)
+	}
+}
+
+// A refresh whose family was revoked between the pre-checks and the rotation (a
+// concurrent logout or eviction) is doomed: the touch may have resurrected and
+// evicted a device, but the rotation then fails. The eviction revoke is
+// deferred until the rotation commits, so a doomed refresh must not revoke a
+// different, healthy device's family as collateral.
+func TestRefreshRotationFailureDoesNotRevokeEvictedFamily(t *testing.T) {
+	service := newRegisterService(t)
+	devices := &fakeDevices{touchEvicted: "family-other"}
+	service = withDevices(service, devices)
+	pair, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	tokens := service.Tokens.(*fakeTokens)
+	// The family was revoked concurrently, so the rotation must fail as a replay.
+	tokens.rotateErr = repository.ErrTokenReplay
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: pair.RefreshToken}); err == nil {
+		t.Fatal("Refresh returned nil error, want the doomed rotation to fail")
+	}
+	for _, family := range tokens.revokedFamilies {
+		if family == "family-other" {
+			t.Fatalf("revoked families = %#v, doomed refresh revoked the unrelated evicted family", tokens.revokedFamilies)
+		}
+	}
+	for _, removed := range devices.removed {
+		if removed == "family-other" {
+			t.Fatalf("removed = %#v, doomed refresh cleaned the unrelated evicted record", devices.removed)
+		}
 	}
 }
 
