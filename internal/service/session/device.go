@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type ListDevicesInput struct {
@@ -24,6 +25,42 @@ type LogoutDeviceInput struct {
 
 type LogoutDeviceResult struct {
 	DeviceID string
+}
+
+// revokeEvictedDevice revokes the token family of a device evicted by the
+// per-user cap, so "最多 5 台同时登录" (PRD §6.1) holds at the session level,
+// not just in the device list. Fail-open: the new login already happened and a
+// database outage must not be able to block it — the evicted family revoke is
+// best effort, and dropping the record at least removes the session from the
+// device list.
+//
+// The record cleanup runs after the revoke to close a small race: a refresh of
+// the evicted family that passed the DB checks just before the revoke can
+// resurrect the record (TouchDevice re-registers expired records), and the
+// removal then clears exactly that stale record.
+//
+// The eviction itself is audited: every other session-killing path (logout,
+// logout_device, change_password, reset_password, replay) writes an audit
+// event, and an eviction that silently revoked a session would leave the
+// 90-day audit trail with a gap nobody could explain.
+func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted string, now time.Time, clientIP, userAgent string) {
+	if evicted == "" {
+		return
+	}
+	entries, err := s.Tokens.RevokeFamily(ctx, evicted, now)
+	if err != nil {
+		slog.WarnContext(ctx, "revoke evicted device family failed", "user_id", userID, "device_id", evicted, "error", err)
+		return
+	}
+	s.deliverBlacklist(ctx, entries, now)
+	if s.Devices != nil {
+		if err := s.Devices.RemoveDevice(ctx, userID, evicted); err != nil {
+			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)
+		}
+	}
+	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, true, 0, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
+		slog.Error("audit evict device", "user_id", userID, "device_id", evicted, "error", auditErr)
+	}
 }
 
 // ListDevices returns the caller's logged-in devices, newest first. Device

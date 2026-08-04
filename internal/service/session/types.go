@@ -66,8 +66,20 @@ type DeviceRecord struct {
 // DeviceOwnedBy, which gates "logout a specific device" and fails closed: an
 // unreadable set proves nothing and must not authorize a family revoke.
 type DeviceStore interface {
-	RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) error
-	TouchDevice(ctx context.Context, userID int64, deviceID string, now time.Time) error
+	// RegisterDevice records a login as a device and returns the device ID
+	// evicted to make room ("" when the set stayed within the cap). The caller
+	// must revoke the evicted device's token family: eviction is the "最多 5 台
+	// 同时登录" enforcement, and leaving the family live would create a session
+	// that is invisible in the device list and cannot be logged out.
+	RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (evicted string, err error)
+	// TouchDevice updates last_seen for a live record, or resurrects an expired
+	// one with a fresh TTL (ua/ip/login_time re-recorded): a refresh that still
+	// works after the 30d record TTL proves the device is in use, and dropping
+	// it would create an invisible, unmanageable ghost session. Resurrecting
+	// re-enters the per-user cap and returns the evicted device ID, whose
+	// family the caller must revoke — otherwise a user at the cap with one
+	// expired-but-refreshing device would silently reach 6 live sessions.
+	TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (evicted string, err error)
 	RemoveDevice(ctx context.Context, userID int64, deviceID string) error
 	RemoveAllDevices(ctx context.Context, userID int64) error
 	ListDevices(ctx context.Context, userID int64) ([]DeviceRecord, error)

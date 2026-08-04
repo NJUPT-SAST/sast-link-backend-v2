@@ -1065,6 +1065,8 @@ func TestRefreshRotatesSameFamilyAndScopes(t *testing.T) {
 
 func TestRefreshRejectsDeletedExpiredAndReplay(t *testing.T) {
 	service, users, _, tokens, _, _ := newTestService(t)
+	devices := &fakeDevices{}
+	service = withDevices(service, devices)
 	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
 	if err != nil {
 		t.Fatalf("Login returned error: %v", err)
@@ -1084,10 +1086,17 @@ func TestRefreshRejectsDeletedExpiredAndReplay(t *testing.T) {
 	if len(tokens.revokedFamilies) == 0 {
 		t.Fatalf("expected fake repository to record family revoke on replay")
 	}
+	// Rotation failure cuts the family; the device record must die with it, or
+	// the list keeps showing a session that can no longer authenticate.
+	if len(devices.removed) != 1 || devices.removed[0] != tokens.createdRefresh.FamilyID {
+		t.Fatalf("removed = %#v, want the replayed family's device record", devices.removed)
+	}
 }
 
 func TestRefreshRevokedTokenRevokesFamilyBeforeOtherPrechecks(t *testing.T) {
 	service, users, _, tokens, _, _ := newTestService(t)
+	devices := &fakeDevices{}
+	service = withDevices(service, devices)
 	blacklist := &fakeBlacklist{}
 	service.Blacklist = blacklist
 	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
@@ -1105,6 +1114,10 @@ func TestRefreshRevokedTokenRevokesFamilyBeforeOtherPrechecks(t *testing.T) {
 	if len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != tokens.createdRefresh.FamilyID {
 		t.Fatalf("revoked families = %#v, want revoked refresh family", tokens.revokedFamilies)
 	}
+	// Replay detection killed the family; the device record must not survive it.
+	if len(devices.removed) != 1 || devices.removed[0] != tokens.createdRefresh.FamilyID {
+		t.Fatalf("removed = %#v, want the replayed family's device record", devices.removed)
+	}
 	if blacklist.jti == "" || blacklist.ttl <= 0 {
 		t.Fatalf("blacklist = %+v, want live revoked access token delivery", blacklist)
 	}
@@ -1112,6 +1125,8 @@ func TestRefreshRevokedTokenRevokesFamilyBeforeOtherPrechecks(t *testing.T) {
 
 func TestRefreshExpiredActiveTokenDoesNotRevokeFamily(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
+	devices := &fakeDevices{}
+	service = withDevices(service, devices)
 	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
 	if err != nil {
 		t.Fatalf("Login returned error: %v", err)
@@ -1122,6 +1137,11 @@ func TestRefreshExpiredActiveTokenDoesNotRevokeFamily(t *testing.T) {
 	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 	if len(tokens.revokedFamilies) != 0 {
 		t.Fatalf("revoked families = %#v, want no revoke for active expired token", tokens.revokedFamilies)
+	}
+	// The session anchor is dead, so the device record must not keep showing a
+	// live login — but this is not a revoke, only a cleanup.
+	if len(devices.removed) != 1 || devices.removed[0] != tokens.createdRefresh.FamilyID {
+		t.Fatalf("removed = %#v, want the expired session's device record", devices.removed)
 	}
 }
 

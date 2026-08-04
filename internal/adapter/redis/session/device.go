@@ -23,12 +23,12 @@ type DeviceStore struct {
 	Store internalredis.Store
 }
 
-func (d DeviceStore) RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) error {
+func (d DeviceStore) RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (string, error) {
 	return d.Store.RegisterDevice(ctx, userID, deviceID, ua, ip, now, deviceTTL, maxDevicesPerUser)
 }
 
-func (d DeviceStore) TouchDevice(ctx context.Context, userID int64, deviceID string, now time.Time) error {
-	return d.Store.TouchDevice(ctx, userID, deviceID, now)
+func (d DeviceStore) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (string, error) {
+	return d.Store.TouchDevice(ctx, userID, deviceID, ua, ip, now, deviceTTL, maxDevicesPerUser)
 }
 
 func (d DeviceStore) RemoveDevice(ctx context.Context, userID int64, deviceID string) error {

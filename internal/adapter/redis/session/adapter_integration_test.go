@@ -90,7 +90,7 @@ func TestDeviceStoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 
-	if err := devices.RegisterDevice(ctx, 42, "family-1", "browser/5", "10.0.0.1", now); err != nil {
+	if _, err := devices.RegisterDevice(ctx, 42, "family-1", "browser/5", "10.0.0.1", now); err != nil {
 		t.Fatalf("RegisterDevice returned error: %v", err)
 	}
 	owned, err := devices.DeviceOwnedBy(ctx, 42, "family-1")
@@ -103,8 +103,8 @@ func TestDeviceStoreRoundTrip(t *testing.T) {
 	}
 
 	later := now.Add(time.Minute)
-	if err := devices.TouchDevice(ctx, 42, "family-1", later); err != nil {
-		t.Fatalf("TouchDevice returned error: %v", err)
+	if _, touchErr := devices.TouchDevice(ctx, 42, "family-1", "ua", "ip", later); touchErr != nil {
+		t.Fatalf("TouchDevice returned error: %v", touchErr)
 	}
 	records, err := devices.ListDevices(ctx, 42)
 	if err != nil {
@@ -114,8 +114,8 @@ func TestDeviceStoreRoundTrip(t *testing.T) {
 		t.Fatalf("records = %#v, want family-1 with last_seen %v", records, later)
 	}
 
-	if err := devices.RemoveDevice(ctx, 42, "family-1"); err != nil {
-		t.Fatalf("RemoveDevice returned error: %v", err)
+	if removeErr := devices.RemoveDevice(ctx, 42, "family-1"); removeErr != nil {
+		t.Fatalf("RemoveDevice returned error: %v", removeErr)
 	}
 	records, err = devices.ListDevices(ctx, 42)
 	if err != nil {

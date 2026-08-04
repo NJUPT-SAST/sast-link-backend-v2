@@ -13,7 +13,7 @@ import (
 
 type fakeDevices struct {
 	registrations []deviceRegistration
-	touched       []string
+	touches       []deviceRegistration
 	removed       []string
 	removedAll    []int64
 	records       []DeviceRecord
@@ -24,6 +24,12 @@ type fakeDevices struct {
 	removeAllErr  error
 	listErr       error
 	ownedErr      error
+	// evicted is returned by RegisterDevice when no error is set, simulating
+	// the per-user cap displacing the oldest device.
+	evicted string
+	// touchEvicted is returned by TouchDevice, simulating a resurrected
+	// record displacing the oldest device past the per-user cap.
+	touchEvicted string
 }
 
 type deviceRegistration struct {
@@ -33,20 +39,23 @@ type deviceRegistration struct {
 	ip       string
 }
 
-func (f *fakeDevices) RegisterDevice(_ context.Context, userID int64, deviceID, ua, ip string, _ time.Time) error {
-	if f.registerErr != nil {
-		return f.registerErr
-	}
+func (f *fakeDevices) RegisterDevice(_ context.Context, userID int64, deviceID, ua, ip string, _ time.Time) (string, error) {
 	f.registrations = append(f.registrations, deviceRegistration{userID: userID, deviceID: deviceID, ua: ua, ip: ip})
-	return nil
+	if f.registerErr != nil {
+		// Simulate a partial failure: the script already evicted inside Redis,
+		// but a later step (evicted-hash delete) failed. The evicted family must
+		// still be revoked.
+		return f.evicted, f.registerErr
+	}
+	return f.evicted, nil
 }
 
-func (f *fakeDevices) TouchDevice(_ context.Context, userID int64, deviceID string, _ time.Time) error {
+func (f *fakeDevices) TouchDevice(_ context.Context, userID int64, deviceID, ua, ip string, _ time.Time) (string, error) {
 	if f.touchErr != nil {
-		return f.touchErr
+		return "", f.touchErr
 	}
-	f.touched = append(f.touched, deviceID)
-	return nil
+	f.touches = append(f.touches, deviceRegistration{userID: userID, deviceID: deviceID, ua: ua, ip: ip})
+	return f.touchEvicted, nil
 }
 
 func (f *fakeDevices) RemoveDevice(_ context.Context, userID int64, deviceID string) error {
@@ -125,6 +134,64 @@ func TestLoginSucceedsWhenDeviceRegistrationFails(t *testing.T) {
 	}
 }
 
+// Eviction is the "最多 5 台同时登录" enforcement: when the cap displaces the
+// oldest device, its whole token family must be revoked so the displaced
+// session cannot keep refreshing invisibly.
+func TestLoginRevokesEvictedDeviceFamily(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	devices := &fakeDevices{evicted: "family-0"}
+	service = withDevices(service, devices)
+	if _, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"}); err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	if len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != "family-0" {
+		t.Fatalf("revoked families = %#v, want the evicted family-0", tokens.revokedFamilies)
+	}
+	if len(devices.removed) != 1 || devices.removed[0] != "family-0" {
+		t.Fatalf("removed = %#v, want the evicted record cleaned after the revoke", devices.removed)
+	}
+	// The eviction is a session-killing event like logout; it must be audited
+	// so the trail explains every dead session.
+	var evictedAudit *model.AuditLog
+	for i := range audit.entries {
+		if audit.entries[i].Action == "evict_device" {
+			evictedAudit = &audit.entries[i]
+		}
+	}
+	if evictedAudit == nil || evictedAudit.ResourceID == nil || *evictedAudit.ResourceID != "family-0" || evictedAudit.Success == nil || !*evictedAudit.Success {
+		t.Fatalf("evict_device audit = %+v, want success with resource family-0", evictedAudit)
+	}
+}
+
+// A device-store error must not lose the eviction: the record write may have
+// partially succeeded (set updated, hash delete failed), so the evicted family
+// is still revoked on the error path.
+func TestLoginRevokesEvictedFamilyEvenWhenRegistrationErrs(t *testing.T) {
+	service, _, _, tokens, _, _ := newTestService(t)
+	devices := &fakeDevices{registerErr: errors.New("redis down"), evicted: "family-0"}
+	service = withDevices(service, devices)
+	if _, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"}); err != nil {
+		t.Fatalf("Login returned error, want fail-open session: %v", err)
+	}
+	if len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != "family-0" {
+		t.Fatalf("revoked families = %#v, want the evicted family-0 even on store error", tokens.revokedFamilies)
+	}
+}
+
+func TestLoginSucceedsWhenEvictedRevokeFails(t *testing.T) {
+	service, _, _, tokens, _, _ := newTestService(t)
+	devices := &fakeDevices{evicted: "family-0"}
+	service = withDevices(service, devices)
+	tokens.revokeErr = errors.New("db down")
+	result, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error, want fail-open session: %v", err)
+	}
+	if result.AccessToken == "" {
+		t.Fatal("login produced no access token")
+	}
+}
+
 func TestRegisterRegistersDevice(t *testing.T) {
 	service := newRegisterService(t)
 	devices := &fakeDevices{}
@@ -164,19 +231,22 @@ func TestRefreshTouchesDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login returned error: %v", err)
 	}
-	result, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: pair.RefreshToken})
+	result, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: pair.RefreshToken, UserAgent: "browser/9", ClientIP: "10.0.0.9"})
 	if err != nil {
 		t.Fatalf("Refresh returned error: %v", err)
 	}
 	if result.AccessToken == "" {
 		t.Fatal("refresh produced no access token")
 	}
-	if len(devices.touched) != 1 || devices.touched[0] == "" {
-		t.Fatalf("touched = %#v, want the family of the refreshed session", devices.touched)
+	if len(devices.touches) != 1 || devices.touches[0].deviceID == "" {
+		t.Fatalf("touches = %#v, want the family of the refreshed session", devices.touches)
 	}
 	tokens := service.Tokens.(*fakeTokens)
-	if tokens.rotatedRefresh.FamilyID != devices.touched[0] {
-		t.Fatalf("touched device %q != rotated family %q", devices.touched[0], tokens.rotatedRefresh.FamilyID)
+	if tokens.rotatedRefresh.FamilyID != devices.touches[0].deviceID {
+		t.Fatalf("touched device %q != rotated family %q", devices.touches[0].deviceID, tokens.rotatedRefresh.FamilyID)
+	}
+	if devices.touches[0].ua != "browser/9" || devices.touches[0].ip != "10.0.0.9" {
+		t.Fatalf("touch meta = %+v, want ua/ip from the refresh request", devices.touches[0])
 	}
 }
 
@@ -188,6 +258,49 @@ func TestRefreshSucceedsWhenTouchFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login returned error: %v", err)
 	}
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: pair.RefreshToken}); err != nil {
+		t.Fatalf("Refresh returned error, want fail-open rotation: %v", err)
+	}
+}
+
+// A refresh that resurrects an expired record re-enters the per-user cap:
+// when the set was already full, the resurrected device displaces the oldest
+// member and the displaced family is revoked, exactly like login eviction.
+// Without the revoke a user at the 5-device cap with one expired-but-still-
+// refreshing device would silently hold 6 live sessions.
+func TestRefreshRevokesEvictedFamilyOnResurrect(t *testing.T) {
+	service := newRegisterService(t)
+	devices := &fakeDevices{touchEvicted: "family-oldest"}
+	service = withDevices(service, devices)
+	pair, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: pair.RefreshToken}); err != nil {
+		t.Fatalf("Refresh returned error, want fail-open rotation: %v", err)
+	}
+	tokens := service.Tokens.(*fakeTokens)
+	if len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != "family-oldest" {
+		t.Fatalf("revoked families = %#v, want the family displaced by the resurrected device", tokens.revokedFamilies)
+	}
+	if len(devices.removed) != 1 || devices.removed[0] != "family-oldest" {
+		t.Fatalf("removed = %#v, want the displaced record cleaned after the revoke", devices.removed)
+	}
+}
+
+// The eviction driven by a resurrecting refresh must not block the rotation
+// itself: a Redis/database outage already costs the refresh nothing, and the
+// displaced family stays live only until the operator notices — WARN only.
+func TestRefreshSucceedsWhenEvictedRevokeFails(t *testing.T) {
+	service := newRegisterService(t)
+	devices := &fakeDevices{touchEvicted: "family-oldest"}
+	service = withDevices(service, devices)
+	pair, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	tokens := service.Tokens.(*fakeTokens)
+	tokens.revokeErr = errors.New("db down")
 	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: pair.RefreshToken}); err != nil {
 		t.Fatalf("Refresh returned error, want fail-open rotation: %v", err)
 	}
