@@ -121,9 +121,32 @@ type ClientRepository interface {
 	FindActiveByClientID(ctx context.Context, clientID string) (*model.OAuthClient, error)
 }
 
-// TokenRepository persists an issued session.
+// TokenRepository persists an issued session and can revoke a token family.
+// RevokeFamily is the same repository method the session service uses, so a
+// device evicted by a third-party login dies the same way a password-login
+// eviction does.
 type TokenRepository interface {
 	CreatePair(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
+	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
+}
+
+// DeviceStore registers a third-party login session as a device and can drop
+// one. The method signatures mirror the session service's DeviceStore port so
+// the same adapter satisfies both (the two packages must not import each
+// other, PRD §6.1). Only registration and removal are needed here: refresh
+// touch, list and single-device logout all run through the session service on
+// the shared token-family IDs.
+type DeviceStore interface {
+	RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (evicted string, err error)
+	RemoveDevice(ctx context.Context, userID int64, deviceID string) error
+}
+
+// TokenBlacklist delivers revoked JWT JTIs to Redis so the middleware's
+// fail-open fast path can reject them. The durable revocation is the
+// PostgreSQL row the middleware always checks; this delivery is best-effort
+// and must never turn a session into a hard dependency on Redis.
+type TokenBlacklist interface {
+	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
 }
 
 // AuditRepository records the audit trail.

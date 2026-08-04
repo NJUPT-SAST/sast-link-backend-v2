@@ -230,9 +230,9 @@ func (r *UserRepository) UpdateAdminUser(
 	userID int64,
 	update AdminUserUpdate,
 	revokedAt time.Time,
-) ([]model.BlacklistEntry, error) {
+) ([]model.BlacklistEntry, bool, error) {
 	if userID <= 0 {
-		return nil, fmt.Errorf("%w: user id must be positive", ErrInvalidArgument)
+		return nil, false, fmt.Errorf("%w: user id must be positive", ErrInvalidArgument)
 	}
 	// email_type is derived from login_email, and the V001 trigger only recomputes it
 	// when login_email is in the SET list. Writing it alone would therefore store a type
@@ -240,14 +240,15 @@ func (r *UserRepository) UpdateAdminUser(
 	// keeps that unrepresentable at the layer that owns the column rather than resting
 	// on every caller validating it first.
 	if update.EmailType != nil && update.LoginEmail == nil {
-		return nil, fmt.Errorf("%w: email_type cannot be set without login_email", ErrInvalidArgument)
+		return nil, false, fmt.Errorf("%w: email_type cannot be set without login_email", ErrInvalidArgument)
 	}
 	columns := update.columns()
 	if len(columns) == 0 {
-		return nil, fmt.Errorf("%w: update has no fields", ErrInvalidArgument)
+		return nil, false, fmt.Errorf("%w: update has no fields", ErrInvalidArgument)
 	}
 
 	var entries []model.BlacklistEntry
+	sessionsRevoked := false
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		// Lock the row before reading the role it is being compared against, so the
 		// decision below cannot be made against a value another writer is replacing.
@@ -281,6 +282,7 @@ func (r *UserRepository) UpdateAdminUser(
 		if !roleChanged {
 			return nil
 		}
+		sessionsRevoked = true
 		if err := transaction.Model(&model.User{}).
 			Where("id = ?", userID).
 			UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error; err != nil {
@@ -295,11 +297,11 @@ func (r *UserRepository) UpdateAdminUser(
 	})
 	if err != nil {
 		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrLastAdmin) {
-			return nil, err
+			return nil, false, err
 		}
-		return nil, fmt.Errorf("update admin user: %w", err)
+		return nil, false, fmt.Errorf("update admin user: %w", err)
 	}
-	return entries, nil
+	return entries, sessionsRevoked, nil
 }
 
 // SoftDeleteAndRevokeSessions closes an account and cuts every session it holds

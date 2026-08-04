@@ -46,10 +46,15 @@ func mapServiceError(err error) error {
 		// malformed-ID path.
 		message = "用户不存在"
 	case errcode.CodeNotFound:
-		// Only the unbind path raises this. The handler's malformed-ID branch already
-		// answers "绑定记录不存在"; without this case the service path answered the
-		// KindNotFound default instead, so the same 40400 had two messages.
-		message = "绑定记录不存在"
+		// The unbind path and the device-logout path both raise this code, each
+		// with its own service-level message ("绑定记录不存在" / "设备不存在").
+		// The service error carries the right one, so pass it through; without a
+		// case the message would fall back to the KindNotFound default
+		// ("资源不存在"), and stamping a single message would mislabel one of
+		// the two paths.
+		if serviceErr.Message != "" {
+			message = serviceErr.Message
+		}
 	case errcode.CodeValidationFailed:
 		// Only ErrLastLoginMethod raises this. The KindValidationFailed default
 		// ("业务校验失败") drops the one thing the client needs to know: which rule

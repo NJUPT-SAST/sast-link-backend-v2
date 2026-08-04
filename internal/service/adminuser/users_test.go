@@ -86,6 +86,7 @@ func TestUpdateUserTreatsUnchangedRoleAsNoRoleChange(t *testing.T) {
 func TestUpdateUserRevokesSessionsOnRoleChange(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
+	h.users.updateRevoked = true
 	h.users.updateEntries = []model.BlacklistEntry{
 		{TokenID: "jti-live", ExpiresAt: testNow.Add(30 * time.Minute)},
 		{TokenID: "jti-expired", ExpiresAt: testNow.Add(-time.Minute)},
@@ -113,6 +114,50 @@ func TestUpdateUserRevokesSessionsOnRoleChange(t *testing.T) {
 	// key with a negative TTL.
 	if _, ok := h.blacklist.batch["jti-expired"]; ok {
 		t.Fatalf("blacklist batch = %v, want the expired JTI skipped", h.blacklist.batch)
+	}
+	// The role change revoked every session; the device set must die with it, or
+	// the user's device list keeps showing logins that can no longer authenticate.
+	if len(h.devices.cleared) != 1 || h.devices.cleared[0] != testTargetID {
+		t.Fatalf("device clears = %#v, want the target user cleared once", h.devices.cleared)
+	}
+}
+
+// The gate for device cleanup is the repository's authoritative revocation
+// flag, not len(entries): entries only collect still-live access tokens for
+// blacklist delivery, so a demotion of a user idle for over an hour revokes
+// every refresh token while returning zero entries — and the device records
+// must still be cleared.
+func TestUpdateUserClearsDevicesWhenRevokedWithoutEntries(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
+	h.users.updateRevoked = true
+	// No live access tokens: the repository revoked everything but returned
+	// nothing to blacklist.
+	h.users.updateEntries = nil
+
+	if _, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.Role = stringPtr(string(model.UserRoleMember))
+	})); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	if len(h.devices.cleared) != 1 || h.devices.cleared[0] != testTargetID {
+		t.Fatalf("device clears = %#v, want the target user cleared despite empty entries", h.devices.cleared)
+	}
+}
+
+// An edit that revokes nothing (e.g. a pure profile-field change) must not touch
+// the device set.
+func TestUpdateUserWithoutRevocationLeavesDevices(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+
+	if _, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.Name = stringPtr("李四")
+	})); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	if len(h.devices.cleared) != 0 {
+		t.Fatalf("device clears = %#v, want none without a session revoke", h.devices.cleared)
 	}
 }
 
@@ -440,6 +485,11 @@ func TestDeleteUserDeliversRevokedTokens(t *testing.T) {
 	}
 	if _, ok := h.blacklist.batch["jti-a"]; !ok {
 		t.Fatalf("blacklist batch = %v, want the revoked JTI delivered", h.blacklist.batch)
+	}
+	// Closing the account cut every session; the device records must not outlive
+	// the account as ghost logins.
+	if len(h.devices.cleared) != 1 || h.devices.cleared[0] != testTargetID {
+		t.Fatalf("device clears = %#v, want the closed user's records cleared", h.devices.cleared)
 	}
 	assertAudited(t, h, actionDeleteUser, true, 0)
 }

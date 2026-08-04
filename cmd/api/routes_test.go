@@ -80,6 +80,8 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 		http.MethodGet + " /card/:id",
 		http.MethodGet + " /user/identities",
 		http.MethodPut + " /user/avatar",
+		http.MethodGet + " /user/devices",
+		http.MethodDelete + " /user/devices/:id",
 	} {
 		if !registered[route] {
 			t.Fatalf("session route %s disappeared", route)

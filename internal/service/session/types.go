@@ -44,6 +44,48 @@ type TokenBlacklist interface {
 	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
 }
 
+// DeviceRecord is one logged-in device of a user, as derived from Redis device
+// state. Device records are operational, not authoritative: they live only in
+// Redis, expire after the device TTL, and may be briefly inconsistent across
+// instance scaling (PRD §6.1).
+type DeviceRecord struct {
+	DeviceID  string
+	UA        string
+	IP        string
+	LoginTime time.Time
+	LastSeen  time.Time
+}
+
+// DeviceStore persists per-user device records in Redis. The device ID is the
+// token family ID, so a device dies exactly when its session dies (logout
+// revokes the family first, then removes the record).
+//
+// Every method is fail-open for the session flows that call it (Login/Refresh/
+// Logout/ChangePassword/ResetPassword record device state as a side effect and
+// must not fail the main operation because Redis hiccuped), except
+// DeviceOwnedBy, which gates "logout a specific device" and fails closed: an
+// unreadable set proves nothing and must not authorize a family revoke.
+type DeviceStore interface {
+	// RegisterDevice records a login as a device and returns the device ID
+	// evicted to make room ("" when the set stayed within the cap). The caller
+	// must revoke the evicted device's token family: eviction is the "最多 5 台
+	// 同时登录" enforcement, and leaving the family live would create a session
+	// that is invisible in the device list and cannot be logged out.
+	RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (evicted string, err error)
+	// TouchDevice updates last_seen for a live record, or resurrects an expired
+	// one with a fresh TTL (ua/ip/login_time re-recorded): a refresh that still
+	// works after the 30d record TTL proves the device is in use, and dropping
+	// it would create an invisible, unmanageable ghost session. Resurrecting
+	// re-enters the per-user cap and returns the evicted device ID, whose
+	// family the caller must revoke — otherwise a user at the cap with one
+	// expired-but-refreshing device would silently reach 6 live sessions.
+	TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (evicted string, err error)
+	RemoveDevice(ctx context.Context, userID int64, deviceID string) error
+	RemoveAllDevices(ctx context.Context, userID int64) error
+	ListDevices(ctx context.Context, userID int64) ([]DeviceRecord, error)
+	DeviceOwnedBy(ctx context.Context, userID int64, deviceID string) (bool, error)
+}
+
 type UserRepository interface {
 	FindByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error)
 	FindByID(ctx context.Context, userID int64) (*model.User, error)

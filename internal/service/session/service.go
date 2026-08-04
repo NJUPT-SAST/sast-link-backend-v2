@@ -81,6 +81,17 @@ type Service struct {
 	// Limiter because checkEndpointLimit reads the quota off the instance, not
 	// the endpoint name.
 	AvatarLimiter EndpointLimiter
+
+	// Devices persists per-user device records in Redis (PRD §6.1). Device
+	// records are operational state, so every session-flow write through this
+	// port is fail-open: a hiccup must not fail a login, refresh, logout or
+	// password change. DeviceOwnedBy is the exception and fails closed, gating
+	// "logout a specific device" against cross-user family revokes.
+	Devices DeviceStore
+	// DeviceLimiter throttles DELETE /user/devices/:id per user, like the unbind
+	// limiter — the subject is the user, not the IP, because the device list
+	// belongs to an authenticated account.
+	DeviceLimiter EndpointLimiter
 }
 
 func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, error) {
@@ -156,6 +167,21 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)}); auditErr != nil {
 		return nil, compensate("audit login success", auditErr)
 	}
+	// Device registration happens after every compensable step: the family is
+	// committed and audited by this point, so a failed record write only costs a
+	// WARN and the device shows up on the next login. Registering before the
+	// audit would leave an orphan record for every session the compensate path
+	// revokes.
+	if s.Devices != nil {
+		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
+		if err != nil {
+			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
+		}
+		// Eviction revokes the displaced family even when the record write
+		// partially failed: the set already made room, and leaving the old
+		// session live would create an invisible, unmanageable ghost session.
+		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
+	}
 	return &LoginResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -188,10 +214,26 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			return nil, newError(ErrInternal, "撤销被重放的 Refresh Token 家族失败", revokeErr)
 		}
 		s.deliverBlacklist(ctx, entries, s.now())
+		// Replay kills the whole family, and the family is the device record:
+		// without the cleanup the device list keeps showing a session that can
+		// no longer authenticate. Fail-open — the revoke already committed.
+		if s.Devices != nil {
+			if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+				slog.WarnContext(ctx, "remove device on replay revoke failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
+			}
+		}
 		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	if !current.ExpiresAt.After(s.now()) {
+		// The session is over: the refresh anchor is dead, so the device record
+		// must not keep showing a live login. Fail-open — the expiration itself
+		// is authoritative in the DB.
+		if s.Devices != nil {
+			if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+				slog.WarnContext(ctx, "remove device on expired refresh failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
+			}
+		}
 		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeExpired, input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
@@ -218,6 +260,45 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	if err != nil {
 		return nil, err
 	}
+	// The refresh proves the device is alive; update last_seen without extending
+	// the device TTL, so an abandoned device ages out instead of being kept
+	// alive by refreshes. A refresh of an already-expired record resurrects it
+	// (it is clearly still in use), which re-enters the per-user cap: the
+	// displaced family is revoked exactly like login eviction. Fail-open: the
+	// rotated pair is already committed.
+	//
+	// The touch runs BEFORE the rotation commit: a terminating path (logout of
+	// the device, replay revoke, password change) that interleaves with this
+	// refresh always removes the record after the touch, so it can never be
+	// resurrected with a fresh TTL by a refresh whose family was just revoked.
+	// Running it after the commit would open exactly that window — the
+	// resurrect branch re-registers the record and the terminated session stays
+	// visible (and occupying a cap slot) until a manual delete or the TTL.
+	//
+	// The touch's eviction side-effect is deferred until AFTER the rotation
+	// commits, though: revoking the displaced family is the "最多 5 台" cap
+	// enforcement, and it must only fire for a refresh that actually landed. A
+	// refresh whose family was revoked between the pre-checks above and the
+	// rotate (a concurrent logout or eviction) still resurrects and evicts
+	// through the touch — the resurrect branch cannot know the family is doomed —
+	// but revoking a different, healthy device's family as collateral for a
+	// rotation that then fails would log the user out of a session they never
+	// touched. Deferring the revoke makes a doomed refresh non-destructive.
+	//
+	// The residual cost of deferral: the touch already removed the displaced
+	// device's record from the set, and skipping the family revoke leaves that
+	// device briefly invisible in the list while its session stays live — a
+	// ghost that reappears on its own next refresh (the resurrect branch
+	// re-registers it). Acceptable: strictly better than logging the user out
+	// of a device they never touched, and it self-heals.
+	var evicted string
+	if s.Devices != nil {
+		var err error
+		evicted, err = s.Devices.TouchDevice(ctx, current.UserID, current.FamilyID, input.UserAgent, input.ClientIP, s.now())
+		if err != nil {
+			slog.WarnContext(ctx, "touch device failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", err)
+		}
+	}
 	if rotateErr := s.Tokens.RotateRefreshToken(ctx, tokenHash, pair.access, pair.refresh); rotateErr != nil {
 		if errors.Is(rotateErr, repository.ErrTokenReplay) || errors.Is(rotateErr, repository.ErrTokenExpired) || errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) {
 			// RotateRefreshToken revokes the family in the repository; re-invoke
@@ -227,11 +308,22 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 				return nil, newError(ErrInternal, "轮换失败后撤销 Refresh Token 家族失败", revokeErr)
 			}
 			s.deliverBlacklist(ctx, entries, s.now())
+			// The repository cut the family; drop the device record so the list
+			// stops showing a session that can no longer authenticate.
+			if s.Devices != nil {
+				if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+					slog.WarnContext(ctx, "remove device on rotation failure failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
+				}
+			}
 			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
 			return nil, newError(ErrInvalidToken, "Refresh Token 无效", rotateErr)
 		}
 		return nil, newError(ErrInternal, "轮换 Refresh Token 失败", rotateErr)
 	}
+	// The rotation committed: the refresh is real, so the touch's displaced
+	// device (if any) must be evicted exactly like a login eviction. revokeEvictedDevice
+	// no-ops on an empty ID (a live-record touch that evicted nothing).
+	s.revokeEvictedDevice(ctx, current.UserID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, refreshOutcomeRotated, input)
 	return &RefreshResult{
 		AccessToken:      pair.accessToken,
@@ -282,6 +374,14 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 		return nil, newError(ErrInternal, "撤销 Token 家族失败", revokeErr)
 	}
 	s.deliverBlacklist(ctx, entries, now)
+	// The family is revoked; drop its device record so the device list reflects
+	// what can actually authenticate. Fail-open: the session is already dead and
+	// a leftover record expires on its own.
+	if s.Devices != nil {
+		if err := s.Devices.RemoveDevice(ctx, input.PrincipalUserID, familyID); err != nil {
+			slog.WarnContext(ctx, "remove device on logout failed", "user_id", input.PrincipalUserID, "device_id", familyID, "error", err)
+		}
+	}
 	if auditErr := s.audit(ctx, &input.PrincipalUserID, "logout", "session", &familyID, true, 0, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
 		slog.Error("audit logout", "family_id", familyID, "error", auditErr)
 	}
@@ -590,6 +690,16 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if auditErr := s.audit(ctx, &user.ID, "register", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit register", "user_id", user.ID, "error", auditErr)
 	}
+	// Registration is the user's first login, so the initial session registers
+	// as a device exactly like a password login. Fail-open: the account and its
+	// session already committed.
+	if s.Devices != nil {
+		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
+		if err != nil {
+			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
+		}
+		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
+	}
 	return &RegisterResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -670,6 +780,13 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	}
 	s.deliverBlacklist(ctx, entries, now)
 	s.clearLoginFailures(ctx, user, email)
+	// Same device cleanup as ChangePassword: reset revokes every session, so the
+	// device set must not survive it.
+	if s.Devices != nil {
+		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
+			slog.WarnContext(ctx, "remove all devices on password reset failed", "user_id", user.ID, "error", err)
+		}
+	}
 	if auditErr := s.audit(ctx, &user.ID, "reset_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit reset password", "user_id", user.ID, "error", auditErr)
 	}
@@ -721,6 +838,14 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	}
 	s.deliverBlacklist(ctx, entries, now)
 	s.clearLoginFailures(ctx, user, user.LoginEmail)
+	// Every session of the user was just revoked, so the device set must die
+	// with it (PRD §6.1: 设备记录清除). Fail-open: the revocation is durable in
+	// PostgreSQL and a leftover device record cannot authenticate anything.
+	if s.Devices != nil {
+		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
+			slog.WarnContext(ctx, "remove all devices on password change failed", "user_id", user.ID, "error", err)
+		}
+	}
 	if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, nil); auditErr != nil {
 		slog.Error("audit change password", "user_id", user.ID, "error", auditErr)
 	}

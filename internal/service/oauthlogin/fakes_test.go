@@ -287,6 +287,9 @@ func (r *fakeClientRepository) FindActiveByClientID(
 type fakeTokenRepository struct {
 	pairs int
 	err   error
+
+	revoked   []string
+	revokeErr error
 }
 
 func (r *fakeTokenRepository) CreatePair(
@@ -299,6 +302,14 @@ func (r *fakeTokenRepository) CreatePair(
 	}
 	r.pairs++
 	return nil
+}
+
+func (r *fakeTokenRepository) RevokeFamily(_ context.Context, familyID string, _ time.Time) ([]model.BlacklistEntry, error) {
+	if r.revokeErr != nil {
+		return nil, r.revokeErr
+	}
+	r.revoked = append(r.revoked, familyID)
+	return nil, nil
 }
 
 type fakeAuditRepository struct {
@@ -415,10 +426,64 @@ type testDoubles struct {
 	Clients      *fakeClientRepository
 	Tokens       *fakeTokenRepository
 	Audits       *fakeAuditRepository
+	Devices      *fakeDeviceStore
+	Blacklist    *fakeBlacklist
 }
 
-// fakeLimiter records the (endpoint, subject) pairs it was asked about so tests
-// can assert the key shape, not just the decision.
+// fakeDeviceStore records registrations and removals and reports an optional
+// eviction, the way the Redis store reports the member the per-user cap
+// displaced.
+type fakeDeviceStore struct {
+	registrations []deviceRegistration
+	removed       []string
+	registerErr   error
+	evicted       string
+}
+
+type deviceRegistration struct {
+	userID   int64
+	deviceID string
+	ua       string
+	ip       string
+}
+
+func (f *fakeDeviceStore) RegisterDevice(_ context.Context, userID int64, deviceID, ua, ip string, _ time.Time) (string, error) {
+	if f.registerErr != nil {
+		return f.evicted, f.registerErr
+	}
+	f.registrations = append(f.registrations, deviceRegistration{userID: userID, deviceID: deviceID, ua: ua, ip: ip})
+	return f.evicted, nil
+}
+
+func (f *fakeDeviceStore) RemoveDevice(_ context.Context, _ int64, deviceID string) error {
+	f.removed = append(f.removed, deviceID)
+	return nil
+}
+
+// fakeBlacklist records batch deliveries.
+type fakeBlacklist struct {
+	batches []map[string]time.Duration
+	err     error
+}
+
+func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]time.Duration) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.batches = append(f.batches, entries)
+	return nil
+}
+
+func TestFakeDeviceStoreRegistration(t *testing.T) {
+	store := &fakeDeviceStore{evicted: "family-x"}
+	evicted, err := store.RegisterDevice(context.Background(), 1, "family-1", "ua", "ip", time.Now())
+	if err != nil || evicted != "family-x" {
+		t.Fatalf("evicted = %q, err = %v", evicted, err)
+	}
+}
+
+// fakeLimiter records the (endpoint, subject) pairs it was asked about so
+// tests can assert the key shape, not just the decision.
 type fakeLimiter struct {
 	result LimitResult
 	err    error

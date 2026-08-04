@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,36 @@ func (r repeatedReader) Read(target []byte) (int, error) {
 		target[i] = byte(r)
 	}
 	return len(target), nil
+}
+
+var (
+	testCredentialsOnce sync.Once
+	testPrivateKey      *rsa.PrivateKey
+	testPasswordHash    string
+	testCredentialsErr  error
+)
+
+// sharedTestCredentials computes the immutable, production-strength password
+// hash and RSA key once per package. The session fixtures are created over a
+// hundred times; deriving PBKDF2-SHA512/600k and generating RSA-2048 for every
+// fixture makes the package exceed Go's 10-minute timeout under -race and
+// atomic coverage without improving test isolation. Tests still receive fresh
+// services and mutable fakes; only these read-only cryptographic values are
+// shared.
+func sharedTestCredentials(t *testing.T) (*rsa.PrivateKey, string) {
+	t.Helper()
+	testCredentialsOnce.Do(func() {
+		testPrivateKey, testCredentialsErr = rsa.GenerateKey(rand.Reader, 2048)
+		if testCredentialsErr != nil {
+			return
+		}
+		passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
+		testPasswordHash, testCredentialsErr = passwords.HashPassword(context.Background(), "secret")
+	})
+	if testCredentialsErr != nil {
+		t.Fatalf("initialize shared test credentials: %v", testCredentialsErr)
+	}
+	return testPrivateKey, testPasswordHash
 }
 
 type fakeUsers struct {
@@ -1065,6 +1096,8 @@ func TestRefreshRotatesSameFamilyAndScopes(t *testing.T) {
 
 func TestRefreshRejectsDeletedExpiredAndReplay(t *testing.T) {
 	service, users, _, tokens, _, _ := newTestService(t)
+	devices := &fakeDevices{}
+	service = withDevices(service, devices)
 	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
 	if err != nil {
 		t.Fatalf("Login returned error: %v", err)
@@ -1084,10 +1117,17 @@ func TestRefreshRejectsDeletedExpiredAndReplay(t *testing.T) {
 	if len(tokens.revokedFamilies) == 0 {
 		t.Fatalf("expected fake repository to record family revoke on replay")
 	}
+	// Rotation failure cuts the family; the device record must die with it, or
+	// the list keeps showing a session that can no longer authenticate.
+	if len(devices.removed) != 1 || devices.removed[0] != tokens.createdRefresh.FamilyID {
+		t.Fatalf("removed = %#v, want the replayed family's device record", devices.removed)
+	}
 }
 
 func TestRefreshRevokedTokenRevokesFamilyBeforeOtherPrechecks(t *testing.T) {
 	service, users, _, tokens, _, _ := newTestService(t)
+	devices := &fakeDevices{}
+	service = withDevices(service, devices)
 	blacklist := &fakeBlacklist{}
 	service.Blacklist = blacklist
 	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
@@ -1105,6 +1145,10 @@ func TestRefreshRevokedTokenRevokesFamilyBeforeOtherPrechecks(t *testing.T) {
 	if len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != tokens.createdRefresh.FamilyID {
 		t.Fatalf("revoked families = %#v, want revoked refresh family", tokens.revokedFamilies)
 	}
+	// Replay detection killed the family; the device record must not survive it.
+	if len(devices.removed) != 1 || devices.removed[0] != tokens.createdRefresh.FamilyID {
+		t.Fatalf("removed = %#v, want the replayed family's device record", devices.removed)
+	}
 	if blacklist.jti == "" || blacklist.ttl <= 0 {
 		t.Fatalf("blacklist = %+v, want live revoked access token delivery", blacklist)
 	}
@@ -1112,6 +1156,8 @@ func TestRefreshRevokedTokenRevokesFamilyBeforeOtherPrechecks(t *testing.T) {
 
 func TestRefreshExpiredActiveTokenDoesNotRevokeFamily(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
+	devices := &fakeDevices{}
+	service = withDevices(service, devices)
 	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
 	if err != nil {
 		t.Fatalf("Login returned error: %v", err)
@@ -1122,6 +1168,11 @@ func TestRefreshExpiredActiveTokenDoesNotRevokeFamily(t *testing.T) {
 	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 	if len(tokens.revokedFamilies) != 0 {
 		t.Fatalf("revoked families = %#v, want no revoke for active expired token", tokens.revokedFamilies)
+	}
+	// The session anchor is dead, so the device record must not keep showing a
+	// live login — but this is not a revoke, only a cleanup.
+	if len(devices.removed) != 1 || devices.removed[0] != tokens.createdRefresh.FamilyID {
+		t.Fatalf("removed = %#v, want the expired session's device record", devices.removed)
 	}
 }
 
@@ -2167,15 +2218,8 @@ func TestPasswordUpdateFailsWhenSessionRevocationFails(t *testing.T) {
 func newRegisterService(t *testing.T) Service {
 	t.Helper()
 	clock := fixedClock{value: time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)}
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
-	}
+	key, hash := sharedTestCredentials(t)
 	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword(context.Background(), "secret")
-	if err != nil {
-		t.Fatalf("hash test password: %v", err)
-	}
 	user := testUserWithHash(42, "user@njupt.edu.cn", model.UserStateOnSAST, hash)
 	tokens := newFakeTokens()
 	users := &fakeUsers{
@@ -2211,15 +2255,8 @@ func newRegisterService(t *testing.T) Service {
 func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeTokens, *fakeAudit, *fakeFailures) {
 	t.Helper()
 	clock := fixedClock{value: time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)}
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
-	}
+	key, hash := sharedTestCredentials(t)
 	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword(context.Background(), "secret")
-	if err != nil {
-		t.Fatalf("hash test password: %v", err)
-	}
 	user := testUserWithHash(42, "user@njupt.edu.cn", model.UserStateOnSAST, hash)
 	client := &model.OAuthClient{ID: 1, ClientID: "builtin", ClientType: model.ClientTypeFirstParty, IsActive: boolPtr(true), Scopes: model.StringArray(sessionScopes)}
 	clients := &fakeClients{byClientID: map[string]*model.OAuthClient{client.ClientID: client}}
@@ -2251,11 +2288,7 @@ func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeToken
 
 func testUser(t *testing.T, id int64, email string, state model.UserState) *model.User {
 	t.Helper()
-	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword(context.Background(), "secret")
-	if err != nil {
-		t.Fatalf("hash test password: %v", err)
-	}
+	_, hash := sharedTestCredentials(t)
 	return testUserWithHash(id, email, state, hash)
 }
 

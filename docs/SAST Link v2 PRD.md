@@ -126,9 +126,8 @@ POST /user/login
 2. 检查登录失败次数（Redis `sastlink:auth:login_failure:{email}`，15min 窗口 ≥ 10 次则锁定）
 3. 查用户是否存在：不存在返回 40106（邮箱不存在）；存在则执行 PBKDF2-SHA512 密码哈希校验
 4. 校验账号状态 — `is_deleted` 拒绝（40301）
-5. 检查设备数 — 该用户已有设备数 ≥ 5 时淘汰最旧设备
-6. 生成 Token Pair，Redis 记录设备信息
-7. DB 写入 `oauth_refresh_tokens`、`oauth_access_tokens` 元数据、`audit_logs`
+5. 生成 Token Pair（family 即设备 ID），DB 写入 `oauth_refresh_tokens`、`oauth_access_tokens` 元数据、`audit_logs`（audit 失败触发 compensate 撤销本次 family，不产生孤儿设备记录）
+6. 设备登记（fail-open，Redis 不可用仅 WARN 不影响登录）：`ZADD devices:{uid}` + `HSET device:{id}`；该用户设备数超 5 时淘汰最旧设备并**撤销被淘汰设备的全部 token（RevokeFamily）+ 审计 `evict_device`**——设备记录读写失败不进入 compensate 路径
 
 **token_version 机制**：`token_version` 存储在 `user` 表，改密/重置密码后递增。JWT Access Token 的 claims 中包含 `token_version`，登录态校验时与 DB 当前值比对，不一致即拒绝。此机制确保改密后所有旧 Token（无论是否在黑名单中）立即失效。
 
@@ -450,6 +449,8 @@ Payload: {
 | `register` | 用户注册成功 |
 | `login` | 密码登录 / OAuth 登录成功/失败 |
 | `logout` | 用户登出 |
+| `logout_device` | 登出指定设备（设备列表） |
+| `evict_device` | 5 台上限淘汰设备（撤销被淘汰 family） |
 | `change_password` | 修改密码 |
 | `reset_password` | 重置密码 |
 | `oauth_bind` / `oauth_unbind` | 第三方账号绑定/解绑 |
@@ -466,6 +467,8 @@ Payload: {
 | `register` | `{"login_email": "xxx@njupt.edu.cn"}` |
 | `login` | `{"method": "password" \| "github" \| "lark" \| "other_mail"}` |
 | `logout` | `{}` |
+| `logout_device` | `{"device_id": "uuid"}` |
+| `evict_device` | `{"device_id": "uuid"}`（resource_id 亦为被淘汰 family） |
 | `change_password` | `{}` |
 | `reset_password` | `{}` |
 | `oauth_bind` | `{"provider": "github" \| "lark" \| "other_mail", "provider_id": "xxx"}` |
@@ -544,7 +547,7 @@ Token 黑名单可以跳过的依据：JTI 写入黑名单与 `oauth_access_toke
 
 ### 6.1 设备管理
 
-数据结构：Sorted Set + Hash 组合。
+数据结构：Sorted Set + Hash 组合。**device_id 复用 token family_id**（同为 UUID v4）：**一次登录即一台设备**（密码登录、注册、GitHub/Lark 第三方登录统一登记——第三方登录经由 `POST /oauth/exchange-code` 兑换会话，与密码登录共用同一 family 体系、同一 Redis 设备存储，登出/改密/刷新/淘汰全部生效），设备生命周期与会话生命周期天然同步——登出/改密撤销 family 时设备记录随之清除，不存在“设备挂着但会话已死”的不一致。**设备 = 内部会话流的 token family**：OAuth provider 授权码流（`/oauth/authorize` + `/oauth/token`，含第一方客户端）签发的会话属第三方应用授权场景，不参与设备登记与 5 台上限。
 
 ```
 sastlink:devices:{user_id}    Sorted Set    score=login_timestamp  member=device_id
@@ -552,9 +555,10 @@ sastlink:device:{device_id}   Hash          {ua, ip, login_time, last_seen}
 ```
 
 - **登录**：生成 `device_id`（UUID v4）→ `ZADD devices:{uid} {ts} {device_id}` → `HSET device:{device_id} ...`。两个 key TTL 均为 30d
-- **淘汰**：`ZCARD` > 5 → `ZREMRANGEBYRANK 0 0`（移除最旧 1 条），对应 device Hash 同步删除
+- **淘汰**：`ZCARD` > 5 → `ZREMRANGEBYRANK 0 0`（移除最旧 1 条），对应 device Hash 同步删除，**并撤销被淘汰设备的全部 token（RevokeFamily）**——「最多 5 台同时登录」是会话级约束：被淘汰设备的 refresh token 立即失效，不会留下列表不可见、无法登出的幽灵会话
 - **登出**：仅删除当前 `device_id`（`ZREM` + `DEL`），不影响其他设备
-- **刷新 Token**：更新对应 device Hash 的 `last_seen` 字段，不续期 TTL
+- **会话终止即清记录**：登出、登出指定设备、修改/重置密码、刷新重放/轮换失败/过期、淘汰撤销均同步清除设备记录（fail-open）；管理员**角色降级（触发会话撤销时）与注销账号**亦清空该用户全部设备记录（state 变更本身不撤销会话，故不清；`is_deleted` 状态不接受编辑，注销走 `DELETE /admin/users/:id`）。每次会话终止写审计：`logout` / `logout_device` / `evict_device` / `change_password` / `reset_password` / refresh 三态 outcome（审计 90 天保留，可回溯"谁杀死了我的会话"）
+- **刷新 Token**：更新对应 device Hash 的 `last_seen` 字段，不续期 TTL（30 天不活跃则记录过期；过期后设备再次刷新视为重新登记，重置 TTL——会话仍在使用就不该变成列表不可见、无法登出的幽灵）
 
 ---
 
@@ -700,7 +704,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 用户资料管理 | 已完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）、头像上传（`PUT /user/avatar`，腾讯云 COS + 内容审核，`STORAGE_*` 配置，未配置时返回 50002） |
 | OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
 | 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）与审计日志查询，读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
-| 其余运维接入 | 待实现 — 设备管理。endpoint 限流已全量接入（见 §11）。数据保留清理已接入：由 `internal/worker/retention.go` 在 API 进程内按 ticker 执行，多实例用 advisory lock 协调；不用 pg_cron（生产库未装扩展，测试镜像亦无法加载），详见 §9.1 |
+| 其余运维接入 | 已完成 — 设备管理：`GET /user/devices` + `DELETE /user/devices/:id`（Redis ZSET + Hash，device_id 复用 token family_id，最多 5 台淘汰最旧，30d TTL；登录/注册登记、刷新更新 last_seen 不续期 TTL、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备的归属校验 fail-closed；按用户限流 `RATE_LIMIT_DEVICE_*`；审计 `logout_device`）。endpoint 限流已全量接入（见 §11）。数据保留清理已接入：由 `internal/worker/retention.go` 在 API 进程内按 ticker 执行，多实例用 advisory lock 协调；不用 pg_cron（生产库未装扩展，测试镜像亦无法加载），详见 §9.1 |
 
 ## 11. 实现顺序
 
@@ -722,4 +726,5 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [x] 管理后台用户管理与审计日志查询（用户列表 / 详情 / 更新 / 软删 / 恢复 / 审计日志）
 - [x] 定时清理过期数据（Go retention worker，非 pg_cron；见 §9.1）
 - [x] 个人卡片端点（`GET /card/:id`；前端页面另计）
+- [x] 设备管理（`GET /user/devices` / `DELETE /user/devices/:id`；device_id 复用 token family_id；Redis ZSET + Hash，5 台淘汰、30d TTL；登录/注册登记、刷新 last_seen、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备归属校验 fail-closed；按用户限流；审计 `logout_device`）
 - [ ] 测试、联调、上线

@@ -822,6 +822,81 @@ GET /card/:id
 
 ---
 
+### 3.5 设备列表
+
+```
+GET /user/devices
+```
+
+**Headers**: `Authorization: Bearer <access_token>`
+
+**Response** `200`:
+
+```json
+{
+  "devices": [
+    {
+      "device_id": "6da1d5dd-02ec-4fc6-840e-67dc0dae52ac",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...",
+      "ip": "10.0.0.2",
+      "login_time": "2026-07-22T10:05:00Z",
+      "last_seen": "2026-07-22T11:30:00Z"
+    },
+    {
+      "device_id": "e99286a4-eef2-4fff-8ff2-cd4b647ee5de",
+      "ua": "SAST-Link-App/1.0",
+      "ip": "10.0.0.1",
+      "login_time": "2026-07-22T10:00:00Z",
+      "last_seen": "2026-07-22T10:00:00Z"
+    }
+  ]
+}
+```
+
+**说明**:
+
+- 按最近登录时间倒序返回（最新在前），每台设备对应一次登录会话（密码登录、注册、GitHub/Lark 第三方登录统一登记）
+- `device_id` 即 token family_id（UUID）：一次登录即一台设备，设备生命周期与 token 会话生命周期同步
+- 设备记录存于 Redis（`sastlink:devices:{user_id}` 有序集合 + `sastlink:device:{device_id}` Hash），最多 5 台，超出时淘汰登录时间最早的一台并**撤销该设备的全部 token**（被淘汰设备的 refresh token 立即失效，无法继续刷新）；TTL 30 天
+- 登录/注册时登记设备；刷新 Token 时更新 `last_seen`（有效记录不续期 TTL，30 天不活跃则记录过期；过期后设备再次刷新会重新登记，同样受 5 台上限约束、超出时淘汰最旧并撤销其会话——会话还在使用就不该变成列表里看不见的幽灵）；登出删除单台；修改/重置密码时清空全部设备
+- 会话终止一律同步清除设备记录并写审计：登出 `logout`、登出指定设备 `logout_device`、淘汰 `evict_device`、改密/重置 `change_password`/`reset_password`、刷新重放/轮换失败/过期（refresh 三态 outcome）；管理员角色降级（触发会话撤销时）与注销账号也会清空该用户设备记录
+- Redis 不可用时降级返回空数组（fail-open），不影响登录能力
+
+**错误码**: `40102`（未认证）、`40301`（账号已注销）、`50000`（服务器内部错误）
+
+---
+
+### 3.6 登出指定设备
+
+```
+DELETE /user/devices/{device_id}
+```
+
+**Headers**: `Authorization: Bearer <access_token>`
+
+**Path 参数**: `device_id` — 设备 ID（token family_id，UUID），非数字字符串
+
+**Response** `200`:
+
+```json
+{
+  "message": "该设备已登出"
+}
+```
+
+**说明**:
+
+- 流程：校验设备归属当前用户（Redis 归属校验，fail-closed）→ 撤销该设备所属 token family 的全部令牌 → 删除设备记录 → 审计 `logout_device`
+- 设备不存在或不属于当前用户均返回 `40400`，不区分两者，避免探测他人设备；空/空白的 `device_id` 同样走 `40400`（handler 先 trim 再判断），本端点不产生 `40000`
+- 登出后该设备的 Access Token 与 Refresh Token 立即全部失效（token family 级联撤销），其他设备不受影响
+- 当前设备登出请使用 `POST /auth/logout`（不依赖设备记录，不受 Redis 故障影响）
+- 按用户限流，60s 内最多 3 次（`42900`，带 Retry-After）；按用户而非 IP，避免校园网 NAT 共享配额
+- Redis 不可用时拒绝执行（fail-closed：无法校验归属时不执行撤销）
+
+**错误码**: `40102`（未认证）、`40301`（账号已注销）、`40400`（设备不存在或不属于当前用户）、`42900`（操作过于频繁）、`50300`（设备服务暂不可用）、`50000`（服务器内部错误）
+
+---
+
 ## 4. 第三方账号绑定（Identities）
 
 ### 4.1 获取绑定列表

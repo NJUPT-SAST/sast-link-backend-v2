@@ -33,7 +33,7 @@ type UserRepository interface {
 		userID int64,
 		update repository.AdminUserUpdate,
 		revokedAt time.Time,
-	) ([]model.BlacklistEntry, error)
+	) (entries []model.BlacklistEntry, sessionsRevoked bool, err error)
 	SoftDeleteAndRevokeSessions(
 		ctx context.Context,
 		userID int64,
@@ -51,6 +51,14 @@ type AuditLogRepository interface {
 // TokenBlacklist is the fast-reject cache for revoked access tokens.
 type TokenBlacklist interface {
 	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
+}
+
+// DeviceStore clears a user's device records when an administrative action
+// (role demotion, state change, account close) revokes every session. The
+// method mirrors the session service's DeviceStore port so the same Redis
+// adapter satisfies both (the packages must not import each other, PRD §6.1).
+type DeviceStore interface {
+	RemoveAllDevices(ctx context.Context, userID int64) error
 }
 
 // ListUsersInput is a filtered, paged user query. Page and PageSize are validated

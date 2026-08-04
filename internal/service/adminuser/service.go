@@ -24,6 +24,7 @@ type Service struct {
 	Users     UserRepository
 	Audit     AuditLogRepository
 	Blacklist TokenBlacklist
+	Devices   DeviceStore
 	Clock     Clock
 }
 

@@ -68,6 +68,26 @@ func TestValidateAPIAuthRejectsBadRetentionSettings(t *testing.T) {
 	}
 }
 
+func TestValidateAPIAuthRejectsBadDeviceRateLimit(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"RATE_LIMIT_DEVICE_RPM", "0", "RATE_LIMIT_DEVICE_RPM must be positive"},
+		{"RATE_LIMIT_DEVICE_WINDOW", "500ms", "RATE_LIMIT_DEVICE_WINDOW must be at least 1s"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 // Audit history is operational rather than compliance-bound, so the 90-day PRD §9
 // figure is the default, not a hard minimum: a deployment may keep more, or trim
 // below it down to the sanity floor.
@@ -208,6 +228,12 @@ func TestLoadValidConfig(t *testing.T) {
 	}
 	if cfg.RateLimitUnbindWindow != time.Minute {
 		t.Errorf("RateLimitUnbindWindow = %s, want 60s", cfg.RateLimitUnbindWindow)
+	}
+	if cfg.RateLimitDeviceRPM != 3 {
+		t.Errorf("RateLimitDeviceRPM = %d, want 3", cfg.RateLimitDeviceRPM)
+	}
+	if cfg.RateLimitDeviceWindow != time.Minute {
+		t.Errorf("RateLimitDeviceWindow = %s, want 60s", cfg.RateLimitDeviceWindow)
 	}
 }
 

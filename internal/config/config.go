@@ -130,6 +130,12 @@ type Config struct {
 	// serialization point for concurrent deletes of one record.
 	RateLimitUnbindRPM    int           `env:"RATE_LIMIT_UNBIND_RPM" envDefault:"3"`
 	RateLimitUnbindWindow time.Duration `env:"RATE_LIMIT_UNBIND_WINDOW" envDefault:"60s"`
+	// Throttles DELETE /user/devices/:id per user. The endpoint revokes a whole
+	// token family (and therefore kills a real session), so the cap is per
+	// authenticated user rather than per IP — a campus NAT must not share one
+	// budget, and a leaked token must not be able to hammer revocations.
+	RateLimitDeviceRPM    int           `env:"RATE_LIMIT_DEVICE_RPM" envDefault:"3"`
+	RateLimitDeviceWindow time.Duration `env:"RATE_LIMIT_DEVICE_WINDOW" envDefault:"60s"`
 	// Throttles GET /oauth/authorize per caller IP. The endpoint is
 	// unauthenticated and writes a Redis stash per call, so without a limit anyone
 	// could fill the keyspace. Fail-open, per PRD §6.0.
@@ -365,6 +371,10 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_UNBIND_RPM must be positive")
 	case c.RateLimitUnbindWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_UNBIND_WINDOW must be at least 1s")
+	case c.RateLimitDeviceRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_DEVICE_RPM must be positive")
+	case c.RateLimitDeviceWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_DEVICE_WINDOW must be at least 1s")
 	case c.RateLimitAuthorizeRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_AUTHORIZE_RPM must be positive")
 	case c.RateLimitAuthorizeWindow < time.Second:
