@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,36 @@ func (r repeatedReader) Read(target []byte) (int, error) {
 		target[i] = byte(r)
 	}
 	return len(target), nil
+}
+
+var (
+	testCredentialsOnce sync.Once
+	testPrivateKey      *rsa.PrivateKey
+	testPasswordHash    string
+	testCredentialsErr  error
+)
+
+// sharedTestCredentials computes the immutable, production-strength password
+// hash and RSA key once per package. The session fixtures are created over a
+// hundred times; deriving PBKDF2-SHA512/600k and generating RSA-2048 for every
+// fixture makes the package exceed Go's 10-minute timeout under -race and
+// atomic coverage without improving test isolation. Tests still receive fresh
+// services and mutable fakes; only these read-only cryptographic values are
+// shared.
+func sharedTestCredentials(t *testing.T) (*rsa.PrivateKey, string) {
+	t.Helper()
+	testCredentialsOnce.Do(func() {
+		testPrivateKey, testCredentialsErr = rsa.GenerateKey(rand.Reader, 2048)
+		if testCredentialsErr != nil {
+			return
+		}
+		passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
+		testPasswordHash, testCredentialsErr = passwords.HashPassword(context.Background(), "secret")
+	})
+	if testCredentialsErr != nil {
+		t.Fatalf("initialize shared test credentials: %v", testCredentialsErr)
+	}
+	return testPrivateKey, testPasswordHash
 }
 
 type fakeUsers struct {
@@ -2187,15 +2218,8 @@ func TestPasswordUpdateFailsWhenSessionRevocationFails(t *testing.T) {
 func newRegisterService(t *testing.T) Service {
 	t.Helper()
 	clock := fixedClock{value: time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)}
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
-	}
+	key, hash := sharedTestCredentials(t)
 	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword(context.Background(), "secret")
-	if err != nil {
-		t.Fatalf("hash test password: %v", err)
-	}
 	user := testUserWithHash(42, "user@njupt.edu.cn", model.UserStateOnSAST, hash)
 	tokens := newFakeTokens()
 	users := &fakeUsers{
@@ -2231,15 +2255,8 @@ func newRegisterService(t *testing.T) Service {
 func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeTokens, *fakeAudit, *fakeFailures) {
 	t.Helper()
 	clock := fixedClock{value: time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)}
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
-	}
+	key, hash := sharedTestCredentials(t)
 	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword(context.Background(), "secret")
-	if err != nil {
-		t.Fatalf("hash test password: %v", err)
-	}
 	user := testUserWithHash(42, "user@njupt.edu.cn", model.UserStateOnSAST, hash)
 	client := &model.OAuthClient{ID: 1, ClientID: "builtin", ClientType: model.ClientTypeFirstParty, IsActive: boolPtr(true), Scopes: model.StringArray(sessionScopes)}
 	clients := &fakeClients{byClientID: map[string]*model.OAuthClient{client.ClientID: client}}
@@ -2271,11 +2288,7 @@ func newTestService(t *testing.T) (Service, *fakeUsers, *fakeClients, *fakeToken
 
 func testUser(t *testing.T, id int64, email string, state model.UserState) *model.User {
 	t.Helper()
-	passwords := auth.PasswordHasher{Random: repeatedReader(0x42)}
-	hash, err := passwords.HashPassword(context.Background(), "secret")
-	if err != nil {
-		t.Fatalf("hash test password: %v", err)
-	}
+	_, hash := sharedTestCredentials(t)
 	return testUserWithHash(id, email, state, hash)
 }
 
