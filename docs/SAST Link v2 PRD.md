@@ -449,6 +449,8 @@ Payload: {
 | `register` | 用户注册成功 |
 | `login` | 密码登录 / OAuth 登录成功/失败 |
 | `logout` | 用户登出 |
+| `logout_device` | 登出指定设备（设备列表） |
+| `evict_device` | 5 台上限淘汰设备（撤销被淘汰 family） |
 | `change_password` | 修改密码 |
 | `reset_password` | 重置密码 |
 | `oauth_bind` / `oauth_unbind` | 第三方账号绑定/解绑 |
@@ -465,6 +467,8 @@ Payload: {
 | `register` | `{"login_email": "xxx@njupt.edu.cn"}` |
 | `login` | `{"method": "password" \| "github" \| "lark" \| "other_mail"}` |
 | `logout` | `{}` |
+| `logout_device` | `{"device_id": "uuid"}` |
+| `evict_device` | `{"device_id": "uuid"}`（resource_id 亦为被淘汰 family） |
 | `change_password` | `{}` |
 | `reset_password` | `{}` |
 | `oauth_bind` | `{"provider": "github" \| "lark" \| "other_mail", "provider_id": "xxx"}` |
@@ -553,7 +557,7 @@ sastlink:device:{device_id}   Hash          {ua, ip, login_time, last_seen}
 - **登录**：生成 `device_id`（UUID v4）→ `ZADD devices:{uid} {ts} {device_id}` → `HSET device:{device_id} ...`。两个 key TTL 均为 30d
 - **淘汰**：`ZCARD` > 5 → `ZREMRANGEBYRANK 0 0`（移除最旧 1 条），对应 device Hash 同步删除，**并撤销被淘汰设备的全部 token（RevokeFamily）**——「最多 5 台同时登录」是会话级约束：被淘汰设备的 refresh token 立即失效，不会留下列表不可见、无法登出的幽灵会话
 - **登出**：仅删除当前 `device_id`（`ZREM` + `DEL`），不影响其他设备
-- **会话终止即清记录**：登出、登出指定设备、修改/重置密码、刷新重放/轮换失败/过期、淘汰撤销均同步清除设备记录（fail-open）；管理员降级/封禁（撤销会话）与注销账号亦清空该用户全部设备记录。每次会话终止写审计：`logout` / `logout_device` / `evict_device` / `change_password` / `reset_password` / refresh 三态 outcome（审计 90 天保留，可回溯"谁杀死了我的会话"）
+- **会话终止即清记录**：登出、登出指定设备、修改/重置密码、刷新重放/轮换失败/过期、淘汰撤销均同步清除设备记录（fail-open）；管理员**角色降级（触发会话撤销时）与注销账号**亦清空该用户全部设备记录（state 变更本身不撤销会话，故不清；`is_deleted` 状态不接受编辑，注销走 `DELETE /admin/users/:id`）。每次会话终止写审计：`logout` / `logout_device` / `evict_device` / `change_password` / `reset_password` / refresh 三态 outcome（审计 90 天保留，可回溯"谁杀死了我的会话"）
 - **刷新 Token**：更新对应 device Hash 的 `last_seen` 字段，不续期 TTL（30 天不活跃则记录过期；过期后设备再次刷新视为重新登记，重置 TTL——会话仍在使用就不该变成列表不可见、无法登出的幽灵）
 
 ---

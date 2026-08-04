@@ -1,6 +1,7 @@
 package sessionhandler
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -61,14 +62,15 @@ func (h Handler) ListDevices(c *gin.Context) {
 // record. The device ID is an opaque UUID (the family ID), so any string that
 // does not name a device of the caller answers 40400 rather than 400 — the
 // distinction would confirm nothing useful and might help probe other users'
-// sessions.
+// sessions. The parameter is trimmed first so an encoded blank (e.g. %20)
+// takes the same 40400 path as a missing one instead of a 40000.
 func (h Handler) LogoutDevice(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
 		response.Error(c, internalError())
 		return
 	}
-	deviceID := c.Param("id")
+	deviceID := strings.TrimSpace(c.Param("id"))
 	if deviceID == "" {
 		response.Error(c, notFound(errcode.CodeNotFound, "设备不存在"))
 		return

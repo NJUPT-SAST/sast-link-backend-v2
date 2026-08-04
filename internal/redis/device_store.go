@@ -33,7 +33,12 @@ func (k Keys) Device(deviceID string) string {
 }
 
 // deviceHashKeyPrefix is the shared prefix of every device Hash key, passed
-// into Lua scripts that must delete or read a Hash by member ID.
+// into Lua scripts that must delete or read a Hash by member ID. It is a key
+// pattern, not a key itself: scripts use it to derive member keys at runtime
+// (KEYS[3] .. member). Like every multi-key script in this codebase it assumes
+// a single Redis instance — under Redis Cluster the derived keys carry no hash
+// tag and would cross slots. The deployment runs one Redis; do not enable
+// cluster mode without adding hash tags to the device key scheme.
 func (k Keys) deviceHashKeyPrefix() string {
 	return k.join("device") + ":"
 }

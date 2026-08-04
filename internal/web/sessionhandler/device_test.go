@@ -112,3 +112,21 @@ func TestLogoutDeviceEmptyPathIsNotFound(t *testing.T) {
 		t.Fatal("empty device id must not reach the service")
 	}
 }
+
+// An encoded blank (%%20) decodes to a space and must take the same 40400
+// path as an empty id — the id is an opaque UUID, so an unparseable value is
+// "not a device", never "bad request".
+func TestLogoutDeviceEncodedBlankIsNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{}
+	router := authedRouter(service)
+	recorder := doJSON(router, http.MethodDelete, "/user/devices/%20", "")
+
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusNotFound || body.Code != 40400 {
+		t.Fatalf("response = %d %#v, want 404 40400 for an encoded blank", recorder.Code, body)
+	}
+	if service.logoutDeviceCalls != 0 {
+		t.Fatal("a blank device id must not reach the service")
+	}
+}
