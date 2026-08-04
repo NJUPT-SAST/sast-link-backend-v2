@@ -47,6 +47,17 @@ type Service struct {
 	Tokens     TokenRepository
 	Audits     AuditRepository
 
+	// Devices registers third-party login sessions in the shared device store
+	// (the same Redis adapter the session service uses). A login that goes
+	// through GitHub/Lark must count against the per-user 5-device cap like any
+	// password login; leaving it out would let a user bypass the cap and would
+	// hide the session from the device list entirely. Nil disables the hook
+	// (fail-open).
+	Devices DeviceStore
+	// Blacklist delivers revoked JTIs to Redis after an eviction revoke. Nil
+	// skips delivery; the DB revoke is authoritative either way.
+	Blacklist TokenBlacklist
+
 	States            OAuthStateStore
 	RegistrationState RegistrationStateStore
 	LoginCodes        LoginCodeStore
@@ -328,6 +339,19 @@ func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 		input.ClientIP, input.UserAgent, map[string]any{"user_id": user.ID}); auditErr != nil {
 		slog.ErrorContext(ctx, "audit oauth login exchange", "user_id", user.ID, "error", auditErr)
 	}
+	// A GitHub/Lark login is a session like any password login: register it as
+	// a device so it shows up in the device list, counts against the 5-device
+	// cap, and can be logged out from the list. The eviction side (revoke the
+	// displaced family, drop its record, audit) mirrors the session service.
+	// Fail-open: the pair is already committed, and a store outage must not
+	// break the login that just succeeded.
+	if s.Devices != nil {
+		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.Refresh.FamilyID, input.UserAgent, input.ClientIP, s.Clock.Now())
+		if err != nil {
+			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
+		}
+		s.revokeEvictedDevice(ctx, user.ID, evicted, s.Clock.Now(), input.ClientIP, input.UserAgent)
+	}
 	return &ExchangeCodeResult{
 		AccessToken:      pair.AccessToken,
 		RefreshToken:     pair.RefreshToken,
@@ -337,6 +361,50 @@ func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 		RefreshExpiresAt: pair.Refresh.ExpiresAt,
 		User:             user,
 	}, nil
+}
+
+// revokeEvictedDevice revokes the token family of a device evicted by the
+// per-user cap, exactly like the session service's hook of the same name: the
+// eviction is "最多 5 台同时登录" enforcement, and a family whose record
+// vanished while its tokens stayed live would become an invisible, unmanageable
+// ghost session. Fail-open: the new login already succeeded and an outage must
+// not be able to block it.
+func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted string, now time.Time, clientIP, userAgent string) {
+	if evicted == "" {
+		return
+	}
+	entries, err := s.Tokens.RevokeFamily(ctx, evicted, now)
+	if err != nil {
+		slog.WarnContext(ctx, "revoke evicted device family failed", "user_id", userID, "device_id", evicted, "error", err)
+		return
+	}
+	if s.Blacklist != nil {
+		deliver := make(map[string]time.Duration, len(entries))
+		for _, entry := range entries {
+			ttl := entry.ExpiresAt.Sub(now)
+			if ttl <= 0 || strings.TrimSpace(entry.TokenID) == "" {
+				continue
+			}
+			deliver[entry.TokenID] = ttl
+		}
+		if len(deliver) > 0 {
+			if err := s.Blacklist.BlacklistJTIBatch(ctx, deliver); err != nil {
+				// The same-transaction outbox row guarantees a worker retry.
+				slog.WarnContext(ctx, "deliver token blacklist batch, outbox worker will retry", "count", len(deliver), "error", err)
+			}
+		}
+	}
+	// Drop the displaced record (idempotent). The Redis script already removed
+	// the member and usually the Hash; this closes the gap where the Hash
+	// delete failed after the script evicted, so no orphan record survives.
+	if s.Devices != nil {
+		if err := s.Devices.RemoveDevice(ctx, userID, evicted); err != nil {
+			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)
+		}
+	}
+	if auditErr := s.audit(ctx, &userID, "evict_device", "session", true, 0, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
+		slog.ErrorContext(ctx, "audit evict device", "user_id", userID, "device_id", evicted, "error", auditErr)
+	}
 }
 
 func (s Service) stateTTL() time.Duration {

@@ -335,6 +335,126 @@ func TestExchangeCodeIssuesSessionAndConsumesCode(t *testing.T) {
 	}
 }
 
+// A GitHub/Lark login is a session like any password login: it must register
+// as a device (same family ID, same Redis store), so it shows up in the device
+// list, counts against the 5-device cap and can be logged out from the list.
+func TestExchangeCodeRegistersDevice(t *testing.T) {
+	service, doubles := newTestService(t)
+	devices := &fakeDeviceStore{}
+	service.Devices = devices
+	doubles.Users.byID[42] = activeUser(42)
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+		t.Fatalf("seed login code: %v", err)
+	}
+
+	result, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", ClientIP: "10.0.0.7", UserAgent: "browser/7"})
+	if err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	if len(devices.registrations) != 1 {
+		t.Fatalf("registrations = %#v, want exactly one", devices.registrations)
+	}
+	reg := devices.registrations[0]
+	if reg.userID != 42 || reg.ua != "browser/7" || reg.ip != "10.0.0.7" {
+		t.Fatalf("registration = %+v, want user 42 with the request ua/ip", reg)
+	}
+	// The device ID is the family ID of the issued pair (a UUID), so the
+	// session and the device record stay one thing.
+	if len(reg.deviceID) != 36 || strings.Count(reg.deviceID, "-") != 4 {
+		t.Fatalf("device id = %q, want the issued family UUID", reg.deviceID)
+	}
+	if result.RefreshToken == "" {
+		t.Fatal("ExchangeCode returned no refresh token")
+	}
+}
+
+// Registering a third-party session can displace the oldest device past the
+// per-user cap, and the displaced family must be revoked exactly like a
+// password-login eviction — otherwise the cap is a display constraint again.
+func TestExchangeCodeRevokesEvictedFamily(t *testing.T) {
+	service, doubles := newTestService(t)
+	devices := &fakeDeviceStore{evicted: "family-oldest"}
+	service.Devices = devices
+	service.Blacklist = &fakeBlacklist{}
+	doubles.Users.byID[42] = activeUser(42)
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+		t.Fatalf("seed login code: %v", err)
+	}
+
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"}); err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	if len(doubles.Tokens.revoked) != 1 || doubles.Tokens.revoked[0] != "family-oldest" {
+		t.Fatalf("revoked families = %#v, want the displaced family-oldest", doubles.Tokens.revoked)
+	}
+	if len(devices.removed) != 1 || devices.removed[0] != "family-oldest" {
+		t.Fatalf("removed = %#v, want the displaced record cleaned after the revoke", devices.removed)
+	}
+	// The eviction is a session-killing event; it must be audited. This
+	// package's audit helper has no resourceID parameter, so the device ID
+	// rides in the detail JSON.
+	var evictedAudit *model.AuditLog
+	for i := range doubles.Audits.entries {
+		if doubles.Audits.entries[i].Action == "evict_device" {
+			evictedAudit = &doubles.Audits.entries[i]
+		}
+	}
+	if evictedAudit == nil || evictedAudit.Success == nil || !*evictedAudit.Success {
+		t.Fatalf("evict_device audit = %+v, want a success entry", evictedAudit)
+	}
+	if detail := string(evictedAudit.Detail); !strings.Contains(detail, "family-oldest") {
+		t.Fatalf("evict_device audit detail = %s, want the displaced family id", detail)
+	}
+}
+
+// The device hook must never break the login that just succeeded: a store
+// outage or a failed revoke is WARN-only, and the pair is already committed.
+func TestExchangeCodeSucceedsWhenDeviceRegistrationFails(t *testing.T) {
+	service, doubles := newTestService(t)
+	devices := &fakeDeviceStore{registerErr: errors.New("redis down")}
+	service.Devices = devices
+	doubles.Users.byID[42] = activeUser(42)
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+		t.Fatalf("seed login code: %v", err)
+	}
+
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"}); err != nil {
+		t.Fatalf("ExchangeCode returned error, want fail-open session: %v", err)
+	}
+	if doubles.Tokens.pairs != 1 {
+		t.Fatalf("persisted pairs = %d, want 1 despite device-store error", doubles.Tokens.pairs)
+	}
+
+	// A device-store error must not lose the eviction: the write may have
+	// partially succeeded (set updated, hash delete failed), so the displaced
+	// family is still revoked on the error path.
+	storeErr := &fakeDeviceStore{registerErr: errors.New("redis down"), evicted: "family-oldest"}
+	service.Devices = storeErr
+	doubles.LoginCodes.codes["lc_abd"] = 42
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abd"}); err != nil {
+		t.Fatalf("ExchangeCode returned error: %v", err)
+	}
+	if len(doubles.Tokens.revoked) != 1 || doubles.Tokens.revoked[0] != "family-oldest" {
+		t.Fatalf("revoked families = %#v, want eviction still handled on store error", doubles.Tokens.revoked)
+	}
+}
+
+// The eviction revoke is fail-open: a DB outage WARNs and leaves the new login
+// untouched.
+func TestExchangeCodeSucceedsWhenEvictedRevokeFails(t *testing.T) {
+	service, doubles := newTestService(t)
+	service.Devices = &fakeDeviceStore{evicted: "family-oldest"}
+	doubles.Tokens.revokeErr = errors.New("db down")
+	doubles.Users.byID[42] = activeUser(42)
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+		t.Fatalf("seed login code: %v", err)
+	}
+
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"}); err != nil {
+		t.Fatalf("ExchangeCode returned error, want fail-open session: %v", err)
+	}
+}
+
 func TestExchangeCodeRejectsUnknownCode(t *testing.T) {
 	service, _ := newTestService(t)
 	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_missing"})
