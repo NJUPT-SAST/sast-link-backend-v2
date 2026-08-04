@@ -18,7 +18,7 @@ env:
 jobs:
   lint:
     name: lint
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, build]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -35,7 +35,7 @@ jobs:
 
   test:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, build]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
@@ -50,7 +50,7 @@ jobs:
 
   build:
     name: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, build]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
