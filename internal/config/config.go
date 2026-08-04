@@ -371,6 +371,10 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_UNBIND_RPM must be positive")
 	case c.RateLimitUnbindWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_UNBIND_WINDOW must be at least 1s")
+	case c.RateLimitDeviceRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_DEVICE_RPM must be positive")
+	case c.RateLimitDeviceWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_DEVICE_WINDOW must be at least 1s")
 	case c.RateLimitAuthorizeRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_AUTHORIZE_RPM must be positive")
 	case c.RateLimitAuthorizeWindow < time.Second:
