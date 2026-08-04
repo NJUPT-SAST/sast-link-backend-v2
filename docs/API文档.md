@@ -855,10 +855,11 @@ GET /user/devices
 
 **说明**:
 
-- 按最近登录时间倒序返回（最新在前），每台设备对应一次密码登录（或注册）会话
+- 按最近登录时间倒序返回（最新在前），每台设备对应一次登录会话（密码登录、注册、GitHub/Lark 第三方登录统一登记）
 - `device_id` 即 token family_id（UUID）：一次登录即一台设备，设备生命周期与 token 会话生命周期同步
-- 设备记录存于 Redis（`sastlink:devices:{user_id}` 有序集合 + `sastlink:device:{device_id}` Hash），最多 5 台，超出时淘汰登录时间最早的一台；TTL 30 天
-- 登录/注册时登记设备；刷新 Token 时更新 `last_seen`（不续期 TTL）；登出删除单台；修改/重置密码时清空全部设备
+- 设备记录存于 Redis（`sastlink:devices:{user_id}` 有序集合 + `sastlink:device:{device_id}` Hash），最多 5 台，超出时淘汰登录时间最早的一台并**撤销该设备的全部 token**（被淘汰设备的 refresh token 立即失效，无法继续刷新）；TTL 30 天
+- 登录/注册时登记设备；刷新 Token 时更新 `last_seen`（有效记录不续期 TTL，30 天不活跃则记录过期；过期后设备再次刷新会重新登记，同样受 5 台上限约束、超出时淘汰最旧并撤销其会话——会话还在使用就不该变成列表里看不见的幽灵）；登出删除单台；修改/重置密码时清空全部设备
+- 会话终止一律同步清除设备记录并写审计：登出 `logout`、登出指定设备 `logout_device`、淘汰 `evict_device`、改密/重置 `change_password`/`reset_password`、刷新重放/轮换失败/过期（refresh 三态 outcome）；管理员降级/封禁/注销账号也会清空该用户设备记录
 - Redis 不可用时降级返回空数组（fail-open），不影响登录能力
 
 **错误码**: `40102`（未认证）、`40301`（账号已注销）、`50000`（服务器内部错误）

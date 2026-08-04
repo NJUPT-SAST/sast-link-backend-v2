@@ -3071,7 +3071,7 @@ components:
         last_seen:
           type: string
           format: date-time
-          description: 最近一次刷新 Token 的时间（刷新不续期设备 TTL）
+          description: 最近一次刷新 Token 的时间（有效记录刷新不续期 TTL；记录过期后再次刷新会重新登记，受 5 台上限约束，超出时淘汰最旧设备并撤销其会话）
     DevicesListResponse:
       type: object
       description: 设备列表响应

@@ -12,7 +12,7 @@ OAuth/OIDC Provider 部分已完成两段式授权端点（`GET /oauth/authorize
 
 头像上传已完成：`PUT /user/avatar`（multipart/form-data，≤5MB，jpg/png/webp 魔数检测 + 解码校验），上传至腾讯云 COS（`internal/adapter/cos`，`STORAGE_*` 配置，未配置时端点返回 `50002`），默认开启 COS 内容审核（fail-closed：审核服务不可用时返回 `50300` 拒绝上传，敏感内容删除对象并返回 `42203`），成功后将公开 URL 写入 `profile.avatar` 并删除旧头像对象（失败仅记日志），按用户限流（`RATE_LIMIT_UPLOAD_AVATAR_*`），审计 `upload_avatar`。`STORAGE_*` 全空 = 未配置（其他端点不受影响）；半配置 = 启动报错。
 
-设备管理已完成：`GET /user/devices`（按最近登录排序的设备列表：device_id/ua/ip/login_time/last_seen）与 `DELETE /user/devices/:id`（登出指定设备：Redis 归属校验 → 撤销该 token family → 删除设备记录，审计 `logout_device`，按用户限流 `RATE_LIMIT_DEVICE_*`）。设备记录存于 Redis（`sastlink:devices:{user_id}` ZSET + `sastlink:device:{device_id}` Hash，30d TTL，最多 5 台淘汰最旧），**device_id 复用 token family_id**——一次登录即一台设备，设备生命周期与会话生命周期天然同步：登录/注册登记、刷新更新 `last_seen`（不续期 TTL）、登出删单台、改密/重置清空全部。设备记录读写全部 fail-open（不影响主链路），仅“登出指定设备”的归属校验 fail-closed。
+设备管理已完成：`GET /user/devices`（按最近登录排序的设备列表：device_id/ua/ip/login_time/last_seen）与 `DELETE /user/devices/:id`（登出指定设备：Redis 归属校验 → 撤销该 token family → 删除设备记录，审计 `logout_device`，按用户限流 `RATE_LIMIT_DEVICE_*`）。设备记录存于 Redis（`sastlink:devices:{user_id}` ZSET + `sastlink:device:{device_id}` Hash，30d TTL，最多 5 台，超出时淘汰最旧并**撤销其全部 token** + 审计 `evict_device`），**device_id 复用 token family_id**——一次登录即一台设备（**密码登录、注册、GitHub/Lark 第三方登录统一登记**，第三方登录的刷新/登出/改密清空天然共享同一 family 体系；OAuth provider 授权码流不参与登记），设备生命周期与会话生命周期天然同步：登录/注册登记（触发淘汰时同步撤销被淘汰设备会话）、刷新更新 `last_seen`（有效记录不续期 TTL，过期后再次刷新重新登记；Hash 丢失/无 TTL 时防御性重建，幻影成员不占名额）、登出删单台、改密/重置清空全部、管理员降级/封禁/注销同步清空。设备记录读写全部 fail-open（不影响主链路），仅“登出指定设备”的归属校验 fail-closed。
 
 `cmd/api` 只负责运行 HTTP 服务，启动时不会执行 DDL 或 schema migration。数据库结构只能通过 `cmd/migrate` 显式管理。
 

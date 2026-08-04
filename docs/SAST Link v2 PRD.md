@@ -126,9 +126,8 @@ POST /user/login
 2. 检查登录失败次数（Redis `sastlink:auth:login_failure:{email}`，15min 窗口 ≥ 10 次则锁定）
 3. 查用户是否存在：不存在返回 40106（邮箱不存在）；存在则执行 PBKDF2-SHA512 密码哈希校验
 4. 校验账号状态 — `is_deleted` 拒绝（40301）
-5. 检查设备数 — 该用户已有设备数 ≥ 5 时淘汰最旧设备
-6. 生成 Token Pair，Redis 记录设备信息
-7. DB 写入 `oauth_refresh_tokens`、`oauth_access_tokens` 元数据、`audit_logs`
+5. 生成 Token Pair（family 即设备 ID），DB 写入 `oauth_refresh_tokens`、`oauth_access_tokens` 元数据、`audit_logs`（audit 失败触发 compensate 撤销本次 family，不产生孤儿设备记录）
+6. 设备登记（fail-open，Redis 不可用仅 WARN 不影响登录）：`ZADD devices:{uid}` + `HSET device:{id}`；该用户设备数超 5 时淘汰最旧设备并**撤销被淘汰设备的全部 token（RevokeFamily）+ 审计 `evict_device`**——设备记录读写失败不进入 compensate 路径
 
 **token_version 机制**：`token_version` 存储在 `user` 表，改密/重置密码后递增。JWT Access Token 的 claims 中包含 `token_version`，登录态校验时与 DB 当前值比对，不一致即拒绝。此机制确保改密后所有旧 Token（无论是否在黑名单中）立即失效。
 
@@ -544,7 +543,7 @@ Token 黑名单可以跳过的依据：JTI 写入黑名单与 `oauth_access_toke
 
 ### 6.1 设备管理
 
-数据结构：Sorted Set + Hash 组合。**device_id 复用 token family_id**（同为 UUID v4）：一次密码登录即一台设备，设备生命周期与会话生命周期天然同步——登出/改密撤销 family 时设备记录随之清除，不存在“设备挂着但会话已死”的不一致。
+数据结构：Sorted Set + Hash 组合。**device_id 复用 token family_id**（同为 UUID v4）：**一次登录即一台设备**（密码登录、注册、GitHub/Lark 第三方登录统一登记——第三方登录经由 `POST /oauth/exchange-code` 兑换会话，与密码登录共用同一 family 体系、同一 Redis 设备存储，登出/改密/刷新/淘汰全部生效），设备生命周期与会话生命周期天然同步——登出/改密撤销 family 时设备记录随之清除，不存在“设备挂着但会话已死”的不一致。**设备 = 内部会话流的 token family**：OAuth provider 授权码流（`/oauth/authorize` + `/oauth/token`，含第一方客户端）签发的会话属第三方应用授权场景，不参与设备登记与 5 台上限。
 
 ```
 sastlink:devices:{user_id}    Sorted Set    score=login_timestamp  member=device_id
@@ -552,9 +551,10 @@ sastlink:device:{device_id}   Hash          {ua, ip, login_time, last_seen}
 ```
 
 - **登录**：生成 `device_id`（UUID v4）→ `ZADD devices:{uid} {ts} {device_id}` → `HSET device:{device_id} ...`。两个 key TTL 均为 30d
-- **淘汰**：`ZCARD` > 5 → `ZREMRANGEBYRANK 0 0`（移除最旧 1 条），对应 device Hash 同步删除
+- **淘汰**：`ZCARD` > 5 → `ZREMRANGEBYRANK 0 0`（移除最旧 1 条），对应 device Hash 同步删除，**并撤销被淘汰设备的全部 token（RevokeFamily）**——「最多 5 台同时登录」是会话级约束：被淘汰设备的 refresh token 立即失效，不会留下列表不可见、无法登出的幽灵会话
 - **登出**：仅删除当前 `device_id`（`ZREM` + `DEL`），不影响其他设备
-- **刷新 Token**：更新对应 device Hash 的 `last_seen` 字段，不续期 TTL
+- **会话终止即清记录**：登出、登出指定设备、修改/重置密码、刷新重放/轮换失败/过期、淘汰撤销均同步清除设备记录（fail-open）；管理员降级/封禁（撤销会话）与注销账号亦清空该用户全部设备记录。每次会话终止写审计：`logout` / `logout_device` / `evict_device` / `change_password` / `reset_password` / refresh 三态 outcome（审计 90 天保留，可回溯"谁杀死了我的会话"）
+- **刷新 Token**：更新对应 device Hash 的 `last_seen` 字段，不续期 TTL（30 天不活跃则记录过期；过期后设备再次刷新视为重新登记，重置 TTL——会话仍在使用就不该变成列表不可见、无法登出的幽灵）
 
 ---
 
