@@ -3,6 +3,7 @@ package adminuser
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -144,7 +145,7 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		return nil, selfErr
 	}
 
-	entries, err := s.Users.UpdateAdminUser(ctx, input.UserID, repository.AdminUserUpdate{
+	entries, sessionsRevoked, err := s.Users.UpdateAdminUser(ctx, input.UserID, repository.AdminUserUpdate{
 		Name:        validated.name,
 		PhoneNumber: validated.phoneNumber,
 		QQNumber:    validated.qqNumber,
@@ -168,6 +169,20 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		return nil, mapped
 	}
 	s.deliverBlacklist(ctx, entries, s.now())
+	// A role change that revoked sessions also clears the device set: the
+	// user's every session was just cut, and the device list must not keep
+	// showing logins that can no longer authenticate. Fail-open — the revoke
+	// is durable in PostgreSQL and a leftover record expires on its own.
+	//
+	// The gate is the repository's authoritative flag, not len(entries): the
+	// entries only collect still-live access tokens for blacklist delivery, so
+	// a demotion of a user idle for over an hour revokes every refresh token
+	// while returning zero entries.
+	if sessionsRevoked && s.Devices != nil {
+		if err := s.Devices.RemoveAllDevices(ctx, input.UserID); err != nil {
+			slog.WarnContext(ctx, "remove all devices on admin update failed", "user_id", input.UserID, "error", err)
+		}
+	}
 	s.auditUpdate(ctx, input, true, 0, validated.changed)
 	// Report what the transaction actually revoked rather than what this layer
 	// predicted: the repository judges the role change against the locked row, so its
@@ -198,6 +213,14 @@ func (s Service) DeleteUser(ctx context.Context, input TargetUserInput) error {
 		return mapped
 	}
 	s.deliverBlacklist(ctx, entries, s.now())
+	// Closing the account cut every session; clear the device records so the
+	// (deleted) user leaves no ghost logins behind. Fail-open — the user is
+	// already gone.
+	if s.Devices != nil {
+		if err := s.Devices.RemoveAllDevices(ctx, input.UserID); err != nil {
+			slog.WarnContext(ctx, "remove all devices on user delete failed", "user_id", input.UserID, "error", err)
+		}
+	}
 	s.auditTarget(ctx, input, actionDeleteUser, true, 0)
 	return nil
 }

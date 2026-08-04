@@ -26,6 +26,7 @@ type fakeUsers struct {
 	updatedUserID  int64
 	updateInput    repository.AdminUserUpdate
 	updateEntries  []model.BlacklistEntry
+	updateRevoked  bool
 	updateErr      error
 	deleteCalls    int
 	deletedUserID  int64
@@ -61,14 +62,14 @@ func (f *fakeUsers) UpdateAdminUser(
 	userID int64,
 	update repository.AdminUserUpdate,
 	_ time.Time,
-) ([]model.BlacklistEntry, error) {
+) ([]model.BlacklistEntry, bool, error) {
 	f.updateCalls++
 	f.updatedUserID = userID
 	f.updateInput = update
 	if f.updateErr != nil {
-		return nil, f.updateErr
+		return nil, false, f.updateErr
 	}
-	return f.updateEntries, nil
+	return f.updateEntries, f.updateRevoked, nil
 }
 
 func (f *fakeUsers) SoftDeleteAndRevokeSessions(
@@ -142,6 +143,7 @@ type harness struct {
 	users     *fakeUsers
 	audit     *fakeAudit
 	blacklist *fakeBlacklist
+	devices   *fakeDeviceStore
 }
 
 func newHarness(t *testing.T) *harness {
@@ -149,16 +151,19 @@ func newHarness(t *testing.T) *harness {
 	users := &fakeUsers{}
 	auditLog := &fakeAudit{}
 	blacklist := &fakeBlacklist{}
+	devices := &fakeDeviceStore{}
 	return &harness{
 		service: Service{
 			Users:     users,
 			Audit:     auditLog,
 			Blacklist: blacklist,
+			Devices:   devices,
 			Clock:     testClock{value: testNow},
 		},
 		users:     users,
 		audit:     auditLog,
 		blacklist: blacklist,
+		devices:   devices,
 	}
 }
 
@@ -189,6 +194,18 @@ const (
 )
 
 func stringPtr(value string) *string { return &value }
+
+// fakeDeviceStore records RemoveAllDevices calls so tests can assert that a
+// session-killing admin action cleared the user's device records.
+type fakeDeviceStore struct {
+	cleared []int64
+	err     error
+}
+
+func (f *fakeDeviceStore) RemoveAllDevices(_ context.Context, userID int64) error {
+	f.cleared = append(f.cleared, userID)
+	return f.err
+}
 
 func updateInput(mutate func(*UpdateUserInput)) UpdateUserInput {
 	input := UpdateUserInput{

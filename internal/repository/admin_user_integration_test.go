@@ -262,7 +262,7 @@ func TestUpdateAdminUserRevokesSessionsAtomically(t *testing.T) {
 	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
 
 	role := model.UserRoleMember
-	entries, err := users.UpdateAdminUser(context.Background(), user.ID,
+	entries, _, err := users.UpdateAdminUser(context.Background(), user.ID,
 		repository.AdminUserUpdate{Role: &role}, revokedAt)
 	if err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
@@ -297,7 +297,7 @@ func TestUpdateAdminUserKeepsSessionsWhenRoleUnchanged(t *testing.T) {
 	createTokenPair(t, tokens, "keep", familyID, 0, client.ID, user.ID)
 
 	name := "新名字"
-	entries, err := users.UpdateAdminUser(context.Background(), user.ID,
+	entries, _, err := users.UpdateAdminUser(context.Background(), user.ID,
 		repository.AdminUserUpdate{Name: &name}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
@@ -328,7 +328,7 @@ func TestUpdateAdminUserLetsTriggerRecomputeEmailType(t *testing.T) {
 
 	email := "moved@sast.fun"
 	emailType := model.EmailTypeSAST
-	if _, err := users.UpdateAdminUser(context.Background(), user.ID,
+	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
 		repository.AdminUserUpdate{LoginEmail: &email, EmailType: &emailType},
 		time.Now().UTC()); err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
@@ -352,7 +352,7 @@ func TestUpdateAdminUserRejectsForeignEmailDomain(t *testing.T) {
 		model.UserRoleMember, model.UserStateOnSAST, nil)
 
 	email := "someone@gmail.com"
-	if _, err := users.UpdateAdminUser(context.Background(), user.ID,
+	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
 		repository.AdminUserUpdate{LoginEmail: &email},
 		time.Now().UTC()); err == nil {
 		t.Fatal("UpdateAdminUser accepted a foreign domain; the trigger should refuse it")
@@ -369,7 +369,7 @@ func TestUpdateAdminUserSkipsDeletedAccounts(t *testing.T) {
 		model.UserRoleMember, model.UserStateDeleted, nil)
 
 	name := "改不动"
-	_, err := users.UpdateAdminUser(context.Background(), user.ID,
+	_, _, err := users.UpdateAdminUser(context.Background(), user.ID,
 		repository.AdminUserUpdate{Name: &name}, time.Now().UTC())
 	// The row exists and the caller may see it in the console, so the closed state is
 	// a conflict to report rather than a missing record. Reporting ErrNotFound here
@@ -386,7 +386,7 @@ func TestUpdateAdminUserReportsAMissingRowAsNotFound(t *testing.T) {
 	users := repository.NewUser(database)
 
 	name := "无此人"
-	_, err := users.UpdateAdminUser(context.Background(), 999999999,
+	_, _, err := users.UpdateAdminUser(context.Background(), 999999999,
 		repository.AdminUserUpdate{Name: &name}, time.Now().UTC())
 	if !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
@@ -397,7 +397,7 @@ func TestUpdateAdminUserRejectsEmptyUpdate(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)
 
-	_, err := users.UpdateAdminUser(context.Background(), 1,
+	_, _, err := users.UpdateAdminUser(context.Background(), 1,
 		repository.AdminUserUpdate{}, time.Now().UTC())
 	if !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("error = %v, want ErrInvalidArgument", err)
@@ -508,7 +508,7 @@ func TestUpdateAdminUserRefusesEmailTypeWithoutAddress(t *testing.T) {
 		model.UserRoleMember, model.UserStateOnSAST, nil)
 
 	emailType := model.EmailTypeSAST
-	_, err := users.UpdateAdminUser(context.Background(), user.ID,
+	_, _, err := users.UpdateAdminUser(context.Background(), user.ID,
 		repository.AdminUserUpdate{EmailType: &emailType}, time.Now().UTC())
 	if !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("error = %v, want ErrInvalidArgument", err)

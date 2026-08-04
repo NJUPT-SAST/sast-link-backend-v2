@@ -27,7 +27,7 @@ func TestUpdateAdminUserRefusesDemotingTheLastAdmin(t *testing.T) {
 		model.UserRoleAdmin, model.UserStateDeleted, nil)
 
 	role := model.UserRoleMember
-	_, err := users.UpdateAdminUser(context.Background(), admin.ID,
+	_, _, err := users.UpdateAdminUser(context.Background(), admin.ID,
 		repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
 	if !errors.Is(err, repository.ErrLastAdmin) {
 		t.Fatalf("error = %v, want ErrLastAdmin", err)
@@ -76,7 +76,7 @@ func TestUpdateAdminUserAllowsDemotionWhenAnotherAdminRemains(t *testing.T) {
 		model.UserRoleAdmin, model.UserStateOnSAST, nil)
 
 	role := model.UserRoleMember
-	if _, err := users.UpdateAdminUser(context.Background(), first.ID,
+	if _, _, err := users.UpdateAdminUser(context.Background(), first.ID,
 		repository.AdminUserUpdate{Role: &role}, time.Now().UTC()); err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestConcurrentDemotionsCannotRemoveEveryAdmin(t *testing.T) {
 		go func(index int, userID int64) {
 			defer waitGroup.Done()
 			<-start
-			_, err := users.UpdateAdminUser(context.Background(), userID,
+			_, _, err := users.UpdateAdminUser(context.Background(), userID,
 				repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
 			results[index] = err
 		}(index, target)
@@ -171,7 +171,7 @@ func TestConcurrentDemotionAndSoftDeleteKeepOneAdmin(t *testing.T) {
 	go func() {
 		defer waitGroup.Done()
 		<-start
-		_, err := users.UpdateAdminUser(context.Background(), first.ID,
+		_, _, err := users.UpdateAdminUser(context.Background(), first.ID,
 			repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
 		results[0] = err
 	}()
@@ -215,7 +215,7 @@ func TestUpdateAdminUserGuardsDemotionEvenWhenCallerSaysOtherwise(t *testing.T) 
 		model.UserRoleAdmin, model.UserStateOnSAST, nil)
 
 	role := model.UserRoleMember
-	_, err := users.UpdateAdminUser(context.Background(), admin.ID,
+	_, _, err := users.UpdateAdminUser(context.Background(), admin.ID,
 		repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
 	if !errors.Is(err, repository.ErrLastAdmin) {
 		t.Fatalf("error = %v, want ErrLastAdmin: the transaction must judge the stored "+
@@ -250,7 +250,7 @@ func TestUpdateAdminUserRevokesOnRoleChangeTheCallerDidNotExpect(t *testing.T) {
 
 	role := model.UserRoleMember
 	// revokeSessions=false is what a caller computes after reading the row as a member.
-	entries, err := users.UpdateAdminUser(context.Background(), target.ID,
+	entries, _, err := users.UpdateAdminUser(context.Background(), target.ID,
 		repository.AdminUserUpdate{Role: &role}, revokedAt)
 	if err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
