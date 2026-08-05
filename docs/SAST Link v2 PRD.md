@@ -539,7 +539,7 @@ is_deleted ──(恢复)──► njupter
 | 类别 | 判据 | 场景 | 故障行为 |
 |------|------|------|----------|
 | **Fail-closed** | Redis 是唯一存储，取不到值不等于校验通过 | 验证码、OAuth State、registration_state、login_code、Register-Ticket、Bind-Ticket、幂等性 key、授权请求暂存 | 拒绝请求，用户重走流程。所有 key 均带 TTL，冷启动自愈 |
-| **Fail-open** | PostgreSQL 持有权威副本，或丢失仅放宽速率窗口 | Token 黑名单、登录失败计数与锁定、限流（含解绑限流、authorize 限流） | WARN 日志后继续，不返回 5xx |
+| **Fail-open** | PostgreSQL 持有权威副本，或丢失仅放宽速率窗口 | auth-state 缓存（取代原 JTI 黑名单）、登录失败计数与锁定、限流（含解绑限流、authorize 限流）、设备记录 | WARN 日志后继续，不返回 5xx |
 
 auth-state 缓存可以跳过的依据：缓存失效由撤销事务内写出的 outbox 行保证，而登录态校验在缓存未命中或出错时始终回退 `oauth_access_tokens.revoked_at` 的权威 DB 查询（§4.1），DB 拒绝的集合覆盖缓存可能放行的任何 token。缓存是快速路径，不是权威。
 
