@@ -46,7 +46,11 @@ jobs:
           cache: true
 
       - name: Run tests
-        run: go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
+        # -pgo=off: the test build must not pick up cmd/api/default.pgo. PGO +
+        # -race/-cover on the same package is a known source of linker
+        # "fingerprint mismatch" flake; tests don't need profile-guided
+        # optimization (it only shapes the production binary).
+        run: go test -race -shuffle=on -pgo=off -coverprofile=coverage.out -covermode=atomic ./...
 
   build:
     name: build
