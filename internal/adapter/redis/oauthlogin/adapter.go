@@ -120,16 +120,17 @@ type LoginCodeStore struct {
 
 // SaveLoginCode stashes the user this code redeems to.
 //
-// The user ID is stored as a decimal string rather than a JSON number: JSON
-// unmarshalling into `any` would yield a float64 and silently lose precision
-// above 2^53, and a string round-trips exactly.
+// The user ID is stored as a raw decimal string rather than a JSON number or a
+// JSON-quoted string: JSON unmarshalling into `any` would yield a float64 and
+// silently lose precision above 2^53, and a plain string round-trips exactly
+// without paying for encoding.
 func (s LoginCodeStore) SaveLoginCode(
 	ctx context.Context,
 	code string,
 	userID int64,
 	ttl time.Duration,
 ) error {
-	return s.Store.SetOneTime(ctx, s.Store.Keys.LoginCode(code),
+	return s.Store.SetRawOneTime(ctx, s.Store.Keys.LoginCode(code),
 		strconv.FormatInt(userID, 10), ttl)
 }
 
@@ -139,8 +140,7 @@ func (s LoginCodeStore) SaveLoginCode(
 // GetDel is what enforces single use: two concurrent exchanges of one code race
 // here and exactly one gets a session.
 func (s LoginCodeStore) ConsumeLoginCode(ctx context.Context, code string) (int64, bool, error) {
-	var raw string
-	err := s.Store.GetDelOneTime(ctx, s.Store.Keys.LoginCode(code), &raw)
+	raw, err := s.Store.GetDelRawOneTime(ctx, s.Store.Keys.LoginCode(code))
 	if err != nil {
 		if errors.Is(err, internalredis.ErrMiss) {
 			return 0, false, nil

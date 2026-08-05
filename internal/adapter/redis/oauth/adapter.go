@@ -24,14 +24,14 @@ func (l EndpointLimiter) Allow(ctx context.Context, endpoint, subject string) (o
 	return oauth.LimitResult{Allowed: result.Allowed, RetryAfter: result.RetryAfter}, nil
 }
 
-// BlacklistStore adapts the JTI blacklist to the OAuth service port.
+// BlacklistStore adapts auth-state cache invalidation to the OAuth service port.
 type BlacklistStore struct {
 	Store internalredis.Store
 }
 
-// BlacklistJTIBatch delivers a revoked family's JTIs in one round trip.
-func (s BlacklistStore) BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error {
-	return s.Store.BlacklistJTIBatch(ctx, entries)
+// DeleteAuthStates removes the cached auth-state entries for a revoked family.
+func (s BlacklistStore) DeleteAuthStates(ctx context.Context, jtis []string) error {
+	return s.Store.DeleteAuthStates(ctx, jtis)
 }
 
 // AuthorizeRequestStore persists validated authorize requests awaiting consent.

@@ -95,7 +95,8 @@ func TestTokenRepositoryFamilyOperationsWaitForSameAdvisoryLock(t *testing.T) {
 		refresh := refreshToken("locked-rotate-next-refresh", familyID, 1, client.ID, user.ID)
 
 		assertWaitsForTokenFamilyLock(t, database, familyID, func(ctx context.Context) error {
-			return tokenRepository.RotateRefreshToken(ctx, "locked-rotate-refresh", access, refresh)
+			_, err := tokenRepository.RotateRefreshToken(ctx, familyID, "locked-rotate-refresh", access, refresh)
+			return err
 		})
 	})
 }
@@ -120,12 +121,14 @@ func TestTokenRepositoryRotateRefreshTokenConcurrentSingleSuccess(t *testing.T) 
 			indexSuffix := fmt.Sprintf("%02d", index)
 			access := accessToken("rotate-concurrent-access-"+indexSuffix, client.ID, user.ID, &familyID)
 			refresh := refreshToken("rotate-concurrent-refresh-"+indexSuffix, familyID, 1, client.ID, user.ID)
-			results <- tokenRepository.RotateRefreshToken(
+			_, err := tokenRepository.RotateRefreshToken(
 				context.Background(),
+				familyID,
 				"rotate-concurrent-current-refresh",
 				access,
 				refresh,
 			)
+			results <- err
 		}(index)
 	}
 	close(start)
@@ -138,10 +141,10 @@ func TestTokenRepositoryRotateRefreshTokenConcurrentSingleSuccess(t *testing.T) 
 		switch {
 		case err == nil:
 			successes++
-		case errors.Is(err, repository.ErrTokenReplay):
+		case errors.Is(err, repository.ErrTokenReplay) || errors.Is(err, repository.ErrTokenReplayWithinGrace):
 			replays++
 		default:
-			t.Fatalf("RotateRefreshToken() concurrent error = %v, want nil or ErrTokenReplay", err)
+			t.Fatalf("RotateRefreshToken() concurrent error = %v, want nil, ErrTokenReplay, or ErrTokenReplayWithinGrace", err)
 		}
 	}
 	if successes != 1 || replays != contenders-1 {
@@ -154,8 +157,11 @@ func TestTokenRepositoryRotateRefreshTokenConcurrentSingleSuccess(t *testing.T) 
 		Count(&activeRefreshTokens).Error; err != nil {
 		t.Fatalf("count active refresh tokens: %v", err)
 	}
-	if activeRefreshTokens != 0 {
-		t.Fatalf("active refresh tokens after replay = %d, want family revoked", activeRefreshTokens)
+	// A concurrent replay is benign (revoked within the grace window): the family
+	// must survive so the winning rotation stays live, instead of logging the user
+	// out for refreshing on two tabs at once.
+	if activeRefreshTokens != 1 {
+		t.Fatalf("active refresh tokens after benign concurrent replay = %d, want 1 (the winner's token)", activeRefreshTokens)
 	}
 }
 
@@ -201,12 +207,14 @@ func TestTokenRepositoryRotateRefreshTokenRejectsTokenExpiredWhileWaitingForFami
 	newRefresh := refreshToken("rotate-lock-expired-new-refresh", familyID, 1, client.ID, user.ID)
 	result := make(chan error, 1)
 	go func() {
-		result <- tokenRepository.RotateRefreshToken(
+		_, err := tokenRepository.RotateRefreshToken(
 			context.Background(),
+			familyID,
 			"rotate-lock-expired-current-refresh",
 			newAccess,
 			newRefresh,
 		)
+		result <- err
 	}()
 	time.Sleep(350 * time.Millisecond)
 	if err := lockTransaction.Rollback().Error; err != nil {

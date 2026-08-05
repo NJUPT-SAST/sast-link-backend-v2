@@ -19,7 +19,9 @@ const (
 )
 
 type ForgotPasswordUsers interface {
-	FindByLoginEmail(ctx context.Context, email string) (*model.User, error)
+	// FindAuthUserByLoginEmail returns the scalar columns without preloads; the
+	// worker only needs to confirm the account exists and read its ID.
+	FindAuthUserByLoginEmail(ctx context.Context, email string) (*model.User, error)
 }
 
 type ForgotPasswordCodes interface {
@@ -74,7 +76,7 @@ func (w *ForgotPassword) Run(ctx context.Context) error {
 }
 
 func (w *ForgotPassword) process(ctx context.Context, job session.ForgotPasswordJob) {
-	user, err := w.Users.FindByLoginEmail(ctx, job.Email)
+	user, err := w.Users.FindAuthUserByLoginEmail(ctx, job.Email)
 	if errors.Is(err, repository.ErrNotFound) {
 		return
 	}

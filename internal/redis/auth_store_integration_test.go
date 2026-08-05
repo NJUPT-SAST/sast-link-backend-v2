@@ -42,9 +42,6 @@ func TestKeys(t *testing.T) {
 	if got, want := keys.AuthorizeRequest("ar_abc"), "sast-link:test:oauth:authorize_request:ar_abc"; got != want {
 		t.Fatalf("AuthorizeRequest key = %q, want %q", got, want)
 	}
-	if got, want := keys.JTIBlacklist("jti"), "sast-link:test:token:blacklist:jti"; got != want {
-		t.Fatalf("JTIBlacklist key = %q, want %q", got, want)
-	}
 	if got, want := keys.LoginFailure("user:42"), "sast-link:test:auth:login_failure:user%3A42"; got != want {
 		t.Fatalf("LoginFailure key = %q, want %q", got, want)
 	}
@@ -129,55 +126,6 @@ func TestStoreOneTimeConcurrentGetDel(t *testing.T) {
 	}
 }
 
-func TestJTIBlacklist(t *testing.T) {
-	client := testutil.StartRedis(t)
-	ctx := context.Background()
-	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
-	blacklisted, err := store.IsJTIBlacklisted(ctx, "jti-1")
-	if err != nil {
-		t.Fatalf("IsJTIBlacklisted returned error: %v", err)
-	}
-	if blacklisted {
-		t.Fatal("JTI unexpectedly blacklisted")
-	}
-	blacklistErr := store.BlacklistJTI(ctx, "jti-1", 2*time.Second)
-	if blacklistErr != nil {
-		t.Fatalf("BlacklistJTI returned error: %v", blacklistErr)
-	}
-	blacklisted, err = store.IsJTIBlacklisted(ctx, "jti-1")
-	if err != nil || !blacklisted {
-		t.Fatalf("IsJTIBlacklisted = %v, %v; want true, nil", blacklisted, err)
-	}
-}
-
-// BlacklistJTIBatch backs whole-user revocation (password change/reset): every
-// live JTI must land in one round trip with its own TTL.
-func TestJTIBlacklistBatch(t *testing.T) {
-	client := testutil.StartRedis(t)
-	ctx := context.Background()
-	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
-
-	if err := store.BlacklistJTIBatch(ctx, nil); err != nil {
-		t.Fatalf("BlacklistJTIBatch(nil) returned error: %v", err)
-	}
-	if err := store.BlacklistJTIBatch(ctx, map[string]time.Duration{
-		"jti-a": 2 * time.Second,
-		"jti-b": 3 * time.Second,
-	}); err != nil {
-		t.Fatalf("BlacklistJTIBatch returned error: %v", err)
-	}
-	for _, jti := range []string{"jti-a", "jti-b"} {
-		blacklisted, err := store.IsJTIBlacklisted(ctx, jti)
-		if err != nil || !blacklisted {
-			t.Fatalf("IsJTIBlacklisted(%q) = %v, %v; want true, nil", jti, blacklisted, err)
-		}
-		ttl, err := client.PTTL(ctx, store.Keys.JTIBlacklist(jti)).Result()
-		if err != nil || ttl <= 0 {
-			t.Fatalf("PTTL(%q) = %v, %v; want positive expiry", jti, ttl, err)
-		}
-	}
-}
-
 func TestFixedWindowLimiter(t *testing.T) {
 	client := testutil.StartRedis(t)
 	ctx := context.Background()
@@ -210,6 +158,38 @@ func TestFixedWindowLimiter(t *testing.T) {
 	}
 	if third.Allowed || third.Remaining != 0 || third.RetryAfter <= 0 {
 		t.Fatalf("third result = %+v, want denied with retry-after", third)
+	}
+}
+
+// The auth-state cache replaced the JTI blacklist as the middleware's fast
+// path: the put/get/delete round trip and its miss semantics must hold, since
+// the middleware serves role and revocation state from it on a cache hit.
+func TestAuthStateCacheRoundTrip(t *testing.T) {
+	client := testutil.StartRedis(t)
+	ctx := context.Background()
+	store := Store{Client: client, Keys: NewKeys("sast-link:test")}
+	jti := "auth-state-jti"
+
+	if _, found, err := store.GetAuthState(ctx, jti); err != nil || found {
+		t.Fatalf("GetAuthState before put = found %v, err %v; want miss", found, err)
+	}
+	if err := store.PutAuthState(ctx, jti, []byte(`{"revoked":false}`), time.Minute); err != nil {
+		t.Fatalf("PutAuthState: %v", err)
+	}
+	data, found, err := store.GetAuthState(ctx, jti)
+	if err != nil || !found || string(data) != `{"revoked":false}` {
+		t.Fatalf("GetAuthState after put = %q found %v err %v; want the stored blob", data, found, err)
+	}
+	if err := store.DeleteAuthStates(ctx, []string{jti}); err != nil {
+		t.Fatalf("DeleteAuthStates: %v", err)
+	}
+	if _, found, err := store.GetAuthState(ctx, jti); err != nil || found {
+		t.Fatalf("GetAuthState after delete = found %v, err %v; want miss", found, err)
+	}
+	// Deleting a key that does not exist is a no-op, not an error (the outbox
+	// worker may ack a batch already delivered by another instance).
+	if err := store.DeleteAuthStates(ctx, []string{"no-such-jti"}); err != nil {
+		t.Fatalf("DeleteAuthStates(miss) = %v; want no-op", err)
 	}
 }
 

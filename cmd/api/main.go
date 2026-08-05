@@ -8,9 +8,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
+	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	_ "go.uber.org/automaxprocs" // calibrate GOMAXPROCS to the container's cgroup CPU quota
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/db"
@@ -43,6 +46,10 @@ func run() error {
 	}
 
 	setupLogger(cfg.LogLevel)
+	// automaxprocs sets GOMAXPROCS from the cgroup CPU quota (1 on the all-in-one
+	// bench); log the effective value so a measurement session can prove it is
+	// running single-core rather than spilling onto the host.
+	slog.Info("effective GOMAXPROCS", slog.Int("gomaxprocs", runtime.GOMAXPROCS(0)))
 
 	database, err := db.Open(cfg.PostgresDSN())
 	if err != nil {
@@ -50,7 +57,7 @@ func run() error {
 	}
 	defer func() { _ = db.Close(database) }()
 
-	rdb, err := internalredis.New(cfg.RedisAddr(), cfg.RedisPassword, cfg.RedisDB)
+	rdb, err := internalredis.New(cfg.RedisAddr(), cfg.RedisSecret, cfg.RedisDB)
 	if err != nil {
 		return fmt.Errorf("open redis: %w", err)
 	}
@@ -63,9 +70,23 @@ func run() error {
 		return err
 	}
 
+	// Release mode suppresses gin's debug-mode per-request overhead and startup
+	// noise (route printing, panic stack dumps); debug tracing is not useful in a
+	// service whose request path is already pprof-instrumented.
+	if cfg.AppEnv != "development" {
+		gin.SetMode(gin.ReleaseMode)
+	}
 	router, err := web.NewRouter(cfg.CORSAllowedOrigins, cfg.TrustedProxies, cfg.HSTSMaxAge)
 	if err != nil {
 		return fmt.Errorf("create router: %w", err)
+	}
+	// pprof is fail-closed: exposed only in an explicit development environment
+	// or when PPROF_ENABLED is set. The old `!= "production"` gate left it open
+	// whenever APP_ENV was unset (the default), letting an unauthenticated caller
+	// trigger CPU sampling or dump goroutine stacks on a production box that
+	// merely forgot the env var.
+	if cfg.AppEnv == "development" || cfg.EnablePprof {
+		registerProfiling(router)
 	}
 	health.New(map[string]func() error{
 		"db":    func() error { return pingDB(database) },

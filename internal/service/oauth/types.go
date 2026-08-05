@@ -26,10 +26,11 @@ type EndpointLimiter interface {
 	Allow(ctx context.Context, endpoint, subject string) (LimitResult, error)
 }
 
-// TokenBlacklist delivers revoked JTIs to the fast-reject cache. Revocation is
-// authoritative in PostgreSQL, so these calls are advisory.
+// TokenBlacklist invalidates the auth-state cache entries for revoked access
+// tokens. Revocation is authoritative in PostgreSQL; this clears the short-TTL
+// cache so the middleware's next request re-checks the database immediately.
 type TokenBlacklist interface {
-	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
+	DeleteAuthStates(ctx context.Context, jtis []string) error
 }
 
 // AuthorizeRequestPayload is a validated /oauth/authorize request awaiting the
@@ -63,6 +64,9 @@ type AuthorizeRequestStore interface {
 // UserRepository reads the account behind an authorization.
 type UserRepository interface {
 	FindByID(ctx context.Context, userID int64) (*model.User, error)
+	// FindAuthUserByID returns the scalar columns without the Profile/Identities
+	// preloads; token/UserInfo paths only need the claims and state fields.
+	FindAuthUserByID(ctx context.Context, userID int64) (*model.User, error)
 }
 
 // ClientRepository resolves OAuth clients.
@@ -88,13 +92,21 @@ type AuthorizationRepository interface {
 // TokenRepository persists and revokes token metadata.
 type TokenRepository interface {
 	CreatePair(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
-	RotateRefreshToken(ctx context.Context, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
+	// CreatePairWithAudit is CreatePair with the token-issuance audit row written
+	// into audit_logs in the same transaction (nil audit disables it), so the pair
+	// and its audit commit atomically on one fsync.
+	CreatePairWithAudit(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
+	// RotateRefreshToken rotates currentRefreshTokenHash inside familyID and
+	// returns the family origin's created_at, i.e. when the user actually
+	// authorized. Rotation must not advance the ID Token's auth_time, so it is
+	// read off the sequence-0 row rather than the rotated one.
+	RotateRefreshToken(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) (time.Time, error)
+	// RotateRefreshTokenWithAudit is RotateRefreshToken with the token-issuance
+	// audit row written into audit_logs in the same transaction (nil audit
+	// disables it), so the rotation and its audit commit atomically on one fsync.
+	RotateRefreshTokenWithAudit(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) (time.Time, error)
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
-	// FindFamilyOriginCreatedAt returns when a family's first refresh token was
-	// created, i.e. when the user actually authorized. Rotation must not advance the
-	// ID Token's auth_time, so it cannot be read from the rotated row itself.
-	FindFamilyOriginCreatedAt(ctx context.Context, familyID string) (time.Time, error)
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
 }
 
@@ -202,7 +214,6 @@ type UserInfoResult struct {
 	Name              string `json:"name,omitempty"`
 	Picture           string `json:"picture,omitempty"`
 	PreferredUsername string `json:"preferred_username,omitempty"`
-	Profile           string `json:"profile,omitempty"`
 	UpdatedAt         int64  `json:"updated_at,omitempty"`
 	Email             string `json:"email,omitempty"`
 	EmailVerified     *bool  `json:"email_verified,omitempty"`

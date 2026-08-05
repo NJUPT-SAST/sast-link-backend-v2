@@ -248,7 +248,7 @@ func TestCreateRegistrationWithIdentityRollsBackOnTokenFailure(t *testing.T) {
 		model.LoginMethodGitHub, "145339701"); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("identity survived the rollback: %v", err)
 	}
-	if _, err := userRepository.FindByLoginEmail(context.Background(),
+	if _, err := userRepository.FindAuthUserByLoginEmail(context.Background(),
 		"oauthrollback@njupt.edu.cn"); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("user survived the rollback: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestCreateRegistrationWithIdentityRejectsBoundProviderAccount(t *testing.T)
 	if err == nil {
 		t.Fatal("registration succeeded against an already-bound provider account")
 	}
-	if _, findErr := userRepository.FindByLoginEmail(context.Background(),
+	if _, findErr := userRepository.FindAuthUserByLoginEmail(context.Background(),
 		"ghsecond@njupt.edu.cn"); !errors.Is(findErr, repository.ErrNotFound) {
 		t.Fatalf("account was created despite the binding conflict: %v", findErr)
 	}

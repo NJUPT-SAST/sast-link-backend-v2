@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
-	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -63,7 +62,9 @@ func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) 
 	if err := s.checkEndpointLimit(ctx, s.UnbindLimiter, "unbind", "user:"+strconv.FormatInt(input.UserID, 10)); err != nil {
 		return nil, err
 	}
-	user, err := s.Users.FindByID(ctx, input.UserID)
+	// Only the password hash, state, and id are read here; the Profile/Identities
+	// preloads of FindByID would be pure waste on this rate-limited path.
+	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
@@ -91,15 +92,15 @@ func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) 
 		return nil, newError(ErrPasswordInvalid, "密码错误", verifyErr)
 	}
 
-	if !hasOtherLoginMethod(user, identity.ID) {
-		return nil, newError(ErrLastLoginMethod, "不能解绑唯一的登录方式", nil)
-	}
-
-	// No claim to compensate here: concurrent deletes of one record serialize at
-	// PostgreSQL, where the loser matches no row and gets 绑定记录不存在.
-	if deleteErr := s.Identities.DeleteByIDAndUser(ctx, input.IdentityID, input.UserID); deleteErr != nil {
+	// The last-login-method guard runs inside the deleting transaction under a
+	// lock on the user row, so two concurrent unbinds cannot both pass a stale
+	// snapshot and delete the account into having no way to sign in.
+	if deleteErr := s.Identities.DeleteIdentityGuardingLoginMethod(ctx, input.IdentityID, input.UserID); deleteErr != nil {
 		if errors.Is(deleteErr, repository.ErrNotFound) {
 			return nil, newError(ErrIdentityNotFound, "绑定记录不存在", nil)
+		}
+		if errors.Is(deleteErr, repository.ErrLastLoginMethod) {
+			return nil, newError(ErrLastLoginMethod, "不能解绑唯一的登录方式", nil)
 		}
 		return nil, newError(ErrInternal, "删除第三方绑定记录失败", deleteErr)
 	}
@@ -109,21 +110,6 @@ func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) 
 		Provider:   string(identity.Provider),
 		ProviderID: identity.ProviderID,
 	}, nil
-}
-
-// hasOtherLoginMethod reports whether the user keeps a usable login method once
-// the identity with excludeID is gone. A login email always qualifies; otherwise
-// at least one other identity must remain.
-func hasOtherLoginMethod(user *model.User, excludeID int64) bool {
-	if strings.TrimSpace(user.LoginEmail) != "" {
-		return true
-	}
-	for _, identity := range user.Identities {
-		if identity.ID != excludeID {
-			return true
-		}
-	}
-	return false
 }
 
 func (s Service) auditUnbind(ctx context.Context, input UnbindIdentityInput, identity *model.Identity, success bool, errCode int) {

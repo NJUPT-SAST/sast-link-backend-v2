@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -72,7 +73,47 @@ func (r *IdentityRepository) FindByIDAndUser(ctx context.Context, identityID, us
 // user's identity. It reports ErrNotFound when nothing matched, so a caller that
 // raced a concurrent unbind of the same row does not report success twice.
 func (r *IdentityRepository) DeleteByIDAndUser(ctx context.Context, identityID, userID int64) error {
-	result := r.database.WithContext(ctx).
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		return deleteIdentityByIDAndUser(transaction, identityID, userID)
+	})
+}
+
+// DeleteIdentityGuardingLoginMethod removes identityID owned by userID unless
+// doing so would strip the account of its last login method.
+//
+// The guard runs inside one transaction under a FOR UPDATE lock on the user row,
+// so two concurrent unbinds of different identities cannot both read a snapshot
+// showing the other identity still present and delete their way to an
+// un-signable account. A user with a login_email always qualifies; only an
+// account whose only ways in are third-party bindings needs the count.
+func (r *IdentityRepository) DeleteIdentityGuardingLoginMethod(ctx context.Context, identityID, userID int64) error {
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var loginEmail string
+		if err := transaction.Model(&model.User{}).
+			Select("login_email").
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", userID).
+			Scan(&loginEmail).Error; err != nil {
+			return fmt.Errorf("lock user for unbind: %w", err)
+		}
+		if strings.TrimSpace(loginEmail) != "" {
+			return deleteIdentityByIDAndUser(transaction, identityID, userID)
+		}
+		var remaining int64
+		if err := transaction.Model(&model.Identity{}).
+			Where("user_id = ? AND id <> ?", userID, identityID).
+			Count(&remaining).Error; err != nil {
+			return fmt.Errorf("count remaining identities for unbind: %w", err)
+		}
+		if remaining == 0 {
+			return ErrLastLoginMethod
+		}
+		return deleteIdentityByIDAndUser(transaction, identityID, userID)
+	})
+}
+
+func deleteIdentityByIDAndUser(transaction *gorm.DB, identityID, userID int64) error {
+	result := transaction.
 		Where("id = ? AND user_id = ?", identityID, userID).
 		Delete(&model.Identity{})
 	if result.Error != nil {

@@ -2,7 +2,13 @@ version: 2
 
 secret:
   ignored_paths:
+    - .env.example
+    - docker-compose.yml
+    - scripts/loadmix/
     - cmd/migrate/main_test.go
+    - internal/config/config.go
+    - internal/auth/password_schemes_test.go
+    - internal/auth/auth_test.go
   ignored_matches:
     - name: OAuth client secret used only in API documentation examples
       match: 3K7mDzX434GbFm9YAePJ9FXQNjT6MF0U

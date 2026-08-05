@@ -18,15 +18,17 @@ import (
 )
 
 const (
-	defaultAccessTTL         = time.Hour
-	defaultRefreshTTL        = 30 * 24 * time.Hour
-	loginCompensationTimeout = 5 * time.Second
+	defaultAccessTTL  = time.Hour
+	defaultRefreshTTL = 30 * 24 * time.Hour
 	// verificationTTL bounds email verification codes and the tickets derived
 	// from them (Register-Ticket / Bind-Ticket), per the API contract's 5-minute
 	// one-time semantics.
 	verificationTTL = 5 * time.Minute
 	// maxOtherMailBindings is the per-user cap on other_mail identities.
 	maxOtherMailBindings = 2
+	// auditTimeout bounds a detached audit write so a completed action's row
+	// still lands after the caller disconnects, without hanging the worker.
+	auditTimeout = 5 * time.Second
 )
 
 var sessionScopes = scope.InternalSessionScopes
@@ -56,12 +58,16 @@ type Service struct {
 	UnbindLimiter EndpointLimiter
 	// RegisterLimiter throttles POST /auth/register per caller IP. A valid
 	// Register-Ticket is required to reach the write, so this bounds cost rather
-	// than guessing: every accepted call runs a 600k-iteration PBKDF2 derivation.
+	// than guessing: every accepted call runs an argon2id derivation.
 	RegisterLimiter EndpointLimiter
 	// CardLimiter throttles the unauthenticated GET /card/:id per caller IP. The
 	// path parameter is a sequential user ID, so an uncapped endpoint is a scrape
 	// of every public card.
-	CardLimiter      EndpointLimiter
+	CardLimiter EndpointLimiter
+	// RefreshLimiter throttles POST /auth/refresh per caller IP. The endpoint is
+	// unauthenticated and each call runs several DB statements, so without a cap a
+	// single source can amplify DB work for free (see config.RateLimitRefreshRPM).
+	RefreshLimiter   EndpointLimiter
 	ForgotPasswords  ForgotPasswordDispatcher
 	InternalClientID string
 	JWT              *auth.JWTManager
@@ -102,11 +108,9 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	if err := s.checkEndpointLimit(ctx, s.Limiter, "login", loginLimitSubject(input, identifier)); err != nil {
 		return nil, err
 	}
-	client, err := s.findInternalClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	user, err := s.Users.FindByLoginIdentifier(ctx, identifier)
+	// Lean lookup: the login response serializes only scalar user fields, so the
+	// Profile/Identities preloads would be two dead SQL statements per login.
+	user, err := s.Users.FindAuthUserByLoginIdentifier(ctx, identifier)
 	if errors.Is(err, repository.ErrNotFound) {
 		failureKey := loginFailureKey(nil, identifier)
 		if lockErr := s.checkLoginLock(ctx, failureKey); lockErr != nil {
@@ -137,24 +141,48 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		}
 		return nil, s.failLogin(ctx, user, input, failureKey, ErrPasswordInvalid, "密码错误", passwordErr)
 	}
+	// Rehash a stale hash in place once the password is proven, so a KDF parameter
+	// change (scheme, work factor) reaches existing accounts on their next login
+	// instead of verifying at the old cost forever. This is an optimization, not an
+	// auth gate: a failed write keeps the old hash and the login still succeeds.
+	if s.Passwords.ShouldRehash(user.PasswordHash) {
+		newHash, hashErr := s.Passwords.HashPassword(ctx, input.Password)
+		if hashErr != nil {
+			slog.WarnContext(ctx, "rehash password on login failed", "user_id", user.ID, "error", hashErr)
+		} else if updateErr := s.Users.UpdatePasswordHash(ctx, user.ID, user.PasswordHash, newHash); updateErr != nil {
+			// The rehash is guarded on the hash this login verified: a concurrent
+			// password change/reset that landed in between wins, and the skipped
+			// rehash must not surface as a failure.
+			if !errors.Is(updateErr, repository.ErrRehashSkipped) {
+				slog.WarnContext(ctx, "persist rehashed password failed", "user_id", user.ID, "error", updateErr)
+			}
+		}
+	}
+	// The built-in client is resolved only after the password verifies: a wrong
+	// password is exactly the pattern an endpoint is hammered with, and probing
+	// it must not make every attempt hit oauth_clients as well.
+	client, err := s.findInternalClient(ctx)
+	if err != nil {
+		return nil, err
+	}
 	pair, err := s.issuePair(user, client, 0, "", sessionScopes)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.Tokens.CreatePair(ctx, pair.access, pair.refresh); err != nil {
-		return nil, newError(ErrInternal, "创建 Token Pair 失败", err)
-	}
-	// From here the token pair is persisted. Any subsequent failure must
-	// compensate by revoking the family so no half-issued session survives.
-	compensate := func(message string, cause error) error {
-		compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginCompensationTimeout)
-		defer cancel()
-		entries, revokeErr := s.Tokens.RevokeFamily(compensationCtx, pair.familyID, s.now())
-		if revokeErr != nil {
-			slog.Error("compensate revoke after login failure", "family_id", pair.familyID, "error", revokeErr)
+	// Build the audit row before the token transaction so a marshal error fails
+	// before any write; the row then rides the same commit as the token pair, so
+	// the session and its audit are atomic at the cost of a single fsync, and no
+	// compensate-on-audit branch is needed.
+	var audit *model.AuditLog
+	if s.Audit != nil {
+		audit, err = s.buildAuditEntry(&user.ID, "login", "session", nil, true, 0,
+			input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)})
+		if err != nil {
+			return nil, newError(ErrInternal, "构造审计记录失败", err)
 		}
-		s.deliverBlacklist(compensationCtx, entries, s.now())
-		return newError(ErrInternal, message, cause)
+	}
+	if err := s.Tokens.CreatePairWithAudit(ctx, pair.access, pair.refresh, audit); err != nil {
+		return nil, newError(ErrInternal, "创建 Token Pair 失败", err)
 	}
 	if s.Failures != nil {
 		if resetErr := s.Failures.Reset(ctx, failureKey); resetErr != nil {
@@ -163,9 +191,6 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 			// and refusing every login for as long as Redis is unavailable.
 			slog.WarnContext(ctx, "reset login failures unavailable", "error", resetErr)
 		}
-	}
-	if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)}); auditErr != nil {
-		return nil, compensate("audit login success", auditErr)
 	}
 	// Device registration happens after every compensable step: the family is
 	// committed and audited by this point, so a failed record write only costs a
@@ -197,6 +222,11 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	if strings.TrimSpace(input.RefreshToken) == "" {
 		return nil, newError(ErrInvalidInput, "刷新参数无效", nil)
 	}
+	// Unauthenticated and DB-heavy, so it is throttled before any lookup — the
+	// limiter must bound the amplification, not sit behind the work it exists to cap.
+	if err := s.checkEndpointLimit(ctx, s.RefreshLimiter, "refresh", strings.TrimSpace(input.ClientIP)); err != nil {
+		return nil, err
+	}
 	tokenHash, err := s.RefreshTokens.HashRefreshToken(input.RefreshToken)
 	if err != nil {
 		return nil, newError(ErrInvalidToken, "Refresh Token 无效", err)
@@ -209,17 +239,24 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		return nil, newError(ErrInternal, "查询 Refresh Token 失败", err)
 	}
 	if current.RevokedAt != nil {
-		entries, revokeErr := s.Tokens.RevokeFamily(ctx, current.FamilyID, s.now())
-		if revokeErr != nil {
-			return nil, newError(ErrInternal, "撤销被重放的 Refresh Token 家族失败", revokeErr)
-		}
-		s.deliverBlacklist(ctx, entries, s.now())
-		// Replay kills the whole family, and the family is the device record:
-		// without the cleanup the device list keeps showing a session that can
-		// no longer authenticate. Fail-open — the revoke already committed.
-		if s.Devices != nil {
-			if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
-				slog.WarnContext(ctx, "remove device on replay revoke failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
+		// Within the grace window this is a benign concurrent refresh (the winning
+		// rotation preserved the family) and must not be cut, or the winning tab
+		// would be logged out. Beyond the window it is a true replay of a
+		// long-dead token: cut the family, which also invalidates the cached
+		// auth-state entries for every sibling token.
+		if !repository.IsWithinRefreshGrace(*current.RevokedAt, s.now()) {
+			entries, revokeErr := s.Tokens.RevokeFamily(ctx, current.FamilyID, s.now())
+			if revokeErr != nil {
+				return nil, newError(ErrInternal, "撤销被重放的 Refresh Token 家族失败", revokeErr)
+			}
+			s.deliverBlacklist(ctx, entries, s.now())
+			// Replay kills the whole family, and the family is the device record:
+			// without the cleanup the device list keeps showing a session that can
+			// no longer authenticate. Fail-open — the revoke already committed.
+			if s.Devices != nil {
+				if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+					slog.WarnContext(ctx, "remove device on replay revoke failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
+				}
 			}
 		}
 		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
@@ -245,7 +282,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeClientMismatch, input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 与客户端不匹配", nil)
 	}
-	user, err := s.Users.FindByID(ctx, current.UserID)
+	user, err := s.Users.FindAuthUserByID(ctx, current.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "Refresh Token 所属用户无效", nil)
 	}
@@ -293,21 +330,39 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	// of a device they never touched, and it self-heals.
 	var evicted string
 	if s.Devices != nil {
-		var err error
 		evicted, err = s.Devices.TouchDevice(ctx, current.UserID, current.FamilyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
 			slog.WarnContext(ctx, "touch device failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", err)
 		}
 	}
-	if rotateErr := s.Tokens.RotateRefreshToken(ctx, tokenHash, pair.access, pair.refresh); rotateErr != nil {
+	// The success audit rides the rotation transaction, so the refresh waits on
+	// one fsync instead of two. A build failure (practically unreachable — the
+	// detail map is constant) logs and drops the success row; there is no
+	// synchronous fallback.
+	var audit *model.AuditLog
+	if s.Audit != nil {
+		audit, err = s.buildAuditEntry(&current.UserID, "refresh", "session", &current.FamilyID, true, 0,
+			input.ClientIP, input.UserAgent, map[string]any{"outcome": refreshOutcomeRotated})
+		if err != nil {
+			slog.WarnContext(ctx, "build refresh audit entry", "error", err)
+			audit = nil
+		}
+	}
+	if _, rotateErr := s.Tokens.RotateRefreshTokenWithAudit(ctx, current.FamilyID, tokenHash, pair.access, pair.refresh, audit); rotateErr != nil {
+		if errors.Is(rotateErr, repository.ErrTokenReplayWithinGrace) {
+			// A benign concurrent refresh: another request in this family already
+			// rotated, and the repository preserved the family. The presented token
+			// is dead, but the device record belongs to the still-live family and
+			// must not be dropped — removing it would leave the winning session
+			// invisible in the device list and free its cap slot.
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
+			return nil, newError(ErrInvalidToken, "Refresh Token 无效", rotateErr)
+		}
 		if errors.Is(rotateErr, repository.ErrTokenReplay) || errors.Is(rotateErr, repository.ErrTokenExpired) || errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) {
-			// RotateRefreshToken revokes the family in the repository; re-invoke
-			// RevokeFamily to obtain blacklist entries for synchronous Redis delivery.
-			entries, revokeErr := s.Tokens.RevokeFamily(ctx, current.FamilyID, s.now())
-			if revokeErr != nil {
-				return nil, newError(ErrInternal, "轮换失败后撤销 Refresh Token 家族失败", revokeErr)
-			}
-			s.deliverBlacklist(ctx, entries, s.now())
+			// RotateRefreshToken already cut the family in its own transaction and
+			// enqueued the blacklist outbox rows. A second RevokeFamily here would
+			// find no live token (the refresh token outlives every access token, so
+			// an expired one means the whole family is dead) and deliver nothing.
 			// The repository cut the family; drop the device record so the list
 			// stops showing a session that can no longer authenticate.
 			if s.Devices != nil {
@@ -324,7 +379,6 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	// device (if any) must be evicted exactly like a login eviction. revokeEvictedDevice
 	// no-ops on an empty ID (a live-record touch that evicted nothing).
 	s.revokeEvictedDevice(ctx, current.UserID, evicted, s.now(), input.ClientIP, input.UserAgent)
-	s.auditRefresh(ctx, current.UserID, &current.FamilyID, true, refreshOutcomeRotated, input)
 	return &RefreshResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -392,7 +446,9 @@ func (s Service) Profile(ctx context.Context, input ProfileInput) (*ProfileResul
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidInput, "用户资料参数无效", nil)
 	}
-	user, err := s.Users.FindByID(ctx, input.UserID)
+	// Two-query profile load (user+profile JOIN + lean identities) instead of
+	// FindByID's three.
+	user, err := s.Users.FindProfileByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "用户资料身份主体无效", nil)
 	}
@@ -585,7 +641,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	}
 
 	// Throttled here rather than at the top of the function: the cap exists to
-	// bound PBKDF2 derivations, and this is the last point before the flow starts
+	// bound argon2id derivations, and this is the last point before the flow starts
 	// spending things. Every rejection above — a short password, a bad college, an
 	// occupied student ID — costs nothing to produce, so charging quota for it
 	// would let a user lock themselves out by mistyping their own form. It still
@@ -700,6 +756,15 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		}
 		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	}
+	// The registration transaction inserts user, profile and any third-party
+	// binding but does not reload them, so the in-memory user still has an empty
+	// Profile and Identities — which would make this response disagree with a
+	// Login response for the same account. Read the aggregate back.
+	reloaded, reloadErr := s.Users.FindByID(ctx, user.ID)
+	if reloadErr != nil {
+		slog.ErrorContext(ctx, "reload registered user", "user_id", user.ID, "error", reloadErr)
+		return nil, newError(ErrInternal, "读取注册结果失败", reloadErr)
+	}
 	return &RegisterResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -707,7 +772,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		Scope:            pair.scopeClaim,
 		AccessExpiresAt:  pair.access.ExpiresAt,
 		RefreshExpiresAt: pair.refresh.ExpiresAt,
-		Profile:          profileDTO(user),
+		Profile:          profileDTO(reloaded),
 	}, nil
 }
 
@@ -750,7 +815,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	if err := s.verifyCode(ctx, string(mailer.VerificationPurposeResetPassword), email, input.Code); err != nil {
 		return nil, err
 	}
-	user, err := s.Users.FindByLoginEmail(ctx, email)
+	user, err := s.Users.FindAuthUserByLoginEmail(ctx, email)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrUnknownIdentifier, "登录邮箱不存在", nil)
 	}
@@ -806,7 +871,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	if input.NewPassword == input.OldPassword {
 		return nil, newError(ErrPasswordUnchanged, "新密码不能与旧密码相同", nil)
 	}
-	user, err := s.Users.FindByID(ctx, input.UserID)
+	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
@@ -988,14 +1053,17 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 // parameter because each endpoint carries its own quota on its own instance; the
 // endpoint name only scopes the Redis key.
 func (s Service) checkEndpointLimit(ctx context.Context, limiter EndpointLimiter, endpoint, subject string) error {
-	if limiter == nil {
+	// An empty subject (a request without a usable client IP) has nothing to key
+	// the window on; the Redis limiter rejects it, which this helper would
+	// otherwise read as "limiter unavailable" and log a WARN per request.
+	if limiter == nil || strings.TrimSpace(subject) == "" {
 		return nil
 	}
 	result, err := limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
 		// Redis-backed throttling has no durable fallback. Rejecting every
 		// request would take the endpoint down entirely, so allow the call and
-		// rely on PBKDF2 cost plus alerting during the outage.
+		// rely on argon2id cost plus alerting during the outage.
 		slog.WarnContext(ctx, "endpoint limiter unavailable, allowing request", "endpoint", endpoint, "error", err)
 		return nil
 	}
@@ -1037,21 +1105,22 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 	if s.Blacklist == nil {
 		return
 	}
-	batch := make(map[string]time.Duration, len(entries))
+	jtis := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		ttl := entry.ExpiresAt.Sub(now)
-		if ttl <= 0 || strings.TrimSpace(entry.TokenID) == "" {
+		// The auth-state cache entry must be deleted so the middleware cannot
+		// serve a stale non-revoked state for a token the DB now says revoked.
+		if entry.ExpiresAt.Sub(now) <= 0 || strings.TrimSpace(entry.TokenID) == "" {
 			continue
 		}
-		batch[entry.TokenID] = ttl
+		jtis = append(jtis, entry.TokenID)
 	}
-	if len(batch) == 0 {
+	if len(jtis) == 0 {
 		return
 	}
-	if err := s.Blacklist.BlacklistJTIBatch(ctx, batch); err != nil {
+	if err := s.Blacklist.DeleteAuthStates(ctx, jtis); err != nil {
 		// The same-transaction outbox row guarantees a worker retry, so a
 		// failed synchronous delivery is expected degradation, not an error.
-		slog.WarnContext(ctx, "deliver token blacklist batch, outbox worker will retry", "count", len(batch), "error", err)
+		slog.WarnContext(ctx, "deliver auth-state invalidation, outbox worker will retry", "count", len(jtis), "error", err)
 	}
 }
 
@@ -1200,10 +1269,14 @@ func (s Service) auditRefresh(
 }
 
 func (s Service) findInternalClient(ctx context.Context) (*model.OAuthClient, error) {
-	if strings.TrimSpace(s.InternalClientID) == "" || s.Clients == nil {
+	clientID := strings.TrimSpace(s.InternalClientID)
+	if clientID == "" || s.Clients == nil {
 		return nil, newError(ErrInternal, "内置 OAuth 客户端未配置", nil)
 	}
-	client, err := s.Clients.FindActiveByClientID(ctx, strings.TrimSpace(s.InternalClientID))
+	// The internal client is immutable and startup-validated, so the repository
+	// serves it from a process-local cache after the first load — no DB round trip
+	// per login/refresh.
+	client, err := s.Clients.FindActiveInternalClient(ctx, clientID)
 	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
 		return nil, newError(ErrInternal, "内置 OAuth 客户端不可用", err)
 	}

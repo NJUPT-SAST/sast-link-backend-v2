@@ -57,6 +57,10 @@ func (f *fakeUsers) FindByID(_ context.Context, _ int64) (*model.User, error) {
 	return f.findResult, nil
 }
 
+func (f *fakeUsers) FindAuthUserByID(_ context.Context, _ int64) (*model.User, error) {
+	return f.FindByID(context.Background(), 0)
+}
+
 func (f *fakeUsers) UpdateAdminUser(
 	_ context.Context,
 	userID int64,
@@ -116,12 +120,12 @@ func (f *fakeAudit) List(
 }
 
 type fakeBlacklist struct {
-	batch map[string]time.Duration
-	err   error
+	jtis []string
+	err  error
 }
 
-func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]time.Duration) error {
-	f.batch = entries
+func (f *fakeBlacklist) DeleteAuthStates(_ context.Context, jtis []string) error {
+	f.jtis = jtis
 	return f.err
 }
 

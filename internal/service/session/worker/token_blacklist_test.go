@@ -44,12 +44,12 @@ func (f *fakeOutbox) ClaimDue(_ context.Context, _ time.Time, _ time.Duration, _
 	return entries, nil
 }
 
-func (f *fakeOutbox) Ack(_ context.Context, id int64, _ string) (bool, error) {
-	f.acks = append(f.acks, id)
+func (f *fakeOutbox) AckMany(_ context.Context, ids []int64, _ string) (int64, error) {
+	f.acks = append(f.acks, ids...)
 	if f.ackCall != nil {
 		f.ackCall()
 	}
-	return true, nil
+	return int64(len(ids)), nil
 }
 
 func (f *fakeOutbox) Fail(_ context.Context, id int64, _ string, attemptedAt, nextDeliveryAt time.Time, deliveryError string) (bool, error) {
@@ -66,14 +66,12 @@ func (f *fakeOutbox) CleanupExpired(_ context.Context, _ time.Time) (int64, erro
 }
 
 type fakeBlacklist struct {
-	jti string
-	ttl time.Duration
-	err error
+	jtis []string
+	err  error
 }
 
-func (f *fakeBlacklist) BlacklistJTI(_ context.Context, jti string, ttl time.Duration) error {
-	f.jti = jti
-	f.ttl = ttl
+func (f *fakeBlacklist) DeleteAuthStates(_ context.Context, jtis []string) error {
+	f.jtis = jtis
 	return f.err
 }
 
@@ -84,13 +82,13 @@ func TestTokenBlacklistRunDeliversAndAcknowledges(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	outbox.ackCall = cancel
 	blacklist := &fakeBlacklist{}
-	worker := TokenBlacklist{Outbox: outbox, Blacklist: blacklist, Interval: time.Hour, CleanupInterval: time.Hour, Clock: fixedClock{value: now}}
+	worker := TokenBlacklist{Outbox: outbox, AuthState: blacklist, Interval: time.Hour, CleanupInterval: time.Hour, Clock: fixedClock{value: now}}
 
 	if err := worker.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if blacklist.jti != "jti" || blacklist.ttl != time.Minute {
-		t.Fatalf("blacklist = (%q, %s), want jti/1m", blacklist.jti, blacklist.ttl)
+	if len(blacklist.jtis) != 1 || blacklist.jtis[0] != "jti" {
+		t.Fatalf("invalidated jtis = %v, want [jti]", blacklist.jtis)
 	}
 	if len(outbox.acks) != 1 || outbox.acks[0] != 1 || len(outbox.failures) != 0 {
 		t.Fatalf("acks=%v failures=%v", outbox.acks, outbox.failures)
@@ -106,7 +104,7 @@ func TestTokenBlacklistRunSchedulesFailedDelivery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	outbox := &fakeOutbox{claimed: []model.TokenBlacklistOutbox{{ID: 2, TokenID: "jti", ExpiresAt: now.Add(time.Minute), AttemptCount: 2, ClaimToken: &claim}}, ackCall: cancel}
 	blacklist := &fakeBlacklist{err: errors.New("redis down")}
-	worker := TokenBlacklist{Outbox: outbox, Blacklist: blacklist, Interval: time.Hour, CleanupInterval: time.Hour, Clock: fixedClock{value: now}}
+	worker := TokenBlacklist{Outbox: outbox, AuthState: blacklist, Interval: time.Hour, CleanupInterval: time.Hour, Clock: fixedClock{value: now}}
 
 	if err := worker.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -125,7 +123,7 @@ func TestTokenBlacklistRunAcknowledgesNaturallyExpiredDelivery(t *testing.T) {
 	claim := "claim"
 	ctx, cancel := context.WithCancel(context.Background())
 	outbox := &fakeOutbox{claimed: []model.TokenBlacklistOutbox{{ID: 3, TokenID: "jti", ExpiresAt: now, ClaimToken: &claim}}, ackCall: cancel}
-	worker := TokenBlacklist{Outbox: outbox, Blacklist: &fakeBlacklist{}, Interval: time.Hour, CleanupInterval: time.Hour, Clock: fixedClock{value: now}}
+	worker := TokenBlacklist{Outbox: outbox, AuthState: &fakeBlacklist{}, Interval: time.Hour, CleanupInterval: time.Hour, Clock: fixedClock{value: now}}
 
 	if err := worker.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -143,7 +141,7 @@ func TestTokenBlacklistRunRetriesClaimErrorsUntilCanceled(t *testing.T) {
 			cancel()
 		}
 	}
-	worker := TokenBlacklist{Outbox: outbox, Blacklist: &fakeBlacklist{}, Interval: time.Millisecond, CleanupInterval: time.Hour}
+	worker := TokenBlacklist{Outbox: outbox, AuthState: &fakeBlacklist{}, Interval: time.Millisecond, CleanupInterval: time.Hour}
 
 	if err := worker.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)

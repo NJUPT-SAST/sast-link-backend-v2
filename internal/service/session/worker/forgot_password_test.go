@@ -28,6 +28,10 @@ func (f forgotUsers) FindByLoginEmail(_ context.Context, email string) (*model.U
 	return user, nil
 }
 
+func (f forgotUsers) FindAuthUserByLoginEmail(_ context.Context, email string) (*model.User, error) {
+	return f.FindByLoginEmail(context.Background(), email)
+}
+
 type forgotCodes struct {
 	email, code, purpose string
 	err                  error

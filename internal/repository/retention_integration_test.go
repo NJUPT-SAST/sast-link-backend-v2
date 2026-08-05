@@ -10,12 +10,12 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
-// A family's sequence-0 refresh token must survive retention: it is what
-// FindFamilyOriginCreatedAt reads to date an ID Token's auth_time, and it carries
-// revoked_at from the first rotation onward. Deleting it while the family still
-// rotates makes the refresh flow revoke the family and answer 500 — so this test
-// pins the sequence > 0 guard against real PostgreSQL.
-func TestRetentionKeepsFamilyOriginRefreshToken(t *testing.T) {
+// A family whose every refresh token is revoked and expired is dead: its origin
+// row exists only to date an ID Token's auth_time, and no ID Token will ever be
+// minted from a family that cannot rotate. Deleting the whole dead family — the
+// origin included — is what keeps oauth_refresh_tokens from growing by one row
+// per historical login.
+func TestRetentionClearsDeadFamilyRefreshTokens(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)
 	tokens := repository.NewToken(database)
@@ -28,8 +28,9 @@ func TestRetentionKeepsFamilyOriginRefreshToken(t *testing.T) {
 	// so rotation is the only way to reach the state retention actually meets.
 	familyID := "retention-family"
 	createTokenPair(t, tokens, "retention-origin", familyID, 0, client.ID, user.ID)
-	if err := tokens.RotateRefreshToken(
+	if _, err := tokens.RotateRefreshToken(
 		context.Background(),
+		familyID,
 		"retention-origin-refresh",
 		accessToken("retention-rotated-access", client.ID, user.ID, &familyID),
 		refreshToken("retention-rotated-refresh", familyID, 1, client.ID, user.ID),
@@ -55,21 +56,25 @@ func TestRetentionKeepsFamilyOriginRefreshToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteRevokedRefreshTokens() error = %v", err)
 	}
-	if removed != 1 {
-		t.Fatalf("DeleteRevokedRefreshTokens() removed = %d, want 1 (the rotated token only)", removed)
+	if removed != 2 {
+		t.Fatalf("DeleteRevokedRefreshTokens() removed = %d, want 2 (the whole dead family)", removed)
 	}
 
-	origin, err := tokens.FindFamilyOriginCreatedAt(context.Background(), familyID)
-	if err != nil {
-		t.Fatalf("FindFamilyOriginCreatedAt() error = %v, want the origin row preserved", err)
+	var leftover int64
+	if err := database.Model(&model.OAuthRefreshToken{}).
+		Where("family_id = ?", familyID).
+		Count(&leftover).Error; err != nil {
+		t.Fatalf("count remaining family rows: %v", err)
 	}
-	if origin.IsZero() {
-		t.Fatal("FindFamilyOriginCreatedAt() returned a zero time")
+	if leftover != 0 {
+		t.Fatalf("remaining family rows = %d, want 0", leftover)
 	}
 }
 
-// An unrevoked refresh token is still usable, so expiry alone must not delete it.
-func TestRetentionKeepsUnrevokedRefreshTokens(t *testing.T) {
+// A family with a live token must survive the sweep: the rotated row is
+// unrevoked and unexpired, so it can still rotate, and the origin row it rotates
+// from is what dates the next ID Token's auth_time.
+func TestRetentionKeepsLiveFamilyRefreshTokens(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)
 	tokens := repository.NewToken(database)
@@ -77,30 +82,28 @@ func TestRetentionKeepsUnrevokedRefreshTokens(t *testing.T) {
 	user := createUserWithProfile(t, users, "retention-live@njupt.edu.cn")
 	client := createOAuthClient(t, database)
 
-	// Rotate so the surviving token is sequence 1: that removes the sequence > 0
-	// guard from the picture and leaves revoked_at as the only thing protecting it.
+	// Rotate so the family has a live sequence-1 token and a revoked origin.
 	familyID := "retention-live-family"
 	createTokenPair(t, tokens, "retention-live", familyID, 0, client.ID, user.ID)
-	if err := tokens.RotateRefreshToken(
+	if _, err := tokens.RotateRefreshToken(
 		context.Background(),
+		familyID,
 		"retention-live-refresh",
 		accessToken("retention-live-rotated-access", client.ID, user.ID, &familyID),
 		refreshToken("retention-live-rotated-refresh", familyID, 1, client.ID, user.ID),
 	); err != nil {
 		t.Fatalf("RotateRefreshToken() error = %v", err)
 	}
-	// Rotation set revoked_at on this row, so clear it: an unrevoked token is
-	// exactly the case under test. created_at moves back with expires_at to satisfy
-	// ck_oauth_refresh_tokens_expiry.
+	// Age only the revoked origin row; the rotated row stays fresh.
 	dead := time.Now().UTC().Add(-90 * 24 * time.Hour)
 	if err := database.Model(&model.OAuthRefreshToken{}).
-		Where("token_hash = ?", "retention-live-rotated-refresh").
+		Where("token_hash = ?", "retention-live-refresh").
 		Updates(map[string]any{
-			"revoked_at": nil,
+			"revoked_at": dead,
 			"expires_at": dead,
 			"created_at": dead.Add(-time.Hour),
 		}).Error; err != nil {
-		t.Fatalf("age refresh token: %v", err)
+		t.Fatalf("age origin refresh token: %v", err)
 	}
 
 	removed, err := retention.DeleteRevokedRefreshTokens(context.Background(), time.Now().UTC(), 100)
@@ -108,7 +111,12 @@ func TestRetentionKeepsUnrevokedRefreshTokens(t *testing.T) {
 		t.Fatalf("DeleteRevokedRefreshTokens() error = %v", err)
 	}
 	if removed != 0 {
-		t.Fatalf("DeleteRevokedRefreshTokens() removed = %d, want 0 for an unrevoked token", removed)
+		t.Fatalf("DeleteRevokedRefreshTokens() removed = %d, want 0 for a live family", removed)
+	}
+
+	var origin model.OAuthRefreshToken
+	if err := database.Where("token_hash = ?", "retention-live-refresh").First(&origin).Error; err != nil {
+		t.Fatalf("origin row missing after sweep: %v", err)
 	}
 }
 
@@ -262,11 +270,11 @@ func TestRetentionTryLockIsExclusive(t *testing.T) {
 	}
 }
 
-// The reason the sequence > 0 guard exists, stated as a behavioral test rather
-// than a comment: a family that keeps rotating outlives the origin row's own
-// expires_at, and the refresh flow reads that row on every rotation. If retention
-// ever deletes it, oauth.Service.refresh revokes the whole family and answers 500 —
-// a forced logout for an active user. Retention must survive a full rotation.
+// A family that keeps rotating outlives the origin row's own expires_at, and the
+// refresh flow reads that row on every rotation. Deleting it while any member of
+// the family is still live would make oauth.Service.refresh revoke the whole
+// family and answer 500 — a forced logout for an active user. This pins the
+// "live family keeps its origin" half of DeleteRevokedRefreshTokens.
 func TestRetentionKeepsAuthTimeReadableAcrossRotations(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)
@@ -283,8 +291,9 @@ func TestRetentionKeepsAuthTimeReadableAcrossRotations(t *testing.T) {
 	current := "retention-authtime-refresh"
 	for sequence := 1; sequence <= 3; sequence++ {
 		next := fmt.Sprintf("retention-authtime-refresh-%d", sequence)
-		if err := tokens.RotateRefreshToken(
+		if _, err := tokens.RotateRefreshToken(
 			context.Background(),
+			familyID,
 			current,
 			accessToken(fmt.Sprintf("retention-authtime-access-%d", sequence), client.ID, user.ID, &familyID),
 			refreshToken(next, familyID, sequence, client.ID, user.ID),
@@ -306,10 +315,11 @@ func TestRetentionKeepsAuthTimeReadableAcrossRotations(t *testing.T) {
 			t.Fatalf("DeleteRevokedRefreshTokens() error = %v", err)
 		}
 
-		// This is the exact call the refresh flow makes before signing an ID Token.
-		if _, err := tokens.FindFamilyOriginCreatedAt(context.Background(), familyID); err != nil {
-			t.Fatalf("FindFamilyOriginCreatedAt() after rotation %d = %v, want the origin row intact",
-				sequence, err)
+		// This is the row the refresh flow reads before signing an ID Token; it
+		// must survive while the family still holds a live token.
+		var origin model.OAuthRefreshToken
+		if err := database.Where("family_id = ? AND sequence = 0", familyID).First(&origin).Error; err != nil {
+			t.Fatalf("origin row missing after rotation %d = %v, want it intact", sequence, err)
 		}
 	}
 }

@@ -99,12 +99,12 @@ func TestParseCommandRejectsAlternateCommands(t *testing.T) {
 func TestPostgresURLEscapesCredentials(t *testing.T) {
 	const testPassword = "p@ss:/?#[]% word" //nolint:gosec // Deliberately exercises URL escaping with a non-secret test value.
 	connectionString := postgresURL(&config.Config{
-		DBHost:     "db.example.test",
-		DBPort:     "5432",
-		DBUser:     "migration user",
-		DBPassword: testPassword,
-		DBName:     "sastlink",
-		DBSSLMode:  "require",
+		DBHost:    "db.example.test",
+		DBPort:    "5432",
+		DBUser:    "migration user",
+		DBSecret:  testPassword,
+		DBName:    "sastlink",
+		DBSSLMode: "require",
 	})
 
 	connection, err := url.Parse(connectionString)

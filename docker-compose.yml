@@ -11,6 +11,16 @@ services:
       - "127.0.0.1:${COMPOSE_DB_PORT:-15432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    # Tuned for the 1c1g deployment shape: max_connections tracks the API pool
+    # (30) plus headroom, shared_buffers takes the memory the argon2id KDF leaves.
+    # synchronous_commit stays on — these writes are the durability-critical path.
+    command:
+      - "-c"
+      - "max_connections=50"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=512MB"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sastlink} -d ${DB_NAME:-sastlink}"]
       interval: 5s
@@ -53,7 +63,6 @@ services:
       JWT_AUDIENCE: ${JWT_AUDIENCE:-sast-link-v2}
       REFRESH_TOKEN_HMAC_SECRET: ${REFRESH_TOKEN_HMAC_SECRET}
       OAUTH_CONSENT_URL: ${OAUTH_CONSENT_URL}
-      OAUTH_CARD_BASE_URL: ${OAUTH_CARD_BASE_URL:-https://link.sast.fun/card}
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT:-465}
       SMTP_USERNAME: ${SMTP_USERNAME}
@@ -74,7 +83,8 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_PORT: "8080"
-      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_LEVEL: ${LOG_LEVEL:-warn}
+      GOMEMLIMIT: ${GOMEMLIMIT:-900MiB}
       DB_HOST: postgres
       DB_PORT: "5432"
       DB_USER: ${DB_USER:-sastlink}
@@ -97,7 +107,6 @@ services:
       REFRESH_TOKEN_HMAC_SECRET: ${REFRESH_TOKEN_HMAC_SECRET}
       INTERNAL_OAUTH_CLIENT_ID: ${INTERNAL_OAUTH_CLIENT_ID:-sast-link-web}
       OAUTH_CONSENT_URL: ${OAUTH_CONSENT_URL}
-      OAUTH_CARD_BASE_URL: ${OAUTH_CARD_BASE_URL:-https://link.sast.fun/card}
       OAUTH_CODE_TTL: ${OAUTH_CODE_TTL:-5m}
       OAUTH_AUTHORIZE_REQUEST_TTL: ${OAUTH_AUTHORIZE_REQUEST_TTL:-10m}
       # Third-party login: SAST Link acting as an OAuth *client*, the opposite
@@ -123,20 +132,25 @@ services:
       OAUTH_LOGIN_STATE_TTL: ${OAUTH_LOGIN_STATE_TTL:-10m}
       OAUTH_LOGIN_REGISTRATION_STATE_TTL: ${OAUTH_LOGIN_REGISTRATION_STATE_TTL:-15m}
       OAUTH_LOGIN_CODE_TTL: ${OAUTH_LOGIN_CODE_TTL:-60s}
-      RATE_LIMIT_LOGIN_RPM: ${RATE_LIMIT_LOGIN_RPM:-5}
+      # Rate-limit defaults mirror .env.example so the local stack behaves like
+      # the production configuration. Raise them in your .env when running
+      # loadmix; leaving them wide open here makes bench results unrepresentative.
+      RATE_LIMIT_LOGIN_RPM: ${RATE_LIMIT_LOGIN_RPM:-300}
       RATE_LIMIT_LOGIN_WINDOW: ${RATE_LIMIT_LOGIN_WINDOW:-15m}
       RATE_LIMIT_SEND_EMAIL_RPM: ${RATE_LIMIT_SEND_EMAIL_RPM:-3}
-      RATE_LIMIT_SEND_EMAIL_IP_RPM: ${RATE_LIMIT_SEND_EMAIL_IP_RPM:-10}
+      RATE_LIMIT_SEND_EMAIL_IP_RPM: ${RATE_LIMIT_SEND_EMAIL_IP_RPM:-30}
       RATE_LIMIT_SEND_EMAIL_WINDOW: ${RATE_LIMIT_SEND_EMAIL_WINDOW:-60s}
       RATE_LIMIT_UNBIND_RPM: ${RATE_LIMIT_UNBIND_RPM:-3}
       RATE_LIMIT_UNBIND_WINDOW: ${RATE_LIMIT_UNBIND_WINDOW:-60s}
-      RATE_LIMIT_AUTHORIZE_RPM: ${RATE_LIMIT_AUTHORIZE_RPM:-20}
+      RATE_LIMIT_AUTHORIZE_RPM: ${RATE_LIMIT_AUTHORIZE_RPM:-100}
       RATE_LIMIT_AUTHORIZE_WINDOW: ${RATE_LIMIT_AUTHORIZE_WINDOW:-60s}
-      RATE_LIMIT_TOKEN_RPM: ${RATE_LIMIT_TOKEN_RPM:-60}
+      RATE_LIMIT_TOKEN_RPM: ${RATE_LIMIT_TOKEN_RPM:-100}
       RATE_LIMIT_TOKEN_WINDOW: ${RATE_LIMIT_TOKEN_WINDOW:-60s}
-      RATE_LIMIT_OAUTH_LOGIN_RPM: ${RATE_LIMIT_OAUTH_LOGIN_RPM:-20}
+      RATE_LIMIT_REFRESH_RPM: ${RATE_LIMIT_REFRESH_RPM:-100}
+      RATE_LIMIT_REFRESH_WINDOW: ${RATE_LIMIT_REFRESH_WINDOW:-60s}
+      RATE_LIMIT_OAUTH_LOGIN_RPM: ${RATE_LIMIT_OAUTH_LOGIN_RPM:-100}
       RATE_LIMIT_OAUTH_LOGIN_WINDOW: ${RATE_LIMIT_OAUTH_LOGIN_WINDOW:-60s}
-      RATE_LIMIT_EXCHANGE_CODE_RPM: ${RATE_LIMIT_EXCHANGE_CODE_RPM:-30}
+      RATE_LIMIT_EXCHANGE_CODE_RPM: ${RATE_LIMIT_EXCHANGE_CODE_RPM:-100}
       RATE_LIMIT_EXCHANGE_CODE_WINDOW: ${RATE_LIMIT_EXCHANGE_CODE_WINDOW:-60s}
       # Keyed by Register-Ticket, so the window must not outlive the ticket's
       # 5-minute TTL; the service refuses to start if it does.
@@ -146,7 +160,10 @@ services:
       RATE_LIMIT_CARD_WINDOW: ${RATE_LIMIT_CARD_WINDOW:-60s}
       LOGIN_FAILURE_LIMIT: ${LOGIN_FAILURE_LIMIT:-10}
       LOGIN_FAILURE_WINDOW: ${LOGIN_FAILURE_WINDOW:-15m}
-      PASSWORD_HASH_MAX_CONCURRENT: ${PASSWORD_HASH_MAX_CONCURRENT:-64}
+      ARGON2_CONCURRENCY: ${ARGON2_CONCURRENCY}
+      ARGON2_TIME: ${ARGON2_TIME:-2}
+      ARGON2_MEMORY: ${ARGON2_MEMORY:-19456}
+      ARGON2_THREADS: ${ARGON2_THREADS:-1}
       # Retention sweeps run inside this process, not pg_cron. Listed here because
       # this block is a whitelist: an omitted variable cannot be overridden from .env.
       RETENTION_INTERVAL: ${RETENTION_INTERVAL:-1h}

@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -102,10 +103,26 @@ func (k Keys) LoginCode(code string) string {
 	return k.join("auth", "login_code", dynamicKeySegment(code))
 }
 
-// JTIBlacklist returns a JWT blacklist key.
-func (k Keys) JTIBlacklist(jti string) string {
-	return k.join("token", "blacklist", dynamicKeySegment(jti))
+// AuthState returns the per-token auth-state cache key. The middleware stores the
+// DB-authoritative revocation/role state here for a short TTL so authenticated
+// requests can skip the per-request DB query; revocation paths write a tombstone
+// (not a delete) so a stale refill cannot re-seed a revoked token's cache.
+func (k Keys) AuthState(jti string) string {
+	return k.join("auth", "authstate", dynamicKeySegment(jti))
 }
+
+// authStateTombstone is written by the revocation paths in place of a delete.
+// PutAuthState (SET NX) refuses to overwrite it, which closes the write race
+// where a request that read the DB just before a revoking transaction commits
+// would otherwise re-seed a pre-revocation blob with a fresh TTL. GetAuthState
+// reads it as a miss so the middleware falls back to the DB.
+var authStateTombstone = []byte("__revoked__")
+
+// defaultAuthStateTombstoneTTL is used when Store.AuthStateTombstoneTTL is zero.
+// It must outlive the longest in-flight request (bounded by the server
+// WriteTimeout), so a slow request's stale PUT cannot land after the tombstone
+// expires and admit the revoked token.
+const defaultAuthStateTombstoneTTL = 15 * time.Second
 
 // RateLimit returns a fixed-window rate-limiter key.
 func (k Keys) RateLimit(scope, id string) string {
@@ -121,6 +138,78 @@ func (k Keys) LoginFailure(email string) string {
 type Store struct {
 	Client Cmdable
 	Keys   Keys
+	// AuthStateTombstoneTTL overrides the tombstone lifetime used by
+	// DeleteAuthStates. When zero, defaultAuthStateTombstoneTTL is used. The
+	// value must exceed the server's WriteTimeout so an in-flight request that
+	// read the DB before a revocation cannot re-seed the cache after the
+	// tombstone expires.
+	AuthStateTombstoneTTL time.Duration
+}
+
+// GetAuthState reads a cached per-token auth-state blob by JTI. It returns
+// found=false for a missing entry; a Redis error propagates so the caller can
+// fail open to the database. The value is the raw JSON the middleware wrote.
+func (s Store) GetAuthState(ctx context.Context, jti string) ([]byte, bool, error) {
+	if s.Client == nil || jti == "" {
+		return nil, false, fmt.Errorf("get auth state: %w", ErrInvalidArgument)
+	}
+	data, err := s.Client.Get(ctx, s.Keys.AuthState(jti)).Bytes()
+	if errors.Is(err, goredis.Nil) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get auth state: %w", err)
+	}
+	if bytes.Equal(data, authStateTombstone) {
+		// A revocation tombstone reads as a miss so the middleware falls back to
+		// the DB (which rejects the revoked token) without a decode-failure log.
+		return nil, false, nil
+	}
+	return data, true, nil
+}
+
+// PutAuthState stores a per-token auth-state blob with a TTL. The TTL bounds how
+// long a state change without an explicit revocation can take to surface. SET NX
+// refuses to overwrite a revocation tombstone: without it, a request that read
+// the DB just before a revoking transaction committed could re-seed a
+// pre-revocation blob with a fresh TTL after the revocation, admitting the token
+// until that TTL expired.
+func (s Store) PutAuthState(ctx context.Context, jti string, data []byte, ttl time.Duration) error {
+	if s.Client == nil || jti == "" || len(data) == 0 || ttl <= 0 {
+		return fmt.Errorf("put auth state: %w", ErrInvalidArgument)
+	}
+	if err := s.Client.SetNX(ctx, s.Keys.AuthState(jti), data, ttl).Err(); err != nil {
+		return fmt.Errorf("put auth state: %w", err)
+	}
+	return nil
+}
+
+// DeleteAuthStates writes a short-lived tombstone for a set of JTIs, used by the
+// revocation delivery so a revoked token's cache cannot admit it once the DB says
+// revoked. The tombstone (not a delete) is what makes the write race impossible:
+// PutAuthState's SET NX refuses to overwrite it, so no stale refill can land
+// after a revocation.
+func (s Store) tombstoneTTL() time.Duration {
+	if s.AuthStateTombstoneTTL > 0 {
+		return s.AuthStateTombstoneTTL
+	}
+	return defaultAuthStateTombstoneTTL
+}
+
+func (s Store) DeleteAuthStates(ctx context.Context, jtis []string) error {
+	if s.Client == nil {
+		return fmt.Errorf("delete auth states: %w", ErrInvalidArgument)
+	}
+	pipe := s.Client.Pipeline()
+	for _, jti := range jtis {
+		if jti != "" {
+			pipe.Set(ctx, s.Keys.AuthState(jti), authStateTombstone, s.tombstoneTTL())
+		}
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("delete auth states: %w", err)
+	}
+	return nil
 }
 
 // SetOneTime stores a JSON payload using SET NX EX semantics.
@@ -190,6 +279,39 @@ func (s Store) GetDelOneTime(ctx context.Context, key string, target any) error 
 		return fmt.Errorf("unmarshal one-time payload: %w", err)
 	}
 	return nil
+}
+
+// SetRawOneTime stores a raw string value under SET NX EX semantics, skipping
+// JSON encoding for payloads that are already their final wire form (e.g. a
+// decimal user ID).
+func (s Store) SetRawOneTime(ctx context.Context, key, value string, ttl time.Duration) error {
+	if s.Client == nil || key == "" || value == "" || ttl <= 0 {
+		return fmt.Errorf("set raw one-time: %w", ErrInvalidArgument)
+	}
+	ok, err := s.Client.SetNX(ctx, key, value, ttl).Result()
+	if err != nil {
+		return fmt.Errorf("set raw one-time: %w", err)
+	}
+	if !ok {
+		return ErrAlreadyExists
+	}
+	return nil
+}
+
+// GetDelRawOneTime atomically consumes a raw string value stored by
+// SetRawOneTime.
+func (s Store) GetDelRawOneTime(ctx context.Context, key string) (string, error) {
+	if s.Client == nil || key == "" {
+		return "", fmt.Errorf("getdel raw one-time: %w", ErrInvalidArgument)
+	}
+	value, err := s.Client.GetDel(ctx, key).Result()
+	if errors.Is(err, goredis.Nil) {
+		return "", ErrMiss
+	}
+	if err != nil {
+		return "", fmt.Errorf("getdel raw one-time: %w", err)
+	}
+	return value, nil
 }
 
 // SaveVerificationCode stores a numeric verification code for the given purpose
@@ -351,59 +473,6 @@ func (s Store) ConsumeRegisterTicket(ctx context.Context, ticket string) error {
 	return nil
 }
 
-// BlacklistJTI blacklists a JWT ID until its token expiry.
-func (s Store) BlacklistJTI(ctx context.Context, jti string, ttl time.Duration) error {
-	if s.Client == nil || jti == "" || ttl <= 0 {
-		return fmt.Errorf("blacklist jti: %w", ErrInvalidArgument)
-	}
-	if err := s.Client.Set(ctx, s.Keys.JTIBlacklist(jti), "1", ttl).Err(); err != nil {
-		return fmt.Errorf("blacklist jti: %w", err)
-	}
-	return nil
-}
-
-// BlacklistJTIBatch blacklists multiple JTIs in one MSET round trip. Password
-// change/reset revokes every live session of a user, so delivering each JTI
-// with its own SET costs one Redis RTT per device — MSET keeps it constant.
-// Every entry in the batch must already be validated (non-empty JTI, positive
-// TTL); empty batches are a no-op.
-func (s Store) BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error {
-	if s.Client == nil {
-		return fmt.Errorf("blacklist jti batch: %w", ErrInvalidArgument)
-	}
-	if len(entries) == 0 {
-		return nil
-	}
-	// MSET cannot carry per-key TTLs, so write each key with its expiry through
-	// a pipelined SET — still one network round trip for the whole batch.
-	pipe := s.Client.Pipeline()
-	for jti, ttl := range entries {
-		if jti == "" || ttl <= 0 {
-			continue
-		}
-		pipe.Set(ctx, s.Keys.JTIBlacklist(jti), "1", ttl)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("blacklist jti batch: %w", err)
-	}
-	return nil
-}
-
-// IsJTIBlacklisted reports whether a JWT ID is blacklisted.
-func (s Store) IsJTIBlacklisted(ctx context.Context, jti string) (bool, error) {
-	if s.Client == nil || jti == "" {
-		return false, fmt.Errorf("get jti blacklist: %w", ErrInvalidArgument)
-	}
-	_, err := s.Client.Get(ctx, s.Keys.JTIBlacklist(jti)).Result()
-	if errors.Is(err, goredis.Nil) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("get jti blacklist: %w", err)
-	}
-	return true, nil
-}
-
 // LoginFailureState is a fixed-window password-login failure counter snapshot.
 type LoginFailureState struct {
 	Count int
@@ -418,27 +487,44 @@ end
 return {current, redis.call("PTTL", KEYS[1])}
 `
 
-// GetLoginFailures reads the current password-login failure counter without mutating it.
+// getLoginFailuresScript reads the failure counter and its TTL in one round
+// trip. A missing key (no failures yet) reports a zero count; the counter is
+// otherwise indistinguishable from a zero TTL once it has expired.
+const getLoginFailuresScript = `
+local count = redis.call("GET", KEYS[1])
+if not count then
+  return {0, 0}
+end
+return {tonumber(count), redis.call("PTTL", KEYS[1])}
+`
+
+// GetLoginFailures reads the current password-login failure counter without
+// mutating it. The count and TTL come from one Lua call instead of GET + PTTL,
+// which shaves a round trip off every login attempt (the lockout check runs on
+// both the success and failure paths).
 func (s Store) GetLoginFailures(ctx context.Context, email string) (LoginFailureState, error) {
 	if s.Client == nil || email == "" {
 		return LoginFailureState{}, fmt.Errorf("get login failures: %w", ErrInvalidArgument)
 	}
-	key := s.Keys.LoginFailure(email)
-	count, err := s.Client.Get(ctx, key).Int()
-	if errors.Is(err, goredis.Nil) {
-		return LoginFailureState{}, nil
-	}
+	values, err := s.Client.Eval(ctx, getLoginFailuresScript, []string{s.Keys.LoginFailure(email)}).Slice()
 	if err != nil {
-		return LoginFailureState{}, fmt.Errorf("get login failures: %w", err)
+		return LoginFailureState{}, fmt.Errorf("get login failures eval: %w", err)
 	}
-	ttl, err := s.Client.PTTL(ctx, key).Result()
+	if len(values) != 2 {
+		return LoginFailureState{}, fmt.Errorf("get login failures eval: unexpected result")
+	}
+	count, err := redisInt(values[0])
 	if err != nil {
-		return LoginFailureState{}, fmt.Errorf("get login failures ttl: %w", err)
+		return LoginFailureState{}, err
 	}
-	if ttl < 0 {
-		ttl = 0
+	ttlMilliseconds, err := redisInt(values[1])
+	if err != nil {
+		return LoginFailureState{}, err
 	}
-	return LoginFailureState{Count: count, TTL: ttl}, nil
+	if ttlMilliseconds < 0 {
+		ttlMilliseconds = 0
+	}
+	return LoginFailureState{Count: count, TTL: time.Duration(ttlMilliseconds) * time.Millisecond}, nil
 }
 
 // RecordLoginFailure increments the password-login failure counter in a fixed window.

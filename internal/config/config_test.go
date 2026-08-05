@@ -171,8 +171,8 @@ func TestLoadValidConfig(t *testing.T) {
 	if cfg.RedisAddr() != "redis:6380" {
 		t.Errorf("RedisAddr = %q, want redis:6380", cfg.RedisAddr())
 	}
-	if cfg.RedisPassword != "secret" {
-		t.Errorf("RedisPassword = %q, want secret", cfg.RedisPassword)
+	if cfg.RedisSecret != "secret" {
+		t.Errorf("RedisSecret = %q, want secret", cfg.RedisSecret)
 	}
 	if cfg.RedisDB != 2 {
 		t.Errorf("RedisDB = %d, want 2", cfg.RedisDB)
@@ -211,8 +211,8 @@ func TestLoadValidConfig(t *testing.T) {
 	if cfg.InternalOAuthClientID != "sast-link-web" {
 		t.Errorf("InternalOAuthClientID = %q, want sast-link-web", cfg.InternalOAuthClientID)
 	}
-	if cfg.RateLimitLoginRPM != 5 {
-		t.Errorf("RateLimitLoginRPM = %d, want 5", cfg.RateLimitLoginRPM)
+	if cfg.RateLimitLoginRPM != 300 {
+		t.Errorf("RateLimitLoginRPM = %d, want 300", cfg.RateLimitLoginRPM)
 	}
 	if cfg.RateLimitLoginWindow != 15*time.Minute {
 		t.Errorf("RateLimitLoginWindow = %s, want 15m", cfg.RateLimitLoginWindow)

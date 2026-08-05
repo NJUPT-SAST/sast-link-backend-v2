@@ -19,6 +19,12 @@ import (
 // package's signatures do not repeat the import path.
 type providerIdentity = provider.Identity
 
+// auditTimeout bounds the detached audit write, matching the oauth service. An
+// audit row for a completed action must survive the caller going away, but a
+// stuck database must not hold a login callback hostage; the write is fail-open
+// either way.
+const auditTimeout = 5 * time.Second
+
 // providerClient resolves an enabled provider, or reports that this deployment
 // does not offer it.
 func (s Service) providerClient(name model.LoginMethod) (ProviderClient, error) {
@@ -131,7 +137,12 @@ func (s Service) audit(
 		userAgentPtr = &userAgent
 	}
 	successValue := success
-	return s.Audits.Create(ctx, &model.AuditLog{
+	// Detached like the oauth and admin services: an audit row for a completed
+	// action must survive the caller going away, or the log silently loses the
+	// very events an aborted callback or exchange produced.
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	return s.Audits.Create(auditCtx, &model.AuditLog{
 		UserID:     userID,
 		Action:     action,
 		Resource:   resource,

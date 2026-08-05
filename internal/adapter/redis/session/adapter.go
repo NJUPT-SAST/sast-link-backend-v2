@@ -89,19 +89,13 @@ type BlacklistStore struct {
 	Store internalredis.Store
 }
 
-func (s BlacklistStore) BlacklistJTI(ctx context.Context, jti string, ttl time.Duration) error {
-	return s.Store.BlacklistJTI(ctx, jti, ttl)
-}
-
-// BlacklistJTIBatch delivers a whole revoked session set in one round trip.
-// Used by password change/reset where every live token of the user is revoked
-// at once; the per-token loop would cost one RTT per device.
-func (s BlacklistStore) BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error {
-	return s.Store.BlacklistJTIBatch(ctx, entries)
-}
-
-func (s BlacklistStore) IsJTIBlacklisted(ctx context.Context, jti string) (bool, error) {
-	return s.Store.IsJTIBlacklisted(ctx, jti)
+// DeleteAuthStates removes the auth-state cache entries for a revoked session
+// set in one pipeline round trip. This is the delivery target for revocations:
+// the middleware serves auth state from the cache, so deleting the entry is what
+// makes a revoked token unusable. Used by password change/reset where every live
+// token of the user is revoked at once.
+func (s BlacklistStore) DeleteAuthStates(ctx context.Context, jtis []string) error {
+	return s.Store.DeleteAuthStates(ctx, jtis)
 }
 
 type BindTicketStore struct {

@@ -20,8 +20,36 @@ const tokenFamilyAdvisoryLockNamespace int32 = 0x53415354
 // family that already contains revoked token metadata.
 var ErrTokenFamilyRevoked = errors.New("token family is revoked")
 
+// refreshGracePeriod distinguishes a benign concurrent refresh from a true
+// replay. Two tabs refreshing the same family land here: the first rotation
+// revokes the presented token, the second sees revoked_at. Within this window
+// that is concurrency, not an attack — the family must survive so the winning
+// tab stays logged in. Older than the window, the presented token is a replay of
+// a long-dead token and the family is cut.
+const refreshGracePeriod = 30 * time.Second
+
+// RefreshGracePeriod is exported so the session and OAuth services can apply the
+// same window when a revoked-token presentation arrives before the rotation
+// transaction runs (the common case). Within it a revoked token is a benign
+// concurrent refresh and the family survives; beyond it, a true replay cuts it.
+const RefreshGracePeriod = refreshGracePeriod
+
+// IsWithinRefreshGrace reports whether a token revoked at revokedAt is still in
+// the benign-concurrency window at the given time. The rotation transaction and
+// both service pre-reads share this so the comparison cannot drift.
+func IsWithinRefreshGrace(revokedAt, at time.Time) bool {
+	return at.Sub(revokedAt) <= refreshGracePeriod
+}
+
 // ErrTokenReplay indicates refresh-token reuse or replay within a known token family.
 var ErrTokenReplay = errors.New("repository: token replay")
+
+// ErrTokenReplayWithinGrace reports a presented refresh token that was already
+// rotated by a benign concurrent refresh in the same family within the grace
+// window. The family is preserved — the caller must not run family-death
+// cleanup (device removal, re-revoke) — but the presented token is dead and the
+// request must still fail.
+var ErrTokenReplayWithinGrace = errors.New("repository: token replay within grace window")
 
 // ErrTokenExpired indicates that token metadata is already expired.
 var ErrTokenExpired = errors.New("repository: token expired")
@@ -61,6 +89,29 @@ func (r *TokenRepository) CreatePair(
 	})
 }
 
+// CreatePairWithAudit is CreatePair with the login's audit row written directly
+// into audit_logs inside the same transaction, so the session and its audit
+// commit atomically on one fsync and the request path never waits on a second
+// commit. A nil audit (disabled) skips the write.
+func (r *TokenRepository) CreatePairWithAudit(
+	ctx context.Context,
+	access *model.OAuthAccessToken,
+	refresh *model.OAuthRefreshToken,
+	audit *model.AuditLog,
+) error {
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := createTokenPairInTransaction(transaction, access, refresh); err != nil {
+			return err
+		}
+		if audit != nil {
+			if err := transaction.Create(audit).Error; err != nil {
+				return fmt.Errorf("create login audit: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
 // createTokenPairInTransaction appends one validated token pair using the
 // caller's transaction. Registration reuses this so the account, profile and
 // initial session either all commit or all roll back.
@@ -77,12 +128,17 @@ func createTokenPairInTransaction(
 		return fmt.Errorf("lock token family: %w", err)
 	}
 
-	familyRevoked, err := tokenFamilyHasRevokedAccess(transaction, familyID)
-	if err != nil {
-		return fmt.Errorf("check token family revocation: %w", err)
-	}
-	if familyRevoked {
-		return ErrTokenFamilyRevoked
+	// A brand-new family (sequence 0 — login, registration, auth-code grant) is a
+	// random UUID, so the revoked-access scan is guaranteed empty; skip it like
+	// validateTokenFamilyAppend already skips its own scan for sequence 0.
+	if refresh.Sequence != 0 {
+		familyRevoked, err := tokenFamilyHasRevokedAccess(transaction, familyID)
+		if err != nil {
+			return fmt.Errorf("check token family revocation: %w", err)
+		}
+		if familyRevoked {
+			return ErrTokenFamilyRevoked
+		}
 	}
 	if err := validateTokenFamilyAppend(transaction, refresh); err != nil {
 		return err
@@ -97,25 +153,54 @@ func createTokenPairInTransaction(
 	return nil
 }
 
-// RotateRefreshToken atomically rotates currentRefreshTokenHash to a new access/refresh pair.
+// RotateRefreshToken atomically rotates currentRefreshTokenHash to a new
+// access/refresh pair. It returns the family's origin created_at — the moment
+// the user actually authorized — so the caller can set an ID Token's auth_time
+// without a second lookup. The family is identified by the caller-supplied
+// familyID, which every caller already read off the very row being rotated.
 func (r *TokenRepository) RotateRefreshToken(
 	ctx context.Context,
+	familyID string,
 	currentRefreshTokenHash string,
 	newAccess *model.OAuthAccessToken,
 	newRefresh *model.OAuthRefreshToken,
-) error {
+) (time.Time, error) {
+	return r.rotateRefreshToken(ctx, familyID, currentRefreshTokenHash, newAccess, newRefresh, nil)
+}
+
+// RotateRefreshTokenWithAudit is RotateRefreshToken with the refresh's audit row
+// written directly into audit_logs inside the same transaction, so the rotation
+// and its audit commit atomically on one fsync instead of two.
+func (r *TokenRepository) RotateRefreshTokenWithAudit(
+	ctx context.Context,
+	familyID string,
+	currentRefreshTokenHash string,
+	newAccess *model.OAuthAccessToken,
+	newRefresh *model.OAuthRefreshToken,
+	audit *model.AuditLog,
+) (time.Time, error) {
+	return r.rotateRefreshToken(ctx, familyID, currentRefreshTokenHash, newAccess, newRefresh, audit)
+}
+
+func (r *TokenRepository) rotateRefreshToken(
+	ctx context.Context,
+	familyID string,
+	currentRefreshTokenHash string,
+	newAccess *model.OAuthAccessToken,
+	newRefresh *model.OAuthRefreshToken,
+	audit *model.AuditLog,
+) (time.Time, error) {
+	if strings.TrimSpace(familyID) == "" {
+		return time.Time{}, fmt.Errorf("%w: token family id is empty", ErrInvalidArgument)
+	}
 	if currentRefreshTokenHash == "" {
-		return fmt.Errorf("%w: current refresh token hash is empty", ErrInvalidArgument)
+		return time.Time{}, fmt.Errorf("%w: current refresh token hash is empty", ErrInvalidArgument)
 	}
 	if err := validateTokenPair(newAccess, newRefresh); err != nil {
-		return err
+		return time.Time{}, err
 	}
 
-	familyID, err := r.findRefreshTokenFamilyID(ctx, currentRefreshTokenHash)
-	if err != nil {
-		return err
-	}
-
+	var originCreatedAt time.Time
 	replayDetected := false
 	transactionErr := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		if lockErr := lockTokenFamily(transaction, familyID); lockErr != nil {
@@ -131,11 +216,21 @@ func (r *TokenRepository) RotateRefreshToken(
 			return fmt.Errorf("%w: refresh token family changed during rotation", ErrInvalidArgument)
 		}
 		if current.RevokedAt != nil {
-			if _, revokeErr := revokeFamilyInTransaction(transaction, familyID, rotationTime); revokeErr != nil {
-				return revokeErr
+			// A token revoked within the grace window is a benign concurrent
+			// refresh — another request in this family already rotated it moments
+			// ago. The family must survive so the winning rotation keeps working;
+			// fail this request without cutting anything and signal the grace case
+			// distinctly, so the caller does not run family-death cleanup (device
+			// removal) on a family that is still live. Older revocations are a true
+			// replay and cut the family.
+			if !IsWithinRefreshGrace(*current.RevokedAt, rotationTime) {
+				if _, revokeErr := revokeFamilyInTransaction(transaction, familyID, rotationTime); revokeErr != nil {
+					return revokeErr
+				}
+				replayDetected = true
+				return nil
 			}
-			replayDetected = true
-			return nil
+			return ErrTokenReplayWithinGrace
 		}
 		if validationErr := validateRefreshRotation(current, newAccess, newRefresh); validationErr != nil {
 			return validationErr
@@ -156,6 +251,19 @@ func (r *TokenRepository) RotateRefreshToken(
 			return nil
 		}
 
+		// The origin row is read inside the family lock: the ID Token's auth_time
+		// depends on it, and no concurrent rotation can move it under this
+		// transaction.
+		var origin model.OAuthRefreshToken
+		if err := transaction.
+			Select("created_at").
+			Where("family_id = ?", familyID).
+			Order("sequence ASC").
+			First(&origin).Error; err != nil {
+			return fmt.Errorf("find token family origin: %w", err)
+		}
+		originCreatedAt = origin.CreatedAt
+
 		result := transaction.Model(&model.OAuthRefreshToken{}).
 			Where("id = ? AND revoked_at IS NULL", current.ID).
 			Update("revoked_at", rotationTime)
@@ -171,27 +279,20 @@ func (r *TokenRepository) RotateRefreshToken(
 		if createErr := transaction.Create(newRefresh).Error; createErr != nil {
 			return fmt.Errorf("create rotated refresh token: %w", createErr)
 		}
+		if audit != nil {
+			if createErr := transaction.Create(audit).Error; createErr != nil {
+				return fmt.Errorf("create refresh audit: %w", createErr)
+			}
+		}
 		return nil
 	})
 	if transactionErr != nil {
-		return transactionErr
+		return time.Time{}, transactionErr
 	}
 	if replayDetected {
-		return ErrTokenReplay
+		return time.Time{}, ErrTokenReplay
 	}
-	return nil
-}
-
-func (r *TokenRepository) findRefreshTokenFamilyID(ctx context.Context, tokenHash string) (string, error) {
-	var refresh model.OAuthRefreshToken
-	err := r.database.WithContext(ctx).Select("family_id").Where("token_hash = ?", tokenHash).First(&refresh).Error
-	if err == nil {
-		return refresh.FamilyID, nil
-	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", ErrNotFound
-	}
-	return "", fmt.Errorf("find refresh token family: %w", err)
+	return originCreatedAt, nil
 }
 
 func findRefreshTokenForUpdate(transaction *gorm.DB, tokenHash string) (*model.OAuthRefreshToken, error) {
@@ -256,6 +357,13 @@ func tokenFamilyHasRevokedAccess(transaction *gorm.DB, familyID string) (bool, e
 }
 
 func validateTokenFamilyAppend(transaction *gorm.DB, refresh *model.OAuthRefreshToken) error {
+	// Every current caller (login, registration, the authorization-code grant)
+	// appends to a brand-new family, so scanning the family below would be a
+	// guaranteed-empty query on every token issue. Sequence 0 is exactly that
+	// shape, so it short-circuits; any non-zero sequence goes through the scan.
+	if refresh.Sequence == 0 {
+		return nil
+	}
 	var existing []model.OAuthRefreshToken
 	if err := transaction.
 		Where("family_id = ?", refresh.FamilyID).
@@ -264,10 +372,7 @@ func validateTokenFamilyAppend(transaction *gorm.DB, refresh *model.OAuthRefresh
 		return fmt.Errorf("read refresh token family: %w", err)
 	}
 	if len(existing) == 0 {
-		if refresh.Sequence != 0 {
-			return fmt.Errorf("%w: initial refresh sequence = %d, want 0", ErrInvalidArgument, refresh.Sequence)
-		}
-		return nil
+		return fmt.Errorf("%w: initial refresh sequence = %d, want 0", ErrInvalidArgument, refresh.Sequence)
 	}
 
 	latest := existing[len(existing)-1]
@@ -330,35 +435,6 @@ func (r *TokenRepository) FindRefreshToken(
 		return nil, ErrNotFound
 	}
 	return nil, fmt.Errorf("find refresh token: %w", err)
-}
-
-// FindFamilyOriginCreatedAt returns the creation time of a family's first refresh
-// token, which is the instant the user authorized this family.
-//
-// It reads the lowest sequence rather than min(created_at): sequence is the
-// family's monotonic ordering and is uniquely constrained with family_id, so it
-// identifies the origin row exactly, whereas two rows could in principle share a
-// timestamp. This is what lets the ID Token's auth_time survive rotation — the
-// rotated row's own created_at is the rotation instant, not an authentication.
-func (r *TokenRepository) FindFamilyOriginCreatedAt(
-	ctx context.Context,
-	familyID string,
-) (time.Time, error) {
-	if strings.TrimSpace(familyID) == "" {
-		return time.Time{}, fmt.Errorf("find token family origin: %w", ErrInvalidArgument)
-	}
-	var origin model.OAuthRefreshToken
-	err := r.database.WithContext(ctx).
-		Where("family_id = ?", familyID).
-		Order("sequence ASC").
-		First(&origin).Error
-	if err == nil {
-		return origin.CreatedAt, nil
-	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return time.Time{}, ErrNotFound
-	}
-	return time.Time{}, fmt.Errorf("find token family origin: %w", err)
 }
 
 // FindAccessAuthStateByJTI reads the DB-authoritative state for one access JTI,
@@ -443,8 +519,8 @@ func revokeFamilyInTransaction(transaction *gorm.DB, familyID string, revokedAt 
 }
 
 // enqueueBlacklistInTransaction writes the durable outbox rows for revoked access
-// tokens. Every revocation path funnels through here so the blacklist fast-reject
-// path cannot be forgotten for one of them; the rows are written in the revoking
+// tokens. Every revocation path funnels through here so the durable revocation
+// delivery cannot be forgotten for one of them; the rows are written in the revoking
 // transaction, which is what lets a later Redis delivery failure be harmless.
 func enqueueBlacklistInTransaction(
 	transaction *gorm.DB,
@@ -503,7 +579,7 @@ func revokeAllByClientInTransaction(
 }
 
 // RevokeAllByUser revokes every non-revoked access and refresh token owned by
-// userID and enqueues the still-live access-token JTIs for blacklist delivery.
+// userID and enqueues the still-live access-token JTIs for revocation delivery.
 // Password change/reset must instead use UserRepository.UpdatePasswordAndRevokeSessions,
 // which performs the same revocation in the transaction that rewrites the password.
 func (r *TokenRepository) RevokeAllByUser(
@@ -528,7 +604,7 @@ func (r *TokenRepository) RevokeAllByUser(
 
 // revokeAllByUserInTransaction revokes every live token of userID inside an
 // existing transaction and returns the access-token entries that still need
-// blacklist delivery. Callers own the transaction so the revocation can be made
+// revocation delivery. Callers own the transaction so the revocation can be made
 // atomic with whatever change triggered it.
 func revokeAllByUserInTransaction(
 	transaction *gorm.DB,

@@ -258,11 +258,35 @@ func (s Service) audit(ctx context.Context, userID *int64, action, resource stri
 	if s.Audit == nil {
 		return nil
 	}
+	entry, err := buildAuditLog(s.now(), userID, action, resource, resourceID, success, errCode, clientIP, userAgent, detail)
+	if err != nil {
+		return err
+	}
+	// The audit survives the caller disconnecting: the action already committed,
+	// so the row must be written regardless of what the request does afterwards.
+	// Every other service's audit uses the same detached-context shape.
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	return s.Audit.Create(auditCtx, entry)
+}
+
+// buildAuditLog materialises the shared audit fields (including the JSON detail)
+// once, so the synchronous s.audit path and the outbox-enqueue path cannot drift.
+func buildAuditLog(
+	now time.Time,
+	userID *int64,
+	action, resource string,
+	resourceID *string,
+	success bool,
+	errCode int,
+	clientIP, userAgent string,
+	detail map[string]any,
+) (*model.AuditLog, error) {
 	var detailValue model.JSONB
 	if detail != nil {
 		encoded, err := json.Marshal(detail)
 		if err != nil {
-			return fmt.Errorf("marshal audit detail: %w", err)
+			return nil, fmt.Errorf("marshal audit detail: %w", err)
 		}
 		detailValue = model.JSONB(encoded)
 	}
@@ -279,7 +303,7 @@ func (s Service) audit(ctx context.Context, userID *int64, action, resource stri
 		userAgentPtr = &userAgent
 	}
 	successPtr := success
-	return s.Audit.Create(ctx, &model.AuditLog{
+	return &model.AuditLog{
 		UserID:     userID,
 		Action:     action,
 		Resource:   resource,
@@ -289,6 +313,22 @@ func (s Service) audit(ctx context.Context, userID *int64, action, resource stri
 		UserAgent:  userAgentPtr,
 		Success:    &successPtr,
 		ErrCode:    errCodePtr,
-		CreatedAt:  s.now(),
-	})
+		CreatedAt:  now,
+	}, nil
+}
+
+// buildAuditEntry materialises the shared audit fields for the paths that write
+// their audit inside the token transaction (login, refresh success). The same
+// buildAuditLog helper backs the synchronous s.audit path, so the two cannot
+// drift.
+func (s Service) buildAuditEntry(
+	userID *int64,
+	action, resource string,
+	resourceID *string,
+	success bool,
+	errCode int,
+	clientIP, userAgent string,
+	detail map[string]any,
+) (*model.AuditLog, error) {
+	return buildAuditLog(s.now(), userID, action, resource, resourceID, success, errCode, clientIP, userAgent, detail)
 }

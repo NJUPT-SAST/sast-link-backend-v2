@@ -68,20 +68,15 @@ func TestLoginFailureStoreLockLifecycle(t *testing.T) {
 	}
 }
 
-func TestBlacklistStoreRoundTrip(t *testing.T) {
+func TestBlacklistStoreDeleteAuthStates(t *testing.T) {
 	blacklist := BlacklistStore{Store: newTestStore(t)}
 	ctx := context.Background()
 
-	if err := blacklist.BlacklistJTI(ctx, "jti-42", time.Hour); err != nil {
-		t.Fatalf("blacklist JTI: %v", err)
-	}
-	listed, err := blacklist.IsJTIBlacklisted(ctx, "jti-42")
-	if err != nil || !listed {
-		t.Fatalf("IsJTIBlacklisted=%v err=%v, want blacklisted", listed, err)
-	}
-	listed, err = blacklist.IsJTIBlacklisted(ctx, "jti-unknown")
-	if err != nil || listed {
-		t.Fatalf("unknown JTI blacklisted=%v err=%v, want not blacklisted", listed, err)
+	// DeleteAuthStates is the revocation delivery: it removes cached auth-state
+	// entries. Deleting keys that do not exist is a no-op, not an error; the
+	// put/delete semantics live in the redis store integration tests.
+	if err := blacklist.DeleteAuthStates(ctx, []string{"jti-42", "jti-43"}); err != nil {
+		t.Fatalf("DeleteAuthStates: %v", err)
 	}
 }
 

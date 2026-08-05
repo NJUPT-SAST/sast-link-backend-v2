@@ -14,7 +14,14 @@ import (
 	"gorm.io/gorm"
 )
 
-const serverShutdownTimeout = 10 * time.Second
+const (
+	serverShutdownTimeout = 10 * time.Second
+	// ServerWriteTimeout bounds a single response. It is exported so the
+	// auth-state cache tombstone TTL can be sized to outlive any in-flight
+	// request, preventing a slow request's stale PUT from re-seeding a revoked
+	// token after the tombstone expires.
+	ServerWriteTimeout = 10 * time.Second
+)
 
 type backgroundWorker interface {
 	Run(ctx context.Context) error
@@ -30,6 +37,16 @@ var newHTTPServer = func(address string, handler http.Handler) httpServer {
 		Addr:              address,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout bounds reading the request body: without it a slow body
+		// (e.g. an avatar upload trickling in) can hold a connection open
+		// indefinitely even though the header arrived on time.
+		ReadTimeout: 30 * time.Second,
+		// WriteTimeout bounds a single response. The password-hash semaphore
+		// queues requests during an auth storm; without this bound the queue
+		// grows without backpressure and connections pile up. 10s is a generous
+		// ceiling for any legitimate response on a 1-core box.
+		WriteTimeout: ServerWriteTimeout,
+		IdleTimeout:  60 * time.Second,
 	}
 }
 

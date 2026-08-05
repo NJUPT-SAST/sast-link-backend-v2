@@ -35,7 +35,7 @@ func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error)
 		return nil, err
 	}
 
-	user, err := s.Users.FindByID(ctx, input.UserID)
+	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, newError(ErrUserNotFound, "用户不存在", err)

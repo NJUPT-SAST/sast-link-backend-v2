@@ -38,10 +38,10 @@ type LoginFailureStore interface {
 }
 
 type TokenBlacklist interface {
-	BlacklistJTI(ctx context.Context, jti string, ttl time.Duration) error
-	// BlacklistJTIBatch delivers a revoked session set in one round trip.
-	// Implementations must tolerate an empty map as a no-op.
-	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
+	// DeleteAuthStates removes the auth-state cache entries for a revoked session
+	// set in one round trip. The middleware serves auth state from the cache, so
+	// deleting the entry is what makes a revoked token unusable immediately.
+	DeleteAuthStates(ctx context.Context, jtis []string) error
 }
 
 // DeviceRecord is one logged-in device of a user, as derived from Redis device
@@ -87,9 +87,20 @@ type DeviceStore interface {
 }
 
 type UserRepository interface {
-	FindByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error)
+	// FindAuthUserByLoginIdentifier is the lean login lookup: matches the
+	// login-email or an other-mail identity, without the Profile/Identities
+	// preloads, which the login response never serializes.
+	FindAuthUserByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error)
 	FindByID(ctx context.Context, userID int64) (*model.User, error)
-	FindByLoginEmail(ctx context.Context, email string) (*model.User, error)
+	// FindProfileByID loads a user for a profile response in two queries
+	// (user+profile JOIN + lean identities), skipping the provider credentials the
+	// response never serializes.
+	FindProfileByID(ctx context.Context, userID int64) (*model.User, error)
+	// FindAuthUserByID / FindAuthUserByLoginEmail return the scalar columns
+	// without the Profile/Identities preloads, for auth paths that only need
+	// id, state, password or claims fields.
+	FindAuthUserByID(ctx context.Context, userID int64) (*model.User, error)
+	FindAuthUserByLoginEmail(ctx context.Context, email string) (*model.User, error)
 	ExistsByLoginEmail(ctx context.Context, email string) (bool, error)
 	ExistsByStudentID(ctx context.Context, studentID string) (bool, error)
 	// ExistsAsEmailAnywhere reports whether the email is used as either a login
@@ -103,8 +114,15 @@ type UserRepository interface {
 	CreateRegistrationWithIdentity(ctx context.Context, user *model.User, profile *model.Profile, identity *model.Identity, pairFactory repository.TokenPairFactory) error
 	// UpdatePasswordAndRevokeSessions rewrites the password, bumps token_version
 	// and revokes every live token of the user atomically, returning the
-	// access-token entries still pending blacklist delivery.
+	// access-token entries still pending revocation delivery.
 	UpdatePasswordAndRevokeSessions(ctx context.Context, userID int64, passwordHash string, revokedAt time.Time) ([]model.BlacklistEntry, error)
+	// UpdatePasswordHash rewrites only the stored hash, for rehash-on-login after a
+	// KDF parameter change. It deliberately does not revoke sessions or bump
+	// token_version; password *changes* must use UpdatePasswordAndRevokeSessions.
+	// The write is guarded on currentHash (the hash the login verified), so a
+	// concurrent password change/reset wins and the rehash is skipped
+	// (repository.ErrRehashSkipped) rather than reverting the credential.
+	UpdatePasswordHash(ctx context.Context, userID int64, currentHash, passwordHash string) error
 	// UpdateProfile applies a partial self-service field update across "user" and
 	// profile in one transaction and returns the reloaded aggregate.
 	UpdateProfile(ctx context.Context, userID int64, update repository.ProfileUpdate) (*model.User, error)
@@ -115,11 +133,24 @@ type UserRepository interface {
 
 type ClientRepository interface {
 	FindActiveByClientID(ctx context.Context, clientID string) (*model.OAuthClient, error)
+	// FindActiveInternalClient resolves the immutable built-in client, served
+	// from a process-local cache; only call it for the internal client ID.
+	FindActiveInternalClient(ctx context.Context, clientID string) (*model.OAuthClient, error)
 }
 
 type TokenRepository interface {
 	CreatePair(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
-	RotateRefreshToken(ctx context.Context, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
+	// CreatePairWithAudit is CreatePair with the login's audit row written into
+	// audit_logs in the same transaction (nil audit disables it). The session and
+	// its audit then commit atomically on one fsync.
+	CreatePairWithAudit(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
+	// RotateRefreshToken rotates currentRefreshTokenHash inside familyID and
+	// returns the family origin's created_at; this service ignores it.
+	RotateRefreshToken(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) (time.Time, error)
+	// RotateRefreshTokenWithAudit is RotateRefreshToken with the refresh's audit
+	// row written into audit_logs in the same transaction (nil audit disables it),
+	// so the rotation and its audit commit atomically on one fsync.
+	RotateRefreshTokenWithAudit(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) (time.Time, error)
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
@@ -214,6 +245,11 @@ type IdentityRepository interface {
 	// DeleteByIDAndUser removes an owned identity, reporting
 	// repository.ErrNotFound when nothing matched.
 	DeleteByIDAndUser(ctx context.Context, identityID, userID int64) error
+	// DeleteIdentityGuardingLoginMethod removes an owned identity unless it is
+	// the account's last login method, decided atomically in the repository
+	// under a lock on the user row. Reports repository.ErrLastLoginMethod when
+	// the delete would leave the account unable to sign in.
+	DeleteIdentityGuardingLoginMethod(ctx context.Context, identityID, userID int64) error
 }
 
 type Mailer interface {

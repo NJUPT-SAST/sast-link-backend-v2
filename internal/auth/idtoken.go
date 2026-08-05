@@ -28,7 +28,6 @@ type IDTokenClaims struct {
 	Name              string `json:"name,omitempty"`
 	Picture           string `json:"picture,omitempty"`
 	PreferredUsername string `json:"preferred_username,omitempty"`
-	Profile           string `json:"profile,omitempty"`
 	UpdatedAt         int64  `json:"updated_at,omitempty"`
 
 	// email scope. EmailVerified is a pointer so it can be omitted entirely
@@ -46,7 +45,6 @@ type IDTokenSubjectClaims struct {
 	Name              string
 	Picture           string
 	PreferredUsername string
-	Profile           string
 	UpdatedAt         time.Time
 	Email             string
 }
@@ -69,7 +67,7 @@ type IDTokenInput struct {
 	Claims IDTokenSubjectClaims
 }
 
-// SignIDToken signs an OIDC ID Token with the active RSA key.
+// SignIDToken signs an OIDC ID Token with the active EdDSA key.
 //
 // This is deliberately a separate path from SignAccessToken rather than a shared
 // signer with a switch. The two tokens disagree on their most security-relevant
@@ -106,7 +104,7 @@ func (m JWTManager) SignIDToken(input IDTokenInput) (string, error) {
 	}
 	applyIDTokenScopeClaims(&claims, granted, input.Claims)
 
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
 	token.Header["kid"] = m.Active.KID
 	signed, err := token.SignedString(m.Active.Private)
 	if err != nil {
@@ -125,7 +123,6 @@ func applyIDTokenScopeClaims(claims *IDTokenClaims, granted []string, subject ID
 			claims.Name = subject.Name
 			claims.Picture = subject.Picture
 			claims.PreferredUsername = subject.PreferredUsername
-			claims.Profile = subject.Profile
 			if !subject.UpdatedAt.IsZero() {
 				claims.UpdatedAt = subject.UpdatedAt.UTC().Unix()
 			}

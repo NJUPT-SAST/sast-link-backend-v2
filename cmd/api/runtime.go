@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -72,7 +73,14 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	identities := repository.NewIdentity(database)
 
 	keys := internalredis.NewKeys(cfg.RedisKeyPrefix)
-	store := internalredis.Store{Client: rdb, Keys: keys}
+	// The tombstone must outlive the longest in-flight request. Size it from
+	// the server WriteTimeout plus a small margin so a configuration change to
+	// either value cannot silently reopen the stale-refill race window.
+	store := internalredis.Store{
+		Client:                rdb,
+		Keys:                  keys,
+		AuthStateTombstoneTTL: ServerWriteTimeout + 5*time.Second,
+	}
 	blacklist := sessionredis.BlacklistStore{Store: store}
 	limiter := sessionredis.EndpointLimiter{
 		Limiter: internalredis.FixedWindowLimiter{
@@ -125,6 +133,14 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Keys:   keys,
 			Limit:  cfg.RateLimitCardRPM,
 			Window: cfg.RateLimitCardWindow,
+		},
+	}
+	refreshLimiter := sessionredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitRefreshRPM,
+			Window: cfg.RateLimitRefreshWindow,
 		},
 	}
 	avatarLimiter := sessionredis.EndpointLimiter{
@@ -198,6 +214,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		RegisterLimiter:   registerLimiter,
 		CardLimiter:       cardLimiter,
 		AvatarLimiter:     avatarLimiter,
+		RefreshLimiter:    refreshLimiter,
 		AvatarStore:       avatarStore,
 		AvatarAuditor:     avatarAuditor,
 		Devices:           sessionredis.DeviceStore{Store: store},
@@ -206,14 +223,23 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		InternalClientID:  cfg.InternalOAuthClientID,
 		JWT:               jwtManager,
 		RefreshTokens:     refreshManager,
-		Passwords:         auth.PasswordHasher{Semaphore: make(chan struct{}, cfg.PasswordHashMaxConcurrent)},
-		AccessTTL:         cfg.JWTAccessTokenExpiry,
-		RefreshTTL:        cfg.JWTRefreshTokenExpiry,
+		Passwords: auth.PasswordHasher{
+			Semaphore:     make(chan struct{}, cfg.Argon2Concurrency),
+			Argon2Time:    cfg.Argon2Time,
+			Argon2Memory:  cfg.Argon2Memory,
+			Argon2Threads: cfg.Argon2Threads,
+		},
+		AccessTTL:  cfg.JWTAccessTokenExpiry,
+		RefreshTTL: cfg.JWTRefreshTokenExpiry,
 	}
 	authenticator := middleware.Authenticator{
-		JWT:       jwtManager,
-		Blacklist: blacklist,
-		Tokens:    tokens,
+		JWT: jwtManager,
+		// The auth-state cache replaces the old per-request blacklist GET + DB query:
+		// authenticated requests serve their revocation/role state from Redis for a
+		// short TTL, and the revocation paths delete the entry. Fail-open to the DB.
+		Tokens:         tokens,
+		AuthStateCache: store,
+		AuthStateTTL:   cfg.AuthStateCacheTTL,
 		// Pins the internal API to the built-in client, so a third-party OAuth access
 		// token cannot be used as a session credential.
 		InternalClientID: cfg.InternalOAuthClientID,
@@ -252,7 +278,6 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		RefreshTTL:       cfg.JWTRefreshTokenExpiry,
 		CodeTTL:          cfg.OAuthCodeTTL,
 		RequestTTL:       cfg.OAuthAuthorizeRequestTTL,
-		CardBaseURL:      cfg.OAuthCardBaseURL,
 		// The discovery document's issuer must equal the iss claim of every issued
 		// token, so both read the same setting.
 		Issuer: cfg.JWTIssuer,
@@ -369,7 +394,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		},
 		Auth: authenticator,
 		Workers: []backgroundWorker{
-			sessionworker.TokenBlacklist{Outbox: outbox, Blacklist: blacklist},
+			sessionworker.TokenBlacklist{Outbox: outbox, AuthState: blacklist},
 			forgotPasswords,
 			worker.Retention{
 				Store:            repository.NewRetention(database),

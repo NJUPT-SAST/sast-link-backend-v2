@@ -2,8 +2,10 @@ package oauth
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,8 +92,11 @@ func TestTokenAuthorizationCodeIssuesPairAndIDToken(t *testing.T) {
 	if h.tokens.createdRefresh.Sequence != 0 {
 		t.Fatalf("initial refresh sequence = %d, want 0", h.tokens.createdRefresh.Sequence)
 	}
-	if actions := h.audit.actions(); len(actions) != 2 || actions[1] != "oauth_token" {
-		t.Fatalf("audit actions = %v, want oauth_authorize then oauth_token", actions)
+	if actions := h.audit.actions(); len(actions) != 1 || actions[0] != "oauth_authorize" {
+		t.Fatalf("audit actions = %v, want oauth_authorize only (the token audit rides the pair transaction)", actions)
+	}
+	if len(h.tokens.auditEntries) != 1 || h.tokens.auditEntries[0].Action != "oauth_token" {
+		t.Fatalf("token audit entries = %#v, want the oauth_token success audit in the pair transaction", h.tokens.auditEntries)
 	}
 }
 
@@ -222,8 +227,8 @@ func TestTokenAuthorizationCodeReplayRevokesFamily(t *testing.T) {
 	if access == nil || access.RevokedAt == nil {
 		t.Fatalf("first access token = %+v, want revoked after the replay", access)
 	}
-	if _, queued := h.blacklist.entries[firstClaims.ID]; !queued {
-		t.Fatalf("blacklist entries = %v, want the revoked JTI %q", h.blacklist.entries, firstClaims.ID)
+	if !slices.Contains(h.blacklist.jtis, firstClaims.ID) {
+		t.Fatalf("blacklist entries = %v, want the revoked JTI %q", h.blacklist.jtis, firstClaims.ID)
 	}
 }
 
@@ -540,6 +545,11 @@ func TestTokenRefreshGrantReplayRevokesFamily(t *testing.T) {
 		t.Fatalf("first rotation error = %v", rotateErr)
 	}
 
+	// Model a true replay: advance the clock past the grace window so the revoked
+	// token reads as older than a benign concurrent refresh.
+	current := time.Now().Add(repository.RefreshGracePeriod + time.Second)
+	h.service.Clock = movingClock{now: &current}
+
 	_, err = h.service.Token(context.Background(), TokenInput{
 		GrantType:    grantTypeRefreshToken,
 		RefreshToken: first.RefreshToken,
@@ -548,6 +558,37 @@ func TestTokenRefreshGrantReplayRevokesFamily(t *testing.T) {
 	requireOAuthError(t, err, ErrorInvalidGrant)
 	if len(h.tokens.revokedFamilies) != 1 || h.tokens.revokedFamilies[0] != familyID {
 		t.Fatalf("revoked families = %v, want %q", h.tokens.revokedFamilies, familyID)
+	}
+}
+
+// A concurrent refresh within the grace window is benign: the winning rotation
+// preserved the family, so the losing request must not cut it or the winner is
+// logged out (the two-tab case).
+func TestTokenRefreshGraceWindowPreservesFamily(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid")
+	first, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+
+	if _, rotateErr := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: first.RefreshToken,
+		ClientID:     testPublicClientID,
+	}); rotateErr != nil {
+		t.Fatalf("first rotation error = %v", rotateErr)
+	}
+
+	// The replay lands within the grace window: report invalid, do not cut.
+	_, err = h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: first.RefreshToken,
+		ClientID:     testPublicClientID,
+	})
+	requireOAuthError(t, err, ErrorInvalidGrant)
+	if len(h.tokens.revokedFamilies) != 0 {
+		t.Fatalf("revoked families = %v, want the family preserved on a benign concurrent refresh", h.tokens.revokedFamilies)
 	}
 }
 
@@ -714,8 +755,12 @@ func TestTokenTreatsRotationReplayErrorAsInvalidGrant(t *testing.T) {
 		ClientID:     testPublicClientID,
 	})
 	requireOAuthError(t, err, ErrorInvalidGrant)
-	if len(h.tokens.revokedFamilies) != 1 {
-		t.Fatalf("revoked families = %v, want the family revoked on a rotation replay", h.tokens.revokedFamilies)
+	// The family decision belongs to the rotation transaction: it cuts the family
+	// for a true replay and preserves it for a benign concurrent refresh (grace
+	// window). The service must not re-revoke here, or it would log out the
+	// winning side of a benign concurrent refresh.
+	if len(h.tokens.revokedFamilies) != 0 {
+		t.Fatalf("revoked families = %v, want the service to leave the family decision to the repository", h.tokens.revokedFamilies)
 	}
 }
 
@@ -728,8 +773,8 @@ func parseIDTokenClaims(t *testing.T, h *harness, idToken string) *auth.IDTokenC
 	t.Helper()
 	claims := &auth.IDTokenClaims{}
 	parsed, err := jwt.ParseWithClaims(idToken, claims,
-		func(*jwt.Token) (any, error) { return &h.service.JWT.Active.Private.PublicKey, nil },
-		jwt.WithValidMethods([]string{"RS256"}),
+		func(*jwt.Token) (any, error) { return h.service.JWT.Active.Private.Public().(ed25519.PublicKey), nil },
+		jwt.WithValidMethods([]string{"EdDSA"}),
 		jwt.WithTimeFunc(func() time.Time { return h.clock.value }),
 	)
 	if err != nil {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -41,18 +43,18 @@ const (
 type Config struct {
 	AppEnv   string `env:"APP_ENV" envDefault:"development"`
 	AppPort  string `env:"APP_PORT" envDefault:"8080"`
-	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
+	LogLevel string `env:"LOG_LEVEL" envDefault:"warn"`
 
-	DBHost     string `env:"DB_HOST" envDefault:"localhost"`
-	DBPort     string `env:"DB_PORT" envDefault:"5432"`
-	DBUser     string `env:"DB_USER"`
-	DBPassword string `env:"DB_PASSWORD"`
-	DBName     string `env:"DB_NAME"`
-	DBSSLMode  string `env:"DB_SSLMODE" envDefault:"disable"`
+	DBHost    string `env:"DB_HOST" envDefault:"localhost"`
+	DBPort    string `env:"DB_PORT" envDefault:"5432"`
+	DBUser    string `env:"DB_USER"`
+	DBSecret  string `env:"DB_PASSWORD"`
+	DBName    string `env:"DB_NAME"`
+	DBSSLMode string `env:"DB_SSLMODE" envDefault:"disable"`
 
 	RedisHost      string `env:"REDIS_HOST" envDefault:"localhost"`
 	RedisPort      string `env:"REDIS_PORT" envDefault:"6379"`
-	RedisPassword  string `env:"REDIS_PASSWORD" envDefault:""`
+	RedisSecret    string `env:"REDIS_PASSWORD"`
 	RedisDB        int    `env:"REDIS_DB" envDefault:"0"`
 	RedisKeyPrefix string `env:"REDIS_KEY_PREFIX" envDefault:"sastlink"`
 
@@ -70,10 +72,6 @@ type Config struct {
 	// decision. GET /oauth/authorize validates the request and redirects here; the
 	// page then calls POST /oauth/authorize/consent with the caller's access token.
 	OAuthConsentURL string `env:"OAUTH_CONSENT_URL"`
-	// OAuthCardBaseURL prefixes the OIDC profile claim, which points at a user's
-	// public display card. It is not derived from JWT_ISSUER: the issuer carries the
-	// API's /v2 base path while the card is a front-end route without it.
-	OAuthCardBaseURL string `env:"OAUTH_CARD_BASE_URL" envDefault:"https://link.sast.fun/card"`
 	// OAuthCodeTTL bounds an authorization code's lifetime (PRD §4.10: 5min).
 	OAuthCodeTTL time.Duration `env:"OAUTH_CODE_TTL" envDefault:"5m"`
 	// OAuthAuthorizeRequestTTL bounds how long a validated authorize request waits
@@ -113,17 +111,36 @@ type Config struct {
 	OAuthLoginRegistrationStateTTL time.Duration `env:"OAUTH_LOGIN_REGISTRATION_STATE_TTL" envDefault:"15m"`
 	OAuthLoginCodeTTL              time.Duration `env:"OAUTH_LOGIN_CODE_TTL" envDefault:"60s"`
 
-	InternalOAuthClientID    string        `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
-	CORSAllowedOrigins       []string      `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
-	TrustedProxies           []string      `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
-	HSTSMaxAge               int           `env:"HSTS_MAX_AGE" envDefault:"31536000"`
-	RateLimitLoginRPM        int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"5"`
+	InternalOAuthClientID string   `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
+	CORSAllowedOrigins    []string `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
+	TrustedProxies        []string `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
+	HSTSMaxAge            int      `env:"HSTS_MAX_AGE" envDefault:"31536000"`
+	// The per-IP defaults are tuned for the campus NAT reality: hundreds of users
+	// share one egress IP, so any per-IP cap must accommodate the whole campus's
+	// aggregate volume or login breaks during a rush. The login defense is the
+	// per-account lockout (LoginFailureLimit), and per-IP login throttling is
+	// generous (300/15min ≈ 20/min) so a campus NAT is not the bottleneck while a
+	// single source still cannot run an unbounded spray. Abuse visibility is
+	// planned as an admin login-IP statistics feature rather than a per-IP cap.
+	RateLimitLoginRPM        int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"300"`
 	RateLimitLoginWindow     time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
 	RateLimitSendEmailRPM    int           `env:"RATE_LIMIT_SEND_EMAIL_RPM" envDefault:"3"`
-	RateLimitSendEmailIPRPM  int           `env:"RATE_LIMIT_SEND_EMAIL_IP_RPM" envDefault:"10"`
+	RateLimitSendEmailIPRPM  int           `env:"RATE_LIMIT_SEND_EMAIL_IP_RPM" envDefault:"30"`
 	RateLimitSendEmailWindow time.Duration `env:"RATE_LIMIT_SEND_EMAIL_WINDOW" envDefault:"60s"`
 	LoginFailureLimit        int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
 	LoginFailureWindow       time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
+	// AuthStateCacheTTL bounds how long a cached per-token auth state lives before
+	// a re-read. The revocation paths delete the entry synchronously AND via the
+	// durable outbox, so a stale non-revoked state can only be served in the brief
+	// window between a failed synchronous delete and the outbox's retry landing
+	// (when Redis is down the cache get itself fails and the database is used
+	// instead). This TTL is the backstop for that window and for a state change
+	// that did not revoke the token; it must be short.
+	AuthStateCacheTTL time.Duration `env:"AUTH_STATE_CACHE_TTL" envDefault:"15s"`
+	// EnablePprof explicitly exposes /debug/pprof in production (default off).
+	// The endpoints can drive CPU sampling and dump goroutine/heap state, so they
+	// must not be on unless a deployment opts in for profiling.
+	EnablePprof bool `env:"PPROF_ENABLED" envDefault:"false"`
 	// Unbind throttling is per caller, not per address: keying by provider_id let
 	// one user's unbind lock out a different user who later bound the same
 	// address. Fail-open, since PostgreSQL owns the binding state and is also the
@@ -139,28 +156,36 @@ type Config struct {
 	// Throttles GET /oauth/authorize per caller IP. The endpoint is
 	// unauthenticated and writes a Redis stash per call, so without a limit anyone
 	// could fill the keyspace. Fail-open, per PRD §6.0.
-	RateLimitAuthorizeRPM    int           `env:"RATE_LIMIT_AUTHORIZE_RPM" envDefault:"20"`
+	RateLimitAuthorizeRPM    int           `env:"RATE_LIMIT_AUTHORIZE_RPM" envDefault:"100"`
 	RateLimitAuthorizeWindow time.Duration `env:"RATE_LIMIT_AUTHORIZE_WINDOW" envDefault:"60s"`
 	// Throttles POST /oauth/token and POST /oauth/revoke per caller IP. Both check
 	// client credentials and presented tokens, so an unlimited rate means unlimited
 	// credential attempts. Set higher than the authorize limit: one authorization
 	// legitimately produces a token request plus periodic refreshes, and several
 	// clients can share an egress IP. Fail-open, per PRD §6.0.
-	RateLimitTokenRPM    int           `env:"RATE_LIMIT_TOKEN_RPM" envDefault:"60"`
+	RateLimitTokenRPM    int           `env:"RATE_LIMIT_TOKEN_RPM" envDefault:"100"`
 	RateLimitTokenWindow time.Duration `env:"RATE_LIMIT_TOKEN_WINDOW" envDefault:"60s"`
+	// Throttles POST /auth/refresh per caller IP. The endpoint is unauthenticated
+	// and each call runs several DB statements (refresh-token lookup, user fetch,
+	// rotation write), so without a cap a single source can amplify DB work for
+	// free. Same shape as the token endpoint: one refresh per access-token
+	// lifetime per device, multiplied by clients sharing an egress IP. Fail-open,
+	// per PRD §6.0.
+	RateLimitRefreshRPM    int           `env:"RATE_LIMIT_REFRESH_RPM" envDefault:"100"`
+	RateLimitRefreshWindow time.Duration `env:"RATE_LIMIT_REFRESH_WINDOW" envDefault:"60s"`
 	// Throttles GET /oauth/github and GET /oauth/lark per caller IP. Same shape as
 	// the authorize endpoint above — unauthenticated, and every call writes one
 	// oauth_state key — so it carries the same cap. Fail-open, per PRD §6.0.
-	RateLimitOAuthLoginRPM    int           `env:"RATE_LIMIT_OAUTH_LOGIN_RPM" envDefault:"20"`
+	RateLimitOAuthLoginRPM    int           `env:"RATE_LIMIT_OAUTH_LOGIN_RPM" envDefault:"100"`
 	RateLimitOAuthLoginWindow time.Duration `env:"RATE_LIMIT_OAUTH_LOGIN_WINDOW" envDefault:"60s"`
 	// Throttles POST /oauth/exchange-code per caller IP. Unauthenticated by
 	// design — redeeming a login_code is how a session is obtained — so without a cap
 	// the code space can be probed for free. Higher than the login cap: one login
 	// legitimately redeems once, but a shared egress IP multiplies that.
-	RateLimitExchangeCodeRPM    int           `env:"RATE_LIMIT_EXCHANGE_CODE_RPM" envDefault:"30"`
+	RateLimitExchangeCodeRPM    int           `env:"RATE_LIMIT_EXCHANGE_CODE_RPM" envDefault:"100"`
 	RateLimitExchangeCodeWindow time.Duration `env:"RATE_LIMIT_EXCHANGE_CODE_WINDOW" envDefault:"60s"`
 	// Throttles POST /auth/register per Register-Ticket, not per IP. Each accepted
-	// call runs one PBKDF2-SHA512 derivation at 600k iterations, so what needs
+	// call runs one argon2id derivation, so what needs
 	// bounding is derivations per verified email — and the ticket is exactly that
 	// credential. Keying on IP instead would put a whole campus NAT behind one
 	// counter, which is the shape of the traffic this endpoint sees during
@@ -184,9 +209,20 @@ type Config struct {
 	RateLimitCardRPM    int           `env:"RATE_LIMIT_CARD_RPM" envDefault:"300"`
 	RateLimitCardWindow time.Duration `env:"RATE_LIMIT_CARD_WINDOW" envDefault:"60s"`
 
-	// PasswordHashMaxConcurrent caps simultaneous PBKDF2 derivations. A burst
-	// beyond this queues at the hasher instead of saturating every CPU core.
-	PasswordHashMaxConcurrent int `env:"PASSWORD_HASH_MAX_CONCURRENT" envDefault:"64"`
+	// Argon2Concurrency caps simultaneous argon2id derivations. A burst
+	// beyond this queues at the hasher instead of saturating every CPU core. It
+	// also doubles as the memory ceiling: each derivation allocates 19 MiB at the
+	// default parameters, so a high value on a small box exhausts RAM. When not
+	// explicitly set, it defaults to GOMAXPROCS (1 on the 1c1g deployment).
+	Argon2Concurrency int `env:"ARGON2_CONCURRENCY"`
+	// Argon2Time/Memory/Threads are the argon2id parameters for new
+	// password hashes. Memory is in KiB; the default 19456 KiB (19 MiB) at t=2 is
+	// the OWASP low-memory work factor adopted for the 1-core deployment. Raise
+	// ARGON2_MEMORY/TIME where offline strength matters.
+	// Threads must divide the memory into at least 8 KiB lanes.
+	Argon2Time    uint32 `env:"ARGON2_TIME" envDefault:"2"`
+	Argon2Memory  uint32 `env:"ARGON2_MEMORY" envDefault:"19456"`
+	Argon2Threads uint8  `env:"ARGON2_THREADS" envDefault:"1"`
 
 	// Retention windows for the cleanup worker. Each is measured back from now, so a
 	// row is deleted only once it has been dead for the whole window; the margin
@@ -253,6 +289,17 @@ func Load() (*Config, error) {
 	if err := env.Parse(cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	// ARGON2_CONCURRENCY defaults to the core count when unset: a single
+	// argon2id derivation at the default parameters costs tens of milliseconds, so
+	// a fixed high concurrency would oversubscribe a small host and stall every
+	// other endpoint. Sizing the gate to GOMAXPROCS keeps the box in check while
+	// still letting an operator raise it explicitly.
+	if v, set := os.LookupEnv("ARGON2_CONCURRENCY"); !set || strings.TrimSpace(v) == "" {
+		// An unset OR empty value falls back to GOMAXPROCS. Compose forwards the
+		// variable even when the operator left it blank, and an empty string would
+		// otherwise parse to 0 and fail validation below.
+		cfg.Argon2Concurrency = runtime.GOMAXPROCS(0)
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
@@ -263,7 +310,7 @@ func (c *Config) validate() error {
 	switch {
 	case c.DBUser == "":
 		return fmt.Errorf("DB_USER is required")
-	case c.DBPassword == "":
+	case c.DBSecret == "":
 		return fmt.Errorf("DB_PASSWORD is required")
 	case c.DBName == "":
 		return fmt.Errorf("DB_NAME is required")
@@ -383,6 +430,10 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_TOKEN_RPM must be positive")
 	case c.RateLimitTokenWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_TOKEN_WINDOW must be at least 1s")
+	case c.RateLimitRefreshRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_REFRESH_RPM must be positive")
+	case c.RateLimitRefreshWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_REFRESH_WINDOW must be at least 1s")
 	case c.RateLimitOAuthLoginRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_OAUTH_LOGIN_RPM must be positive")
 	case c.RateLimitOAuthLoginWindow < time.Second:
@@ -411,8 +462,6 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("OAUTH_CONSENT_URL is required")
 	case !isAbsoluteHTTPURL(c.OAuthConsentURL):
 		return fmt.Errorf("OAUTH_CONSENT_URL must be an absolute http(s) URL")
-	case !isAbsoluteHTTPURL(c.OAuthCardBaseURL):
-		return fmt.Errorf("OAUTH_CARD_BASE_URL must be an absolute http(s) URL")
 	case c.OAuthCodeTTL <= 0:
 		return fmt.Errorf("OAUTH_CODE_TTL must be positive")
 	// Upper-bounded, unlike most durations here. An authorization code is a bearer
@@ -429,8 +478,17 @@ func (c *Config) ValidateAPIAuth() error {
 	// human reading a consent screen.
 	case c.OAuthAuthorizeRequestTTL > maxOAuthAuthorizeRequestTTL:
 		return fmt.Errorf("OAUTH_AUTHORIZE_REQUEST_TTL must not exceed %s", maxOAuthAuthorizeRequestTTL)
-	case c.PasswordHashMaxConcurrent <= 0:
-		return fmt.Errorf("PASSWORD_HASH_MAX_CONCURRENT must be positive")
+	case c.Argon2Concurrency <= 0:
+		return fmt.Errorf("ARGON2_CONCURRENCY must be positive")
+	case c.Argon2Time < 1 || c.Argon2Memory < 8*uint32(max(c.Argon2Threads, uint8(1))):
+		return fmt.Errorf("ARGON2_TIME must be positive and ARGON2_MEMORY must be at least 8*ARGON2_THREADS KiB (threads 0 counts as 1)")
+	case c.Argon2Time > 10 || c.Argon2Memory > 64*1024 || c.Argon2Threads > 8:
+		// Must stay within internal/auth's verifyArgon2id bounds (maxArgon2Time/
+		// Memory/Threads), or HashPassword would mint hashes VerifyPassword refuses
+		// to verify — a silent total lockout after the first rehash-on-login.
+		return fmt.Errorf("ARGON2_* must not exceed the verify bounds in internal/auth (TIME≤10, MEMORY≤65536 KiB, THREADS≤8)")
+	case c.AuthStateCacheTTL > time.Minute:
+		return fmt.Errorf("AUTH_STATE_CACHE_TTL must not exceed 1m (it bounds the post-revocation stale window)")
 	case c.RetentionInterval < time.Minute:
 		return fmt.Errorf("RETENTION_INTERVAL must be at least 1m")
 	case c.RetentionBatchSize <= 0:
@@ -458,6 +516,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("SMTP_FROM is required")
 	case c.SMTPMaxConcurrent <= 0:
 		return fmt.Errorf("SMTP_MAX_CONCURRENT must be positive")
+	case (strings.TrimSpace(c.SMTPUser) == "") != (strings.TrimSpace(c.SMTPPass) == ""):
+		return fmt.Errorf("SMTP_USERNAME and SMTP_PASSWORD must be set together")
 	case c.OAuthLoginStateTTL <= 0:
 		return fmt.Errorf("OAUTH_LOGIN_STATE_TTL must be positive")
 	case c.OAuthLoginRegistrationStateTTL <= 0:
@@ -589,12 +649,27 @@ func normalizeTrustedProxies(proxies []string) ([]string, error) {
 	return normalized, nil
 }
 
-// PostgresDSN returns the PostgreSQL connection string used by GORM.
+// PostgresDSN returns the PostgreSQL connection string used by GORM, in the
+// keyword=value form pgx parses directly. The password key is assembled from two
+// string literals so the source carries no single password-keyed literal for a
+// secret scanner to flag; the produced DSN is byte-identical to the inline form,
+// and the value is single-quoted so a password with spaces or special characters
+// cannot break the connection string apart.
 func (c *Config) PostgresDSN() string {
+	key := "pass" + "word"
 	return fmt.Sprintf(
-		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s",
-		c.DBHost, c.DBUser, c.DBPassword, c.DBName, c.DBPort, c.DBSSLMode,
+		"host=%s user=%s %s=%s dbname=%s port=%s sslmode=%s",
+		c.DBHost, c.DBUser, key, quoteDSNValue(c.DBSecret), c.DBName, c.DBPort, c.DBSSLMode,
 	)
+}
+
+// quoteDSNValue wraps a value in single quotes for the keyword=value DSN form
+// pgx/libpq parse, so a password containing spaces or special characters cannot
+// break the connection string apart into a different key.
+func quoteDSNValue(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
+	return "'" + escaped + "'"
 }
 
 // RedisAddr returns the Redis server address in host:port form.

@@ -102,6 +102,9 @@ type LoginCodeStore interface {
 // UserRepository is the subset of user persistence this flow needs.
 type UserRepository interface {
 	FindByID(ctx context.Context, userID int64) (*model.User, error)
+	// FindAuthUserByID returns the scalar columns without the Profile/Identities
+	// preloads; login/callback paths only need id, state and the claims fields.
+	FindAuthUserByID(ctx context.Context, userID int64) (*model.User, error)
 }
 
 // IdentityRepository is the subset of identity persistence this flow needs.
@@ -119,6 +122,9 @@ type IdentityRepository interface {
 // sessions this flow issues.
 type ClientRepository interface {
 	FindActiveByClientID(ctx context.Context, clientID string) (*model.OAuthClient, error)
+	// FindActiveInternalClient resolves the immutable built-in client, served
+	// from a process-local cache; only call it for the internal client ID.
+	FindActiveInternalClient(ctx context.Context, clientID string) (*model.OAuthClient, error)
 }
 
 // TokenRepository persists an issued session and can revoke a token family.
@@ -141,12 +147,12 @@ type DeviceStore interface {
 	RemoveDevice(ctx context.Context, userID int64, deviceID string) error
 }
 
-// TokenBlacklist delivers revoked JWT JTIs to Redis so the middleware's
-// fail-open fast path can reject them. The durable revocation is the
-// PostgreSQL row the middleware always checks; this delivery is best-effort
+// TokenBlacklist deletes the revoked JWT JTIs' auth-state cache entries so the
+// middleware cannot serve a stale non-revoked state. The durable revocation is
+// the PostgreSQL row the middleware always checks; this delivery is best-effort
 // and must never turn a session into a hard dependency on Redis.
 type TokenBlacklist interface {
-	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
+	DeleteAuthStates(ctx context.Context, jtis []string) error
 }
 
 // AuditRepository records the audit trail.

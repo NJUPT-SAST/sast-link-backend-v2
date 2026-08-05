@@ -64,7 +64,7 @@ func TestDiscoveryAdvertisesOnlySupportedCapabilities(t *testing.T) {
 	assertStrings("scopes_supported", []string{"openid", "profile", "email"})
 	assertStrings("response_types_supported", []string{"code"})
 	assertStrings("grant_types_supported", []string{"authorization_code", "refresh_token"})
-	assertStrings("id_token_signing_alg_values_supported", []string{"RS256"})
+	assertStrings("id_token_signing_alg_values_supported", []string{"EdDSA"})
 	// S256-only, matching the V002 database constraint and the protocol layer.
 	assertStrings("code_challenge_methods_supported", []string{"S256"})
 	// "none" is for public clients authenticating by PKCE; there is no Basic support.
@@ -89,7 +89,7 @@ func TestDiscoveryClaimsMatchIssuedClaims(t *testing.T) {
 	emitted := map[string]bool{
 		"sub": true, "iss": true, "aud": true, "exp": true, "iat": true,
 		"auth_time": true, "nonce": true, "name": true, "picture": true,
-		"preferred_username": true, "profile": true, "email": true,
+		"preferred_username": true, "email": true,
 		"email_verified": true, "updated_at": true,
 	}
 	// auth_time is issued but not advertised: the value available today is the consent
@@ -124,8 +124,8 @@ func TestJWKSExposesActiveKey(t *testing.T) {
 		t.Fatalf("keys = %d, want the single active key", len(keys))
 	}
 	key := keys[0]
-	if key["kid"] != "active" || key["alg"] != "RS256" || key["kty"] != "RSA" || key["use"] != "sig" {
-		t.Fatalf("key = %v, want the active RS256 signing key", key)
+	if key["kid"] != "active" || key["alg"] != "EdDSA" || key["kty"] != "OKP" || key["use"] != "sig" {
+		t.Fatalf("key = %v, want the active EdDSA signing key", key)
 	}
 	// A private exponent in a public key set would be a key disclosure.
 	for _, forbidden := range []string{"d", "p", "q", "dp", "dq", "qi"} {

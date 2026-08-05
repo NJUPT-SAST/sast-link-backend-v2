@@ -1,12 +1,11 @@
 package auth
 
 import (
-	"crypto/rsa"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"strings"
 	"time"
 
@@ -15,13 +14,13 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
-const jwtAlgRS256 = "RS256"
+const jwtAlgEdDSA = "EdDSA"
 
-// JWTKeyPair is an RSA key pair identified by kid.
+// JWTKeyPair is an Ed25519 key pair identified by kid.
 type JWTKeyPair struct {
 	KID     string
-	Private *rsa.PrivateKey
-	Public  *rsa.PublicKey
+	Private ed25519.PrivateKey
+	Public  ed25519.PublicKey
 }
 
 // TokenClaims are access-token claims used by SAST Link.
@@ -88,7 +87,7 @@ type JWTManager struct {
 	Clock    Clock
 }
 
-// SignAccessToken signs an RS256 JWT with the active private key and kid.
+// SignAccessToken signs an EdDSA JWT with the active private key and kid.
 func (m JWTManager) SignAccessToken(input TokenInput) (string, error) {
 	scopeClaim, err := scope.Claim(input.Scopes)
 	if err != nil {
@@ -119,7 +118,7 @@ func (m JWTManager) SignAccessToken(input TokenInput) (string, error) {
 			ID:        input.JTI,
 		},
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
 	token.Header["kid"] = m.Active.KID
 	signed, err := token.SignedString(m.Active.Private)
 	if err != nil {
@@ -128,7 +127,7 @@ func (m JWTManager) SignAccessToken(input TokenInput) (string, error) {
 	return signed, nil
 }
 
-// VerifyAccessToken verifies strict RS256 JWT claims and active/previous kid.
+// VerifyAccessToken verifies strict EdDSA JWT claims and active/previous kid.
 func (m JWTManager) VerifyAccessToken(tokenString string) (*TokenClaims, error) {
 	return m.parseAccessToken(tokenString, false)
 }
@@ -143,7 +142,7 @@ func (m JWTManager) VerifyAccessToken(tokenString string) (*TokenClaims, error) 
 // revoking an expired access token silently revokes nothing and answers 200, telling
 // the client the session ended while it has not.
 //
-// Every other check stays in force — RS256 only, known kid, matching issuer and
+// Every other check stays in force — EdDSA only, known kid, matching issuer and
 // audience, iat sanity, and the required-claim set — because the only thing safe to
 // relax here is the clock. In particular this is NOT jwt.ParseUnverified: an
 // unverified jti is attacker-chosen, and accepting one would let anyone revoke an
@@ -162,12 +161,16 @@ func (m JWTManager) parseAccessToken(tokenString string, allowExpired bool) (*To
 	}
 	claims := &TokenClaims{}
 	parserOptions := []jwt.ParserOption{
-		jwt.WithValidMethods([]string{jwtAlgRS256}),
+		jwt.WithValidMethods([]string{jwtAlgEdDSA}),
 		jwt.WithIssuer(m.Issuer),
 		jwt.WithAllAudiences(m.Audience...),
 		jwt.WithExpirationRequired(),
 		jwt.WithIssuedAt(),
 		jwt.WithNotBeforeRequired(),
+		// A small leeway so a freshly issued token is not rejected as
+		// not-valid-yet by a replica whose clock lags the signer by a second or
+		// two. The iat/nbf checks stay enforced; this only forgives the boundary.
+		jwt.WithLeeway(5 * time.Second),
 		jwt.WithTimeFunc(func() time.Time { return now(m.Clock) }),
 	}
 	token, err := jwt.ParseWithClaims(tokenString, claims, m.keyfunc, parserOptions...)
@@ -240,21 +243,22 @@ func isOnlyExpiredError(err error) bool {
 	return true
 }
 
-// JWKS returns public JWKs for active and previous RSA keys.
+// JWKS returns public JWKs for active and previous Ed25519 keys. The JWK is the
+// RFC 8037 OKP form: the public key is the raw 32-byte x coordinate.
 func (m JWTManager) JWKS() map[string]any {
 	keys := make([]map[string]string, 0, 1+len(m.Previous))
 	appendKey := func(pair JWTKeyPair) {
 		public := publicKey(pair)
-		if pair.KID == "" || public == nil {
+		if pair.KID == "" || len(public) == 0 {
 			return
 		}
 		keys = append(keys, map[string]string{
-			"kty": "RSA",
+			"kty": "OKP",
 			"use": "sig",
 			"kid": pair.KID,
-			"alg": jwtAlgRS256,
-			"n":   base64.RawURLEncoding.EncodeToString(public.N.Bytes()),
-			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(public.E)).Bytes()),
+			"crv": "Ed25519",
+			"alg": jwtAlgEdDSA,
+			"x":   base64.RawURLEncoding.EncodeToString(public),
 		})
 	}
 	appendKey(m.Active)
@@ -278,37 +282,37 @@ func validateTokenClaims(claims *TokenClaims) error {
 }
 
 func (m JWTManager) keyfunc(token *jwt.Token) (any, error) {
-	if token.Method.Alg() != jwtAlgRS256 {
+	if token.Method.Alg() != jwtAlgEdDSA {
 		return nil, ErrInvalidToken
 	}
 	kid, ok := token.Header["kid"].(string)
 	if !ok || kid == "" {
 		return nil, ErrInvalidToken
 	}
-	if public := publicKeyByKID(kid, m.Active); public != nil {
+	if public := publicKeyByKID(kid, m.Active); len(public) > 0 {
 		return public, nil
 	}
 	for _, previous := range m.Previous {
-		if public := publicKeyByKID(kid, previous); public != nil {
+		if public := publicKeyByKID(kid, previous); len(public) > 0 {
 			return public, nil
 		}
 	}
 	return nil, ErrInvalidToken
 }
 
-func publicKeyByKID(kid string, pair JWTKeyPair) *rsa.PublicKey {
+func publicKeyByKID(kid string, pair JWTKeyPair) ed25519.PublicKey {
 	if pair.KID != kid {
 		return nil
 	}
 	return publicKey(pair)
 }
 
-func publicKey(pair JWTKeyPair) *rsa.PublicKey {
-	if pair.Public != nil {
+func publicKey(pair JWTKeyPair) ed25519.PublicKey {
+	if len(pair.Public) > 0 {
 		return pair.Public
 	}
-	if pair.Private != nil {
-		return &pair.Private.PublicKey
+	if len(pair.Private) > 0 {
+		return pair.Private.Public().(ed25519.PublicKey)
 	}
 	return nil
 }

@@ -50,9 +50,6 @@ type Service struct {
 	RefreshTTL    time.Duration
 	CodeTTL       time.Duration
 	RequestTTL    time.Duration
-	// CardBaseURL prefixes the OIDC profile claim; a user's card lives at
-	// CardBaseURL + "/" + user ID.
-	CardBaseURL string
 	// Issuer is the OIDC issuer identifier and the base for discovery endpoints.
 	Issuer string
 }
@@ -138,27 +135,27 @@ func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoi
 	return nil
 }
 
-// deliverBlacklist attempts a synchronous Redis delivery of revoked JTIs. The
-// durable outbox row was already written in the revoking transaction, so a
-// failure here only delays the fast-reject path; the auth middleware's DB check
-// rejects these tokens either way.
+// deliverBlacklist clears the auth-state cache entries for the revoked access
+// tokens. The durable delivery is the outbox row written in the revoking
+// transaction (the worker retries until it lands); this synchronous call closes
+// the stale window immediately so a just-revoked token is rejected on the next
+// request rather than riding out the cache TTL.
 func (s Service) deliverBlacklist(ctx context.Context, entries []model.BlacklistEntry, now time.Time) {
 	if s.Blacklist == nil || len(entries) == 0 {
 		return
 	}
-	batch := make(map[string]time.Duration, len(entries))
+	jtis := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		ttl := entry.ExpiresAt.Sub(now)
-		if ttl <= 0 || strings.TrimSpace(entry.TokenID) == "" {
+		if entry.ExpiresAt.Sub(now) <= 0 || strings.TrimSpace(entry.TokenID) == "" {
 			continue
 		}
-		batch[entry.TokenID] = ttl
+		jtis = append(jtis, entry.TokenID)
 	}
-	if len(batch) == 0 {
+	if len(jtis) == 0 {
 		return
 	}
-	if err := s.Blacklist.BlacklistJTIBatch(ctx, batch); err != nil {
-		slog.WarnContext(ctx, "oauth blacklist delivery unavailable", "count", len(batch), "error", err)
+	if err := s.Blacklist.DeleteAuthStates(ctx, jtis); err != nil {
+		slog.WarnContext(ctx, "invalidate oauth auth-state cache", "count", len(jtis), "error", err)
 	}
 }
 
@@ -205,10 +202,14 @@ func (s Service) revokeFamilyErr(ctx context.Context, familyID string) error {
 	return nil
 }
 
-// audit records an OAuth audit event. Audit failures are logged, never returned:
-// losing an audit row must not fail an otherwise valid authorization.
-func (s Service) audit(
-	ctx context.Context,
+// audit records an OAuth audit event. Failures on this detached path are logged,
+// never returned: losing an audit row must not fail an otherwise valid
+// authorization. The in-transaction audits (authorization-code grant and refresh
+// rotation) are the deliberate exception — they ride the token transaction and a
+// failure there fails the operation.
+// buildAuditEntry materialises the shared oauth audit fields, so the synchronous
+// s.audit path and the same-transaction token-rotation audit cannot drift.
+func (s Service) buildAuditEntry(
 	userID *int64,
 	action string,
 	resourceID *string,
@@ -216,16 +217,12 @@ func (s Service) audit(
 	errCode int,
 	clientIP, userAgent string,
 	detail map[string]any,
-) {
-	if s.Audit == nil {
-		return
-	}
+) (*model.AuditLog, error) {
 	var detailValue model.JSONB
 	if detail != nil {
 		encoded, err := json.Marshal(detail)
 		if err != nil {
-			slog.ErrorContext(ctx, "marshal oauth audit detail", "action", action, "error", err)
-			return
+			return nil, err
 		}
 		detailValue = model.JSONB(encoded)
 	}
@@ -242,7 +239,7 @@ func (s Service) audit(
 		userAgentPtr = &userAgent
 	}
 	successPtr := success
-	entry := &model.AuditLog{
+	return &model.AuditLog{
 		UserID:     userID,
 		Action:     action,
 		Resource:   "oauth",
@@ -253,6 +250,26 @@ func (s Service) audit(
 		Success:    &successPtr,
 		ErrCode:    errCodePtr,
 		CreatedAt:  s.now(),
+	}, nil
+}
+
+func (s Service) audit(
+	ctx context.Context,
+	userID *int64,
+	action string,
+	resourceID *string,
+	success bool,
+	errCode int,
+	clientIP, userAgent string,
+	detail map[string]any,
+) {
+	if s.Audit == nil {
+		return
+	}
+	entry, err := s.buildAuditEntry(userID, action, resourceID, success, errCode, clientIP, userAgent, detail)
+	if err != nil {
+		slog.ErrorContext(ctx, "marshal oauth audit detail", "action", action, "error", err)
+		return
 	}
 	// Detached like the revocation above: an audit row for a completed action must
 	// survive the caller going away, or the log would silently lose exactly the

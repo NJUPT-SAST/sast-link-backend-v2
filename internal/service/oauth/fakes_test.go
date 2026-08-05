@@ -2,8 +2,8 @@ package oauth
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"errors"
 	"sync"
 	"testing"
@@ -32,6 +32,10 @@ func (f *fakeUsers) FindByID(_ context.Context, userID int64) (*model.User, erro
 		return nil, repository.ErrNotFound
 	}
 	return user, nil
+}
+
+func (f *fakeUsers) FindAuthUserByID(_ context.Context, userID int64) (*model.User, error) {
+	return f.FindByID(context.Background(), userID)
 }
 
 type fakeClients struct {
@@ -106,6 +110,7 @@ type fakeTokens struct {
 	rotatedAccess   *model.OAuthAccessToken
 	rotatedRefresh  *model.OAuthRefreshToken
 	revokedFamilies []string
+	auditEntries    []*model.AuditLog
 	createErr       error
 	rotateErr       error
 	revokeErr       error
@@ -120,8 +125,15 @@ func newFakeTokens() *fakeTokens {
 }
 
 func (f *fakeTokens) CreatePair(_ context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error {
+	return f.CreatePairWithAudit(context.Background(), access, refresh, nil)
+}
+
+func (f *fakeTokens) CreatePairWithAudit(_ context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error {
 	if f.createErr != nil {
 		return f.createErr
+	}
+	if audit != nil {
+		f.auditEntries = append(f.auditEntries, audit)
 	}
 	f.createdAccess = access
 	f.createdRefresh = refresh
@@ -130,18 +142,52 @@ func (f *fakeTokens) CreatePair(_ context.Context, access *model.OAuthAccessToke
 	return nil
 }
 
-func (f *fakeTokens) RotateRefreshToken(
-	_ context.Context,
+func (f *fakeTokens) RotateRefreshTokenWithAudit(
+	ctx context.Context,
+	familyID string,
 	currentHash string,
 	access *model.OAuthAccessToken,
 	refresh *model.OAuthRefreshToken,
-) error {
+	audit *model.AuditLog,
+) (time.Time, error) {
+	if audit != nil {
+		f.auditEntries = append(f.auditEntries, audit)
+	}
+	return f.RotateRefreshToken(ctx, familyID, currentHash, access, refresh)
+}
+
+func (f *fakeTokens) RotateRefreshToken(
+	_ context.Context,
+	familyID string,
+	currentHash string,
+	access *model.OAuthAccessToken,
+	refresh *model.OAuthRefreshToken,
+) (time.Time, error) {
 	if f.rotateErr != nil {
-		return f.rotateErr
+		return time.Time{}, f.rotateErr
 	}
 	current, ok := f.refreshByHash[currentHash]
 	if !ok {
-		return repository.ErrNotFound
+		return time.Time{}, repository.ErrNotFound
+	}
+	if current.FamilyID != familyID {
+		return time.Time{}, repository.ErrInvalidArgument
+	}
+	if f.originErr != nil {
+		return time.Time{}, f.originErr
+	}
+	// Mirror the repository: the origin is the lowest-sequence row of the family.
+	var origin *model.OAuthRefreshToken
+	for _, candidate := range f.refreshByHash {
+		if candidate.FamilyID != familyID {
+			continue
+		}
+		if origin == nil || candidate.Sequence < origin.Sequence {
+			origin = candidate
+		}
+	}
+	if origin == nil {
+		return time.Time{}, repository.ErrNotFound
 	}
 	revokedAt := time.Now().UTC()
 	current.RevokedAt = &revokedAt
@@ -149,7 +195,7 @@ func (f *fakeTokens) RotateRefreshToken(
 	f.rotatedRefresh = refresh
 	f.accessByJTI[access.TokenID] = access
 	f.refreshByHash[refresh.TokenHash] = refresh
-	return nil
+	return origin.CreatedAt, nil
 }
 
 func (f *fakeTokens) FindRefreshToken(_ context.Context, tokenHash string) (*model.OAuthRefreshToken, error) {
@@ -158,27 +204,6 @@ func (f *fakeTokens) FindRefreshToken(_ context.Context, tokenHash string) (*mod
 		return nil, repository.ErrNotFound
 	}
 	return refresh, nil
-}
-
-// FindFamilyOriginCreatedAt mirrors the repository: the lowest-sequence row of the
-// family, so tests observe the same auth_time semantics as production.
-func (f *fakeTokens) FindFamilyOriginCreatedAt(_ context.Context, familyID string) (time.Time, error) {
-	if f.originErr != nil {
-		return time.Time{}, f.originErr
-	}
-	var origin *model.OAuthRefreshToken
-	for _, refresh := range f.refreshByHash {
-		if refresh.FamilyID != familyID {
-			continue
-		}
-		if origin == nil || refresh.Sequence < origin.Sequence {
-			origin = refresh
-		}
-	}
-	if origin == nil {
-		return time.Time{}, repository.ErrNotFound
-	}
-	return origin.CreatedAt, nil
 }
 
 func (f *fakeTokens) FindAccessTokenByJTI(_ context.Context, jti string) (*model.OAuthAccessToken, error) {
@@ -308,23 +333,18 @@ func (f *fakeRequests) ConsumeAuthorizeRequest(
 }
 
 type fakeBlacklist struct {
-	mutex   sync.Mutex
-	entries map[string]time.Duration
-	err     error
+	mutex sync.Mutex
+	jtis  []string
+	err   error
 }
 
-func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]time.Duration) error {
+func (f *fakeBlacklist) DeleteAuthStates(_ context.Context, jtis []string) error {
 	if f.err != nil {
 		return f.err
 	}
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
-	if f.entries == nil {
-		f.entries = map[string]time.Duration{}
-	}
-	for jti, ttl := range entries {
-		f.entries[jti] = ttl
-	}
+	f.jtis = append(f.jtis, jtis...)
 	return nil
 }
 
@@ -435,7 +455,7 @@ func confidentialClient() *model.OAuthClient {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate signing key: %v", err)
 	}
@@ -490,7 +510,6 @@ func newHarness(t *testing.T) *harness {
 		RefreshTTL:    30 * 24 * time.Hour,
 		CodeTTL:       5 * time.Minute,
 		RequestTTL:    10 * time.Minute,
-		CardBaseURL:   "https://link.sast.fun/card",
 		Issuer:        "https://link.sast.fun/v2",
 	}
 	return h

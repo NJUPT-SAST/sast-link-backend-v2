@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,16 +34,26 @@ type LarkConfig struct {
 
 // LarkClient exchanges Lark authorization codes for account identities.
 //
-// The app_access_token is fetched per exchange rather than cached. Caching it
-// would add a second expiry to reason about and a Redis key the PRD does not
-// define, in exchange for one saved round trip on a flow that already makes
-// several; if login latency ever justifies it, the cache belongs behind this
-// client's interface and not in its callers.
+// The app_access_token is cached: it is app-level (not per-user), valid for two
+// hours, and identical for every exchange, so re-fetching it on each login costs
+// an outbound round trip and one Lark quota hit per login. The cache lives
+// behind this client's interface — nothing in the callers needs to know. A burst
+// of concurrent misses may each fetch once; the requests are idempotent.
 type LarkClient struct {
 	cfg    LarkConfig
 	client Doer
 	now    func() time.Time
+
+	// tokenMu guards the cached app token and its expiry.
+	tokenMu        sync.Mutex
+	appToken       string
+	appTokenExpiry time.Time
 }
+
+// refreshAppTokenLeadTime re-fetches a cached app token before it actually
+// expires, so a token riding its final seconds never reaches Lark. Lark grants
+// two hours; a minute of slack is plenty.
+const refreshAppTokenLeadTime = time.Minute
 
 // NewLark returns a LarkClient. A nil client falls back to NewHTTPClient and a
 // nil clock to time.Now.
@@ -178,6 +189,9 @@ func (c *LarkClient) Exchange(ctx context.Context, code, redirectURI string) (*I
 }
 
 func (c *LarkClient) fetchAppAccessToken(ctx context.Context) (string, error) {
+	if token := c.cachedAppToken(); token != "" {
+		return token, nil
+	}
 	payload, err := json.Marshal(map[string]string{
 		"app_id":     c.cfg.AppID,
 		"app_secret": c.cfg.AppSecret,
@@ -206,7 +220,23 @@ func (c *LarkClient) fetchAppAccessToken(ctx context.Context) (string, error) {
 	if strings.TrimSpace(response.AppAccessToken) == "" {
 		return "", fmt.Errorf("lark app_access_token response is empty: %w", ErrUnexpectedResponse)
 	}
+	expiry := c.now().Add(time.Duration(response.Expire) * time.Second)
+	c.tokenMu.Lock()
+	c.appToken = response.AppAccessToken
+	c.appTokenExpiry = expiry
+	c.tokenMu.Unlock()
 	return response.AppAccessToken, nil
+}
+
+// cachedAppToken returns the cached app token while it still has
+// refreshAppTokenLeadTime of life left, or "" so the caller re-fetches.
+func (c *LarkClient) cachedAppToken() string {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.appToken == "" || !c.now().Before(c.appTokenExpiry.Add(-refreshAppTokenLeadTime)) {
+		return ""
+	}
+	return c.appToken
 }
 
 func (c *LarkClient) exchangeCode(ctx context.Context, appToken, code, redirectURI string) (*larkUserTokenResponse, error) {

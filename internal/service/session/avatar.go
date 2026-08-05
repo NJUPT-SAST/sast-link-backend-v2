@@ -63,7 +63,9 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 
 	// Resolve the caller before spending anything on the body: a deleted or
 	// unknown user must not make the service read (or store) their upload.
-	user, err := s.Users.FindByID(ctx, input.UserID)
+	// FindProfileByID also brings the current profile row, whose avatar is the
+	// object this upload will supersede and must retire.
+	user, err := s.Users.FindProfileByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}

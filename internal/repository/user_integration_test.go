@@ -90,7 +90,7 @@ func TestUserRepositoryCreateWithProfileRejectsNilInputs(t *testing.T) {
 	}
 }
 
-func TestUserRepositoryFindByLoginIdentifier(t *testing.T) {
+func TestUserRepositoryFindAuthUserByLoginIdentifier(t *testing.T) {
 	database := setupDatabase(t)
 	userRepository := repository.NewUser(database)
 	user := createUserWithProfile(t, userRepository, "primary@njupt.edu.cn")
@@ -104,17 +104,21 @@ func TestUserRepositoryFindByLoginIdentifier(t *testing.T) {
 		}
 	}
 
+	// The lean login lookup resolves the login email or an other-mail identity,
+	// returning only the scalar columns (no Profile/Identities preloads).
 	for _, identifier := range []string{"primary@njupt.edu.cn", "other@example.test"} {
-		found, err := userRepository.FindByLoginIdentifier(context.Background(), identifier)
+		found, err := userRepository.FindAuthUserByLoginIdentifier(context.Background(), identifier)
 		if err != nil {
-			t.Fatalf("FindByLoginIdentifier(%q) error = %v", identifier, err)
+			t.Fatalf("FindAuthUserByLoginIdentifier(%q) error = %v", identifier, err)
 		}
-		assertLoadedUser(t, found, user.ID)
+		if found.ID != user.ID || found.LoginEmail != user.LoginEmail {
+			t.Fatalf("FindAuthUserByLoginIdentifier(%q) = %#v, want user %d's scalar fields", identifier, found, user.ID)
+		}
 	}
 	for _, identifier := range []string{"github@example.test", "lark@example.test", "missing@example.test"} {
-		_, err := userRepository.FindByLoginIdentifier(context.Background(), identifier)
+		_, err := userRepository.FindAuthUserByLoginIdentifier(context.Background(), identifier)
 		if !errors.Is(err, repository.ErrNotFound) {
-			t.Fatalf("FindByLoginIdentifier(%q) error = %v, want ErrNotFound", identifier, err)
+			t.Fatalf("FindAuthUserByLoginIdentifier(%q) error = %v, want ErrNotFound", identifier, err)
 		}
 	}
 
@@ -145,21 +149,58 @@ func TestUserRepositoryFindByLoginIdentifier(t *testing.T) {
 	}
 }
 
-func TestUserRepositoryFindByLoginEmailAndExistenceChecks(t *testing.T) {
+// FindAuthUserByLoginIdentifier must match the same identifiers as
+// FindByLoginIdentifier but skip the Profile/Identities preloads: the login
+// response serializes only scalar user fields, so loading the associations is
+// pure waste.
+func TestUserRepositoryFindAuthUserByLoginIdentifierSkipsPreloads(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	user := createUserWithProfile(t, userRepository, "lean@njupt.edu.cn")
+	if err := database.Create(&model.Identity{
+		UserID: user.ID, Provider: model.LoginMethodOtherMail, ProviderID: "lean-other@example.test",
+	}).Error; err != nil {
+		t.Fatalf("create other_mail identity: %v", err)
+	}
+
+	for _, identifier := range []string{"lean@njupt.edu.cn", "lean-other@example.test"} {
+		found, err := userRepository.FindAuthUserByLoginIdentifier(context.Background(), identifier)
+		if err != nil {
+			t.Fatalf("FindAuthUserByLoginIdentifier(%q) error = %v", identifier, err)
+		}
+		if found.ID != user.ID || found.LoginEmail != "lean@njupt.edu.cn" {
+			t.Fatalf("FindAuthUserByLoginIdentifier(%q) = %#v, want user %d", identifier, found, user.ID)
+		}
+		if found.Profile != nil {
+			t.Fatal("lean lookup must not preload Profile")
+		}
+		if len(found.Identities) != 0 {
+			t.Fatal("lean lookup must not preload Identities")
+		}
+	}
+	if _, err := userRepository.FindAuthUserByLoginIdentifier(context.Background(), "github@example.test"); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("FindAuthUserByLoginIdentifier(non-login identity) error = %v, want ErrNotFound", err)
+	}
+	if _, err := userRepository.FindAuthUserByLoginIdentifier(context.Background(), "missing@example.test"); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("FindAuthUserByLoginIdentifier(absent) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestUserRepositoryFindAuthUserByLoginEmailAndExistenceChecks(t *testing.T) {
 	database := setupDatabase(t)
 	userRepository := repository.NewUser(database)
 	user := createUserWithProfile(t, userRepository, "lookup@njupt.edu.cn")
 
-	found, err := userRepository.FindByLoginEmail(context.Background(), "lookup@njupt.edu.cn")
+	found, err := userRepository.FindAuthUserByLoginEmail(context.Background(), "lookup@njupt.edu.cn")
 	if err != nil {
-		t.Fatalf("FindByLoginEmail() error = %v", err)
+		t.Fatalf("FindAuthUserByLoginEmail() error = %v", err)
 	}
-	if found.ID != user.ID || found.Profile == nil {
-		t.Fatalf("FindByLoginEmail() = %#v, want user %d with profile", found, user.ID)
+	if found.ID != user.ID || found.LoginEmail != user.LoginEmail {
+		t.Fatalf("FindAuthUserByLoginEmail() = %#v, want user %d's scalar fields", found, user.ID)
 	}
 
-	// FindByLoginEmail must not resolve other-mail identities, unlike
-	// FindByLoginIdentifier: password reset targets the login email only.
+	// FindAuthUserByLoginEmail must not resolve other-mail identities: password
+	// reset targets the login email only.
 	identityRepository := repository.NewIdentity(database)
 	if err := identityRepository.CreateWithinLimit(context.Background(), &model.Identity{
 		UserID:     user.ID,
@@ -168,8 +209,8 @@ func TestUserRepositoryFindByLoginEmailAndExistenceChecks(t *testing.T) {
 	}, 2); err != nil {
 		t.Fatalf("CreateWithinLimit() error = %v", err)
 	}
-	if _, err := userRepository.FindByLoginEmail(context.Background(), "alias@qq.com"); !errors.Is(err, repository.ErrNotFound) {
-		t.Fatalf("FindByLoginEmail(other mail) error = %v, want ErrNotFound", err)
+	if _, err := userRepository.FindAuthUserByLoginEmail(context.Background(), "alias@qq.com"); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("FindAuthUserByLoginEmail(other mail) error = %v, want ErrNotFound", err)
 	}
 
 	for _, test := range []struct {
@@ -276,6 +317,40 @@ func TestUserRepositoryUpdatePasswordAndRevokeSessions(t *testing.T) {
 	}
 	if outboxCount != 1 {
 		t.Fatalf("outbox rows = %d, want 1", outboxCount)
+	}
+}
+
+// The rehash-on-login write is guarded on the hash the login verified, so a
+// concurrent password change/reset cannot have its new hash reverted by a stale
+// rehash of the old password. A matching currentHash lands the rehash; a stale
+// one is skipped (ErrRehashSkipped) and the newer hash survives.
+func TestUserRepositoryUpdatePasswordHashGuarded(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	user := createUserWithProfile(t, userRepository, "rehash@njupt.edu.cn")
+
+	if err := userRepository.UpdatePasswordHash(context.Background(), user.ID, user.PasswordHash, "new-hash"); err != nil {
+		t.Fatalf("UpdatePasswordHash(matching) error = %v", err)
+	}
+	var stored model.User
+	if err := database.First(&stored, user.ID).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if stored.PasswordHash != "new-hash" {
+		t.Fatalf("password = %q, want new-hash", stored.PasswordHash)
+	}
+	if stored.TokenVersion != user.TokenVersion {
+		t.Fatalf("token_version = %d, want %d (rehash must not bump it)", stored.TokenVersion, user.TokenVersion)
+	}
+
+	if err := userRepository.UpdatePasswordHash(context.Background(), user.ID, "obsolete-hash", "reverted-hash"); err != repository.ErrRehashSkipped {
+		t.Fatalf("UpdatePasswordHash(stale) error = %v, want ErrRehashSkipped", err)
+	}
+	if err := database.First(&stored, user.ID).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if stored.PasswordHash != "new-hash" {
+		t.Fatalf("password = %q, want new-hash preserved (stale rehash must not land)", stored.PasswordHash)
 	}
 }
 

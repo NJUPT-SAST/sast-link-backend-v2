@@ -19,7 +19,7 @@ type ClientRepository interface {
 	FindByID(ctx context.Context, id int64) (*model.OAuthClient, error)
 	// UpdateAndRevoke applies fields and, when revokeTokens is set, revokes the
 	// client's live tokens in the same transaction, returning the access-token
-	// entries that still need blacklist delivery.
+	// entries that still need revocation delivery.
 	UpdateAndRevoke(
 		ctx context.Context,
 		id int64,
@@ -29,9 +29,11 @@ type ClientRepository interface {
 	) ([]model.BlacklistEntry, error)
 }
 
-// TokenBlacklist is the fast-reject cache for revoked access tokens.
+// TokenBlacklist invalidates the auth-state cache entries for revoked access
+// tokens. Revocation is authoritative in PostgreSQL; this clears the short-TTL
+// cache so the middleware's next request re-checks the database immediately.
 type TokenBlacklist interface {
-	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
+	DeleteAuthStates(ctx context.Context, jtis []string) error
 }
 
 // AuditRepository records audit events.

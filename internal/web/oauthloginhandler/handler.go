@@ -5,6 +5,7 @@ package oauthloginhandler
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauthlogin"
@@ -31,10 +33,20 @@ type Service interface {
 // Handler serves the third-party OAuth endpoints.
 type Handler struct {
 	Service Service
+	// Clock is injected so tests can pin "now"; expires_in is computed against it
+	// to stay consistent with the token exp the service signs.
+	Clock auth.Clock
 	// ErrorRedirect is the frontend page a failed callback is sent to. The
 	// callback arrives in a browser, so answering with a JSON envelope would
 	// show the user raw JSON; it redirects with an error query instead.
 	ErrorRedirect string
+}
+
+func (h Handler) now() time.Time {
+	if h.Clock != nil {
+		return h.Clock.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // RegisterRoutes mounts the third-party OAuth endpoints.
@@ -202,7 +214,7 @@ func (h Handler) ExchangeCode(c *gin.Context) {
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
 		TokenType:    result.TokenType,
-		ExpiresIn:    expiresIn(result.AccessExpiresAt),
+		ExpiresIn:    expiresIn(h.now(), result.AccessExpiresAt),
 		User:         mapUser(result.User),
 	})
 }
@@ -251,10 +263,13 @@ func bindMessage(name model.LoginMethod) string {
 	return "GitHub 账号绑定成功"
 }
 
-// expiresIn converts an absolute expiry to the contract's relative seconds. A
-// past instant yields 0 rather than a negative number.
-func expiresIn(expiresAt time.Time) int {
-	seconds := int(time.Until(expiresAt).Seconds())
+// expiresIn converts an absolute expiry to the contract's relative seconds,
+// measured from the injected clock so it agrees with the token's exp. A past
+// instant yields 0 rather than a negative number.
+func expiresIn(now, expiresAt time.Time) int {
+	// Ceil so a token expiring in 3599.9s reports 3600, matching the OAuth token
+	// endpoint; truncation would under-report the same TTL by one second.
+	seconds := int(math.Ceil(expiresAt.Sub(now).Seconds()))
 	if seconds < 0 {
 		return 0
 	}

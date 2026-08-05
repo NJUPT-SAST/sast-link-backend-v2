@@ -2,6 +2,7 @@ package sessionhandler
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"time"
 
@@ -207,11 +208,13 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	r.POST("/auth/register", h.Register)
 	r.POST("/auth/forgot-password/send-code", h.ForgotPasswordSendCode)
 	r.POST("/auth/reset-password", h.ResetPassword)
-	// The card is a deliberately public read (PRD §4.14): it backs homepage friend
-	// links and the OIDC profile claim target, so it stays outside the JWT group.
-	// The repository projection filters soft-deleted users and exposes display
-	// columns only.
-	r.GET("/card/:id", h.Card)
+	// The card endpoint is temporarily disabled pending a privacy redesign. Its
+	// sequential-ID public URL lets anyone enumerate the full member roster, which
+	// is no longer acceptable; it will be reworked (owner-only + non-enumerable
+	// identifier), not re-enabled as-is. The handler/service/repository code stays
+	// in place pending that redesign, and the OIDC profile claim has been removed
+	// so no client can read the card projection through it either.
+	// r.GET("/card/:id", h.Card)
 	protected := r.Group("")
 	protected.Use(authMiddleware)
 	protected.POST("/auth/logout", h.Logout)
@@ -505,7 +508,9 @@ func (h Handler) now() time.Time {
 }
 
 func expiresIn(now, expiry time.Time) int64 {
-	seconds := int64(expiry.Sub(now).Seconds())
+	// Ceil so a token expiring in 3599.9s reports 3600, matching the OAuth token
+	// endpoint; truncation would under-report the same TTL by one second.
+	seconds := int64(math.Ceil(expiry.Sub(now).Seconds()))
 	if seconds < 0 {
 		return 0
 	}

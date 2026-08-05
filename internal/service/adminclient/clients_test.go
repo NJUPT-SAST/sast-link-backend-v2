@@ -3,6 +3,7 @@ package adminclient
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -125,9 +126,9 @@ func TestUpdateClientDisablingRevokesTokens(t *testing.T) {
 	if result.RevokedTokens != 2 {
 		t.Fatalf("RevokedTokens = %d, want 2", result.RevokedTokens)
 	}
-	// The revoked JTIs must reach the fast-reject cache with their remaining TTLs.
-	if len(h.blacklist.batch) != 2 || h.blacklist.batch["jti-1"] != 30*time.Minute {
-		t.Fatalf("blacklist batch = %v, want both JTIs with remaining TTLs", h.blacklist.batch)
+	// The revoked JTIs must reach the auth-state cache for immediate invalidation.
+	if len(h.blacklist.jtis) != 2 || !slices.Contains(h.blacklist.jtis, "jti-1") || !slices.Contains(h.blacklist.jtis, "jti-2") {
+		t.Fatalf("blacklist jtis = %v, want both JTIs delivered", h.blacklist.jtis)
 	}
 }
 

@@ -207,7 +207,7 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 		return nil, newError(ErrInvalidRequest, "redirect_uri 已不在客户端注册值中，请重新发起授权", nil)
 	}
 
-	user, err := s.Users.FindByID(ctx, input.UserID)
+	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
