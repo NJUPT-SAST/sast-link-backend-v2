@@ -1,0 +1,69 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告问题。提交前请先搜索是否已有同类 issue。
+
+        ⚠️ 如果是**安全问题**（越权、敏感数据泄露、token 可伪造等），请勿在此公开提交——改用仓库 Security 页面的 *Report a vulnerability* 私下披露。
+  - type: dropdown
+    id: env
+    attributes:
+      label: 运行环境
+      description: 在哪个环境复现？
+      options:
+        - 本地开发（docker-compose 或原生）
+        - 部署环境（link.sast.fun）
+        - 测试环境
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go 版本
+      description: 本地复现时提供 `go version` 输出（非本地可留空）
+      placeholder: go version go1.26.5 darwin/arm64
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 给出最小复现步骤，从能确定的端点 / 请求开始
+      placeholder: |
+        1. 调用 POST /auth/login，参数 ...
+        2. 紧接着调用 POST /auth/refresh，使用上一步的 refresh token
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你认为应该发生什么
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么——错误码、HTTP 状态码、响应体
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: 服务端或客户端日志（注意脱敏，别贴 token / 验证码 / 密码）
+      render: shell
+  - type: dropdown
+    id: impact
+    attributes:
+      label: 影响
+      options:
+        - 功能不可用
+        - 数据不一致
+        - 性能问题
+        - 疑似安全问题（请走私有披露渠道）
+        - 其他

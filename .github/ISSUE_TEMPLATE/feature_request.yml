@@ -1,0 +1,33 @@
+name: 功能请求
+description: 提出一个新功能或对现有行为的改进
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前先搜索是否已有人提过。功能请求最好对齐 [PRD](https://github.com/NJUPT-SAST/sast-link-backend-v2/blob/main/docs/SAST%20Link%20v2%20PRD.md) 里的产品定位，偏离较大的想法先写清动机再谈方案。
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 动机
+      description: 要解决什么问题、谁受影响、现在缺了什么
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 方案
+      description: 期望的行为 / 接口长什么样。可带端点、错误码、数据字段，越具体越好
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案
+      description: 你还考虑过哪些做法，为什么不选
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 怎样算做完——哪些用例必须通过，哪些边界要覆盖

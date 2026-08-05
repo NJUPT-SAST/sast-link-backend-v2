@@ -48,6 +48,7 @@ logs/
 docs/superpowers
 docs/explore/
 docs/reanalysis/
+docs/performance/
 
 # Temporary files
 tmp/
@@ -68,3 +69,9 @@ dist/
 
 # Claude Code
 .claude/
+
+# stray bench/build artifacts from loadmix + cross-compilation
+/api
+/loadmix
+# generated bench user pool (overwritten by `loadmix setup`; never a clean fixture)
+scripts/loadmix/pool.json
