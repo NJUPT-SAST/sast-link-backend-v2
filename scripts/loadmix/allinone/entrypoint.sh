@@ -40,6 +40,8 @@ redis-server --daemonize yes --port 6379 --bind 0.0.0.0 --requirepass "$REDIS_PA
 # Apply schema migrations.
 migrate up
 
-# Serve. godotenv reads /app/.env for the settings not passed explicitly.
+# Serve. Every setting arrives as an explicit -e from run-bench.sh; no .env is
+# mounted, and godotenv ignores its absence. Config validation names each required
+# key, so a gap here fails startup instead of picking up a stray file.
 cd /app
 exec api
