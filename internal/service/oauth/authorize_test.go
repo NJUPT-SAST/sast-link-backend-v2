@@ -552,3 +552,42 @@ func TestAuthorizeBoundsPersistedParameters(t *testing.T) {
 		})
 	}
 }
+
+// The wire scope parameter is deliberately more forgiving about whitespace than
+// the signed claim: HTTP callers may separate values with runs of spaces, while
+// scope.ParseClaim rejects them in a claim this service produced itself. Both
+// still go through scope.Normalize, so the accepted scope *sets* cannot diverge —
+// openid stays mandatory and unknown values stay rejected on either side.
+func TestParseRequestedScopesToleratesWireWhitespace(t *testing.T) {
+	accepted := map[string][]string{
+		"openid":                     {"openid"},
+		"openid profile email":       {"openid", "profile", "email"},
+		"openid  profile":            {"openid", "profile"},
+		"  openid profile  ":         {"openid", "profile"},
+		"email openid":               {"openid", "email"},
+		"openid\tprofile":            {"openid", "profile"},
+		"openid \t profile \n email": {"openid", "profile", "email"},
+	}
+	for raw, want := range accepted {
+		t.Run("accept/"+raw, func(t *testing.T) {
+			got, err := parseRequestedScopes(raw)
+			if err != nil {
+				t.Fatalf("parseRequestedScopes(%q) error = %v, want nil", raw, err)
+			}
+			if strings.Join(got, " ") != strings.Join(want, " ") {
+				t.Fatalf("parseRequestedScopes(%q) = %v, want %v", raw, got, want)
+			}
+		})
+	}
+
+	// Whitespace tolerance must not become scope tolerance: the set-level rules
+	// (openid required, only the three supported values, no duplicates) are the
+	// same ones the claim parser enforces.
+	for _, raw := range []string{"", "   ", "profile", "profile email", "openid admin", "openid openid"} {
+		t.Run("reject/"+raw, func(t *testing.T) {
+			if _, err := parseRequestedScopes(raw); err == nil {
+				t.Fatalf("parseRequestedScopes(%q) error = nil, want rejection", raw)
+			}
+		})
+	}
+}
