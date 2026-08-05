@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -111,7 +112,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, newError(ErrInvalidGrant, "code_verifier 校验失败", pkceErr)
 	}
 
-	user, err := s.Users.FindByID(ctx, authorization.UserID)
+	user, err := s.Users.FindAuthUserByID(ctx, authorization.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidGrant, "授权码所属用户无效", nil)
 	}
@@ -139,7 +140,24 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if err != nil {
 		return nil, newError(ErrInternal, "签发 Token Pair 失败", err)
 	}
-	if createErr := s.Tokens.CreatePair(ctx, pair.Access, pair.Refresh); createErr != nil {
+	// The success audit rides the token transaction (one fsync), consistent with
+	// the refresh grant and the session login; a build failure falls back to the
+	// synchronous audit.
+	var codeAudit *model.AuditLog
+	if s.Audit != nil {
+		resourceID := client.ClientID
+		codeAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, true, 0,
+			input.ClientIP, input.UserAgent, map[string]any{
+				"client_id":  client.ClientID,
+				"grant_type": grantTypeAuthorizationCode,
+				"outcome":    "issued",
+			})
+		if err != nil {
+			slog.WarnContext(ctx, "build oauth code audit entry", "error", err)
+			codeAudit = nil
+		}
+	}
+	if createErr := s.Tokens.CreatePairWithAudit(ctx, pair.Access, pair.Refresh, codeAudit); createErr != nil {
 		return nil, newError(ErrInternal, "持久化 Token Pair 失败", createErr)
 	}
 
@@ -157,7 +175,6 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, err
 	}
 
-	s.auditToken(ctx, &user.ID, client.ClientID, grantTypeAuthorizationCode, input, true, 0, "issued")
 	return s.tokenResult(pair, idToken), nil
 }
 
@@ -200,8 +217,14 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 			errors.New("refresh token belongs to a different client"))
 	}
 	if current.RevokedAt != nil {
-		// Replay of an already-rotated token: the family is compromised.
-		s.revokeFamily(ctx, current.FamilyID)
+		// The token was rotated or cancelled by another request in this family.
+		// Within the grace window that is a benign concurrent refresh (the winning
+		// rotation preserved the family), and this request must not re-revoke or it
+		// would log out the winner. Beyond the window it is a true replay of a
+		// long-dead token and the family is cut.
+		if !repository.IsWithinRefreshGrace(*current.RevokedAt, s.now()) {
+			s.revokeFamily(ctx, current.FamilyID)
+		}
 		s.auditToken(ctx, &current.UserID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
 		return nil, newError(ErrInvalidGrant, "refresh_token 无效", nil)
 	}
@@ -209,7 +232,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		return nil, newError(ErrInvalidGrant, "refresh_token 已过期", nil)
 	}
 
-	user, err := s.Users.FindByID(ctx, current.UserID)
+	user, err := s.Users.FindAuthUserByID(ctx, current.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidGrant, "refresh_token 所属用户无效", nil)
 	}
@@ -237,32 +260,44 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	if err != nil {
 		return nil, newError(ErrInternal, "签发 Token Pair 失败", err)
 	}
-	if rotateErr := s.Tokens.RotateRefreshToken(ctx, tokenHash, pair.Access, pair.Refresh); rotateErr != nil {
-		if errors.Is(rotateErr, repository.ErrTokenReplay) ||
+	// A rotation is not a fresh authentication, so auth_time stays the moment the
+	// user actually authorized this family: the creation time of its first refresh
+	// token, read by the repository inside the rotation transaction (lowest
+	// sequence, never the rotated row). Reading current.CreatedAt instead would be
+	// right only for the first rotation and would then advance by one rotation
+	// interval on every subsequent one.
+	// The success audit rides the rotation transaction (one fsync, like the
+	// session refresh path). A build failure (practically unreachable — the detail
+	// map is constant) logs and drops the success row; there is no synchronous
+	// fallback.
+	var refreshAudit *model.AuditLog
+	if s.Audit != nil {
+		resourceID := client.ClientID
+		refreshAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, true, 0,
+			input.ClientIP, input.UserAgent, map[string]any{
+				"client_id":  client.ClientID,
+				"grant_type": grantTypeRefreshToken,
+				"outcome":    "rotated",
+			})
+		if err != nil {
+			slog.WarnContext(ctx, "build oauth refresh audit entry", "error", err)
+			refreshAudit = nil
+		}
+	}
+	authTime, rotateErr := s.Tokens.RotateRefreshTokenWithAudit(ctx, current.FamilyID, tokenHash, pair.Access, pair.Refresh, refreshAudit)
+	if rotateErr != nil {
+		if errors.Is(rotateErr, repository.ErrTokenReplayWithinGrace) ||
+			errors.Is(rotateErr, repository.ErrTokenReplay) ||
 			errors.Is(rotateErr, repository.ErrTokenExpired) ||
 			errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) {
-			// The repository already revoked the family; re-invoke it to obtain the
-			// blacklist entries for synchronous delivery.
-			s.revokeFamily(ctx, current.FamilyID)
+			// The rotation transaction already decided: it cut the family for a true
+			// replay and preserved it for a benign concurrent refresh (grace
+			// window). Re-revoking here would cut the preserved family and log out
+			// the winning request, so just report invalid.
 			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
 			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
 		}
 		return nil, newError(ErrInternal, "轮换 refresh_token 失败", rotateErr)
-	}
-
-	// A rotation is not a fresh authentication, so auth_time stays the moment the
-	// user actually authorized this family: the creation time of its first refresh
-	// token, looked up by sequence. Reading current.CreatedAt instead would be right
-	// only for the first rotation and would then advance by one rotation interval on
-	// every subsequent one, overstating how recently the user authenticated to any
-	// relying party enforcing max_age.
-	authTime, err := s.Tokens.FindFamilyOriginCreatedAt(ctx, current.FamilyID)
-	if err != nil {
-		// The family always has a sequence-0 row — the one this rotation descends from —
-		// so a miss here means the metadata is inconsistent, not that the user never
-		// authorized. Signing an ID Token with a guessed auth_time would be worse.
-		s.revokeFamily(ctx, pair.FamilyID)
-		return nil, newError(ErrInternal, "查询 Token 家族授权时间失败", err)
 	}
 	idToken, err := s.signIDToken(ctx, user, client, scopes, "", authTime)
 	if err != nil {
@@ -270,7 +305,6 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		return nil, err
 	}
 
-	s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, true, 0, "rotated")
 	return s.tokenResult(pair, idToken), nil
 }
 
@@ -382,7 +416,7 @@ func (s Service) tokenResult(pair *tokenissue.Pair, idToken string) *TokenResult
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,
 		TokenType:    BearerTokenType,
-		ExpiresIn:    int(s.accessTTL().Seconds()),
+		ExpiresIn:    int(math.Ceil(s.accessTTL().Seconds())),
 		Scope:        pair.ScopeClaim,
 		IDToken:      idToken,
 	}

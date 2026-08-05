@@ -25,7 +25,6 @@ type Service interface {
 	JWKS() map[string]any
 }
 
-// Authenticator validates bearer tokens for the endpoints that need a principal.
 // Authenticator validates bearer tokens for the OAuth-facing endpoints.
 //
 // UserInfo deliberately uses the any-client variant: it exists to serve the

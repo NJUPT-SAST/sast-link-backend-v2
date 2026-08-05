@@ -1,8 +1,8 @@
 package tokenissue
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"errors"
 	"testing"
 	"time"
@@ -18,7 +18,7 @@ func (c fixedClock) Now() time.Time { return c.value }
 
 func newTestIssuer(t *testing.T, clock auth.Clock) Issuer {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate signing key: %v", err)
 	}

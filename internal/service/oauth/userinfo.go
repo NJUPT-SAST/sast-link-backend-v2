@@ -28,7 +28,7 @@ func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoRe
 		return nil, newError(ErrInvalidToken, "Access Token 的 scope 无效", err)
 	}
 
-	user, err := s.Users.FindByID(ctx, input.UserID)
+	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "Access Token 无效", nil)
 	}
@@ -50,7 +50,6 @@ func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoRe
 		result.Name = claims.Name
 		result.Picture = claims.Picture
 		result.PreferredUsername = claims.PreferredUsername
-		result.Profile = claims.Profile
 		if !claims.UpdatedAt.IsZero() {
 			result.UpdatedAt = claims.UpdatedAt.UTC().Unix()
 		}
@@ -73,7 +72,6 @@ func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoRe
 func (s Service) idTokenClaims(ctx context.Context, user *model.User, granted []string) (auth.IDTokenSubjectClaims, error) {
 	claims := auth.IDTokenSubjectClaims{
 		Name:      user.Name,
-		Profile:   s.cardURL(user.ID),
 		UpdatedAt: user.UpdatedAt,
 		Email:     user.LoginEmail,
 		// preferred_username falls back to the real name when no nickname is set, so
@@ -102,13 +100,4 @@ func (s Service) idTokenClaims(ctx context.Context, user *model.User, granted []
 		claims.PreferredUsername = *card.Nickname
 	}
 	return claims, nil
-}
-
-// cardURL builds the public card URL used as the OIDC profile claim.
-func (s Service) cardURL(userID int64) string {
-	base := strings.TrimRight(strings.TrimSpace(s.CardBaseURL), "/")
-	if base == "" {
-		return ""
-	}
-	return base + "/" + userIDString(userID)
 }

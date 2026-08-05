@@ -24,6 +24,9 @@ type UserRepository interface {
 	// FindByID resolves a user with its profile and identities, regardless of state:
 	// the console must be able to inspect a closed account in order to restore it.
 	FindByID(ctx context.Context, userID int64) (*model.User, error)
+	// FindAuthUserByID returns the scalar columns without the Profile/Identities
+	// preloads, for edit paths that only act on the account row itself.
+	FindAuthUserByID(ctx context.Context, userID int64) (*model.User, error)
 	// UpdateAdminUser decides for itself whether the edit demotes an administrator,
 	// from the row locked inside its transaction. It takes no flag for that: a caller's
 	// comparison is against a read from before the transaction, and acting on it let a
@@ -48,9 +51,11 @@ type AuditLogRepository interface {
 	List(ctx context.Context, filter repository.AuditLogFilter) ([]model.AuditLog, int64, error)
 }
 
-// TokenBlacklist is the fast-reject cache for revoked access tokens.
+// TokenBlacklist invalidates the auth-state cache entries for revoked access
+// tokens. Revocation is authoritative in PostgreSQL; this clears the short-TTL
+// cache so the middleware's next request re-checks the database immediately.
 type TokenBlacklist interface {
-	BlacklistJTIBatch(ctx context.Context, entries map[string]time.Duration) error
+	DeleteAuthStates(ctx context.Context, jtis []string) error
 }
 
 // DeviceStore clears a user's device records when an administrative action

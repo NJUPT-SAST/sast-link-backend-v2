@@ -1,14 +1,14 @@
 package auth
 
 import (
-	"crypto/rsa"
+	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"strings"
 )
 
-// JWTConfig contains validated RS256 signing and verification settings.
+// JWTConfig contains validated EdDSA signing and verification settings.
 type JWTConfig struct {
 	Issuer         string
 	Audience       string
@@ -19,7 +19,10 @@ type JWTConfig struct {
 	Clock          Clock
 }
 
-// NewJWTManager parses RSA key material and constructs a strict JWT manager.
+// NewJWTManager parses Ed25519 key material and constructs a strict JWT manager.
+// EdDSA/Ed25519 signs roughly an order of magnitude faster than the RSA-2048 the
+// service used before — a real cost on the 1c1g deployment, where every
+// login/refresh issues a JWT and every authenticated request verifies one.
 func NewJWTManager(config JWTConfig) (*JWTManager, error) {
 	issuer := strings.TrimSpace(config.Issuer)
 	audience := strings.TrimSpace(config.Audience)
@@ -34,12 +37,9 @@ func NewJWTManager(config JWTConfig) (*JWTManager, error) {
 		return nil, ErrInvalidInput
 	}
 
-	active, err := parseRSAPrivateKey(activeKeyPEM)
+	active, err := parseEd25519PrivateKey(activeKeyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("parse active JWT key: %w", err)
-	}
-	if active.N.BitLen() < 2048 {
-		return nil, fmt.Errorf("parse active JWT key: %w", ErrInvalidInput)
 	}
 	manager := &JWTManager{
 		Issuer:   issuer,
@@ -48,11 +48,11 @@ func NewJWTManager(config JWTConfig) (*JWTManager, error) {
 		Clock:    config.Clock,
 	}
 	if previousKeyPEM != "" {
-		previous, err := parseRSAPublicKey(previousKeyPEM)
+		previous, err := parseEd25519PublicKey(previousKeyPEM)
 		if err != nil {
 			return nil, fmt.Errorf("parse previous JWT key: %w", err)
 		}
-		if previous.N.BitLen() < 2048 || previousKID == activeKID {
+		if previousKID == activeKID {
 			return nil, fmt.Errorf("parse previous JWT key: %w", ErrInvalidInput)
 		}
 		manager.Previous = []JWTKeyPair{{KID: previousKID, Public: previous}}
@@ -68,58 +68,46 @@ func NewRefreshTokenManager(secret string, random RandomSource) (*RefreshTokenMa
 	return &RefreshTokenManager{Random: random, Secret: []byte(secret)}, nil
 }
 
-func parseRSAPrivateKey(encoded string) (*rsa.PrivateKey, error) {
+func parseEd25519PrivateKey(encoded string) (ed25519.PrivateKey, error) {
 	block, _ := pem.Decode([]byte(normalizePEM(encoded)))
 	if block == nil {
 		return nil, ErrInvalidInput
 	}
-	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		private, ok := key.(*rsa.PrivateKey)
-		if !ok {
-			return nil, ErrInvalidInput
-		}
-		if err := private.Validate(); err != nil {
-			return nil, ErrInvalidInput
-		}
-		return private, nil
-	}
-	private, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		return nil, ErrInvalidInput
 	}
-	if err := private.Validate(); err != nil {
+	private, ok := key.(ed25519.PrivateKey)
+	if !ok || len(private) != ed25519.PrivateKeySize {
 		return nil, ErrInvalidInput
 	}
 	return private, nil
 }
 
-func parseRSAPublicKey(encoded string) (*rsa.PublicKey, error) {
+func parseEd25519PublicKey(encoded string) (ed25519.PublicKey, error) {
 	block, _ := pem.Decode([]byte(normalizePEM(encoded)))
 	if block == nil {
 		return nil, ErrInvalidInput
 	}
 	if public, err := x509.ParsePKIXPublicKey(block.Bytes); err == nil {
-		rsaPublic, ok := public.(*rsa.PublicKey)
-		if !ok {
+		edPublic, ok := public.(ed25519.PublicKey)
+		if !ok || len(edPublic) != ed25519.PublicKeySize {
 			return nil, ErrInvalidInput
 		}
-		return rsaPublic, nil
+		return edPublic, nil
 	}
 	if private, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		rsaPrivate, ok := private.(*rsa.PrivateKey)
+		edPrivate, ok := private.(ed25519.PrivateKey)
 		if !ok {
 			return nil, ErrInvalidInput
 		}
-		return &rsaPrivate.PublicKey, nil
+		public, ok := edPrivate.Public().(ed25519.PublicKey)
+		if !ok || len(public) != ed25519.PublicKeySize {
+			return nil, ErrInvalidInput
+		}
+		return public, nil
 	}
-	if private, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		return &private.PublicKey, nil
-	}
-	public, err := x509.ParsePKCS1PublicKey(block.Bytes)
-	if err != nil {
-		return nil, ErrInvalidInput
-	}
-	return public, nil
+	return nil, ErrInvalidInput
 }
 
 func normalizePEM(encoded string) string {

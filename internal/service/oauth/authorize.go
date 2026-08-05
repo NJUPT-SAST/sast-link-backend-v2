@@ -207,7 +207,7 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 		return nil, newError(ErrInvalidRequest, "redirect_uri 已不在客户端注册值中，请重新发起授权", nil)
 	}
 
-	user, err := s.Users.FindByID(ctx, input.UserID)
+	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
@@ -258,16 +258,17 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 
 // parseRequestedScopes parses the space-delimited wire scope parameter.
 //
-// Uses scope.ParseClaim rather than a hand split so the authorize endpoint and
-// the JWT claim agree on what a valid scope string is, including openid being
-// mandatory for this service.
+// Validation goes through internal/scope rather than a local membership test, so
+// the authorize endpoint and the signed JWT claim agree on which scope sets exist
+// at all — including openid being mandatory for this service. What differs is only
+// the whitespace tolerance: this is scope.Normalize over strings.Fields, not
+// scope.ParseClaim, because the wire parameter follows HTTP convention and may
+// carry runs of spaces that ParseClaim rejects in a claim we signed ourselves.
 func parseRequestedScopes(raw string) ([]string, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
 		return nil, scope.ErrInvalid
 	}
-	// The wire form allows runs of spaces where the claim form does not, so
-	// collapse them before the strict parse.
 	return scope.Normalize(strings.Fields(value))
 }
 

@@ -87,7 +87,7 @@ func parseCommand(args []string) (command, error) {
 func postgresURL(cfg *config.Config) string {
 	connection := &url.URL{
 		Scheme: "postgres",
-		User:   url.UserPassword(cfg.DBUser, cfg.DBPassword),
+		User:   url.UserPassword(cfg.DBUser, cfg.DBSecret),
 		Host:   net.JoinHostPort(cfg.DBHost, cfg.DBPort),
 		Path:   "/" + cfg.DBName,
 	}

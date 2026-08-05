@@ -2,8 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -39,22 +39,22 @@ func (r repeatedReader) Read(target []byte) (int, error) {
 
 var (
 	testCredentialsOnce sync.Once
-	testPrivateKey      *rsa.PrivateKey
+	testPrivateKey      ed25519.PrivateKey
 	testPasswordHash    string
 	testCredentialsErr  error
 )
 
 // sharedTestCredentials computes the immutable, production-strength password
-// hash and RSA key once per package. The session fixtures are created over a
-// hundred times; deriving PBKDF2-SHA512/600k and generating RSA-2048 for every
-// fixture makes the package exceed Go's 10-minute timeout under -race and
-// atomic coverage without improving test isolation. Tests still receive fresh
-// services and mutable fakes; only these read-only cryptographic values are
-// shared.
-func sharedTestCredentials(t *testing.T) (*rsa.PrivateKey, string) {
+// hash and Ed25519 key once per package. The session fixtures are created over
+// a hundred times; deriving an argon2id hash and generating an Ed25519 keypair
+// for every fixture makes the package exceed Go's 10-minute timeout under -race
+// and atomic coverage without improving test isolation. Tests still receive
+// fresh services and mutable fakes; only these read-only cryptographic values
+// are shared.
+func sharedTestCredentials(t *testing.T) (ed25519.PrivateKey, string) {
 	t.Helper()
 	testCredentialsOnce.Do(func() {
-		testPrivateKey, testCredentialsErr = rsa.GenerateKey(rand.Reader, 2048)
+		_, testPrivateKey, testCredentialsErr = ed25519.GenerateKey(rand.Reader)
 		if testCredentialsErr != nil {
 			return
 		}
@@ -77,6 +77,9 @@ type fakeUsers struct {
 	tokens            *fakeTokens
 	updatePasswordErr error
 	passwordUpdates   []int64
+	// rehashUpdates records UpdatePasswordHash calls, which the repository makes
+	// only for rehash-on-login (no token_version bump, no revocation).
+	rehashUpdates []int64
 	// createErr forces CreateWithProfile to fail, for racing-insert scenarios the
 	// in-memory maps cannot reproduce.
 	createErr error
@@ -93,6 +96,14 @@ type fakeUsers struct {
 }
 
 func (f *fakeUsers) FindByLoginIdentifier(_ context.Context, identifier string) (*model.User, error) {
+	return f.lookup(identifier)
+}
+
+func (f *fakeUsers) FindAuthUserByLoginIdentifier(_ context.Context, identifier string) (*model.User, error) {
+	return f.lookup(identifier)
+}
+
+func (f *fakeUsers) lookup(identifier string) (*model.User, error) {
 	f.lookups = append(f.lookups, identifier)
 	if f.err != nil {
 		return nil, f.err
@@ -115,6 +126,10 @@ func (f *fakeUsers) FindByLoginEmail(_ context.Context, email string) (*model.Us
 	return user, nil
 }
 
+func (f *fakeUsers) FindProfileByID(_ context.Context, userID int64) (*model.User, error) {
+	return f.FindByID(context.Background(), userID)
+}
+
 func (f *fakeUsers) FindByID(_ context.Context, userID int64) (*model.User, error) {
 	if f.err != nil {
 		return nil, f.err
@@ -124,6 +139,14 @@ func (f *fakeUsers) FindByID(_ context.Context, userID int64) (*model.User, erro
 		return nil, repository.ErrNotFound
 	}
 	return user, nil
+}
+
+func (f *fakeUsers) FindAuthUserByID(_ context.Context, userID int64) (*model.User, error) {
+	return f.FindByID(context.Background(), userID)
+}
+
+func (f *fakeUsers) FindAuthUserByLoginEmail(_ context.Context, email string) (*model.User, error) {
+	return f.FindByLoginEmail(context.Background(), email)
 }
 
 func (f *fakeUsers) ExistsByLoginEmail(_ context.Context, email string) (bool, error) {
@@ -268,6 +291,24 @@ func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
 	return f.tokens.RevokeAllByUser(ctx, userID, revokedAt)
 }
 
+// UpdatePasswordHash mirrors the repository's guarded in-place rehash write:
+// the hash changes only if currentHash still matches (a concurrent password
+// change/reset wins, and the rehash is skipped), and — unlike
+// UpdatePasswordAndRevokeSessions — no session is revoked and token_version is
+// untouched.
+func (f *fakeUsers) UpdatePasswordHash(_ context.Context, userID int64, currentHash, passwordHash string) error {
+	user, ok := f.byID[userID]
+	if !ok {
+		return repository.ErrNotFound
+	}
+	if user.PasswordHash != currentHash {
+		return repository.ErrRehashSkipped
+	}
+	user.PasswordHash = passwordHash
+	f.rehashUpdates = append(f.rehashUpdates, userID)
+	return nil
+}
+
 // UpdateProfile mirrors the repository's partial update: only non-nil fields are
 // applied, and the reloaded aggregate is returned.
 func (f *fakeUsers) UpdateProfile(_ context.Context, userID int64, update repository.ProfileUpdate) (*model.User, error) {
@@ -357,6 +398,10 @@ func (f *fakeClients) FindActiveByClientID(_ context.Context, clientID string) (
 	return client, nil
 }
 
+func (f *fakeClients) FindActiveInternalClient(_ context.Context, clientID string) (*model.OAuthClient, error) {
+	return f.FindActiveByClientID(context.Background(), clientID)
+}
+
 type fakeTokens struct {
 	accessByJTI         map[string]*model.OAuthAccessToken
 	refreshByHash       map[string]*model.OAuthRefreshToken
@@ -371,6 +416,9 @@ type fakeTokens struct {
 	rotateErr           error
 	createErr           error
 	revokeErr           error
+	// auditEntries records the outbox rows enqueued with token pairs/rotations,
+	// the async replacement for the synchronous success audit.
+	auditEntries []*model.AuditLog
 }
 
 func newFakeTokens() *fakeTokens {
@@ -388,18 +436,38 @@ func (f *fakeTokens) CreatePair(_ context.Context, access *model.OAuthAccessToke
 	return nil
 }
 
-func (f *fakeTokens) RotateRefreshToken(_ context.Context, currentHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error {
+func (f *fakeTokens) CreatePairWithAudit(_ context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, outbox *model.AuditLog) error {
+	if err := f.CreatePair(context.Background(), access, refresh); err != nil {
+		return err
+	}
+	f.auditEntries = append(f.auditEntries, outbox)
+	return nil
+}
+
+func (f *fakeTokens) RotateRefreshTokenWithAudit(_ context.Context, familyID string, currentHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, outbox *model.AuditLog) (time.Time, error) {
+	origin, err := f.RotateRefreshToken(context.Background(), familyID, currentHash, access, refresh)
+	if err != nil {
+		return time.Time{}, err
+	}
+	f.auditEntries = append(f.auditEntries, outbox)
+	return origin, nil
+}
+
+func (f *fakeTokens) RotateRefreshToken(_ context.Context, familyID string, currentHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) (time.Time, error) {
 	if f.rotateErr != nil {
 		if errors.Is(f.rotateErr, repository.ErrTokenReplay) {
 			if current := f.refreshByHash[currentHash]; current != nil {
 				f.revokedFamilies = append(f.revokedFamilies, current.FamilyID)
 			}
 		}
-		return f.rotateErr
+		return time.Time{}, f.rotateErr
 	}
 	current, ok := f.refreshByHash[currentHash]
 	if !ok {
-		return repository.ErrNotFound
+		return time.Time{}, repository.ErrNotFound
+	}
+	if current.FamilyID != familyID {
+		return time.Time{}, repository.ErrInvalidArgument
 	}
 	now := time.Now().UTC()
 	current.RevokedAt = &now
@@ -407,7 +475,7 @@ func (f *fakeTokens) RotateRefreshToken(_ context.Context, currentHash string, a
 	f.rotatedRefresh = refresh
 	f.accessByJTI[access.TokenID] = access
 	f.refreshByHash[refresh.TokenHash] = refresh
-	return nil
+	return current.CreatedAt, nil
 }
 
 func (f *fakeTokens) FindRefreshToken(_ context.Context, tokenHash string) (*model.OAuthRefreshToken, error) {
@@ -551,30 +619,15 @@ func (f *fakeFailures) Reset(_ context.Context, key string) error {
 }
 
 type fakeBlacklist struct {
-	jti     string
-	ttl     time.Duration
-	entries map[string]time.Duration
-	err     error
+	jtis []string
+	err  error
 }
 
-func (f *fakeBlacklist) BlacklistJTI(_ context.Context, jti string, ttl time.Duration) error {
+func (f *fakeBlacklist) DeleteAuthStates(_ context.Context, jtis []string) error {
 	if f.err != nil {
 		return f.err
 	}
-	f.jti = jti
-	f.ttl = ttl
-	return nil
-}
-
-func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]time.Duration) error {
-	if f.err != nil {
-		return f.err
-	}
-	f.entries = entries
-	for jti, ttl := range entries {
-		f.jti = jti
-		f.ttl = ttl
-	}
+	f.jtis = jtis
 	return nil
 }
 
@@ -712,6 +765,9 @@ func (f *fakeRegisterTicketStore) ConsumeRegisterTicket(_ context.Context, ticke
 
 type fakeIdentities struct {
 	byProviderID map[string]*model.Identity
+	// users lets DeleteIdentityGuardingLoginMethod read the account's login
+	// email when deciding whether an identity is its last way in.
+	users        *fakeUsers
 	err          error
 	createErr    error
 	deleteErr    error
@@ -809,6 +865,28 @@ func (f *fakeIdentities) DeleteByIDAndUser(_ context.Context, identityID, userID
 	return repository.ErrNotFound
 }
 
+func (f *fakeIdentities) DeleteIdentityGuardingLoginMethod(_ context.Context, identityID, userID int64) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	hasLoginEmail := false
+	if f.users != nil {
+		if user, ok := f.users.byID[userID]; ok && strings.TrimSpace(user.LoginEmail) != "" {
+			hasLoginEmail = true
+		}
+	}
+	remaining := int64(0)
+	for _, identity := range f.byProviderID {
+		if identity.ID != identityID && identity.UserID == userID {
+			remaining++
+		}
+	}
+	if !hasLoginEmail && remaining == 0 {
+		return repository.ErrLastLoginMethod
+	}
+	return f.DeleteByIDAndUser(context.Background(), identityID, userID)
+}
+
 type fakeBindTicketStore struct {
 	tickets    map[string]BindTicketPayload
 	err        error
@@ -849,7 +927,7 @@ func (f *fakeBindTicketStore) ConsumeBindTicket(_ context.Context, ticket string
 }
 
 func TestLoginNormalizesIssuesTokensAndAudits(t *testing.T) {
-	service, users, _, tokens, audit, failures := newTestService(t)
+	service, users, _, tokens, _, failures := newTestService(t)
 	result, err := service.Login(context.Background(), LoginInput{Identifier: "  USER@Njupt.edu.cn ", Password: "secret", ClientIP: "127.0.0.1"})
 	if err != nil {
 		t.Fatalf("Login returned error: %v", err)
@@ -873,15 +951,62 @@ func TestLoginNormalizesIssuesTokensAndAudits(t *testing.T) {
 	if len(failures.resets) != 1 || failures.resets[0] != "user:42" {
 		t.Fatalf("failure resets = %#v, want user key reset", failures.resets)
 	}
-	if len(audit.entries) != 1 || audit.entries[0].Action != "login" || audit.entries[0].Success == nil || !*audit.entries[0].Success {
-		t.Fatalf("audit entries = %#v, want successful login audit", audit.entries)
+	if len(tokens.auditEntries) != 1 || tokens.auditEntries[0].Action != "login" || tokens.auditEntries[0].Success == nil || !*tokens.auditEntries[0].Success {
+		t.Fatalf("audit outboxes = %#v, want successful login audit enqueued", tokens.auditEntries)
 	}
 	if got := service.Limiter.(*fakeLimiter).calls[0]; got != "login:127.0.0.1" {
 		t.Fatalf("limiter subject = %q, want client IP", got)
 	}
-	detail := string(audit.entries[0].Detail)
+	detail := string(tokens.auditEntries[0].Detail)
 	if !strings.Contains(detail, `"method":"password"`) || strings.Contains(detail, "identifier") {
 		t.Fatalf("audit detail = %s, want method only", detail)
+	}
+}
+
+// A successful login upgrades a stale hash to the configured parameters in place
+// (rehash-on-login), so a KDF work-factor change reaches existing accounts on
+// their next login instead of verifying at the old cost forever. The rehash must
+// not revoke the session being created: the write is UpdatePasswordHash, not
+// UpdatePasswordAndRevokeSessions.
+func TestLoginRehashesStalePassword(t *testing.T) {
+	service, users, _, _, _, _ := newTestService(t)
+	// Configure the service for 8 MiB; the stored hash carries 16 MiB, exactly the
+	// shape of a work-factor change reaching an existing account.
+	service.Passwords = auth.PasswordHasher{Random: repeatedReader(0x42), Argon2Time: 1, Argon2Memory: 8192, Argon2Threads: 1}
+	stale, err := (auth.PasswordHasher{Random: repeatedReader(0x42), Argon2Time: 1, Argon2Memory: 16384, Argon2Threads: 1}).HashPassword(context.Background(), "secret")
+	if err != nil {
+		t.Fatalf("hash stale password: %v", err)
+	}
+	users.byID[42].PasswordHash = stale
+
+	if _, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"}); err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	if len(users.rehashUpdates) != 1 || users.rehashUpdates[0] != 42 {
+		t.Fatalf("rehash updates = %#v, want user 42", users.rehashUpdates)
+	}
+	if len(users.passwordUpdates) != 0 {
+		t.Fatalf("password-update+revoke calls = %#v, want none (rehash must not revoke sessions)", users.passwordUpdates)
+	}
+	if users.byID[42].PasswordHash == stale {
+		t.Fatal("stored hash was not upgraded")
+	}
+	if parts := strings.Split(users.byID[42].PasswordHash, "$"); len(parts) != 6 || parts[0] != "argon2id-v1" || parts[1] != "1" || parts[2] != "8192" {
+		t.Fatalf("rehashed hash = %q, want argon2id m=8192", users.byID[42].PasswordHash)
+	}
+}
+
+// A login whose stored hash already matches the configured parameters must not
+// rewrite the hash: the extra write is pure overhead on the hot path.
+func TestLoginDoesNotRehashWhenParametersMatch(t *testing.T) {
+	service, users, _, _, _, _ := newTestService(t)
+	// newTestService hashes "secret" with the same bare hasher Login uses, so the
+	// parameters match by construction.
+	if _, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"}); err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	if len(users.rehashUpdates) != 0 {
+		t.Fatalf("rehash updates = %#v, want none when parameters match", users.rehashUpdates)
 	}
 }
 
@@ -1012,27 +1137,27 @@ func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
 }
 
 func TestLoginOtherMailAuditsMethodWithoutIdentifier(t *testing.T) {
-	service, _, _, _, audit, _ := newTestService(t)
+	service, _, _, tokens, _, _ := newTestService(t)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "alias@sast.fun", Password: "secret"})
 	if err != nil {
 		t.Fatalf("Login returned error: %v", err)
 	}
-	detail := string(audit.entries[len(audit.entries)-1].Detail)
+	detail := string(tokens.auditEntries[len(tokens.auditEntries)-1].Detail)
 	if !strings.Contains(detail, `"method":"other_mail"`) || strings.Contains(detail, "identifier") {
 		t.Fatalf("audit detail = %s, want other_mail method only", detail)
 	}
 }
 
-func TestLoginAuditFailureCompensatesCreatedFamily(t *testing.T) {
-	service, _, _, tokens, audit, failures := newTestService(t)
-	audit.err = errors.New("audit down")
+// The success audit rides the token transaction, so a failure inside that
+// transaction rolls the pair back atomically — there is no half-issued session
+// to compensate, because the audit row commits with the pair or not at all.
+func TestLoginTokenPairFailureIsAtomic(t *testing.T) {
+	service, _, _, tokens, _, _ := newTestService(t)
+	tokens.createErr = errors.New("pair down")
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
 	assertKind(t, err, KindInternal, errcode.CodeInternal)
-	if tokens.createdAccess == nil || len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != tokens.createdRefresh.FamilyID {
-		t.Fatalf("created=%+v revoked=%#v, want revoke compensation after post-issue audit failure", tokens.createdAccess, tokens.revokedFamilies)
-	}
-	if len(failures.resets) != 1 || failures.resets[0] != "user:42" {
-		t.Fatalf("failure resets = %#v, want reset before success audit", failures.resets)
+	if tokens.createdAccess != nil || len(tokens.revokedFamilies) != 0 {
+		t.Fatalf("created=%+v revoked=%#v, want nothing created and nothing to compensate", tokens.createdAccess, tokens.revokedFamilies)
 	}
 }
 
@@ -1040,7 +1165,7 @@ func TestLoginAuditFailureCompensatesCreatedFamily(t *testing.T) {
 // window. Revoking the pair instead would make every login fail for the whole
 // duration of a Redis outage, so the session is kept and the audit still runs.
 func TestLoginKeepsSessionWhenFailureResetUnavailable(t *testing.T) {
-	service, _, _, tokens, audit, failures := newTestService(t)
+	service, _, _, tokens, _, failures := newTestService(t)
 	failures.resetErr = errors.New("redis down")
 	result, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
 	if err != nil {
@@ -1049,27 +1174,24 @@ func TestLoginKeepsSessionWhenFailureResetUnavailable(t *testing.T) {
 	if result.AccessToken == "" || len(tokens.revokedFamilies) != 0 {
 		t.Fatalf("result=%+v revoked=%#v, want issued pair with no compensation", result, tokens.revokedFamilies)
 	}
-	if len(audit.entries) != 1 || audit.entries[0].Success == nil || !*audit.entries[0].Success {
-		t.Fatalf("audit entries = %#v, want successful login audit", audit.entries)
+	if len(tokens.auditEntries) != 1 || tokens.auditEntries[0].Success == nil || !*tokens.auditEntries[0].Success {
+		t.Fatalf("audit outboxes = %#v, want successful login audit enqueued", tokens.auditEntries)
 	}
 }
 
-func TestLoginCompensationDetachesRequestCancellation(t *testing.T) {
-	service, _, _, tokens, audit, _ := newTestService(t)
-	audit.err = errors.New("audit down")
+// With the audit folded into the token transaction there is no post-issue step
+// left to compensate; a cancelled request aborts before the pair exists.
+func TestLoginAbortsWhenRequestCancelled(t *testing.T) {
+	service, _, _, tokens, _, _ := newTestService(t)
+	// A semaphore makes the hasher honour a cancelled context at the queue.
+	service.Passwords = auth.PasswordHasher{Semaphore: make(chan struct{}, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	_, err := service.Login(ctx, LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
-	assertKind(t, err, KindInternal, errcode.CodeInternal)
-	if len(tokens.revokedFamilies) != 1 {
-		t.Fatalf("revoked families = %#v, want compensation after canceled request", tokens.revokedFamilies)
-	}
-	if tokens.revokeContextErr != nil {
-		t.Fatalf("compensation context error = %v, want live context", tokens.revokeContextErr)
-	}
-	if !tokens.revokeContextHasTTL {
-		t.Fatal("compensation context has no deadline")
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	if tokens.createdAccess != nil || len(tokens.revokedFamilies) != 0 {
+		t.Fatalf("created=%+v revoked=%#v, want nothing on a cancelled request", tokens.createdAccess, tokens.revokedFamilies)
 	}
 }
 
@@ -1124,7 +1246,31 @@ func TestRefreshRejectsDeletedExpiredAndReplay(t *testing.T) {
 	}
 }
 
-func TestRefreshRevokedTokenRevokesFamilyBeforeOtherPrechecks(t *testing.T) {
+func TestRefreshWithinGraceReplayPreservesDeviceRecord(t *testing.T) {
+	service, _, _, tokens, _, _ := newTestService(t)
+	devices := &fakeDevices{}
+	service = withDevices(service, devices)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	// A benign concurrent refresh: the winning rotation already cut this token,
+	// but within the grace window the family is preserved. The fake returns the
+	// sentinel without recording a family revoke, exactly like the repository
+	// does for the within-grace case.
+	tokens.rotateErr = repository.ErrTokenReplayWithinGrace
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	if len(tokens.revokedFamilies) != 0 {
+		t.Fatalf("revoked families = %#v, want no revoke for a within-grace replay", tokens.revokedFamilies)
+	}
+	// The family survived, so its device record must too.
+	if len(devices.removed) != 0 {
+		t.Fatalf("removed = %#v, want no device removal for a within-grace replay", devices.removed)
+	}
+}
+
+func TestRefreshRevokedTokenRejectsWithoutRedundantRevoke(t *testing.T) {
 	service, users, _, tokens, _, _ := newTestService(t)
 	devices := &fakeDevices{}
 	service = withDevices(service, devices)
@@ -1142,15 +1288,19 @@ func TestRefreshRevokedTokenRevokesFamilyBeforeOtherPrechecks(t *testing.T) {
 
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
 	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
-	if len(tokens.revokedFamilies) != 1 || tokens.revokedFamilies[0] != tokens.createdRefresh.FamilyID {
-		t.Fatalf("revoked families = %#v, want revoked refresh family", tokens.revokedFamilies)
+	// A revoked refresh token belongs to an already-cut family: the revoking
+	// transaction wrote its blacklist outbox rows, so re-revoking here would find
+	// no live token and deliver nothing. The service rejects without repeating it.
+	if len(tokens.revokedFamilies) != 0 {
+		t.Fatalf("revoked families = %#v, want no redundant revoke of an already-revoked family", tokens.revokedFamilies)
 	}
-	// Replay detection killed the family; the device record must not survive it.
-	if len(devices.removed) != 1 || devices.removed[0] != tokens.createdRefresh.FamilyID {
-		t.Fatalf("removed = %#v, want the replayed family's device record", devices.removed)
+	// Within the grace window the revoked token is a benign concurrent refresh:
+	// the family was not cut again and the device record survives it.
+	if len(devices.removed) != 0 {
+		t.Fatalf("removed = %#v, want no device removal for a within-grace refresh", devices.removed)
 	}
-	if blacklist.jti == "" || blacklist.ttl <= 0 {
-		t.Fatalf("blacklist = %+v, want live revoked access token delivery", blacklist)
+	if len(blacklist.jtis) != 0 {
+		t.Fatalf("blacklist = %+v, want no synchronous delivery for an already-revoked family", blacklist)
 	}
 }
 
@@ -1190,19 +1340,18 @@ func TestRefreshAuditsSuccessAndReplay(t *testing.T) {
 	if refresh.RefreshToken == "" {
 		t.Fatal("Refresh returned empty token")
 	}
-	var successEntry *model.AuditLog
-	for i := range audit.entries {
-		if audit.entries[i].Action == "refresh" {
-			successEntry = &audit.entries[i]
-		}
+	if len(tokens.auditEntries) == 0 {
+		t.Fatalf("audit outboxes = %#v, want a successful refresh audit enqueued", tokens.auditEntries)
 	}
-	if successEntry == nil || successEntry.Success == nil || !*successEntry.Success {
-		t.Fatalf("audit entries = %#v, want successful refresh audit", audit.entries)
+	lastOutbox := tokens.auditEntries[len(tokens.auditEntries)-1]
+	if lastOutbox.Action != "refresh" || lastOutbox.Success == nil || !*lastOutbox.Success {
+		t.Fatalf("audit outboxes = %#v, want successful refresh audit", tokens.auditEntries)
 	}
 
 	tokens.rotateErr = repository.ErrTokenReplay
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: refresh.RefreshToken})
 	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	// The replay audit stays synchronous (the failure path is not the hot path).
 	last := audit.entries[len(audit.entries)-1]
 	if last.Action != "refresh" || last.Success == nil || *last.Success || last.ErrCode == nil || *last.ErrCode != errcode.CodeAccessTokenInvalid {
 		t.Fatalf("last audit = %+v, want failed refresh audit with invalid-token code", last)
@@ -1260,7 +1409,7 @@ func TestLogoutStrictOwnershipRevokesAndBlacklists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Logout returned error: %v", err)
 	}
-	if result.FamilyID != familyID || tokens.revokedFamilies[len(tokens.revokedFamilies)-1] != familyID || blacklist.jti != claims.ID || blacklist.ttl <= 0 {
+	if result.FamilyID != familyID || tokens.revokedFamilies[len(tokens.revokedFamilies)-1] != familyID || !slices.Contains(blacklist.jtis, claims.ID) {
 		t.Fatalf("logout result=%+v revoked=%#v blacklist=%+v", result, tokens.revokedFamilies, blacklist)
 	}
 	if detail := string(audit.entries[len(audit.entries)-1].Detail); detail != "{}" {
@@ -1296,8 +1445,8 @@ func TestLogoutRevokeFamilyBeforeBlacklistAndRetry(t *testing.T) {
 	login, claims = loginForLogout(t, &service)
 	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
 	assertKind(t, err, KindInternal, errcode.CodeInternal)
-	if blacklist.jti != "" {
-		t.Fatalf("blacklist jti = %q, want no blacklist when DB revoke fails", blacklist.jti)
+	if len(blacklist.jtis) != 0 {
+		t.Fatalf("blacklist jtis = %v, want no delivery when DB revoke fails", blacklist.jtis)
 	}
 }
 
@@ -2234,7 +2383,7 @@ func newRegisterService(t *testing.T) Service {
 		Clients:          clients,
 		Tokens:           tokens,
 		Audit:            &fakeAudit{},
-		Identities:       &fakeIdentities{},
+		Identities:       &fakeIdentities{users: users},
 		Limiter:          &fakeLimiter{},
 		Mailer:           &fakeMailer{},
 		VerificationCode: &fakeVerificationCodeStore{},
@@ -2792,7 +2941,7 @@ func TestRefreshAuditRecordsReplayOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeRotated {
+	if got := auditOutcome(t, lastTokenAuditAction(t, tokens, "refresh")); got != refreshOutcomeRotated {
 		t.Fatalf("successful refresh outcome = %q, want %q", got, refreshOutcomeRotated)
 	}
 
@@ -2872,6 +3021,21 @@ func TestRefreshAuditRecordsClientMismatchOutcome(t *testing.T) {
 	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeClientMismatch {
 		t.Fatalf("client-mismatch outcome = %q, want %q", got, refreshOutcomeClientMismatch)
 	}
+}
+
+// lastTokenAuditAction finds the most recent audit row the token repository
+// recorded for action — the login/refresh success audits now write directly into
+// the token transaction, so they are asserted on the token fake, not the audit
+// fake.
+func lastTokenAuditAction(t *testing.T, tokens *fakeTokens, action string) model.AuditLog {
+	t.Helper()
+	for i := len(tokens.auditEntries) - 1; i >= 0; i-- {
+		if tokens.auditEntries[i].Action == action {
+			return *tokens.auditEntries[i]
+		}
+	}
+	t.Fatalf("no token audit entry with action %q in %#v", action, tokens.auditEntries)
+	return model.AuditLog{}
 }
 
 func lastAuditAction(t *testing.T, audit *fakeAudit, action string) model.AuditLog {

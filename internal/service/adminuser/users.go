@@ -257,7 +257,7 @@ func (s Service) RestoreUser(ctx context.Context, input TargetUserInput) error {
 
 // loadTarget reads the account an edit is about to change.
 func (s Service) loadTarget(ctx context.Context, userID int64) (*model.User, error) {
-	user, err := s.Users.FindByID(ctx, userID)
+	user, err := s.Users.FindAuthUserByID(ctx, userID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrNotFound, "用户不存在", nil)
 	}

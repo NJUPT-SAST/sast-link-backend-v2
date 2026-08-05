@@ -30,7 +30,7 @@ func (s Service) Discovery() map[string]any {
 			grantTypeRefreshToken,
 		},
 		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"id_token_signing_alg_values_supported": []string{"EdDSA"},
 		// "none" covers public clients authenticating by PKCE alone; confidential
 		// clients post their secret. There is no Basic support, matching the contract.
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
@@ -45,7 +45,7 @@ func (s Service) Discovery() map[string]any {
 		// signIDToken's authTime parameter.
 		"claims_supported": []string{
 			"sub", "iss", "aud", "exp", "iat", "nonce",
-			"name", "picture", "preferred_username", "profile",
+			"name", "picture", "preferred_username",
 			"email", "email_verified", "updated_at",
 		},
 		"code_challenge_methods_supported": []string{pkceMethodS256},

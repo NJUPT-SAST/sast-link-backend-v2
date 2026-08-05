@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -126,10 +125,11 @@ func (s Service) familyByRefreshToken(ctx context.Context, token string, clientI
 // signature are still enforced, and ownership is decided below against the database
 // row rather than anything the token asserts.
 func (s Service) familyByAccessJTI(ctx context.Context, token string, clientID int64) (string, *int64, bool, error) {
-	claims, err := s.JWT.VerifyAccessToken(token)
-	if errors.Is(err, auth.ErrExpiredToken) {
-		claims, err = s.JWT.VerifyExpiredAccessToken(token)
-	}
+	// VerifyExpiredAccessToken is the one call that accepts both a live token and
+	// an expired one (forgiving only the clock; signature, issuer, audience and
+	// kid stay enforced), so an expired token does not pay for two full EdDSA
+	// verifies.
+	claims, err := s.JWT.VerifyExpiredAccessToken(token)
 	if err != nil {
 		return "", nil, false, nil
 	}

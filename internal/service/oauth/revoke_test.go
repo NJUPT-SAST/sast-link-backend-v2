@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -44,8 +45,8 @@ func TestRevokeByRefreshTokenRevokesWholeFamily(t *testing.T) {
 	if access := h.tokens.accessByJTI[claims.ID]; access == nil || access.RevokedAt == nil {
 		t.Fatalf("access token = %+v, want revoked alongside its refresh token", access)
 	}
-	if _, queued := h.blacklist.entries[claims.ID]; !queued {
-		t.Fatalf("blacklist = %v, want the revoked access JTI queued", h.blacklist.entries)
+	if !slices.Contains(h.blacklist.jtis, claims.ID) {
+		t.Fatalf("blacklist = %v, want the revoked access JTI queued", h.blacklist.jtis)
 	}
 }
 

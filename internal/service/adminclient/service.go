@@ -49,7 +49,9 @@ func (s Service) now() time.Time {
 	if clock == nil {
 		clock = auth.SystemClock
 	}
-	return clock.Now()
+	// UTC like the oauth and adminuser services: audit timestamps must not mix
+	// local offsets with the Z every other row carries.
+	return clock.Now().UTC()
 }
 
 func (s Service) newClientID() (string, error) {
@@ -131,26 +133,27 @@ func (s Service) audit(
 	}
 }
 
-// deliverBlacklist pushes revoked JTIs to the fast-reject cache. The durable outbox
-// rows were written in the revoking transaction, so a failure here only delays that
-// path; the middleware's DB check rejects these tokens either way.
+// deliverBlacklist clears the auth-state cache entries for the revoked access
+// tokens. The durable delivery is the outbox row written in the revoking
+// transaction (the worker retries until it lands); this synchronous call closes
+// the stale window immediately so a just-revoked token is rejected on the next
+// request rather than riding out the cache TTL.
 func (s Service) deliverBlacklist(ctx context.Context, entries []model.BlacklistEntry, now time.Time) {
 	if s.Blacklist == nil || len(entries) == 0 {
 		return
 	}
-	batch := make(map[string]time.Duration, len(entries))
+	jtis := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		ttl := entry.ExpiresAt.Sub(now)
-		if ttl <= 0 {
+		if entry.ExpiresAt.Sub(now) <= 0 {
 			continue
 		}
-		batch[entry.TokenID] = ttl
+		jtis = append(jtis, entry.TokenID)
 	}
-	if len(batch) == 0 {
+	if len(jtis) == 0 {
 		return
 	}
-	if err := s.Blacklist.BlacklistJTIBatch(ctx, batch); err != nil {
-		slog.WarnContext(ctx, "deliver client revocation blacklist", "error", err)
+	if err := s.Blacklist.DeleteAuthStates(ctx, jtis); err != nil {
+		slog.WarnContext(ctx, "invalidate client revocation auth-state cache", "count", len(jtis), "error", err)
 	}
 }
 

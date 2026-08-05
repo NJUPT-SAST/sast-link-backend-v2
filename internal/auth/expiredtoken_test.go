@@ -1,8 +1,8 @@
 package auth
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"errors"
 	"testing"
 	"time"
@@ -12,7 +12,7 @@ import (
 // returning the signed token and a manager that considers it expired.
 func expiredTokenManager(t *testing.T) (JWTManager, string) {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate signing key: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestVerifyExpiredAccessTokenStillEnforcesEverythingElse(t *testing.T) {
 // check would become a way to revoke an arbitrary family by forging a jti.
 func TestVerifyExpiredAccessTokenRejectsForeignSignature(t *testing.T) {
 	manager, _ := expiredTokenManager(t)
-	attackerKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, attackerKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate attacker key: %v", err)
 	}

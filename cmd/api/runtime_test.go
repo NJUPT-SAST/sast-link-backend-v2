@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
 	"strings"
 	"testing"
 
@@ -37,11 +35,6 @@ func TestValidateInternalClientModel(t *testing.T) {
 }
 
 func TestAssembleSessionRuntimeWiresServiceAndMiddleware(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
-	}
-	_ = key
 	if len(scope.InternalSessionScopes) != 3 {
 		t.Fatalf("InternalSessionScopes = %v, want 3 scopes", scope.InternalSessionScopes)
 	}

@@ -22,19 +22,26 @@ const (
 
 type TokenBlacklistOutbox interface {
 	ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]model.TokenBlacklistOutbox, error)
-	Ack(ctx context.Context, id int64, claimToken string) (bool, error)
+	AckMany(ctx context.Context, ids []int64, claimToken string) (int64, error)
 	Fail(ctx context.Context, id int64, claimToken string, attemptedAt, nextDeliveryAt time.Time, deliveryError string) (bool, error)
 	CleanupExpired(ctx context.Context, now time.Time) (int64, error)
 }
 
-type JTIBlacklist interface {
-	BlacklistJTI(ctx context.Context, jti string, ttl time.Duration) error
+type AuthStateInvalidator interface {
+	// DeleteAuthStates removes the per-token auth-state cache entries for a set
+	// of JTIs. A single revocation wave (logout, password change) can cut dozens
+	// of sessions at once, so the whole set goes in one pipeline call.
+	DeleteAuthStates(ctx context.Context, jtis []string) error
 }
 
-// TokenBlacklist delivers durable JWT revocations from PostgreSQL to Redis.
+// TokenBlacklist delivers durable JWT revocations from the outbox to the
+// auth-state cache: every revoked JTI's cached state is deleted so the
+// middleware cannot admit a token whose DB row says revoked. The outbox rows are
+// still keyed by token ID; only the Redis delivery target changed from the old
+// JTI blacklist key to the auth-state cache.
 type TokenBlacklist struct {
 	Outbox          TokenBlacklistOutbox
-	Blacklist       JTIBlacklist
+	AuthState       AuthStateInvalidator
 	Interval        time.Duration
 	Lease           time.Duration
 	BatchSize       int
@@ -50,9 +57,11 @@ func (w TokenBlacklist) Run(ctx context.Context) error {
 	}
 	interval := durationOrDefault(w.Interval, defaultTokenBlacklistInterval)
 	cleanupInterval := durationOrDefault(w.CleanupInterval, defaultTokenBlacklistCleanupRate)
-	deliveryTicker := time.NewTicker(interval)
+	// A timer instead of a ticker lets an empty outbox sleep at maxBackoff
+	// instead of waking every second for nothing.
+	dueTimer := time.NewTimer(interval)
+	defer dueTimer.Stop()
 	cleanupTicker := time.NewTicker(cleanupInterval)
-	defer deliveryTicker.Stop()
 	defer cleanupTicker.Stop()
 
 	w.processDue(ctx)
@@ -61,61 +70,97 @@ func (w TokenBlacklist) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-deliveryTicker.C:
-			w.processDue(ctx)
+		case <-dueTimer.C:
+			dueTimer.Reset(w.processDue(ctx))
 		case <-cleanupTicker.C:
 			w.cleanupExpired(ctx)
 		}
 	}
 }
 
-func (w TokenBlacklist) processDue(ctx context.Context) {
+// processDue claims one batch, invalidates the auth-state cache entries in a
+// single pipeline call, and acks or fails each entry. It returns the interval
+// until the next pass: the base interval after any work, maxBackoff when the
+// outbox was empty.
+//
+// Backing off on an idle queue is safe: cache invalidation only closes the
+// residual stale window, while the authoritative DB revoked_at check covers the
+// same tokens from the moment the revoking transaction commits.
+func (w TokenBlacklist) processDue(ctx context.Context) time.Duration {
+	base := durationOrDefault(w.Interval, defaultTokenBlacklistInterval)
+	maxBackoff := durationOrDefault(w.MaxBackoff, defaultTokenBlacklistMaxBackoff)
 	now := w.now()
 	entries, err := w.Outbox.ClaimDue(ctx, now, w.lease(), w.batchSize())
 	if err != nil {
 		if ctx.Err() == nil {
 			slog.Error("claim token blacklist outbox", "error", err)
 		}
-		return
+		return maxBackoff
 	}
+	if len(entries) == 0 {
+		return maxBackoff
+	}
+
+	var claimToken string
+	expiredIDs := make([]int64, 0, len(entries))
+	deliverable := make([]string, 0, len(entries))
+	deliverableIDs := make([]int64, 0, len(entries))
 	for _, entry := range entries {
-		if ctx.Err() != nil {
-			return
+		if entry.ClaimToken == nil || strings.TrimSpace(*entry.ClaimToken) == "" {
+			slog.Error("deliver token blacklist outbox", "id", entry.ID, "error", "missing claim token")
+			continue
 		}
-		w.deliver(ctx, entry)
+		claimToken = *entry.ClaimToken
+		if entry.ExpiresAt.Sub(now) <= 0 {
+			expiredIDs = append(expiredIDs, entry.ID)
+			continue
+		}
+		deliverable = append(deliverable, entry.TokenID)
+		deliverableIDs = append(deliverableIDs, entry.ID)
 	}
+	if len(expiredIDs) > 0 {
+		w.ackMany(ctx, expiredIDs, claimToken)
+	}
+	if len(deliverable) == 0 {
+		return base
+	}
+
+	// Deleting the auth-state cache entry for each revoked JTI is what makes the
+	// revocation effective: the middleware serves state from the cache, and a
+	// stale cached state would otherwise admit a token whose DB row says revoked.
+	if err := w.AuthState.DeleteAuthStates(ctx, deliverable); err != nil {
+		deliverableSet := make(map[string]struct{}, len(deliverable))
+		for _, jti := range deliverable {
+			deliverableSet[jti] = struct{}{}
+		}
+		for _, entry := range entries {
+			if _, ok := deliverableSet[entry.TokenID]; !ok {
+				continue
+			}
+			// Retry backoff grows with attempt count, so each failed row keeps its
+			// own next_delivery_at and the failures stay per-row.
+			next := now.Add(w.retryBackoff(entry.AttemptCount))
+			updated, failErr := w.Outbox.Fail(ctx, entry.ID, *entry.ClaimToken, now, next, err.Error())
+			if failErr != nil {
+				slog.Error("fail token blacklist outbox", "id", entry.ID, "error", failErr)
+			} else if !updated {
+				slog.Warn("token blacklist outbox lease lost after delivery failure", "id", entry.ID)
+			}
+		}
+		return base
+	}
+	w.ackMany(ctx, deliverableIDs, claimToken)
+	return base
 }
 
-func (w TokenBlacklist) deliver(ctx context.Context, entry model.TokenBlacklistOutbox) {
-	if entry.ClaimToken == nil || strings.TrimSpace(*entry.ClaimToken) == "" {
-		slog.Error("deliver token blacklist outbox", "id", entry.ID, "error", "missing claim token")
-		return
-	}
-	now := w.now()
-	ttl := entry.ExpiresAt.Sub(now)
-	if ttl <= 0 {
-		w.ack(ctx, entry)
-		return
-	}
-	if err := w.Blacklist.BlacklistJTI(ctx, entry.TokenID, ttl); err != nil {
-		next := now.Add(w.retryBackoff(entry.AttemptCount))
-		updated, failErr := w.Outbox.Fail(ctx, entry.ID, *entry.ClaimToken, now, next, err.Error())
-		if failErr != nil {
-			slog.Error("fail token blacklist outbox", "id", entry.ID, "error", failErr)
-		} else if !updated {
-			slog.Warn("token blacklist outbox lease lost after delivery failure", "id", entry.ID)
-		}
-		return
-	}
-	w.ack(ctx, entry)
-}
-
-func (w TokenBlacklist) ack(ctx context.Context, entry model.TokenBlacklistOutbox) {
-	acked, err := w.Outbox.Ack(ctx, entry.ID, *entry.ClaimToken)
+// ackMany removes a batch of delivered rows in one statement. All rows share the
+// batch's claim token, so a single DELETE IN covers them.
+func (w TokenBlacklist) ackMany(ctx context.Context, ids []int64, claimToken string) {
+	acked, err := w.Outbox.AckMany(ctx, ids, claimToken)
 	if err != nil {
-		slog.Error("ack token blacklist outbox", "id", entry.ID, "error", err)
-	} else if !acked {
-		slog.Warn("token blacklist outbox lease lost before ack", "id", entry.ID)
+		slog.Error("ack token blacklist outbox batch", "error", err)
+	} else if acked != int64(len(ids)) {
+		slog.Warn("token blacklist outbox lease lost before ack", "acked", acked, "want", len(ids))
 	}
 }
 
@@ -141,8 +186,8 @@ func (w TokenBlacklist) retryBackoff(attemptCount int) time.Duration {
 }
 
 func (w TokenBlacklist) validate() error {
-	if w.Outbox == nil || w.Blacklist == nil {
-		return fmt.Errorf("token blacklist worker requires outbox and blacklist")
+	if w.Outbox == nil || w.AuthState == nil {
+		return fmt.Errorf("token blacklist worker requires outbox and auth-state invalidator")
 	}
 	if w.Interval < 0 || w.Lease < 0 || w.BatchSize < 0 || w.MaxBackoff < 0 || w.CleanupInterval < 0 {
 		return fmt.Errorf("token blacklist worker durations and batch size must not be negative")

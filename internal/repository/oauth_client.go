@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -19,6 +20,37 @@ type OAuthClientRepository struct {
 // NewOAuthClient constructs an OAuthClientRepository backed by database.
 func NewOAuthClient(database *gorm.DB) *OAuthClientRepository {
 	return &OAuthClientRepository{database: database}
+}
+
+// internalClientCache holds the validated built-in client for the process
+// lifetime. It is safe to cache unconditionally: the internal client is
+// first-party-public and immutable — admin updates exclude its scope, grant
+// types, secret and active state — so no invalidation is ever needed. Third-party
+// clients must NOT use this cache (they can be disabled or rescoped live).
+var internalClientCache sync.Map // clientID -> *model.OAuthClient
+
+// FindActiveInternalClient finds the built-in first-party client, serving it from
+// a process-local cache after the first load. Every login/refresh/exchange-code
+// resolves it, so this removes one DB round trip from each without any staleness
+// risk. Only call it for the internal client.
+func (r *OAuthClientRepository) FindActiveInternalClient(ctx context.Context, clientID string) (*model.OAuthClient, error) {
+	if cached, ok := internalClientCache.Load(clientID); ok {
+		return cached.(*model.OAuthClient), nil
+	}
+	client, err := r.FindActiveByClientID(ctx, clientID)
+	if err != nil {
+		return nil, err
+	}
+	internalClientCache.Store(clientID, client)
+	return client, nil
+}
+
+// ResetInternalClientCache clears the cached built-in client. The cache is
+// process-global, so an integration test that seeds the internal client after a
+// previous test cached it would otherwise read a stale fixture; call this in
+// test setup. Production never needs it — the internal client is immutable.
+func ResetInternalClientCache() {
+	internalClientCache.Clear()
 }
 
 // FindActiveByClientID finds an active OAuth client by its public client_id.
@@ -91,7 +123,7 @@ func (r *OAuthClientRepository) Create(ctx context.Context, client *model.OAuthC
 // administrator expects it to cut access immediately, so the flag flip and the
 // revocation must not be separable: committing the flag while the revocation fails
 // would leave live tokens behind a client the console reports as disabled. The
-// returned entries are the still-live access JTIs needing blacklist delivery;
+// returned entries are the still-live access JTIs needing revocation delivery;
 // their durable outbox rows are written here, so a later delivery failure only
 // delays the fast-reject path.
 //

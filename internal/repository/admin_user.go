@@ -270,6 +270,9 @@ func (r *UserRepository) UpdateAdminUser(
 				return err
 			}
 		}
+		if roleChanged {
+			columns["token_version"] = gorm.Expr("token_version + 1")
+		}
 		result := transaction.Model(&model.User{}).
 			Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
 			Updates(columns)
@@ -283,11 +286,6 @@ func (r *UserRepository) UpdateAdminUser(
 			return nil
 		}
 		sessionsRevoked = true
-		if err := transaction.Model(&model.User{}).
-			Where("id = ?", userID).
-			UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error; err != nil {
-			return fmt.Errorf("increment token version: %w", err)
-		}
 		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
 		if revokeErr != nil {
 			return revokeErr
@@ -326,7 +324,10 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 		}
 		result := transaction.Model(&model.User{}).
 			Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
-			Update("state", model.UserStateDeleted)
+			Updates(map[string]any{
+				"state":         model.UserStateDeleted,
+				"token_version": gorm.Expr("token_version + 1"),
+			})
 		if result.Error != nil {
 			return fmt.Errorf("soft delete user: %w", result.Error)
 		}
@@ -334,11 +335,6 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 			// Either the row is missing or it is already closed. Tell those apart so the
 			// console can report "already deleted" instead of "no such user".
 			return classifyMissingUser(transaction, userID)
-		}
-		if err := transaction.Model(&model.User{}).
-			Where("id = ?", userID).
-			UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error; err != nil {
-			return fmt.Errorf("increment token version: %w", err)
 		}
 		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
 		if revokeErr != nil {

@@ -7,8 +7,8 @@ package sessionhandler_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -80,9 +80,9 @@ func setupDeviceE2E(t *testing.T) *deviceE2EHarness {
 		t.Fatalf("create user: %v", createErr)
 	}
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
+		t.Fatalf("generate Ed25519 key: %v", err)
 	}
 	clock := auth.SystemClock
 	service := session.Service{

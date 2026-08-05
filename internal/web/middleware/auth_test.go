@@ -2,8 +2,8 @@ package middleware
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -27,15 +27,22 @@ type testClock struct{ value time.Time }
 
 func (c testClock) Now() time.Time { return c.value }
 
-type fakeBlacklist struct {
-	blacklisted bool
-	err         error
-	calls       int
+type fakeAuthStateCache struct {
+	data  []byte
+	found bool
+	err   error
+	gets  int
+	puts  int
 }
 
-func (f *fakeBlacklist) IsJTIBlacklisted(context.Context, string) (bool, error) {
-	f.calls++
-	return f.blacklisted, f.err
+func (f *fakeAuthStateCache) GetAuthState(context.Context, string) ([]byte, bool, error) {
+	f.gets++
+	return f.data, f.found, f.err
+}
+
+func (f *fakeAuthStateCache) PutAuthState(context.Context, string, []byte, time.Duration) error {
+	f.puts++
+	return nil
 }
 
 type fakeAccessStates struct {
@@ -80,20 +87,19 @@ func TestAuthenticatorRequireAuth(t *testing.T) {
 	})
 
 	tests := []struct {
-		name      string
-		header    string
-		manager   *auth.JWTManager
-		blacklist *fakeBlacklist
-		states    *fakeAccessStates
-		wantHTTP  int
-		wantCode  int
+		name     string
+		header   string
+		manager  *auth.JWTManager
+		cache    *fakeAuthStateCache
+		states   *fakeAccessStates
+		wantHTTP int
+		wantCode int
 	}{
 		{name: "missing header", manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeUnauthenticated},
 		{name: "not strict bearer", header: "bearer " + validToken, manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeUnauthenticated},
 		{name: "expired token", header: "Bearer " + expiredToken, manager: expiredManager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenExpired},
 		{name: "invalid token", header: "Bearer not-a-jwt", manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
 		{name: "invalid subject", header: "Bearer " + badSubjectToken, manager: manager, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
-		{name: "blacklisted jti", header: "Bearer " + validToken, manager: manager, blacklist: &fakeBlacklist{blacklisted: true}, states: validStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
 		{name: "access record absent", header: "Bearer " + validToken, manager: manager, states: &fakeAccessStates{err: repository.ErrNotFound}, wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
 		{name: "access record revoked", header: "Bearer " + validToken, manager: manager, states: revokedStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
 		{name: "access record expired", header: "Bearer " + validToken, manager: manager, states: expiredStates(now), wantHTTP: http.StatusUnauthorized, wantCode: errcode.CodeAccessTokenInvalid},
@@ -103,7 +109,7 @@ func TestAuthenticatorRequireAuth(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			recorder, body := performAuthRequest(test.manager, test.blacklist, test.states, now, test.header)
+			recorder, body := performAuthRequest(test.manager, test.cache, test.states, now, test.header)
 			if recorder.Code != test.wantHTTP || body.Code != test.wantCode {
 				t.Fatalf("response = %d %#v, want %d/%d", recorder.Code, body, test.wantHTTP, test.wantCode)
 			}
@@ -111,13 +117,48 @@ func TestAuthenticatorRequireAuth(t *testing.T) {
 	}
 }
 
-func performAuthRequest(manager *auth.JWTManager, blacklist *fakeBlacklist, states *fakeAccessStates, now time.Time, header string) (*httptest.ResponseRecorder, envelope) {
-	router := gin.New()
-	var blacklistStore JTIBlacklist
-	if blacklist != nil {
-		blacklistStore = blacklist
+// A cache hit must serve the request without touching the database: that is the
+// whole point of the auth-state cache. A cache error must fail open to the DB.
+func TestAuthenticatorServesAuthStateFromCache(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid", "profile", "email"}, TTL: time.Hour,
+	})
+	state := validStates(now).state
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal cached state: %v", err)
 	}
-	authenticator := Authenticator{JWT: manager, Blacklist: blacklistStore, Tokens: states, Clock: testClock{value: now}, InternalClientID: testInternalClientID}
+
+	states := &fakeAccessStates{state: state}
+	cache := &fakeAuthStateCache{data: data, found: true}
+	recorder, body := performAuthRequest(manager, cache, states, now, "Bearer "+token)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("cache-hit response = %d %#v, want 200/0", recorder.Code, body)
+	}
+	if states.calls != 0 {
+		t.Fatalf("database calls = %d, want 0 on a cache hit", states.calls)
+	}
+
+	// A cache error must degrade to the database, never reject the request.
+	states2 := &fakeAccessStates{state: state}
+	failing := &fakeAuthStateCache{err: errors.New("redis down")}
+	recorder2, body2 := performAuthRequest(manager, failing, states2, now, "Bearer "+token)
+	if recorder2.Code != http.StatusOK || body2.Code != 0 || states2.calls != 1 {
+		t.Fatalf("cache-error response = %d %#v (db calls %d), want 200/0 with DB fallback", recorder2.Code, body2, states2.calls)
+	}
+}
+
+func performAuthRequest(manager *auth.JWTManager, cache *fakeAuthStateCache, states *fakeAccessStates, now time.Time, header string) (*httptest.ResponseRecorder, envelope) {
+	router := gin.New()
+	var cacheStore AuthStateCache
+	if cache != nil {
+		cacheStore = cache
+	}
+	authenticator := Authenticator{JWT: manager, Tokens: states, AuthStateCache: cacheStore, AuthStateTTL: time.Minute, Clock: testClock{value: now}, InternalClientID: testInternalClientID}
 	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) {
 		principal, _ := PrincipalFrom(c)
 		c.JSON(http.StatusOK, envelope{Code: 0, Message: "ok", Data: map[string]any{"user_id": principal.UserID, "jti": principal.JTI}})
@@ -148,17 +189,18 @@ func TestAuthenticatorUsesSingleDBAuthStateQuery(t *testing.T) {
 	}
 }
 
-func TestAuthenticatorRejectsBlankJTIWithoutBlacklistLookup(t *testing.T) {
+func TestAuthenticatorRejectsBlankJTIWithoutAuthStateLookup(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
-	blacklist := &fakeBlacklist{}
+	cache := &fakeAuthStateCache{}
 	states := validStates(now)
 	authenticator := Authenticator{
 		JWT: fakeVerifier{claims: &auth.TokenClaims{RegisteredClaims: jwt.RegisteredClaims{
 			Subject: "42", ID: " \t", ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 		}}},
-		Blacklist:        blacklist,
 		Tokens:           states,
+		AuthStateCache:   cache,
+		AuthStateTTL:     time.Minute,
 		Clock:            testClock{value: now},
 		InternalClientID: testInternalClientID,
 	}
@@ -168,45 +210,8 @@ func TestAuthenticatorRejectsBlankJTIWithoutBlacklistLookup(t *testing.T) {
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/protected", nil)
 	request.Header.Set("Authorization", "Bearer token")
 	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusUnauthorized || blacklist.calls != 0 || states.calls != 0 {
-		t.Fatalf("status=%d blacklist calls=%d DB calls=%d", recorder.Code, blacklist.calls, states.calls)
-	}
-}
-
-// A Redis outage must not reject otherwise valid tokens: the DB check that
-// follows covers every JTI the blacklist could hold.
-func TestAuthenticatorFallsBackToDatabaseWhenBlacklistUnavailable(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
-	manager := newTestJWTManager(t, now)
-	token := signTestToken(t, manager, auth.TokenInput{
-		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
-		Scopes: []string{"openid"}, TTL: time.Hour,
-	})
-	blacklist := &fakeBlacklist{err: errors.New("redis unavailable")}
-	states := validStates(now)
-	recorder, body := performAuthRequest(manager, blacklist, states, now, "Bearer "+token)
-	if recorder.Code != http.StatusOK || body.Data["user_id"] != float64(42) {
-		t.Fatalf("response = %d %#v, want 200 and user 42", recorder.Code, body)
-	}
-	if blacklist.calls != 1 || states.calls != 1 {
-		t.Fatalf("blacklist calls=%d DB calls=%d, want 1 and 1", blacklist.calls, states.calls)
-	}
-}
-
-// The DB stays authoritative during a Redis outage.
-func TestAuthenticatorStillRejectsRevokedTokenWhenBlacklistUnavailable(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
-	manager := newTestJWTManager(t, now)
-	token := signTestToken(t, manager, auth.TokenInput{
-		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
-		Scopes: []string{"openid"}, TTL: time.Hour,
-	})
-	blacklist := &fakeBlacklist{err: errors.New("redis unavailable")}
-	recorder, body := performAuthRequest(manager, blacklist, revokedStates(now), now, "Bearer "+token)
-	if recorder.Code != http.StatusUnauthorized || body.Code != errcode.CodeAccessTokenInvalid {
-		t.Fatalf("response = %d %#v, want 401/%d", recorder.Code, body, errcode.CodeAccessTokenInvalid)
+	if recorder.Code != http.StatusUnauthorized || cache.gets != 0 || states.calls != 0 {
+		t.Fatalf("status=%d cache gets=%d DB calls=%d", recorder.Code, cache.gets, states.calls)
 	}
 }
 
@@ -218,7 +223,7 @@ type envelope struct {
 
 func newTestJWTManager(t *testing.T, now time.Time) *auth.JWTManager {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}

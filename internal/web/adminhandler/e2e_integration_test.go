@@ -16,8 +16,8 @@ package adminhandler_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -78,7 +78,7 @@ func setupAdminE2E(t *testing.T) *adminE2EHarness {
 		Keys:   internalredis.NewKeys("sastlink:admin-e2e"),
 	}
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate signing key: %v", err)
 	}
@@ -122,7 +122,6 @@ func setupAdminE2E(t *testing.T) *adminE2EHarness {
 		RefreshTTL:     30 * 24 * time.Hour,
 		CodeTTL:        5 * time.Minute,
 		RequestTTL:     10 * time.Minute,
-		CardBaseURL:    "https://link.sast.fun/card",
 		Issuer:         adminE2EIssuer,
 	}
 	adminService := adminclient.Service{

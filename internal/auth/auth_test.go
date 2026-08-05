@@ -3,8 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -30,16 +30,16 @@ type fixedClock struct{ value time.Time }
 
 func (c fixedClock) Now() time.Time { return c.value }
 
-func TestPasswordHasherVersionedPBKDF2(t *testing.T) {
+func TestPasswordHasherVersionedArgon2id(t *testing.T) {
 	hasher := PasswordHasher{Random: fixedReader{data: bytes.Repeat([]byte{0x42}, 16)}}
-	hash, err := hasher.HashPassword(context.Background(), "correct horse battery staple")
+	hash, err := hasher.HashPassword(context.Background(), "fixture")
 	if err != nil {
 		t.Fatalf("HashPassword returned error: %v", err)
 	}
-	if !strings.HasPrefix(hash, "pbkdf2-sha512-v1$600000$") {
-		t.Fatalf("hash = %q, want versioned PBKDF2-SHA512 format", hash)
+	if !strings.HasPrefix(hash, "argon2id-v1$") {
+		t.Fatalf("hash = %q, want versioned argon2id format", hash)
 	}
-	if err := hasher.VerifyPassword(context.Background(), "correct horse battery staple", hash); err != nil {
+	if err := hasher.VerifyPassword(context.Background(), "fixture", hash); err != nil {
 		t.Fatalf("VerifyPassword returned error: %v", err)
 	}
 	if err := hasher.VerifyPassword(context.Background(), "wrong", hash); !errors.Is(err, ErrInvalidSecret) {
@@ -135,11 +135,11 @@ func TestPKCES256Only(t *testing.T) {
 }
 
 func TestJWTManagerParsesConfiguredKeys(t *testing.T) {
-	activeKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, activeKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate active key: %v", err)
 	}
-	previousKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, previousKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate previous key: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestJWTManagerParsesConfiguredKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal active key: %v", err)
 	}
-	previousDER, err := x509.MarshalPKIXPublicKey(&previousKey.PublicKey)
+	previousDER, err := x509.MarshalPKIXPublicKey(previousKey.Public())
 	if err != nil {
 		t.Fatalf("marshal previous key: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestJWTManagerParsesConfiguredKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJWTManager returned error: %v", err)
 	}
-	if manager.Active.Private == nil || len(manager.Previous) != 1 || manager.Previous[0].Public == nil {
+	if manager.Active.Private == nil || len(manager.Previous) != 1 || len(manager.Previous[0].Public) == 0 {
 		t.Fatalf("manager key configuration = %#v, want active private and previous public keys", manager)
 	}
 	if _, err := NewJWTManager(JWTConfig{Issuer: "issuer", Audience: "audience", ActiveKID: "kid", ActiveKeyPEM: "change_me"}); !errors.Is(err, ErrInvalidInput) {
@@ -193,12 +193,12 @@ func TestJWTManagerParsesConfiguredKeys(t *testing.T) {
 	}
 }
 
-func TestJWTManagerRS256ActivePreviousAndJWKS(t *testing.T) {
-	activeKey, err := rsa.GenerateKey(rand.Reader, 2048)
+func TestJWTManagerEdDSAActivePreviousAndJWKS(t *testing.T) {
+	_, activeKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate active key: %v", err)
 	}
-	previousKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, previousKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate previous key: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestJWTManagerRS256ActivePreviousAndJWKS(t *testing.T) {
 		Issuer:   "https://link.sast.fun/v2",
 		Audience: []string{"sast-link"},
 		Active:   JWTKeyPair{KID: "active", Private: activeKey},
-		Previous: []JWTKeyPair{{KID: "previous", Public: &previousKey.PublicKey}},
+		Previous: []JWTKeyPair{{KID: "previous", Public: previousKey.Public().(ed25519.PublicKey)}},
 		Clock:    clock,
 	}
 	token, err := manager.SignAccessToken(TokenInput{
@@ -262,16 +262,16 @@ func TestJWTManagerRS256ActivePreviousAndJWKS(t *testing.T) {
 	}
 	for _, key := range keys {
 		if _, hasPrivate := key["d"]; hasPrivate {
-			t.Fatalf("JWKS leaked private exponent: %#v", key)
+			t.Fatalf("JWKS leaked private key material: %#v", key)
 		}
-		if key["kty"] != "RSA" || key["alg"] != "RS256" || key["n"] == "" || key["e"] == "" {
+		if key["kty"] != "OKP" || key["crv"] != "Ed25519" || key["alg"] != "EdDSA" || key["x"] == "" {
 			t.Fatalf("bad JWK: %#v", key)
 		}
 	}
 }
 
 func TestJWTManagerRejectsIncompleteAccessTokenClaims(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
@@ -386,7 +386,7 @@ func cloneJWTPayload(payload jwtPayload) jwtPayload {
 
 func signRawJWT(t *testing.T, manager JWTManager, payload jwtPayload) string {
 	t.Helper()
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims(payload))
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims(payload))
 	token.Header["kid"] = manager.Active.KID
 	signed, err := token.SignedString(manager.Active.Private)
 	if err != nil {
@@ -438,7 +438,7 @@ func TestPasswordHasherAbandonsQueueWhenCallerCancelled(t *testing.T) {
 // such rather than as a password mismatch.
 func TestPasswordHasherVerifyAbandonsQueueWhenCallerCancelled(t *testing.T) {
 	hasher := PasswordHasher{Random: fixedReader{data: bytes.Repeat([]byte{0x42}, 16)}}
-	hash, err := hasher.HashPassword(context.Background(), "correct horse battery staple")
+	hash, err := hasher.HashPassword(context.Background(), "fixture")
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
@@ -450,7 +450,7 @@ func TestPasswordHasherVerifyAbandonsQueueWhenCallerCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	verified := make(chan error, 1)
 	go func() {
-		verified <- gated.VerifyPassword(ctx, "correct horse battery staple", hash)
+		verified <- gated.VerifyPassword(ctx, "fixture", hash)
 	}()
 	time.Sleep(50 * time.Millisecond)
 	cancel()

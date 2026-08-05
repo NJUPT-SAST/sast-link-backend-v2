@@ -28,7 +28,6 @@ func TestUserInfoFiltersClaimsByScope(t *testing.T) {
 		wantName          string
 		wantPicture       string
 		wantPreferred     string
-		wantProfile       string
 		wantEmail         string
 		wantEmailVerified bool
 		wantUpdatedAt     bool
@@ -40,7 +39,6 @@ func TestUserInfoFiltersClaimsByScope(t *testing.T) {
 			wantName:      "张三",
 			wantPicture:   "https://cos.example.test/avatar/1.jpg",
 			wantPreferred: "三三",
-			wantProfile:   "https://link.sast.fun/card/1",
 			wantUpdatedAt: true,
 		},
 		{
@@ -55,7 +53,6 @@ func TestUserInfoFiltersClaimsByScope(t *testing.T) {
 			wantName:          "张三",
 			wantPicture:       "https://cos.example.test/avatar/1.jpg",
 			wantPreferred:     "三三",
-			wantProfile:       "https://link.sast.fun/card/1",
 			wantEmail:         "b24040101@njupt.edu.cn",
 			wantEmailVerified: true,
 			wantUpdatedAt:     true,
@@ -74,9 +71,9 @@ func TestUserInfoFiltersClaimsByScope(t *testing.T) {
 				t.Fatalf("sub = %q, want the user ID; it must always ship", result.Subject)
 			}
 			if result.Name != test.wantName || result.Picture != test.wantPicture ||
-				result.PreferredUsername != test.wantPreferred || result.Profile != test.wantProfile {
-				t.Fatalf("profile claims = %+v, want name %q picture %q preferred %q profile %q",
-					result, test.wantName, test.wantPicture, test.wantPreferred, test.wantProfile)
+				result.PreferredUsername != test.wantPreferred {
+				t.Fatalf("profile claims = %+v, want name %q picture %q preferred %q",
+					result, test.wantName, test.wantPicture, test.wantPreferred)
 			}
 			if result.Email != test.wantEmail {
 				t.Fatalf("email = %q, want %q", result.Email, test.wantEmail)
@@ -108,9 +105,6 @@ func TestUserInfoFallsBackWithoutProfileRow(t *testing.T) {
 	}
 	if result.Picture != "" {
 		t.Fatalf("picture = %q, want empty without a profile row", result.Picture)
-	}
-	if result.Profile != "https://link.sast.fun/card/1" {
-		t.Fatalf("profile = %q, want the card URL regardless of the profile row", result.Profile)
 	}
 }
 

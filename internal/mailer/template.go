@@ -30,13 +30,13 @@ func renderVerificationText(data verificationEmailData) string {
 	return fmt.Sprintf("你正在%s。验证码：%s。%d 分钟内有效。", data.Action, data.Code, data.TTLMinutes)
 }
 
+// verificationTemplate is parsed once at startup; the template is static, and
+// re-parsing it per email would throw away the compile on every send.
+var verificationTemplate = template.Must(template.New("verification").Parse(verificationEmailTemplate))
+
 func renderVerificationHTML(data verificationEmailData) (string, error) {
-	tmpl, err := template.New("verification").Parse(verificationEmailTemplate)
-	if err != nil {
-		return "", fmt.Errorf("parse verification template: %w", err)
-	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	if err := verificationTemplate.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("execute verification template: %w", err)
 	}
 	return buf.String(), nil

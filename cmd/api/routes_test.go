@@ -77,7 +77,6 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 	for _, route := range []string{
 		http.MethodPost + " /user/login",
 		http.MethodPost + " /auth/refresh",
-		http.MethodGet + " /card/:id",
 		http.MethodGet + " /user/identities",
 		http.MethodPut + " /user/avatar",
 		http.MethodGet + " /user/devices",

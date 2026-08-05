@@ -1,8 +1,8 @@
 package auth
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"errors"
 	"testing"
 	"time"
@@ -12,7 +12,7 @@ import (
 
 func newIDTokenManager(t *testing.T, clock Clock) JWTManager {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate signing key: %v", err)
 	}
@@ -28,7 +28,7 @@ func parseIDToken(t *testing.T, manager JWTManager, token string) *IDTokenClaims
 	t.Helper()
 	claims := &IDTokenClaims{}
 	parsed, err := jwt.ParseWithClaims(token, claims, manager.keyfunc,
-		jwt.WithValidMethods([]string{jwtAlgRS256}),
+		jwt.WithValidMethods([]string{jwtAlgEdDSA}),
 		jwt.WithTimeFunc(func() time.Time { return now(manager.Clock) }),
 	)
 	if err != nil {
@@ -45,7 +45,6 @@ func fullSubjectClaims() IDTokenSubjectClaims {
 		Name:              "张三",
 		Picture:           "https://cos.example.test/avatar/1.jpg",
 		PreferredUsername: "zhangsan",
-		Profile:           "https://link.sast.fun/card/1",
 		UpdatedAt:         time.Date(2026, 7, 1, 8, 30, 0, 0, time.UTC),
 		Email:             "b24040101@njupt.edu.cn",
 	}
@@ -152,16 +151,14 @@ func TestSignIDTokenEmitsOnlyGrantedScopeClaims(t *testing.T) {
 			case !test.wantEmailVerified && claims.EmailVerified != nil:
 				t.Fatalf("email_verified = %v, want omitted without the email scope", *claims.EmailVerified)
 			}
-			// preferred_username and profile ride the profile scope alongside name.
+			// preferred_username rides the profile scope alongside name.
 			wantPreferred := ""
-			wantProfile := ""
 			if test.wantName != "" {
 				wantPreferred = subject.PreferredUsername
-				wantProfile = subject.Profile
 			}
-			if claims.PreferredUsername != wantPreferred || claims.Profile != wantProfile {
-				t.Fatalf("preferred_username/profile = %q/%q, want %q/%q",
-					claims.PreferredUsername, claims.Profile, wantPreferred, wantProfile)
+			if claims.PreferredUsername != wantPreferred {
+				t.Fatalf("preferred_username = %q, want %q",
+					claims.PreferredUsername, wantPreferred)
 			}
 		})
 	}

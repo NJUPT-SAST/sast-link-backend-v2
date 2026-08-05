@@ -77,12 +77,12 @@ func (f *fakeClients) UpdateAndRevoke(
 }
 
 type fakeBlacklist struct {
-	batch map[string]time.Duration
-	err   error
+	jtis []string
+	err  error
 }
 
-func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]time.Duration) error {
-	f.batch = entries
+func (f *fakeBlacklist) DeleteAuthStates(_ context.Context, jtis []string) error {
+	f.jtis = jtis
 	return f.err
 }
 

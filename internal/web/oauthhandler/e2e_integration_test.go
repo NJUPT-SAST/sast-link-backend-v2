@@ -11,8 +11,8 @@ package oauthhandler_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -79,7 +79,7 @@ func setupE2E(t *testing.T) *e2eHarness {
 		Keys:   internalredis.NewKeys("sastlink:e2e"),
 	}
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate signing key: %v", err)
 	}
@@ -144,7 +144,6 @@ func setupE2E(t *testing.T) *e2eHarness {
 		RefreshTTL:     30 * 24 * time.Hour,
 		CodeTTL:        5 * time.Minute,
 		RequestTTL:     10 * time.Minute,
-		CardBaseURL:    "https://link.sast.fun/card",
 		Issuer:         e2eIssuer,
 	}
 
@@ -386,13 +385,12 @@ func TestE2ECodeReplayRevokesIssuedTokens(t *testing.T) {
 	if access.RevokedAt == nil {
 		t.Fatal("access token row is not revoked after the code replay")
 	}
-	// And the blacklist must have received the JTI for the fast-reject path.
-	blacklisted, err := h.store.IsJTIBlacklisted(context.Background(), claims.ID)
-	if err != nil {
-		t.Fatalf("IsJTIBlacklisted: %v", err)
-	}
-	if !blacklisted {
-		t.Fatal("revoked JTI was not delivered to the Redis blacklist")
+	// The revocation must have invalidated the auth-state cache entry, so the
+	// middleware cannot admit the replayed token's cached state.
+	if _, found, err := h.store.GetAuthState(context.Background(), claims.ID); err != nil {
+		t.Fatalf("GetAuthState: %v", err)
+	} else if found {
+		t.Fatal("revoked JTI's auth-state cache entry was not invalidated")
 	}
 	// The middleware must now reject it.
 	recorder = httptest.NewRecorder()

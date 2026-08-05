@@ -209,7 +209,7 @@ func (s Service) loginBranch(
 	existing *model.Identity,
 	redirect string,
 ) (*CallbackResult, error) {
-	user, err := s.Users.FindByID(ctx, existing.UserID)
+	user, err := s.Users.FindAuthUserByID(ctx, existing.UserID)
 	if err != nil {
 		if isNotFound(err) {
 			// The binding outlived its user row. Nothing the caller can fix, and
@@ -303,7 +303,7 @@ func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 		return nil, newError(ErrLoginCodeInvalid, "login_code 无效或已过期", nil)
 	}
 
-	user, err := s.Users.FindByID(ctx, userID)
+	user, err := s.Users.FindAuthUserByID(ctx, userID)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, newError(ErrUserNotFound, "用户不存在", err)
@@ -317,7 +317,9 @@ func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 		return nil, newError(ErrUserDeleted, "账号已注销", nil)
 	}
 
-	client, err := s.Clients.FindActiveByClientID(ctx, s.InternalClientID)
+	// The built-in client is immutable and cached process-locally, so this costs
+	// no DB round trip.
+	client, err := s.Clients.FindActiveInternalClient(ctx, s.InternalClientID)
 	if err != nil {
 		return nil, newError(ErrInternal, "查询内置客户端失败", err)
 	}
@@ -379,18 +381,19 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 		return
 	}
 	if s.Blacklist != nil {
-		deliver := make(map[string]time.Duration, len(entries))
+		jtis := make([]string, 0, len(entries))
 		for _, entry := range entries {
-			ttl := entry.ExpiresAt.Sub(now)
-			if ttl <= 0 || strings.TrimSpace(entry.TokenID) == "" {
+			// The auth-state cache entry must be deleted so the middleware cannot
+			// serve a stale non-revoked state for a token the DB now says revoked.
+			if entry.ExpiresAt.Sub(now) <= 0 || strings.TrimSpace(entry.TokenID) == "" {
 				continue
 			}
-			deliver[entry.TokenID] = ttl
+			jtis = append(jtis, entry.TokenID)
 		}
-		if len(deliver) > 0 {
-			if err := s.Blacklist.BlacklistJTIBatch(ctx, deliver); err != nil {
+		if len(jtis) > 0 {
+			if err := s.Blacklist.DeleteAuthStates(ctx, jtis); err != nil {
 				// The same-transaction outbox row guarantees a worker retry.
-				slog.WarnContext(ctx, "deliver token blacklist batch, outbox worker will retry", "count", len(deliver), "error", err)
+				slog.WarnContext(ctx, "deliver auth-state invalidation, outbox worker will retry", "count", len(jtis), "error", err)
 			}
 		}
 	}

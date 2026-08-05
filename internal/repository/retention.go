@@ -130,23 +130,38 @@ func (r *RetentionRepository) DeleteExpiredAccessTokens(
 		&model.OAuthAccessToken{}, "oauth_access_tokens", "expires_at < ?", cutoff)
 }
 
-// DeleteRevokedRefreshTokens removes rotated-away refresh tokens that expired
-// before cutoff, except each family's sequence-0 row.
+// DeleteRevokedRefreshTokens removes refresh tokens that expired before cutoff,
+// covering two shapes:
 //
-// That row is what FindFamilyOriginCreatedAt reads to set an ID Token's auth_time,
-// and it carries revoked_at the moment the family first rotates — so the naive
-// condition would delete it while the family is still alive. A family that keeps
-// rotating outlives the origin row's own expires_at, and losing it makes the
-// refresh flow revoke the whole family and return 500. Keeping one row per family
-// is the cost of an accurate auth_time.
+//   - rotated-away rows (revoked_at set, sequence > 0), the historic sweep;
+//   - every row of a family that is entirely dead — no member is unrevoked and
+//     still valid, so the family can never rotate again. That includes the
+//     sequence-0 origin row a single login left behind when the user never came
+//     back: it was never revoked, so the old `revoked_at IS NOT NULL` predicate
+//     missed it and the table grew by one row per historical login.
+//
+// The origin row of a live family is still preserved: the refresh flow reads it to
+// set an ID Token's auth_time, and a family that keeps rotating outlives the
+// origin's own expires_at. Deleting it while the family lives makes the refresh
+// flow revoke the family and return 500. "Live" means unrevoked and not yet
+// expired, judged against cutoff so the sweep never races a valid token.
 func (r *RetentionRepository) DeleteRevokedRefreshTokens(
 	ctx context.Context,
 	cutoff time.Time,
 	batchSize int,
 ) (int64, error) {
-	return r.deleteBatch(ctx, cutoff, batchSize, "revoked refresh tokens",
-		&model.OAuthRefreshToken{}, "oauth_refresh_tokens",
-		"revoked_at IS NOT NULL AND sequence > 0 AND expires_at < ?", cutoff)
+	condition := `expires_at < ?
+		AND (
+			(revoked_at IS NOT NULL AND sequence > 0)
+			OR NOT EXISTS (
+				SELECT 1 FROM oauth_refresh_tokens live
+				WHERE live.family_id = oauth_refresh_tokens.family_id
+					AND live.revoked_at IS NULL
+					AND live.expires_at > ?
+			)
+		)`
+	return r.deleteBatch(ctx, cutoff, batchSize, "dead refresh tokens",
+		&model.OAuthRefreshToken{}, "oauth_refresh_tokens", condition, cutoff, cutoff)
 }
 
 // DeleteExpiredAuditLogs removes audit entries created before cutoff.

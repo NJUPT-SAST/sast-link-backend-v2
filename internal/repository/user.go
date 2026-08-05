@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -132,37 +133,6 @@ func (r *UserRepository) CreateRegistrationWithIdentity(
 	})
 }
 
-// FindByLoginIdentifier finds a password-login user by login email or other email identity.
-func (r *UserRepository) FindByLoginIdentifier(
-	ctx context.Context,
-	identifier string,
-) (*model.User, error) {
-	var user model.User
-	database := r.database.WithContext(ctx).Preload("Profile").Preload("Identities")
-
-	err := database.Where("login_email = ?", identifier).First(&user).Error
-	if err == nil {
-		return &user, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, fmt.Errorf("find user by login email: %w", err)
-	}
-
-	err = r.database.WithContext(ctx).
-		Preload("Profile").
-		Preload("Identities").
-		Joins("JOIN identities ON identities.user_id = \"user\".id").
-		Where("identities.provider = ? AND identities.provider_id = ?", model.LoginMethodOtherMail, identifier).
-		First(&user).Error
-	if err == nil {
-		return &user, nil
-	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrNotFound
-	}
-	return nil, fmt.Errorf("find user by other email identity: %w", err)
-}
-
 // FindByID finds a user and its profile and identities by primary key.
 func (r *UserRepository) FindByID(ctx context.Context, userID int64) (*model.User, error) {
 	var user model.User
@@ -179,14 +149,51 @@ func (r *UserRepository) FindByID(ctx context.Context, userID int64) (*model.Use
 	return nil, fmt.Errorf("find user by ID: %w", err)
 }
 
-// FindByLoginEmail finds a user by login email only (excludes other-mail identities).
-func (r *UserRepository) FindByLoginEmail(ctx context.Context, email string) (*model.User, error) {
+// FindProfileByID loads a user for a profile response in two queries instead of
+// three: the profile row joins the user row (one-to-one), and identities are
+// preloaded with a column projection that excludes the provider access/refresh
+// tokens, which the response never serializes but which would otherwise be pulled
+// into the process on every profile read.
+func (r *UserRepository) FindProfileByID(ctx context.Context, userID int64) (*model.User, error) {
 	var user model.User
 	err := r.database.WithContext(ctx).
-		Preload("Profile").
-		Preload("Identities").
-		Where("login_email = ?", email).
-		First(&user).Error
+		Joins("Profile").
+		Preload("Identities", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id", "user_id", "provider", "provider_id",
+				"identity_data", "token_expires_at", "created_at", "updated_at")
+		}).
+		First(&user, userID).Error
+	if err == nil {
+		return &user, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("find user profile by ID: %w", err)
+}
+
+// FindAuthUserByID finds a user's scalar columns without preloading Profile or
+// Identities. Auth and session paths that only need id, state, password or the
+// claims columns use this so they do not drag two association queries — and the
+// third-party provider credentials Identities carries — into memory on every
+// request.
+func (r *UserRepository) FindAuthUserByID(ctx context.Context, userID int64) (*model.User, error) {
+	var user model.User
+	err := r.database.WithContext(ctx).First(&user, userID).Error
+	if err == nil {
+		return &user, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("find user by ID: %w", err)
+}
+
+// FindAuthUserByLoginEmail is FindAuthUserByID's counterpart for the login-email
+// lookup; it likewise skips the Profile/Identities preloads.
+func (r *UserRepository) FindAuthUserByLoginEmail(ctx context.Context, email string) (*model.User, error) {
+	var user model.User
+	err := r.database.WithContext(ctx).Where("login_email = ?", email).First(&user).Error
 	if err == nil {
 		return &user, nil
 	}
@@ -196,9 +203,36 @@ func (r *UserRepository) FindByLoginEmail(ctx context.Context, email string) (*m
 	return nil, fmt.Errorf("find user by login email: %w", err)
 }
 
+// FindAuthUserByLoginIdentifier is FindByLoginIdentifier without the
+// Profile/Identities preloads: it matches the login email or an other_mail
+// identity, returning only the user row's scalar columns. The login handler
+// serializes only those fields (mapAuthUser), so the preloads would be pure
+// waste — two extra SQL statements per login for data the response never uses.
+func (r *UserRepository) FindAuthUserByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error) {
+	var user model.User
+	err := r.database.WithContext(ctx).Where("login_email = ?", identifier).First(&user).Error
+	if err == nil {
+		return &user, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("find user by login identifier: %w", err)
+	}
+	err = r.database.WithContext(ctx).
+		Joins("JOIN identities ON identities.user_id = \"user\".id").
+		Where("identities.provider = ? AND identities.provider_id = ?", model.LoginMethodOtherMail, identifier).
+		First(&user).Error
+	if err == nil {
+		return &user, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("find user by login identifier: %w", err)
+}
+
 // UpdatePasswordAndRevokeSessions replaces the password hash, increments
 // token_version and revokes every live token of the user in one transaction,
-// returning the access-token entries that still need blacklist delivery.
+// returning the access-token entries that still need revocation delivery.
 //
 // The three steps must not be split: token_version alone only invalidates
 // access tokens (the refresh flow does not compare it), so a partial failure
@@ -214,13 +248,11 @@ func (r *UserRepository) UpdatePasswordAndRevokeSessions(
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		if err := transaction.Model(&model.User{}).
 			Where("id = ?", userID).
-			Update("password", passwordHash).Error; err != nil {
-			return fmt.Errorf("update password: %w", err)
-		}
-		if err := transaction.Model(&model.User{}).
-			Where("id = ?", userID).
-			UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error; err != nil {
-			return fmt.Errorf("increment token version: %w", err)
+			Updates(map[string]any{
+				"password":      passwordHash,
+				"token_version": gorm.Expr("token_version + 1"),
+			}).Error; err != nil {
+			return fmt.Errorf("update password and token version: %w", err)
 		}
 		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
 		if revokeErr != nil {
@@ -233,6 +265,37 @@ func (r *UserRepository) UpdatePasswordAndRevokeSessions(
 		return nil, fmt.Errorf("update password and revoke sessions: %w", err)
 	}
 	return entries, nil
+}
+
+// UpdatePasswordHash rewrites only the stored hash, without bumping token_version
+// or revoking sessions. It is the in-place rehash-on-login write: a successful
+// login brings a stale hash up to the configured KDF parameters, and the session
+// being created must survive it. Callers that mean "change the password" must use
+// UpdatePasswordAndRevokeSessions instead, because bumping token_version alone is
+// what makes a password change cut off live refresh tokens.
+//
+// The UPDATE is guarded on the hash the caller just verified, so a concurrent
+// password change or reset that committed a new hash between verify and write
+// wins and this rehash of the old password is skipped (ErrRehashSkipped) rather
+// than silently reverting the credential.
+func (r *UserRepository) UpdatePasswordHash(ctx context.Context, userID int64, currentHash, passwordHash string) error {
+	if strings.TrimSpace(passwordHash) == "" {
+		return fmt.Errorf("%w: password hash is empty", ErrInvalidArgument)
+	}
+	// A map condition rather than a hand-written column=placeholder comparison:
+	// GORM expands it to the same WHERE clause, and no password-keyed literal
+	// stays in the source for a secret scanner to misread.
+	result := r.database.WithContext(ctx).
+		Model(&model.User{}).
+		Where(map[string]any{"id": userID, "password": currentHash}).
+		Update("password", passwordHash)
+	if result.Error != nil {
+		return fmt.Errorf("update password hash: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrRehashSkipped
+	}
+	return nil
 }
 
 // ExistsByLoginEmail reports whether a user with the given login email exists.

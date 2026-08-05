@@ -48,7 +48,7 @@ type Request struct {
 	RefreshTTL time.Duration
 }
 
-// Issuer signs token pairs using the service's RSA and HMAC key material.
+// Issuer signs token pairs using the service's EdDSA and HMAC key material.
 type Issuer struct {
 	JWT     *auth.JWTManager
 	Refresh *auth.RefreshTokenManager

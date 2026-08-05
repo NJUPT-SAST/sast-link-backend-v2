@@ -137,7 +137,14 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 		return err
 	}
 	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
-	auth := smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
+	// Only attempt AUTH when credentials were configured. smtp.PlainAuth with empty
+	// credentials is a non-nil auth that would send `AUTH PLAIN \x00\x00\x00`
+	// against any relay advertising AUTH, and a relay that needs no authentication
+	// (a perfectly legal deployment) would reject the empty login.
+	var auth smtp.Auth
+	if strings.TrimSpace(m.cfg.Username) != "" {
+		auth = smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
+	}
 
 	if m.cfg.UseTLS {
 		return sendTLS(ctx, addr, m.cfg.Host, auth, from, recipients, msg)

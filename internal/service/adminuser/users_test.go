@@ -107,13 +107,13 @@ func TestUpdateUserRevokesSessionsOnRoleChange(t *testing.T) {
 	if h.users.updateInput.Role == nil || *h.users.updateInput.Role != model.UserRoleMember {
 		t.Fatalf("role passed down = %v, want member", h.users.updateInput.Role)
 	}
-	if _, ok := h.blacklist.batch["jti-live"]; !ok {
-		t.Fatalf("blacklist batch = %v, want the live JTI delivered", h.blacklist.batch)
+	if !slices.Contains(h.blacklist.jtis, "jti-live") {
+		t.Fatalf("blacklist jtis = %v, want the live JTI delivered", h.blacklist.jtis)
 	}
 	// An already-expired token is rejected by expiry alone; caching it would waste a
 	// key with a negative TTL.
-	if _, ok := h.blacklist.batch["jti-expired"]; ok {
-		t.Fatalf("blacklist batch = %v, want the expired JTI skipped", h.blacklist.batch)
+	if slices.Contains(h.blacklist.jtis, "jti-expired") {
+		t.Fatalf("blacklist jtis = %v, want the expired JTI skipped", h.blacklist.jtis)
 	}
 	// The role change revoked every session; the device set must die with it, or
 	// the user's device list keeps showing logins that can no longer authenticate.
@@ -483,8 +483,8 @@ func TestDeleteUserDeliversRevokedTokens(t *testing.T) {
 	if h.users.deletedUserID != testTargetID {
 		t.Fatalf("closed user %d, want the target %d", h.users.deletedUserID, testTargetID)
 	}
-	if _, ok := h.blacklist.batch["jti-a"]; !ok {
-		t.Fatalf("blacklist batch = %v, want the revoked JTI delivered", h.blacklist.batch)
+	if !slices.Contains(h.blacklist.jtis, "jti-a") {
+		t.Fatalf("blacklist jtis = %v, want the revoked JTI delivered", h.blacklist.jtis)
 	}
 	// Closing the account cut every session; the device records must not outlive
 	// the account as ghost logins.

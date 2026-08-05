@@ -15,7 +15,9 @@ import (
 
 const maxOutboxDeliveryErrorLength = 1024
 
-// TokenBlacklistOutboxRepository coordinates durable Redis blacklist deliveries.
+// TokenBlacklistOutboxRepository coordinates durable revocation deliveries: the
+// rows ride the revoking transaction and the worker invalidates auth-state cache
+// entries (the name is legacy — the delivery target is no longer a blacklist).
 type TokenBlacklistOutboxRepository struct {
 	database *gorm.DB
 }
@@ -80,6 +82,23 @@ func (r *TokenBlacklistOutboxRepository) Ack(ctx context.Context, id int64, clai
 		return false, fmt.Errorf("ack token blacklist outbox: %w", result.Error)
 	}
 	return result.RowsAffected == 1, nil
+}
+
+// AckMany removes a whole claimed batch in one statement. All rows in a ClaimDue
+// batch share one claim token, so a single DELETE IN covers the ack; this is the
+// worker's steady-state path (a password change can cut hundreds of sessions at
+// once), where per-row DELETEs would serialize dozens of round trips on one core.
+func (r *TokenBlacklistOutboxRepository) AckMany(ctx context.Context, ids []int64, claimToken string) (int64, error) {
+	if len(ids) == 0 || claimToken == "" {
+		return 0, nil
+	}
+	result := r.database.WithContext(ctx).
+		Where("id IN ? AND claim_token = ?", ids, claimToken).
+		Delete(&model.TokenBlacklistOutbox{})
+	if result.Error != nil {
+		return 0, fmt.Errorf("ack token blacklist outbox batch: %w", result.Error)
+	}
+	return result.RowsAffected, nil
 }
 
 // Fail records a failed delivery, clears its lease, and schedules its retry.

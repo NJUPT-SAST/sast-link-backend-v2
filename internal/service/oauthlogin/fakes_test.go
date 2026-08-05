@@ -2,8 +2,8 @@ package oauthlogin
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
 	"errors"
 	"sync"
 	"testing"
@@ -71,6 +71,10 @@ func (r *fakeUserRepository) FindByID(_ context.Context, userID int64) (*model.U
 	}
 	clone := *user
 	return &clone, nil
+}
+
+func (r *fakeUserRepository) FindAuthUserByID(_ context.Context, userID int64) (*model.User, error) {
+	return r.FindByID(context.Background(), userID)
 }
 
 type fakeIdentityRepository struct {
@@ -274,6 +278,10 @@ type fakeClientRepository struct {
 	err    error
 }
 
+func (r *fakeClientRepository) FindActiveInternalClient(ctx context.Context, clientID string) (*model.OAuthClient, error) {
+	return r.FindActiveByClientID(ctx, clientID)
+}
+
 func (r *fakeClientRepository) FindActiveByClientID(
 	_ context.Context,
 	_ string,
@@ -350,7 +358,7 @@ func (c fixedClock) Now() time.Time { return c.instant }
 func newTestService(t *testing.T) (Service, *testDoubles) {
 	t.Helper()
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate signing key: %v", err)
 	}
@@ -460,17 +468,17 @@ func (f *fakeDeviceStore) RemoveDevice(_ context.Context, _ int64, deviceID stri
 	return nil
 }
 
-// fakeBlacklist records batch deliveries.
+// fakeBlacklist records auth-state invalidation deliveries.
 type fakeBlacklist struct {
-	batches []map[string]time.Duration
-	err     error
+	jtis []string
+	err  error
 }
 
-func (f *fakeBlacklist) BlacklistJTIBatch(_ context.Context, entries map[string]time.Duration) error {
+func (f *fakeBlacklist) DeleteAuthStates(_ context.Context, jtis []string) error {
 	if f.err != nil {
 		return f.err
 	}
-	f.batches = append(f.batches, entries)
+	f.jtis = append(f.jtis, jtis...)
 	return nil
 }
 
