@@ -362,6 +362,8 @@ POST /user/login
 POST /auth/refresh
 ```
 
+> **限流**：按调用方 IP 固定窗口限流（默认 100 次/60s，`RATE_LIMIT_REFRESH_RPM` / `RATE_LIMIT_REFRESH_WINDOW`）。本端点无认证且每次调用执行多条 DB 语句（查 token、查用户、轮换事务），不限流则单一来源可以零成本放大数据库负载。限流检查排在 token 哈希与查库**之前**——限流器若排在它要保护的工作之后就失去意义。与 `/oauth/token` 同为 100 次/60s 一档。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+
 **Request**:
 
 ```json
