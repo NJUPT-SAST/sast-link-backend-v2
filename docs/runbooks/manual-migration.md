@@ -49,10 +49,12 @@ CLI 会根据这些变量拼接 PostgreSQL URL，并通过 `pgx/v5` driver 执�
 当前 migration 文件包括：
 
 ```text
-000001_initial_schema.up.sql
-000001_initial_schema.down.sql
-000002_require_s256_pkce.up.sql
-000002_require_s256_pkce.down.sql
+000001_initial_schema.up.sql / .down.sql
+000002_require_s256_pkce.up.sql / .down.sql
+000003_seed_builtin_oauth_client.up.sql / .down.sql
+000004_token_blacklist_outbox.up.sql / .down.sql
+000005_forbid_login_email_as_identity.up.sql / .down.sql
+000006_index_expired_authorizations.up.sql / .down.sql
 ```
 
 ## 执行前检查清单

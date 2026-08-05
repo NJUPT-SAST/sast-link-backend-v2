@@ -52,21 +52,21 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 | 缓存 | Redis | 8+ |
 | 对象存储 | 腾讯云 COS | 头像上传 |
 | 邮件 | SMTP | 验证码发送 |
-| 密码哈希 | PBKDF2-SHA512 | 600,000 轮，16 字节随机盐。Go 标准库 `crypto/pbkdf2` + `crypto/sha512`，零外部依赖。单次派生约 380ms（16 核实测），并发上限 `PASSWORD_HASH_MAX_CONCURRENT`（默认 64）。派生排队可被 context 取消，客户端断开即释放队列位，避免无界积压 |
-| 认证授权 | OAuth 2.1 + RS256 | JWT（Access Token）含 `kid` 头，支持密钥轮换；通过 JWKS 端点分发公钥 |
+| 密码哈希 | argon2id（单方案） | 默认 **m=19456 KiB / t=2**（OWASP 低内存底线）。16 字节随机盐，版本化哈希（`argon2id-v1$t$m$threads$salt$key`）；存量 `pbkdf2-sha512-v1` 哈希保留只读验证，登录成功时原地重哈希迁移到 argon2id。并发上限 `ARGON2_CONCURRENCY`（未设置时按 GOMAXPROCS，1c1g=1，内存硬上限）。派生排队可被 context 取消 |
+| 认证授权 | OAuth 2.1 + EdDSA（Ed25519） | JWT（Access Token）含 `kid` 头，支持密钥轮换；通过 JWKS 端点分发公钥 |
 | 集成测试 | testcontainers-go | — |
 
 ### 3.2 密钥管理
 
 | 密钥类型 | 存储方式 | 轮换策略 |
 |----------|----------|----------|
-| JWT 签名密钥 (RS256) | 环境变量 / Secret Manager | 支持双密钥（`JWT_SECRET_KEY` + `JWT_SECRET_KEY_PREV`）；active 必须为 RSA private PEM，新 Token 用 active key 签名；previous 可为 RSA public/private PEM，仅用于验签，过渡期后废弃 |
+| JWT 签名密钥 (EdDSA) | 环境变量 / Secret Manager | 支持双密钥（`JWT_SECRET_KEY` + `JWT_SECRET_KEY_PREV`）；active 必须为 Ed25519 private PEM（PKCS8），新 Token 用 active key 签名；previous 可为 Ed25519 public/private PEM，仅用于验签，过渡期后废弃 |
 | OAuth client_secret | DB 存储 bcrypt hash | 可随时重置，不影响已签发 Token |
 
 ### 3.3 部署架构
 
 - **容器化**：Docker 多阶段构建（golang:alpine → alpine），复用服务器上已有的 PostgreSQL 与 Redis 实例
-- **高可用**：API 服务无状态（JWT 自包含），可水平扩展；黑名单仅是快速拒绝路径，`oauth_access_tokens.revoked_at` 每请求经 DB 校验，Redis 黑名单不一致不影响吊销正确性；设备记录在扩缩容时短暂不一致可接受。PostgreSQL 是唯一必需依赖，Redis 故障时服务降级但仍可提供认证能力（见 §6.0）
+- **高可用**：API 服务无状态（JWT 自包含），可水平扩展；auth-state 缓存仅是快速路径，命中即用、未命中或出错回退 `oauth_access_tokens.revoked_at` 的权威 DB 校验，缓存不一致不影响吊销正确性。PostgreSQL 是唯一必需依赖，Redis 故障时服务降级但仍可提供认证能力（见 §6.0）
 - **定时任务**：API 进程内的 Go worker 按 ticker 清理过期数据，多实例通过 PostgreSQL advisory lock 协调（不用 pg_cron：生产库未装该扩展，且测试镜像无法加载）
 - **Base URL**：`https://link.sast.fun/v2`
 
@@ -76,13 +76,13 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 
 ### 4.1 内部认证（SAST Link 内部）
 
-SAST Link 内部使用 JWT RS256 签名 Access Token + opaque Refresh Token：
+SAST Link 内部使用 JWT EdDSA（Ed25519）签名 Access Token + opaque Refresh Token：
 
-- **Access Token**：RS256 签名 JWT，有效期 1 小时，含 `jti`（撤销）、`sub`（user.id）、`role`、`state`、`token_version`、`scope`、`azp`（签发对象 client_id）等 claims。自包含，业务服务可离线验签
+- **Access Token**：EdDSA（Ed25519）签名 JWT，有效期 1 小时，含 `jti`（撤销）、`sub`（user.id）、`role`、`state`、`token_version`、`scope`、`azp`（签发对象 client_id）等 claims。自包含，业务服务可离线验签
 - **Refresh Token**：opaque 随机字符串，有效期 30 天，HMAC-SHA256 hash 后存 DB。采用 **rotation + family 链** 机制（见 4.6）
-- **登录态校验**：每次请求校验 Access Token 签名 → 检查 jti 是否在黑名单（Redis）→ 单条 SQL join `oauth_access_tokens` 与 `user`，一次取回 `revoked_at`/`expires_at`/`state`/`role`/`token_version`，校验 token 未撤销未过期、账号非 is_deleted、`token_version` 与 claims 一致 → 校验 `azp` 为内置 first-party 客户端（见 §7.1「第三方 Token 隔离」）
+- **登录态校验**：每次请求校验 Access Token 签名 → 查 auth-state 缓存（命中即用；未命中或出错回退 DB）→ 单条 SQL join `oauth_access_tokens` 与 `user`，一次取回 `revoked_at`/`expires_at`/`state`/`role`/`token_version`，校验 token 未撤销未过期、账号非 is_deleted、`token_version` 与 claims 一致 → 校验 `azp` 为内置 first-party 客户端（见 §7.1「第三方 Token 隔离」）
 - **角色鉴权**：角色判定读上述查询取回的 DB `role`，而非 Access Token 里的 `role` claim。claim 是签发时快照，降权后旧 token 仍带原角色；读 DB 使降权在下一个请求即生效，与 `token_version` 机制正交（后者依赖改 role 时同事务递增，见 §4.12）。`role` claim 仍参与非空校验，但不用于授权决策
-- **登出**：Access Token 的 jti 写入 Redis 黑名单（TTL = 剩余有效期）；Refresh Token family 链全部撤销（`revoked_at` = NOW）
+- **登出**：撤销事务内将 Access Token 的 jti 写入 outbox 行，worker 失效对应 auth-state 缓存；Refresh Token family 链全部撤销（`revoked_at` = NOW）
 - **改密**：`user.token_version` 自增，拦截所有旧 token
 
 ### 4.2 对外认证（OAuth 2.1 + OIDC Provider）
@@ -92,7 +92,7 @@ SAST Link 同时作为 OAuth 2.1 授权服务器和 OIDC Provider：
 | 层面 | 标准 | 说明 |
 | ------ | ------ | ------ |
 | 授权框架 | OAuth 2.1 | PKCE-S256 强制（即使第三方应用），state 参数强制 |
-| 身份层 | OpenID Connect | 当 scope 含 `openid` 时返回 ID Token（RS256 JWT） |
+| 身份层 | OpenID Connect | 当 scope 含 `openid` 时返回 ID Token（EdDSA JWT） |
 | 客户端认证 | PKCE（第一方）/ client_secret_post（第三方） | 第一方应用无 client_secret；第三方应用注册后获取 client_secret（bcrypt 存储） |
 | 端点 | authorize / token / revoke / userinfo / jwks / discovery | 详见 4.10 / 4.11 |
 
@@ -102,11 +102,11 @@ SAST Link 同时作为 OAuth 2.1 授权服务器和 OIDC Provider：
 
 1. `POST /auth/register/send-code` → 校验邮箱域名 → 生成 6 位数字验证码 → SMTP 发送 → 验证码写 Redis（key: `sastlink:verify:register:{email}`，TTL 5min）
 2. `POST /auth/register/verify-code` → 校验验证码（匹配后删除；填错仅消耗一次尝试，验证码保留，最多 5 次后作废）→ 返回 Register-Ticket（`reg_` + 32 位 hex，Redis 5min，一次性）
-3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱（先只读校验）→ 校验所有 user 字段已填且密码 ≥ 8 位 → 查邮箱/学号是否被占用 → PBKDF2-SHA512 哈希 → 创建 user + profile → 建号成功后才 DEL 消费 ticket → 签发 Token Pair
+3. `POST /auth/register` → 凭 Register-Ticket 获取已验证邮箱（先只读校验）→ 校验所有 user 字段已填且密码 ≥ 8 位 → 查邮箱/学号是否被占用 → 密码哈希（默认 argon2id m=19456KiB/t2）→ 创建 user + profile → 建号成功后才 DEL 消费 ticket → 签发 Token Pair
 
 并发注册由 `user.login_email` 的 UNIQUE 约束串行化，不依赖 ticket 消费选主；因此 ticket 保留到建号成功为止，竞态失败者（40901/40902）可改字段后用同一 ticket 重试，无需重新发验证码。`user` 表有 `login_email` 与 `student_id` 两个 UNIQUE 约束，唯一冲突需按约束名区分后再映射错误码，否则学号冲突会被误报为「邮箱已被注册」
 
-**可选 registration_state 绑定**：传入 `registration_state` + `oauth_state`（OAuth 标准 state 参数）时，注册成功后 * 并消费 `registration_state` + `oauth_state` → 验证双值匹配 → 自动创建 identities 记录。用于第三方 OAuth 首次登录的无绑定分支——用户先经 OAuth 回调拿到 `registration_state`，再走注册流程，注册后自动绑定
+**可选 registration_state 绑定**：传入 `registration_state` + `oauth_state`（OAuth 标准 state 参数）时，注册成功后消费 `registration_state` + `oauth_state` → 验证双值匹配 → 自动创建 identities 记录。用于第三方 OAuth 首次登录的无绑定分支——用户先经 OAuth 回调拿到 `registration_state`，再走注册流程，注册后自动绑定
 
 **约束**：
 
@@ -124,14 +124,14 @@ POST /user/login
 
 1. 校验邮箱格式 — `@njupt.edu.cn` / `@sast.fun` 查 `user.login_email`；第三方邮箱查 `identities(provider='other_mail').provider_id` 反查 user
 2. 检查登录失败次数（Redis `sastlink:auth:login_failure:{email}`，15min 窗口 ≥ 10 次则锁定）
-3. 查用户是否存在：不存在返回 40106（邮箱不存在）；存在则执行 PBKDF2-SHA512 密码哈希校验
+3. 查用户是否存在：不存在返回 40106（邮箱不存在）；存在则执行密码哈希校验（默认 argon2id m=19456KiB/t2，按存储哈希参数分派）
 4. 校验账号状态 — `is_deleted` 拒绝（40301）
-5. 生成 Token Pair（family 即设备 ID），DB 写入 `oauth_refresh_tokens`、`oauth_access_tokens` 元数据、`audit_logs`（audit 失败触发 compensate 撤销本次 family，不产生孤儿设备记录）
+5. 生成 Token Pair（family 即设备 ID），DB 写入 `oauth_refresh_tokens`、`oauth_access_tokens` 元数据，`audit_logs` 在同一事务内原子提交（audit 随 token pair 一起写入，不触发 compensate，也就不产生孤儿设备记录）
 6. 设备登记（fail-open，Redis 不可用仅 WARN 不影响登录）：`ZADD devices:{uid}` + `HSET device:{id}`；该用户设备数超 5 时淘汰最旧设备并**撤销被淘汰设备的全部 token（RevokeFamily）+ 审计 `evict_device`**——设备记录读写失败不进入 compensate 路径
 
 **token_version 机制**：`token_version` 存储在 `user` 表，改密/重置密码后递增。JWT Access Token 的 claims 中包含 `token_version`，登录态校验时与 DB 当前值比对，不一致即拒绝。此机制确保改密后所有旧 Token（无论是否在黑名单中）立即失效。
 
-`token_version` 以 DB 为唯一权威，不单独走 Redis 缓存：中间件每请求本就需要查 `oauth_access_tokens` 拿 `revoked_at`/`expires_at`，`token_version` 由同一条 join `user` 的查询顺带返回，额外缓存只会在 DB 查询之外多一次网络往返而省不掉任何 DB 调用。若后续要削减这次 DB 查询，应缓存整个 auth state（`revoked_at` + `expires_at` + `state` + `token_version`）而非单个字段，并同步设计登出、family 级联撤销、改密与账号注销四条路径的缓存失效。
+`token_version` 以 DB 为唯一权威，不单独走 Redis 缓存。登录态校验已实现 auth-state 缓存：整个 auth state（`revoked_at` + `expires_at` + `state` + `token_version` + `role`）按 token 缓存，短 TTL，命中时省掉 DB 查询；未命中或缓存出错时回退到 join `oauth_access_tokens` 与 `user` 的权威查询。登出、family 级联撤销、改密与账号注销四条路径在撤销事务内写 outbox 行，由 worker 批量失效对应缓存。
 
 ### 4.5 第三方 OAuth 登录
 
@@ -165,7 +165,7 @@ GET /oauth/lark/callback?code=...&state=...
 
 | Token 类型 | 格式 | 有效期 | 说明 |
 | ------------ | ------ | -------- | ------ |
-| Access Token | RS256 JWT | 1h | 自包含，含 jti/sub/role/state/token_version/scope/azp；kid 支持密钥轮换 |
+| Access Token | EdDSA（Ed25519）JWT | 1h | 自包含，含 jti/sub/role/state/token_version/scope/azp；kid 支持密钥轮换 |
 | Refresh Token | opaque string | 30d | HMAC-SHA256 hash 存 DB（`oauth_refresh_tokens.token_hash`） |
 | Register-Ticket | opaque string (`reg_` 前缀) | 5min | Redis 存储，一次性使用 |
 | login_code | opaque string (`lc_` 前缀) | 60s | Redis 存储，一次性使用，OAuth 回调交换用 |
@@ -181,7 +181,7 @@ family_id (UUID) ─── seq=0 (初始) ──rotated──► seq=1 ──rot
 ```
 
 - 合法用户刷新：旧 refresh_token 标记 revoked，签发新 token（family_id 不变，seq+1）
-- 攻击者重放已 revoked 的 refresh_token：通过 family_id 检测到 seq 不连续 → **整条 family 链全部撤销**（级联撤销所有同 family_id 的 access_token + refresh_token），强制用户重新登录
+- 攻击者重放已 revoked 的 refresh_token：通过 family_id 检测到 seq 不连续 → **整条 family 链全部撤销**（级联撤销所有同 family_id 的 access_token + refresh_token），强制用户重新登录。轮换后 30s 内的并发刷新视为良性（`refreshGracePeriod`），不触发级联撤销；超出窗口的重放才撤销整条 family
 - 过期处理：refresh_token 过期（`expires_at`）即失效，须重新登录，无宽限期
 
 #### 登出
@@ -192,9 +192,8 @@ Authorization: Bearer <access_token>
 Body: { "refresh_token": "rt_..." }
 ```
 
-- 当前 access_token 的 jti 写入 Redis 黑名单（TTL = 剩余有效期）
+- 当前 access_token 的 jti 写入 outbox 行，worker 失效对应 auth-state 缓存
 - 整条 refresh_token family 标记 revoked
-- 仅删除当前设备记录（`ZREM` + `DEL`），不影响其他设备
 
 ### 4.7 密码管理
 
@@ -209,7 +208,7 @@ Body: { "old_password", "new_password" }
 - 验证旧密码正确
 - 新密码 ≥ 8 位（NIST SP 800-63B 建议最小长度，不做强制复杂度，前端引导用户设置强密码）
 - `user.token_version` 递增，级联撤销该用户所有 token family
-- 当前 access_token jti 写入 Redis 黑名单
+- 当前 access_token 的 jti 写入 outbox 行，worker 失效对应 auth-state 缓存
 
 #### 重置密码（忘记密码）
 
@@ -312,8 +311,8 @@ POST /oauth/authorize/consent  → Bearer 认证 → GetDel 消费暂存 → 建
 - 授权码重放检测：`is_used=TRUE` 的同 code 再次出现 → 通过 `family_id` 级联撤销整条 token 链
 - **PKCE 校验失败同样消耗授权码**。否则窃得授权码的攻击者可对着一个始终有效的 code 无限枚举 `code_verifier`
 - 授权码过期不触发级联撤销：过期的 code 从未被兑换，没有需要惩罚的 family
-- `client_secret` 以 SHA-256 存储（非 PBKDF2）。client_secret 是 32 字节 crypto/rand 高熵值，不存在字典攻击面；而 PBKDF2 的 600k 迭代约 380ms/次，会让 token 端点成为 CPU 瓶颈。这与 API key 存 SHA-256 是同一论证
-- `GET /oauth/authorize` 按调用方 IP 限流（默认 20 次/60s）：该端点无认证且每次调用写一个 Redis 暂存键
+- `client_secret` 以 SHA-256 存储（非 argon2id）。client_secret 是 32 字节 crypto/rand 高熵值，不存在字典攻击面；而 argon2id（默认 m=19456KiB/t=2）的派生成本会让 token 端点成为 CPU 瓶颈。这与 API key 存 SHA-256 是同一论证
+- `GET /oauth/authorize` 按调用方 IP 限流（默认 100 次/60s）：该端点无认证且每次调用写一个 Redis 暂存键
 - **不支持 scope 收窄**（已知偏差）。RFC 6749 §6 允许 refresh 时请求更小的 scope，但仓储层要求轮换后的 token pair 携带与当前完全一致的 scope。客户端如需更小的 scope 须重新授权
 
 #### 错误重定向规则
@@ -325,14 +324,14 @@ POST /oauth/authorize/consent  → Bearer 认证 → GetDel 消费暂存 → 建
 | `client_id` / `redirect_uri` 校验通过之前 | `OAUTH_CONSENT_URL` | 否 |
 | 校验通过之后 | 客户端 `redirect_uri` | 是 |
 
-RFC 6749 §4.1.2.1 禁止把错误重定向到未经校验的 `redirect_uri`——否则任何人填入任意地址即可让本服务把浏览器弹送过去，端点退化为 open redirector。无法识别的错误按不可重定向处理：这恰恰是可重定向性无法确立的情形。
+RFC 6749 §4.1.2.1 禁止把错误重定向到未经校验的 `redirect_uri`——否则任何人填入任意地址即可让本服务把浏览器重定向到那里，端点退化为 open redirector。无法识别的错误按不可重定向处理：这恰恰是可重定向性无法确立的情形。
 
 #### 响应格式
 
 OAuth 端点不遵循 SAST Link 标准响应信封：
 
 - `/oauth/authorize`：成功/错误均使用 redirect response。
-- `/oauth/token`：请求体为 `application/x-www-form-urlencoded`；成功 `200` 返回 `{ "access_token", "refresh_token", "token_type", "expires_in", "scope", "id_token" }` 并携带 `Cache-Control: no-store` 与 `Pragma: no-cache`（RFC 6749 §5.1，防止共享缓存把一个客户端的 token 投递给另一个），错误使用 RFC 6749 JSON `{ "error": "invalid_grant", "error_description": "..." }`。`invalid_client` 为 `401` 并附带 `WWW-Authenticate`，其余错误为 `400`（RFC 6749 §5.2）。
+- `/oauth/token`：请求体为 `application/x-www-form-urlencoded`；成功 `200` 返回 `{ "access_token", "refresh_token", "token_type", "expires_in", "scope", "id_token" }` 并携带 `Cache-Control: no-store` 与 `Pragma: no-cache`（RFC 6749 §5.1，防止共享缓存把一个客户端的 token 投递给另一个），错误使用 RFC 6749 JSON `{ "error": "invalid_grant", "error_description": "..." }`。`invalid_client` 为 `401` 且不附带 `WWW-Authenticate`（本服务只在表单体读取 client_secret，discovery 仅通告 `none` 与 `client_secret_post`），其余错误为 `400`（RFC 6749 §5.2）。
 - `/oauth/revoke`：请求体为 `application/x-www-form-urlencoded`；遵循 RFC 7009，成功固定 `200 OK` 空响应体，错误使用 OAuth JSON 格式。未知/已过期/已撤销的 token 一律 `200`——客户端诉求已成立，反之会把端点变成探测 token 存在性的 oracle。
 - 请求参数只从请求体读取，query string 被忽略；重复参数直接拒绝（RFC 6749 §3.2，避免与链路上代理对生效值产生分歧）。
 
@@ -347,7 +346,7 @@ SAST Link 基于 OAuth 2.1 提供 OpenID Connect 1.0 兼容的身份认证层。
 | 端点 | 说明 |
 | ------ | ------ |
 | `GET /.well-known/openid-configuration` | Discovery 文档，含 issuer、各端点 URL、支持的 scope/claim/alg |
-| `GET /.well-known/jwks.json` | RS256 公钥集（JWKS），`kid` 与 JWT Header 匹配 |
+| `GET /.well-known/jwks.json` | EdDSA（Ed25519）公钥集（JWKS，RFC 8037 OKP），`kid` 与 JWT Header 匹配 |
 | `GET /userinfo` / `POST /userinfo` | UserInfo 端点，Bearer Token 认证 |
 
 #### ID Token
@@ -355,7 +354,7 @@ SAST Link 基于 OAuth 2.1 提供 OpenID Connect 1.0 兼容的身份认证层。
 scope 含 `openid` 时，`POST /oauth/token` 响应额外返回 `id_token`：
 
 ```
-Header: { "alg": "RS256", "kid": "link-v2-{year}-{month}", "typ": "JWT" }
+Header: { "alg": "EdDSA", "kid": "link-v2-{year}-{month}", "typ": "JWT" }
 Payload: {
   "iss": "https://link.sast.fun/v2",
   "sub": "1",                           // user.id 字符串
@@ -367,7 +366,6 @@ Payload: {
   "name": "张三",
   "picture": "https://cos.example.com/avatar/1.jpg",
   "preferred_username": "张三",
-  "profile": "https://link.sast.fun/card/1",
   "updated_at": 1717396400,
   // email scope:
   "email": "b2404****@njupt.edu.cn",
@@ -387,12 +385,12 @@ Payload: {
 
 - `preferred_username` 取 `profile.nickname`，未设置或为空白时回退到 `user.name`
 - `profile` 指向公开名片 URL（`OAUTH_CARD_BASE_URL` + `/` + user ID）。该配置独立于 `JWT_ISSUER`：issuer 带 API 的 `/v2` 基路径，而名片是不带它的前端路由
-- `auth_time` 取授权码行的 `created_at`——两段式流程中授权码正是在用户点「同意」那一刻创建的，语义精确，无需额外建列。refresh 轮换不是重新认证，因此保持该 family 首个 refresh token 的创建时刻
+- `auth_time` 取授权码行的 `created_at`——两段式流程中授权码正是在用户点「同意」那一刻创建的，无需额外建列。注意这是 consent 时刻而非真实认证时刻：闲置多日后再次授权会高报认证新鲜度，因此该 claim 会签发但不通告在 `claims_supported` 中（见 API 文档 §8.4）。refresh 轮换不是重新认证，因此保持该 family 首个 refresh token 的创建时刻
 - ID Token 的 `aud` 是 `client_id`，与 access token（`aud` 为本服务）分属两条独立签名路径。若共用一条，要么破坏中间件的 audience 校验，要么签发出能被本服务当作自身 bearer 凭证接受的 ID Token
 
 #### ID Token 与 Access Token 的关系
 
-第三方 access token 仍使用服务 audience，因此能通过现有 JWT 中间件认证——`/userinfo` 正依赖这一点。`/userinfo` 自行完成认证而非挂在中间件之后，只是为了按 RFC 6750 格式应答（`WWW-Authenticate` 挑战头），token 校验逻辑本身复用中间件的 `Authenticate`。
+第三方 access token 仍使用服务 audience，因此能通过现有 JWT 中间件认证——`/userinfo` 正依赖这一点。`/userinfo` 自行完成认证而非挂在中间件之后，只是为了按 RFC 6750 格式应答（`WWW-Authenticate` 挑战头），token 校验逻辑本身复用中间件的 `AuthenticateAnyClient`（`Authenticate` 带 `azp` 内置客户端闸门，会拒绝第三方 token）。
 
 ### 4.12 管理后台
 
@@ -481,7 +479,9 @@ Payload: {
 
 ### 4.14 个人卡片
 
-- URL 格式：`https://link.sast.fun/card/{user.id}`（OIDC `profile` claim 也指向此 URL）
+> **状态**：已下线（隐私重设计中，见 §10.4 端点列表）。顺序 ID 的公开 URL 可枚举全站成员名单；重开后为 owner-only + 不可枚举标识，不会原样启用。OIDC `profile` URL claim 已随卡片一并移除，当前无 claim 指向卡片 URL。
+
+- URL 格式：`https://link.sast.fun/card/{user.id}`
 - 展示内容：nickname、department、intro、avatar、blog_url、github_url
 - 用途：homepage 友链、个人名片分享
 
@@ -522,7 +522,7 @@ is_deleted ──(恢复)──► njupter
 | 限流 | `sastlink:ratelimit:{ip}:{endpoint}` | 30s~15min | String（INCR 计数器 + EXPIRE） | 固定窗口计数器，按端点差异化配置（登录 15min/发验证码 60s 等） |
 | 设备管理 | `sastlink:devices:{user_id}` | 30d | Sorted Set（score=login_ts, member=device_id） | 最多 5 台同时登录，详情另存 Hash。淘汰/登出见 §6.1 |
 | 解绑限流 | `sastlink:ratelimit:user:{user_id}:unbind` | 60s | Fixed window（INCR + EXPIRE） | 限制单个用户的解绑频率。键按 `user_id` 而非 `provider_id`：后者会让 A 解绑某地址后，B 绑定同一地址再解绑时撞上 A 的窗口。在密码校验**之前**检查，否则爆破尝试不消耗配额。此处用限流而非复用登录失败计数：后者的键与密码登录共用，在本端点试错密码会连带锁死用户的登录入口，且其响应为「登录已被锁定」，在解绑上语义不符；若要改为累积锁定，需要独立的键命名空间与错误码。并发解绑同一条记录由 PostgreSQL 串行化：输的一方匹配不到行，返回 `40400` |
-| Token 黑名单 | `sastlink:token:blacklist:{jti}` | Token 剩余有效期 | String（SET EX，值任意） | 登出/改密后 Access Token 失效，利用 TTL 自动过期清理 |
+| auth-state 缓存 | `sastlink:auth:state:{jti}` | 短 TTL（默认 15s） | String（JSON，短 TTL） | 每请求的 token 状态缓存，命中省 DB 查询；撤销路径失效对应条目 |
 | 幂等性 | `sastlink:idempotency:{key}` | 24h | String（SET NX，存响应体） | 敏感写操作（注册、绑定等）。key 由客户端传入（`Idempotency-Key` header），同一 key 重复请求返回首次结果 |
 | OAuth State | `sastlink:oauth:state:{state}` | 10min | String（GetDel 消费） | OAuth 授权标准 state 参数，发起时写入，回调时 GetDel 校验防 CSRF |
 | OAuth 注册暂存 | `sastlink:oauth:registration:{state}` | 15min | String（GetDel 消费，JSON 值） | OAuth 回调无绑定分支。暂存 `{provider, provider_id, identity_data, oauth_state}`，消费时校验双值匹配 |
@@ -541,7 +541,7 @@ is_deleted ──(恢复)──► njupter
 | **Fail-closed** | Redis 是唯一存储，取不到值不等于校验通过 | 验证码、OAuth State、registration_state、login_code、Register-Ticket、Bind-Ticket、幂等性 key、授权请求暂存 | 拒绝请求，用户重走流程。所有 key 均带 TTL，冷启动自愈 |
 | **Fail-open** | PostgreSQL 持有权威副本，或丢失仅放宽速率窗口 | Token 黑名单、登录失败计数与锁定、限流（含解绑限流、authorize 限流） | WARN 日志后继续，不返回 5xx |
 
-Token 黑名单可以跳过的依据：JTI 写入黑名单与 `oauth_access_tokens.revoked_at` 在**同一事务**内完成，而登录态校验始终执行那条 DB 查询（§4.1），因此 DB 拒绝的集合是黑名单的严格超集。黑名单是快速拒绝路径与纵深防御，不是权威。
+auth-state 缓存可以跳过的依据：缓存失效由撤销事务内写出的 outbox 行保证，而登录态校验在缓存未命中或出错时始终回退 `oauth_access_tokens.revoked_at` 的权威 DB 查询（§4.1），DB 拒绝的集合覆盖缓存可能放行的任何 token。缓存是快速路径，不是权威。
 
 **禁止**把 fail-open 依赖的错误转成 `ErrInternal`——那会让一个可选缓存变成认证链路的单点故障。
 
@@ -650,7 +650,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - **OIDC UserInfo 端点**：错误时 RFC 6750 格式 `{ "error": "invalid_token", "error_description": "..." }`，并附带 `WWW-Authenticate` Bearer 挑战头
 - **OIDC Discovery / JWKS**：直接返回协议标准 JSON（`/.well-known/openid-configuration`、`/.well-known/jwks.json`）
 - **健康检查**：直接返回 `{ "status", "db", "redis" }`
-- **个人卡片公开端点**：`/card/{id}` 直接返回公开 profile 字段
+- **个人卡片公开端点**：`/card/{id}` 直接返回公开 profile 字段。**已下线**（顺序 ID 可枚举全站成员名单，隐私重设计中），重开后为 owner-only + 不可枚举标识
 
 ### 10.2 Base URL
 
@@ -658,7 +658,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 
 ### 10.3 认证方式
 
-`Authorization: Bearer <access_token>`（JWT RS256，1h 有效期）
+`Authorization: Bearer <access_token>`（JWT EdDSA/Ed25519，1h 有效期）
 
 ### 10.4 完整端点列表
 
@@ -697,11 +697,11 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 模块 | 状态 |
 | ------ | ------ |
 | Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
-| 数据基础层 | 已完成 — V001–V005 SQL migrations、固定内置 `sast-link-web` first-party Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
-| 认证基础设施 | 已完成 — PBKDF2-SHA512、RS256 JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/JTI 黑名单/登录失败计数与 fixed-window limiter |
+| 数据基础层 | 已完成 — V001–V006 SQL migrations、固定内置 `sast-link-web` first-party Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
+| 认证基础设施 | 已完成 — 单方案 argon2id 密码哈希（默认 m=19456KiB/t2，存量 pbkdf2-sha512-v1 只读验证 + 登录时重哈希迁移）、EdDSA（Ed25519）JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope、token-family rotation/replay、Redis 一次性状态/auth-state 缓存/登录失败计数与 fixed-window limiter |
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流，以及登录 / 登出 / 刷新审计接入（刷新以 `outcome` 区分 `rotated` 与 `refresh_replayed`，后者即重放防御触发并级联撤销整个 token family） |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
-| 用户资料管理 | 已完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、公开个人卡片（`GET /card/:id`）、头像上传（`PUT /user/avatar`，腾讯云 COS + 内容审核，`STORAGE_*` 配置，未配置时返回 50002） |
+| 用户资料管理 | 已完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、头像上传（`PUT /user/avatar`，腾讯云 COS + 内容审核，`STORAGE_*` 配置，未配置时返回 50002）。公开个人卡片 `GET /card/:id` 已下线（隐私重设计中） |
 | OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
 | 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）与审计日志查询，读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
 | 其余运维接入 | 已完成 — 设备管理：`GET /user/devices` + `DELETE /user/devices/:id`（Redis ZSET + Hash，device_id 复用 token family_id，最多 5 台淘汰最旧，30d TTL；登录/注册登记、刷新更新 last_seen 不续期 TTL、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备的归属校验 fail-closed；按用户限流 `RATE_LIMIT_DEVICE_*`；审计 `logout_device`）。endpoint 限流已全量接入（见 §11）。数据保留清理已接入：由 `internal/worker/retention.go` 在 API 进程内按 ticker 执行，多实例用 advisory lock 协调；不用 pg_cron（生产库未装扩展，测试镜像亦无法加载），详见 §9.1 |
@@ -709,15 +709,15 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ## 11. 实现顺序
 
 - [x] Go 服务骨架（配置 / DB 与 Redis 连接 / Web 基础设施 / 健康检查）
-- [x] 数据基础层（V001–V005 migrations / 内置 first-party Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
-- [x] 认证基础设施（PBKDF2 / JWT + JWKS / Refresh Token / PKCE-S256 / scope / Redis auth state + limiter / token-family rotation）
+- [x] 数据基础层（V001–V006 migrations / 内置 first-party Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
+- [x] 认证基础设施（单方案 argon2id 密码哈希（默认 m=19456KiB/t2，存量 pbkdf2-sha512-v1 只读验证 + 登录时重哈希）/ JWT + JWKS（EdDSA）/ Refresh Token / PKCE-S256 / scope / Redis auth-state 缓存 + limiter / token-family rotation）
 - [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
 - [x] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码 / 第三方邮箱绑定）
-- [x] 用户资料自助管理（资料编辑 / 绑定列表 / 解绑 / 公开个人卡片）
+- [x] 用户资料自助管理（资料编辑 / 绑定列表 / 解绑；公开个人卡片已下线，隐私重设计中）
 - [x] 头像上传（腾讯云 COS + `STORAGE_*` 配置，≤5MB jpg/png/webp 魔数与解码校验，旧头像清理，按用户限流，审计 `upload_avatar`；未配置时端点返回 50002）
 - [x] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [x] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
-- [x] 限流与防刷扩展（登录、验证码发信（邮箱 + IP 双键）、解绑、`/oauth/authorize`、`/oauth/token` + `/oauth/revoke`、`GET /oauth/{github,lark}`、`/oauth/exchange-code`、`POST /auth/register`、`GET /card/:id` 均已接入。全部按具名端点在 service 内生效，没有全局中间件——新增路由不会自动继承任何配额，必须显式声明。键的选择按端点实际承压对象而非一律按 IP：注册按 Register-Ticket（计量 PBKDF2 成本的单位），解绑按 user，其余无认证端点只有 IP 可用。校园网 NAT 是这一取舍的主因——整栋楼共享一个出口 IP，按 IP 给注册设小额度等于全校每窗口只能注册数次。默认值按端点形状推定，尚未据真实流量校准）
+- [x] 限流与防刷扩展（登录、验证码发信（邮箱 + IP 双键）、解绑、`/oauth/authorize`、`/oauth/token` + `/oauth/revoke`、`POST /auth/refresh`、`GET /oauth/{github,lark}`、`/oauth/exchange-code`、`POST /auth/register`、`GET /card/:id` 均已接入。全部按具名端点在 service 内生效，没有全局中间件——新增路由不会自动继承任何配额，必须显式声明。键的选择按端点实际承压对象而非一律按 IP：注册按 Register-Ticket（计量密码哈希成本的单位），解绑按 user，其余无认证端点只有 IP 可用。校园网 NAT 是这一取舍的主因——整栋楼共享一个出口 IP，按 IP 给注册设小额度等于全校每窗口只能注册数次。默认值按端点形状推定，尚未据真实流量校准）
 - [x] 审计日志扩展（登录/登出/刷新、注册三步、改密与重置、邮箱与第三方绑定/解绑、资料修改、`oauth_authorize` / `oauth_token` / `oauth_revoke`、第三方登录与 `login_code` 交换、管理后台用户与客户端变更均已接入。Token 重放在两条路径上均以 `outcome: refresh_replayed` / `code_replayed` 落库，可单独检索——同一 action 同一错误码下，只有 outcome 能区分「令牌泄露并已级联撤销」与普通失败）
 - [x] 头像内容审核（腾讯云 COS 图片审核，`STORAGE_AUDIT_ENABLED` 默认开启，fail-closed：审核服务不可用返回 50300 拒绝上传，敏感内容删除对象并返回 42203）
 - [x] OAuth 2.1 授权服务端（两段式 authorize / consent / token / revoke + PKCE-S256 + 重放级联撤销）

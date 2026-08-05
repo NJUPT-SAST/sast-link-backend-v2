@@ -2,7 +2,7 @@
 
 SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一身份认证中心与人员信息管理系统。
 
-当前仓库已完成 Go 服务骨架、数据基础层、认证基础设施、内部认证闭环、用户资料自助管理、OAuth 2.1/OIDC Provider 与管理后台（OAuth 客户端 + 用户管理 + 审计日志）：HTTP API 入口、PostgreSQL/Redis 连接、健康检查、V001–V006 SQL migrations（含固定内置 `sast-link-web` first-party Client、token blacklist Outbox、跨表邮箱唯一性触发器与过期授权码清理索引）、持久化实体与 Auth repositories、密码哈希、RS256 JWT/JWKS、opaque Refresh Token、PKCE-S256、统一 OAuth/OIDC scope、Redis 一次性状态/限流/登录失败计数，以及密码登录、Token 刷新、登出、JWT middleware、可靠黑名单投递 worker、SMTP 邮件、两步邮箱注册、改密/重置密码（含全量 Token 吊销与授权码作废）、第三方邮箱绑定、资料查询与编辑、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 按用户限流）和公开个人卡片。
+当前仓库已完成 Go 服务骨架、数据基础层、认证基础设施、内部认证闭环、用户资料自助管理、OAuth 2.1/OIDC Provider 与管理后台（OAuth 客户端 + 用户管理 + 审计日志）：HTTP API 入口、PostgreSQL/Redis 连接、健康检查、V001–V006 SQL migrations（含固定内置 `sast-link-web` first-party Client、token blacklist Outbox、跨表邮箱唯一性触发器与过期授权码清理索引）、持久化实体与 Auth repositories、密码哈希、EdDSA（Ed25519）JWT/JWKS、opaque Refresh Token、PKCE-S256、统一 OAuth/OIDC scope、Redis 一次性状态/auth-state 缓存/限流/登录失败计数，以及密码登录、Token 刷新、登出、JWT middleware、基于 token-blacklist outbox 的撤销投递 worker（失效 auth-state 缓存）、SMTP 邮件、两步邮箱注册、改密/重置密码（含全量 Token 吊销与授权码作废）、第三方邮箱绑定、资料查询与编辑、绑定列表与解绑（密码二次确认 + 唯一登录方式保护 + 按用户限流）和头像上传。
 
 OAuth/OIDC Provider 部分已完成两段式授权端点（`GET /oauth/authorize` + `POST /oauth/authorize/consent`）、Token 端点（authorization_code 与 refresh_token 两种 grant、ID Token 签发）、RFC 7009 撤销端点、`/userinfo`、OIDC discovery 与 JWKS，以及 `/admin/oauth-clients` 客户端注册与更新（内置客户端受保护，不可停用或改写 redirect_uris）。
 
@@ -67,20 +67,26 @@ golangci-lint run ./...
 - `internal/db/`：GORM PostgreSQL 连接管理
 - `internal/health/`：健康检查 handler
 - `internal/service/session/`：内部登录、Refresh rotation、登出撤销与资料查询用例
-- `internal/service/session/worker/`：token blacklist Outbox 的 Redis 投递与重试 worker
+- `internal/service/session/worker/`：token blacklist Outbox 的批量投递与重试 worker（撤销事务入队 → 失效 auth-state 缓存）
 - `internal/worker/`：过期数据清理 worker（授权码、access/refresh token 元数据、审计日志）。在 API 进程内按 ticker 执行，多实例通过 PostgreSQL advisory lock 协调；不用 pg_cron，因生产库未装该扩展且测试镜像无法加载
-- `internal/adapter/redis/session/`：将 Redis 限流、登录失败计数和 JTI blacklist 适配到 Session ports
+- `internal/adapter/redis/session/`：将 Redis 限流、登录失败计数和 auth-state 缓存适配到 Session ports
 - `internal/provider/`：GitHub 与飞书的出站 HTTP client，把第三方响应归一化为 Identity
 - `internal/objectstore/`：对象存储 port（`ObjectStore` / `AvatarAuditor`），头像上传的存储与内容审核依赖
 - `internal/adapter/cos/`：腾讯云 COS 适配器（上传 / 删除 / 图片审核），实现 objectstore ports
 - `internal/service/oauthlogin/`：第三方登录三条链路（授权跳转 / 回调分叉 / login_code 交换）与登录态绑定
 - `internal/adapter/redis/oauthlogin/`：`oauth_state`、`registration_state`、`login_code` 的一次性状态适配
 - `internal/web/`：Gin router、JWT middleware、认证 handlers 与基础响应设施
-- `internal/redis/`：一次性认证状态、JTI blacklist、登录失败计数与 fixed-window limiter
+- `internal/redis/`：一次性认证状态、auth-state 缓存、登录失败计数与 fixed-window limiter
 - `internal/model/`：GORM persistence entities 与 PostgreSQL 类型
 - `internal/repository/`：user/token/audit repositories 与 token-family rotation/revocation
 - `internal/migration/`：migration runner 与 V001 baseline guard
 - `internal/testutil/`：PostgreSQL 16 与 Redis 8 Testcontainers 测试基础设施
+
+## Community
+
+- [贡献指南](./CONTRIBUTING.md)
+- [行为准则](./CODE_OF_CONDUCT.md)
+- [安全策略](./SECURITY.md)
 
 ## License
 

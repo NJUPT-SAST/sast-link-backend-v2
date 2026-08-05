@@ -41,7 +41,7 @@ CREATE TYPE email_enum AS ENUM (
 -- 客户端类型
 CREATE TYPE client_enum AS ENUM (
     'first_party', -- sast 内部应用，受信任的
-    'third_party' -- 外部接入应用，需走OAuth流程
+    'third_party' -- 外部接入应用，需走 OAuth 流程
 );
 
 -- 学院
@@ -322,7 +322,7 @@ CREATE TABLE oauth_clients (
 
 Authorization Code + PKCE 流程中的短期授权码。一次性使用，过期后定时任务清理。
 
-> 协议层要求 PKCE S256-only。V001 历史迁移中的 `ck_oauth_authorizations_challenge_method` 仍允许 `plain`，用于保留已发布 schema 的真实状态；V002 迁移应将约束收紧为仅允许 `S256`。
+> 协议层要求 PKCE S256-only。V001 历史迁移中的 `ck_oauth_authorizations_challenge_method` 仍允许 `plain`，用于保留已发布 schema 的真实状态；V002 迁移已将该约束收紧为仅允许 `S256`。
 
 ```sql
 CREATE TABLE oauth_authorizations (
@@ -376,7 +376,7 @@ CREATE INDEX idx_oauth_authorizations_user_client
     ON oauth_authorizations(user_id, client_id);
 ```
 
-> 此表无 `updated_at`。生命周期为"创建 → 标记已用"。已使用 + 已过期的 code 仍被 pg_cron 统一清理；部分索引 `idx_oauth_authorizations_expires_at` 仅覆盖 `is_used = FALSE` 的行，清理 `is_used = TRUE` 过期行需 seq scan
+> 此表无 `updated_at`。生命周期为"创建 → 标记已用"。已使用 + 已过期的 code 由 API 内 retention worker 统一清理；V006 增设全量 `expires_at` 索引 `idx_oauth_authorizations_expires_at_all`，过期行按索引定位，无需 seq scan
 
 ## oauth_access_tokens 元数据
 
@@ -486,7 +486,7 @@ CREATE INDEX idx_oauth_refresh_tokens_expires_at
 
 ## token_blacklist_outbox 令牌黑名单投递箱
 
-持久化投递箱（Outbox）模式，用于 JWT 撤销的可靠投递。当在 PostgreSQL 事务中调用 `RevokeFamily` 时，每一条仍在有效期内的 JWT `jti` 会被 UPSERT 到此表。API 会同步尽力写入 Redis 以降低撤销延迟；后台 worker 仍会认领所有投递行，写入 Redis JTI 黑名单并在成功后确认删除，因此同步失败与并发 refresh replay 产生的撤销都会最终重试。失败的投递保留在表中，按指数退避重试。行在其 JWT 生存期过后自然过期。
+持久化投递箱（Outbox）模式，用于 JWT 撤销的可靠投递。当在 PostgreSQL 事务中调用 `RevokeFamily` 时，每一条仍在有效期内的 JWT `jti` 会被 UPSERT 到此表。后台 worker 认领所有投递行，失效对应 auth-state 缓存条目并在成功后确认删除，因此同步失效失败与并发 refresh replay 产生的撤销都会最终重试。失败的投递保留在表中，按指数退避重试。行在其 JWT 生存期过后自然过期。
 
 ```sql
 CREATE TABLE token_blacklist_outbox (
@@ -552,7 +552,7 @@ WHERE id IN (
 )
 RETURNING *;
 
--- 2. 写入 Redis JTI 黑名单（TTL = expires_at - NOW()）
+-- 2. 失效对应 auth-state 缓存条目（DeleteAuthStates）
 
 -- 3. 成功 → DELETE FROM token_blacklist_outbox WHERE id = $id;
 --    失败 → UPDATE token_blacklist_outbox
@@ -762,4 +762,4 @@ oauth_authorizations.family_id
 
 13. 所有触发器
 
-14. pg_cron 扩展 + 定时清理任务调度
+14. 索引/触发器复核（清理由 API 内 retention worker 执行，不使用 pg_cron）

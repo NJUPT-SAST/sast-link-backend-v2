@@ -199,7 +199,7 @@ paths:
           description: >-
             注册过于频繁（42900，带 Retry-After）。按 Register-Ticket 限流而非按 IP，
             默认 5 次/5 分钟（RATE_LIMIT_REGISTER_ATTEMPTS）：每个被接受的请求执行一次
-            60 万轮 PBKDF2 派生，ticket 即该成本应计量的「一个已验证邮箱」；按 IP 限流会让
+            argon2id 派生（默认 m=19456KiB/t2），ticket 即该成本应计量的「一个已验证邮箱」；按 IP 限流会让
             校园网 NAT 后整栋楼共享一个桶。检查排在全部廉价校验之后（填错表单不计费）、
             registration_state 消费之前，故被限流的请求既不消费 Register-Ticket 也不消费
             registration_state，可在窗口恢复后用同一 ticket 重试——窗口不得超过 ticket 的
@@ -511,10 +511,10 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: >-
-            `42900`（带 Retry-After）—— 按调用方 IP 限流，默认 20 次/60s
+            `42900`（带 Retry-After）—— 按调用方 IP 限流，默认 100 次/60s
             （RATE_LIMIT_OAUTH_LOGIN_RPM）。与 /oauth/authorize 形状相同：
             无认证且每次调用写一个 oauth_state 键。限流在解析 provider 之前生效，
-            因此未启用的 provider 那条返回 40000 的路由也不是免费探测面。
+            因此未启用的 provider 那条返回 40000 的路由也不是无成本探测面。
         "503":
           description: >-
             `50300` —— Redis 不可用，无法写入 oauth_state。fail-closed：
@@ -582,7 +582,7 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: >-
-            `42900`（带 Retry-After）—— 按调用方 IP 限流，默认 20 次/60s
+            `42900`（带 Retry-After）—— 按调用方 IP 限流，默认 100 次/60s
             （RATE_LIMIT_OAUTH_LOGIN_RPM），与 GitHub 授权端点共用同一档配额与
             同一 Redis 计数域（endpoint 名 oauth_login）。
         "503":
@@ -659,10 +659,10 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: >-
-            `42900`（带 Retry-After）—— 按调用方 IP 限流，默认 30 次/60s
+            `42900`（带 Retry-After）—— 按调用方 IP 限流，默认 100 次/60s
             （RATE_LIMIT_EXCHANGE_CODE_RPM）。本端点按设计免认证——兑换 login_code
-            正是取得会话的方式——故配额是约束免费探测的唯一手段。限流检查排在
-            空 code 校验之前：调用方控制输入，先免费拒空会让每次猜测一次
+            正是取得会话的方式——故配额是约束无成本探测的唯一手段。限流检查排在
+            空 code 校验之前：调用方控制输入，先直接拒空会让每次猜测一次
             Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 login_code。
       security: []
   /user/profile:
@@ -880,9 +880,10 @@ paths:
   /card/{id}:
     get:
       summary: 获取个人卡片
-      deprecated: false
+      deprecated: true
       description: |
-        公开端点，无需认证。返回 profile 表中公开字段，用于个人主页展示、homepage 友链及 OIDC profile claim 指向。
+        已下线（路由注释，暂不响应）。顺序 ID 的公开 URL 可枚举全站成员名单，隐私重设计中。
+        重开后为 owner-only + 不可枚举标识，不会原样启用。
       operationId: cardGetCard
       tags:
         - Card
@@ -1290,7 +1291,7 @@ paths:
           unauthorized_client、invalid_request）重定向至客户端 redirect_uri，
           携带 error / error_description / state。
 
-        按调用方 IP 限流（默认 20 次/60s）：本端点无认证且每次调用写一个 Redis 暂存键。
+        按调用方 IP 限流（默认 100 次/60s）：本端点无认证且每次调用写一个 Redis 暂存键。
       operationId: oauthAuthorize
       tags:
         - OAuth 2.1 Server
@@ -1467,7 +1468,7 @@ paths:
         支持 grant_type: `authorization_code` 和 `refresh_token`。
         第一方应用使用 PKCE 无需 client_secret，第三方应用需提供 client_secret。
         此端点不遵循标准响应信封，请求体必须使用 application/x-www-form-urlencoded，成功和错误均使用 RFC 6749 格式。
-        scope 包含 `openid` 时，响应额外返回 `id_token`（RS256 签名 JWT）。
+        scope 包含 `openid` 时，响应额外返回 `id_token`（EdDSA / Ed25519 签名 JWT）。
       operationId: oauthToken
       tags:
         - OAuth 2.1 Server
@@ -1540,7 +1541,7 @@ paths:
         "429":
           description: |
             `temporarily_unavailable` —— 按调用方 IP 限流
-            （`RATE_LIMIT_TOKEN_RPM`，默认 60 次/60s），附带 `Retry-After`。
+            （`RATE_LIMIT_TOKEN_RPM`，默认 100 次/60s），附带 `Retry-After`。
           content:
             application/json:
               schema:
@@ -1662,7 +1663,7 @@ paths:
       summary: JWKS 公钥集
       deprecated: false
       description: |
-        返回 RS256 签名公钥集（JSON Web Key Set），用于验证 ID Token 和 Access Token 的签名。
+        返回 EdDSA（Ed25519）签名公钥集（JSON Web Key Set，RFC 8037 OKP），用于验证 ID Token 和 Access Token 的签名。
       operationId: oidcJwks
       tags:
         - OIDC
@@ -1683,7 +1684,7 @@ paths:
       description: |
         返回当前认证用户的身份信息。响应内容根据 Token 的 scope 决定：
         - `openid` 至少返回 `sub`
-        - `profile` 额外返回 name / picture / preferred_username / profile 等
+        - `profile` 额外返回 name / picture / preferred_username / updated_at 等
         - `email` 额外返回 email / email_verified
 
         符合 [OpenID Connect Core 1.0 — UserInfo Endpoint](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo) 规范。
@@ -1981,7 +1982,7 @@ paths:
       description: |
         需 admin 角色。将 user.state 设为 is_deleted，保留数据；同一事务内递增
         token_version 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，
-        非 DB 级联删除），撤销的 JTI 写入 outbox 并投递至 Redis 黑名单。
+        非 DB 级联删除），撤销的 JTI 写入 outbox，由 worker 失效对应 auth-state 缓存。
 
         不可注销自己的账号，也不可注销系统中最后一名活跃管理员（均 403）。
       operationId: adminDeleteUser
@@ -2779,7 +2780,7 @@ components:
     #   - /oauth/authorize/consent → SAST Link 自有端点而非 RFC 定义端点，沿用标准信封
     #   - /userinfo → 成功为 OIDC UserInfo claims；错误为 RFC 6750 Bearer Token 格式
     #   - /health → 直接 {status, db, redis}
-    #   - /card/{id} → 直接 profile 公开字段
+    #   - /card/{id} → 已下线（隐私重设计中），暂不响应
     #   - /.well-known/openid-configuration → OIDC Discovery JSON
     #   - /.well-known/jwks.json → JWKS JSON
     StandardEnvelope:
@@ -3276,9 +3277,9 @@ components:
         id_token:
           type: string
           description: |
-            OIDC ID Token（RS256 签名 JWT）。仅在 scope 包含 `openid` 时返回。
+            OIDC ID Token（EdDSA / Ed25519 签名 JWT）。仅在 scope 包含 `openid` 时返回。
             ID Token 包含以下 OIDC 标准 claims，具体内容取决于授权 scope。
-          example: eyJhbGciOiJSUzI1NiIs...
+          example: eyJhbGciOiJFZERTQSIs...
         scope:
           type: string
           description: 授权范围，空格分隔，取值见 OAuthScope 枚举（openid / profile / email）
@@ -3416,7 +3417,7 @@ components:
             type: string
           description: ID Token 签名算法
           example:
-            - RS256
+            - EdDSA
         token_endpoint_auth_methods_supported:
           type: array
           items:
@@ -3492,12 +3493,12 @@ components:
             $ref: "#/components/schemas/JWK"
     JWK:
       type: object
-      description: JSON Web Key，RS256 公钥
+      description: JSON Web Key，Ed25519 公钥（RFC 8037 OKP）
       properties:
         kty:
           type: string
           description: 密钥类型
-          example: RSA
+          example: OKP
         use:
           type: string
           description: 用途
@@ -3505,25 +3506,25 @@ components:
         kid:
           type: string
           description: 密钥 ID，用于匹配 JWT 头中的 kid
-          example: link-v2-2026-06
+          example: link-v2-active
+        crv:
+          type: string
+          description: 曲线名
+          example: Ed25519
         alg:
           type: string
           description: 签名算法
-          example: RS256
-        n:
+          example: EdDSA
+        x:
           type: string
-          description: RSA 公钥 modulus（Base64URL）
-          example: 0vx7agoebGcQSuuPiLgX...
-        e:
-          type: string
-          description: RSA 公钥 exponent（Base64URL）
-          example: AQAB
+          description: Ed25519 公钥坐标（Base64URL，32 字节）
+          example: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo
     UserInfoResponse:
       type: object
       description: |
         OIDC UserInfo 端点响应。返回的 claims 取决于 Access Token 的 scope：
         - `openid` → sub（必返）
-        - `profile` → name, picture, preferred_username, profile, updated_at
+        - `profile` → name, picture, preferred_username, updated_at
         - `email` → email, email_verified
 
         未授权或用户未填写的 claim 一律**不出现在响应中**，而不是返回 `null`
@@ -3547,11 +3548,6 @@ components:
           type: string
           description: 昵称（fallback 至姓名）。需 profile scope
           example: 张三
-        profile:
-          type: string
-          format: uri
-          description: 用户主页（SAST Link 个人卡片）。需 profile scope
-          example: https://link.sast.fun/card/1
         email:
           type: string
           format: email
@@ -3569,8 +3565,8 @@ components:
       type: object
       description: |
         ID Token claims 说明（仅供文档参考，非实际返回结构）。
-        ID Token 是一个 RS256 签名的 JWT，当 scope 包含 `openid` 时在 token 端点响应中返回。
-        其 Header 包含 `alg=RS256` 和 `kid`，Payload 包含以下 claims。
+        ID Token 是一个 EdDSA（Ed25519）签名的 JWT，当 scope 包含 `openid` 时在 token 端点响应中返回。
+        其 Header 包含 `alg=EdDSA` 和 `kid`，Payload 包含以下 claims。
       properties:
         iss:
           type: string
@@ -3618,12 +3614,6 @@ components:
           type: string
           description: 昵称 / 常用用户名（需 profile scope）
           example: 张三
-          nullable: true
-        profile:
-          type: string
-          format: uri
-          description: 用户主页 URL（需 profile scope）
-          example: https://link.sast.fun/card/1
           nullable: true
         email:
           type: string

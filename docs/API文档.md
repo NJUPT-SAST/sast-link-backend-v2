@@ -57,7 +57,7 @@
 `/oauth/authorize/consent` 是 SAST Link 自有端点而非 RFC 定义端点，**使用标准信封**，不在上述例外之列。
 
 - `/health`：直出 `{ "status", "db", "redis" }`。
-- `/card/{id}`：直出公开 profile 字段。
+- `/card/{id}`：**已下线**（见 §3.4），暂不响应。
 
 **OAuth 2.1 错误响应示例**：
 
@@ -166,7 +166,7 @@
 
 OAuth 的 RFC 端点（`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`、`/userinfo`）不使用上述业务错误码，改用 RFC 6749 / RFC 6750 的 `{error, error_description}` 格式，详见 §5。`/oauth/authorize/consent` 是 SAST Link 自有端点，沿用本表业务码。
 
-密码派生（PBKDF2）有并发上限，请求需排队等待槽位。若客户端在排队期间断开或超时，服务端放弃该次派生并返回 `50300`，且**不计入登录失败次数、不写入失败审计**——未完成的校验不构成密码错误的证据。
+密码派生有并发上限（`ARGON2_CONCURRENCY`，未设置时按 GOMAXPROCS 推导，1c1g=1），请求需排队等待槽位。若客户端在排队期间断开或超时，服务端放弃该次派生并返回 `50300`，且**不计入登录失败次数、不写入失败审计**——未完成的校验不构成密码错误的证据。
 
 ---
 
@@ -237,7 +237,7 @@ POST /auth/register/verify-code
 
 注册第二步：凭 Register-Ticket + 补充信息完成注册。
 
-> **限流**：按 **Register-Ticket** 固定窗口限流（默认 5 次/5 分钟，`RATE_LIMIT_REGISTER_ATTEMPTS`），不按 IP。该配额限制的是成本：每个被接受的请求执行一次 60 万轮迭代的 PBKDF2-SHA512 派生，而 ticket 恰好代表「一个已验证邮箱」这一应被计量的单位。按 IP 限流会让校园网 NAT 后整栋楼共享一个计数桶，正是新生集中注册的流量形状。
+> **限流**：按 **Register-Ticket** 固定窗口限流（默认 5 次/5 分钟，`RATE_LIMIT_REGISTER_ATTEMPTS`），不按 IP。该配额限制的是成本：每个被接受的请求执行一次密码哈希派生（默认 argon2id m=19456KiB/t2），而 ticket 恰好代表「一个已验证邮箱」这一应被计量的单位。按 IP 限流会让校园网 NAT 后整栋楼共享一个计数桶，正是新生集中注册的流量形状。
 >
 > 限流检查排在**全部廉价校验之后**（密码长度、学院枚举、邮箱与学号占用），因此用户填错表单不消耗配额；同时排在 `registration_state` 消费**之前**，故被限流的请求既不消费 Register-Ticket 也不消费 `registration_state`，窗口恢复后可用同一 ticket 重试。窗口不得超过 Register-Ticket 的 5 分钟 TTL——否则窗口尚未恢复而 ticket 已过期，重试无从谈起——服务启动时校验这一约束。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 
@@ -279,7 +279,7 @@ POST /auth/register
 
 ```json
 {
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "access_token": "eyJhbGciOiJFZERTQSIs...",
   "refresh_token": "rt_abc123...",
   "token_type": "Bearer",
   "expires_in": 3600,
@@ -315,6 +315,10 @@ Register-Ticket 在建号成功后才消费。返回 40901/40902/40900 时 ticke
 POST /user/login
 ```
 
+> **限流**：按 **调用者 IP** 固定窗口限流（默认 300 次/15 分钟，`RATE_LIMIT_LOGIN_RPM` / `RATE_LIMIT_LOGIN_WINDOW`）。校园网 NAT 后多个用户共享同一出口 IP，因此该上限故意宽松；真正的账号防护是下面的登录失败锁定（`LOGIN_FAILURE_LIMIT`）。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+>
+> 登录失败次数（`LOGIN_FAILURE_LIMIT`，默认 10 次/15 分钟）达到上限后，该账号会被锁定至窗口结束，返回 `42901`。
+
 **Request**:
 
 ```json
@@ -328,7 +332,7 @@ POST /user/login
 
 ```json
 {
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "access_token": "eyJhbGciOiJFZERTQSIs...",
   "refresh_token": "rt_abc123...",
   "token_type": "Bearer",
   "expires_in": 3600,
@@ -370,7 +374,7 @@ POST /auth/refresh
 
 ```json
 {
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "access_token": "eyJhbGciOiJFZERTQSIs...",
   "refresh_token": "rt_new_abc456...",
   "token_type": "Bearer",
   "expires_in": 3600
@@ -512,7 +516,7 @@ POST /auth/reset-password
 >
 > **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
 >
-> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 20 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是免费探测面。`POST /oauth/exchange-code` 按 IP 限流（默认 30 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先免费拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可烧掉他人活跃凭证。两处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 100 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`POST /oauth/exchange-code` 按 IP 限流（默认 100 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。两处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 >
 > 回调端点（`/oauth/{github,lark}/callback`）不单独限流：它需要一个有效的一次性 `oauth_state` 才能推进，而该 state 由已限流的授权端点签发。
 
@@ -593,7 +597,7 @@ POST /oauth/exchange-code
 
 ```json
 {
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "access_token": "eyJhbGciOiJFZERTQSIs...",
   "refresh_token": "rt_abc123...",
   "token_type": "Bearer",
   "expires_in": 3600,
@@ -784,7 +788,7 @@ PUT /user/avatar
 
 ### 3.4 获取个人卡片
 
-无需认证的公开端点。
+**已下线**（路由注释，暂不响应）。顺序 ID 的公开 URL 可枚举全站成员名单，隐私重设计中。重开后为 owner-only + 不可枚举标识，不会原样启用。以下为下线前的契约，供重设计参考。
 
 ```
 GET /card/:id
@@ -814,7 +818,7 @@ GET /card/:id
 }
 ```
 
-**说明**: 返回 `profile` 表中公开字段，用于公开个人主页、homepage 友链展示及 OIDC `profile` claim 指向。用户 ID 不存在或已注销（`state = is_deleted`）时返回 404（`40401`），两者不区分；ID 格式非法（非正整数、含非数字字符）同样返回 `40401`，避免探测哪些 ID 曾经存在。
+**说明**: 返回 `profile` 表中公开字段，用于公开个人主页、homepage 友链展示。用户 ID 不存在或已注销（`state = is_deleted`）时返回 404（`40401`），两者不区分；ID 格式非法（非正整数、含非数字字符）同样返回 `40401`，避免探测哪些 ID 曾经存在。
 
 **错误码**: `40401`（用户不存在、已注销或 ID 格式非法）、`50000`（服务器内部错误）
 
@@ -1184,11 +1188,11 @@ GET /oauth/authorize
 | `client_id` / `redirect_uri` 校验通过**之前** | `invalid_request`、`invalid_client`、`temporarily_unavailable`（限流或 Redis 暂存写入失败）、`server_error`（查库失败） | 302 至 `OAUTH_CONSENT_URL`，携带 `error` / `error_description`，**不带 `state`** |
 | 校验通过**之后** | `unsupported_response_type`、`invalid_scope`、`unauthorized_client`、`invalid_request` | 302 至客户端 `redirect_uri`，携带 `error` / `error_description` / `state` |
 
-RFC 6749 §4.1.2.1 禁止把错误重定向到未经校验的 `redirect_uri`——否则任何人填入任意地址即可让本服务把浏览器弹送过去，端点退化为 open redirector。`redirect_uri` 必须与 `oauth_clients.redirect_uris` 之一**精确字符串相等**，前缀匹配不成立（`https://app.example.com/cb/../evil` 会被拒绝）。
+RFC 6749 §4.1.2.1 禁止把错误重定向到未经校验的 `redirect_uri`——否则任何人填入任意地址即可让本服务把浏览器重定向到那里，端点退化为 open redirector。`redirect_uri` 必须与 `oauth_clients.redirect_uris` 之一**精确字符串相等**，前缀匹配不成立（`https://app.example.com/cb/../evil` 会被拒绝）。
 
 **scope 限制**：`first_party` 客户端可请求任意受支持 scope；`third_party` 客户端只能请求注册时声明的子集，超出返回 `invalid_scope`。
 
-**限流**：按调用方 IP 固定窗口限流（默认 20 次/60s，`RATE_LIMIT_AUTHORIZE_RPM`）。本端点无认证且每次调用写一个 Redis 暂存键，若不限流可被灌满键空间。限流器故障时 fail-open（PRD §6.0）。
+**限流**：按调用方 IP 固定窗口限流（默认 100 次/60s，`RATE_LIMIT_AUTHORIZE_RPM`）。本端点无认证且每次调用写一个 Redis 暂存键，若不限流可被灌满键空间。限流器故障时 fail-open（PRD §6.0）。
 
 **PKCE 说明**：协议层与当前 V002 数据库约束均为 S256-only，不接受 `plain`；V001 曾允许 `plain` 仅作为早期 schema 历史。
 
@@ -1254,7 +1258,7 @@ POST /oauth/authorize/consent
 POST /oauth/token
 ```
 
-支持 `authorization_code` 和 `refresh_token` 两种 grant_type。第一方应用使用 PKCE 无需 `client_secret`，第三方应用需提供 `client_secret`。scope 包含 `openid` 时响应额外返回 `id_token`（RS256 签名 JWT）。此端点不遵循标准响应信封，请求体使用 `application/x-www-form-urlencoded`，成功和错误均使用 RFC 6749 格式。
+支持 `authorization_code` 和 `refresh_token` 两种 grant_type。第一方应用使用 PKCE 无需 `client_secret`，第三方应用需提供 `client_secret`。scope 包含 `openid` 时响应额外返回 `id_token`（EdDSA / Ed25519 签名 JWT）。此端点不遵循标准响应信封，请求体使用 `application/x-www-form-urlencoded`，成功和错误均使用 RFC 6749 格式。
 
 **Request**（第一方应用 / PKCE，`application/x-www-form-urlencoded`）:
 
@@ -1278,16 +1282,16 @@ grant_type=authorization_code&code=auth_code_abc123...&redirect_uri=https%3A%2F%
 
 ```json
 {
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "access_token": "eyJhbGciOiJFZERTQSIs...",
   "refresh_token": "rt_abc123...",
   "token_type": "Bearer",
   "expires_in": 3600,
-  "id_token": "eyJhbGciOiJSUzI1NiIs...",
+  "id_token": "eyJhbGciOiJFZERTQSIs...",
   "scope": "openid profile"
 }
 ```
 
-**说明**：响应体固定额外返回 `id_token`（RS256 签名 JWT），详见 [8.4 ID Token](#84-id-token)。本服务要求所有 scope 都必须包含 `openid`（授权端点与客户端注册时均强制校验），因此不存在不返回 `id_token` 的情形；不含 `openid` 的授权请求会以 `invalid_scope` 被拒绝，纯 OAuth2（非 OIDC）模式不受支持。
+**说明**：响应体固定额外返回 `id_token`（EdDSA / Ed25519 签名 JWT），详见 [8.4 ID Token](#84-id-token)。本服务要求所有 scope 都必须包含 `openid`（授权端点与客户端注册时均强制校验），因此不存在不返回 `id_token` 的情形；不含 `openid` 的授权请求会以 `invalid_scope` 被拒绝，纯 OAuth2（非 OIDC）模式不受支持。
 
 **Access Token 的适用范围**：此处签发的 `access_token` 用于 `/userinfo` 及其他以本服务为 resource server 的 OAuth 受保护资源，**不可**用于 SAST Link 的内部接口（`/user/*`、`/auth/*` 等）。token 的 `azp` claim 记录签发对象，内部接口只接受内置 first-party 客户端签发的 token，第三方 token 会得到 `403`（业务码 `40300`）。这不是限流或临时限制，而是权限边界：第三方获得用户授权意味着可以读取被授权的 claims，不意味着可以代替用户修改账号。
 
@@ -1327,7 +1331,7 @@ grant_type=refresh_token&refresh_token=rt_abc123...&client_id=9f3a1c7d2e5b40a8c6
 | `400` | `unsupported_grant_type` | `grant_type` 非 `authorization_code` / `refresh_token` |
 | `400` | `unauthorized_client` | 客户端未注册该 grant type |
 | `401` | `invalid_client` | 客户端认证失败（RFC 6749 §5.2 单独规定此项为 401，其余皆为 400）。**不附带 `WWW-Authenticate`**：本服务只从表单体读取 `client_secret`，discovery 仅通告 `none` 与 `client_secret_post`，通告未实现的 Basic 方案会让客户端反复重试并始终失败 |
-| `429` | `temporarily_unavailable` | 按调用方 IP 限流（`RATE_LIMIT_TOKEN_RPM`，默认 60 次/60s），附带 `Retry-After`。`/oauth/revoke` 与本端点共用同一限流器 |
+| `429` | `temporarily_unavailable` | 按调用方 IP 限流（`RATE_LIMIT_TOKEN_RPM`，默认 100 次/60s），附带 `Retry-After`。`/oauth/revoke` 与本端点共用同一限流器 |
 | `500` | `server_error` | 服务器内部错误 |
 
 **客户端认证**：
@@ -1341,13 +1345,13 @@ grant_type=refresh_token&refresh_token=rt_abc123...&client_id=9f3a1c7d2e5b40a8c6
 **授权码模式行为**：
 
 - 授权码单次使用。**PKCE 校验失败同样消耗授权码**——否则窃得授权码的攻击者可对着一个始终有效的 code 无限枚举 `code_verifier`
-- 授权码重放（第二次兑换）触发 `family_id` 全链级联撤销：首次兑换签发的 access / refresh token 一并作废并投递黑名单（PRD §4.10）
+- 授权码重放（第二次兑换）触发 `family_id` 全链级联撤销：首次兑换签发的 access / refresh token 一并作废并失效其 auth-state 缓存（PRD §4.10）
 - 授权码过期不触发级联撤销：过期的 code 从未被兑换，没有需要惩罚的 family
 
 **Refresh Token 模式行为**：
 
 - 轮换式：旧 refresh token 立即撤销，`sequence + 1`
-- 重放已轮换的 refresh token 触发整条 family 级联撤销
+- 重放已轮换的 refresh token 触发整条 family 级联撤销。轮换后 30s 内（`refreshGracePeriod`）的并发刷新视为良性，不触发级联撤销；超出窗口的重放才撤销整条 family
 - **不支持 scope 收窄**。RFC 6749 §6 允许 refresh 时请求更小的 scope，但当前仓储层要求轮换后的 token pair 携带与当前完全一致的 scope，因此轮换后 scope 原样继承。客户端如需更小的 scope，须重新走一次授权流程。这是已知偏差
 - 轮换不是重新认证，因此 ID Token 的 `auth_time` 保持该 family 首个 refresh token 的创建时刻
 
@@ -1556,7 +1560,7 @@ DELETE /admin/users/:id
 }
 ```
 
-**说明**: 将 `user.state` 设为 `is_deleted`，保留数据；同一事务内递增 `token_version` 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，非 DB 级联删除），撤销的 JTI 写入 outbox 并投递至 Redis 黑名单。
+**说明**: 将 `user.state` 设为 `is_deleted`，保留数据；同一事务内递增 `token_version` 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，非 DB 级联删除），撤销的 JTI 写入 outbox，worker 失效其 auth-state 缓存。
 
 不可注销自己的账号，也不可注销系统中最后一名活跃管理员，均返回 `403`。重复注销返回 `422`。
 
@@ -1714,7 +1718,7 @@ PUT /admin/oauth-clients/:id
 - 仅 `client_name`、`redirect_uris`、`is_active` 三个字段可改，均为可选；未出现的字段保持不变。
 - `client_id`、`client_type`、`scopes`、`grant_types` **不可修改**，请求中出现这些字段返回 `400`。改 `client_type` 会把机密客户端变成公开客户端（或反之），属于权限变更而非资料修改；收窄 `scopes` 应通过停用并重新注册完成。
 - `redirect_uris` 的校验规则与注册时一致。
-- 停用是安全动作，语义是「立即断开」：已签发的 Access Token 立刻失效（写入黑名单 + DB 撤销），Refresh Token 无法再续期，该客户端也无法再发起新的授权请求。
+- 停用是安全动作，语义是「立即断开」：已签发的 Access Token 立刻失效（失效 auth-state 缓存 + DB 撤销），Refresh Token 无法再续期，该客户端也无法再发起新的授权请求。
 - 重复对已停用的客户端提交 `is_active: false` 不会重复撤销。
 - `:id` 为客户端主键（列表接口返回的 `id`，非 `client_id`）。非数字或非正整数返回 `404`。
 - **内置客户端受保护**：`INTERNAL_OAUTH_CLIENT_ID`（默认 `sast-link-web`）不可停用，也不可改写 `redirect_uris`，两者均返回 `403`；改名允许。内部会话流程通过 `is_active = TRUE` 解析该客户端，停用它会立刻中断全站登录、刷新与注册，并撤销所有内部会话 token——包括执行该操作的管理员自己的，此后无人能登录回来把开关拨正，只能直连数据库恢复。改写它的 `redirect_uris` 则会把第一方授权码投递到他处。
@@ -1819,7 +1823,7 @@ GET /health
 SAST Link v2 作为 OpenID Connect Provider，在 OAuth 2.1 授权服务之上提供标准化的身份认证层。OIDC 协议栈：
 
 - 授权码流（Authorization Code Flow + PKCE）— 推荐，opaque redirect-based
-- RS256 签名 ID Token + JWKS 公钥分发
+- EdDSA（Ed25519）签名 ID Token + JWKS 公钥分发
 - Discovery 元数据（`.well-known/openid-configuration`）
 
 **触发条件**：授权请求的 `scope` 包含 `openid` 时，Token 端点响应额外返回 `id_token`。
@@ -1844,11 +1848,11 @@ GET /.well-known/openid-configuration
   "response_types_supported": ["code"],
   "grant_types_supported": ["authorization_code", "refresh_token"],
   "subject_types_supported": ["public"],
-  "id_token_signing_alg_values_supported": ["RS256"],
+  "id_token_signing_alg_values_supported": ["EdDSA"],
   "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
   "claims_supported": [
     "sub", "iss", "aud", "exp", "iat", "nonce",
-    "name", "picture", "preferred_username", "profile",
+    "name", "picture", "preferred_username",
     "email", "email_verified", "updated_at"
   ],
   "code_challenge_methods_supported": ["S256"],
@@ -1881,18 +1885,18 @@ GET /.well-known/jwks.json
 {
   "keys": [
     {
-      "kty": "RSA",
+      "kty": "OKP",
       "use": "sig",
-      "kid": "link-v2-2026-06",
-      "alg": "RS256",
-      "n": "0vx7agoebGcQSuuPiLgX...",
-      "e": "AQAB"
+      "kid": "link-v2-active",
+      "crv": "Ed25519",
+      "alg": "EdDSA",
+      "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
     }
   ]
 }
 ```
 
-**说明**：公钥用于验证 ID Token 和 Access Token 的 RS256 签名。`kid` 与 JWT Header 中的 `kid` 对应，支持密钥轮换。
+**说明**：公钥用于验证 ID Token 和 Access Token 的 EdDSA（Ed25519）签名，格式为 RFC 8037 OKP。`kid` 与 JWT Header 中的 `kid` 对应，支持密钥轮换。
 
 ---
 
@@ -1923,7 +1927,6 @@ POST /userinfo
   "name": "张三",
   "picture": "https://cos.example.com/avatar/1.jpg",
   "preferred_username": "张三",
-  "profile": "https://link.sast.fun/card/1",
   "email": "b2404****@njupt.edu.cn",
   "email_verified": true,
   "updated_at": 1717396400
@@ -1977,11 +1980,11 @@ Content-Type: application/json
 
 ```json
 {
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
+  "access_token": "eyJhbGciOiJFZERTQSIs...",
   "refresh_token": "rt_abc123...",
   "token_type": "Bearer",
   "expires_in": 3600,
-  "id_token": "eyJhbGciOiJSUzI1NiIsImtpZCI6ImxpbmstdjItMjAyNi0wNiIsInR5cCI6IkpXVCJ9...",
+  "id_token": "eyJhbGciOiJFZERTQSIsImtpZCI6ImxpbmstdjItYWN0aXZlIiwidHlwIjoiSldUIn0...",
   "scope": "openid profile email"
 }
 ```
@@ -2000,7 +2003,6 @@ Content-Type: application/json
   "name": "张三",
   "picture": "https://cos.example.com/avatar/1.jpg",
   "preferred_username": "张三",
-  "profile": "https://link.sast.fun/card/1",
   "email": "b2404****@njupt.edu.cn",
   "email_verified": true,
   "updated_at": 1717396400
@@ -2021,7 +2023,6 @@ Content-Type: application/json
 | `name` | `profile` | 真实姓名 |
 | `picture` | `profile` | 头像 URL |
 | `preferred_username` | `profile` | 昵称 |
-| `profile` | `profile` | 用户主页 URL |
 | `email` | `email` | 注册邮箱 |
 | `email_verified` | `email` | 邮箱已验证，固定 `true` |
 | `updated_at` | `profile` | 用户信息最后修改时间 |
@@ -2032,7 +2033,7 @@ Content-Type: application/json
 >
 > 后果：用户三天前登录、会话仍有效，今天走第三方授权，`auth_time` 会被报成今天——**高报**了认证的新鲜度，而这恰是该 claim 存在的意义。
 >
-> 因此该 claim **会签发但不在 `claims_supported` 中通告**：不通告就不构成承诺，可选 claim 缺失是诚实的，通告一个错值不是。同时 `max_age` 与 `prompt` 均未实现，RP 无法据此要求重新认证。
+> 因此该 claim **会签发但不在 `claims_supported` 中通告**：不通告就不构成承诺，省略可选 claim 是正确的行为，通告一个错值才是误导。同时 `max_age` 与 `prompt` 均未实现，RP 无法据此要求重新认证。
 >
 > 真正修复需要：登录时持久化认证时刻 → 经授权确认写入授权码行 → 传递到 token family。涉及数据库迁移，留待后续实现，届时再把 `auth_time` 加回 `claims_supported`。
 
