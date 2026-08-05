@@ -1,14 +1,20 @@
 version: 2
 
 secret:
+  # Prefer ignored_matches over ignored_paths. A path exemption is permanent and
+  # unconditional: it also hides a real secret committed to that file later.
+  # internal/config/config.go and docker-compose.yml are deliberately NOT listed
+  # here — they are where every environment variable name and every secret
+  # injection point is defined, which makes them the two files most worth
+  # scanning. Their only literal is the local-development placeholder below.
   ignored_paths:
     - .env.example
-    - docker-compose.yml
     - scripts/loadmix/
     - cmd/migrate/main_test.go
-    - internal/config/config.go
     - internal/auth/password_schemes_test.go
     - internal/auth/auth_test.go
   ignored_matches:
     - name: OAuth client secret used only in API documentation examples
       match: 3K7mDzX434GbFm9YAePJ9FXQNjT6MF0U
+    - name: Local-development placeholder password in docker-compose defaults
+      match: change_me
