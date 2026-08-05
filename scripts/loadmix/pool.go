@@ -27,7 +27,7 @@ func savePool(path string, p pool) error {
 }
 
 func loadPool(path string) (pool, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 // path comes from loadmix CLI flags, trusted developer input.
 	if err != nil {
 		return pool{}, err
 	}
