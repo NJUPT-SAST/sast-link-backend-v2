@@ -25,7 +25,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 | 账号登录 | 邮箱密码登录；GitHub OAuth 登录；飞书 OAuth 登录（限 SAST 企业内用户） |
 | 第三方绑定 | 已登录用户可绑定 GitHub / 飞书 / 第三方邮箱（最多 2 个）；绑定后可对应方式登录 |
 | 账号管理 | 登出、改密（需旧密码）、重置密码（邮箱验证码）；修改个人资料；上传头像 |
-| 个人卡片 | 生成公开个人主页链接（`https://link.sast.fun/card/{id}`），用于 homepage 友链展示 |
+| 个人卡片 | ~~生成公开个人主页链接（`https://link.sast.fun/card/{id}`），用于 homepage 友链展示~~ —— 已下线，待隐私重设计（见 §4.14） |
 
 ### 2.2 管理端
 
@@ -384,7 +384,7 @@ Payload: {
 授权范围之外的 claim **完全不出现**，而非返回空值：relying party 无法区分 `"name": ""` 与「该用户没有名字」。ID Token 与 UserInfo 共用同一套 claim 构造与同一道 scope 闸门，因此两个端点对同一 token 不会给出不一致的结论。
 
 - `preferred_username` 取 `profile.nickname`，未设置或为空白时回退到 `user.name`
-- `profile` 指向公开名片 URL（`OAUTH_CARD_BASE_URL` + `/` + user ID）。该配置独立于 `JWT_ISSUER`：issuer 带 API 的 `/v2` 基路径，而名片是不带它的前端路由
+- `profile` URL claim 已移除（连同 `OAUTH_CARD_BASE_URL` 配置）。它指向的公开名片端点 `GET /card/:id` 因顺序 ID 可枚举全站成员名单而下线（见 §4.14），claim 若保留即等于给任何第三方客户端一条读取该投影的旁路。`profile` scope 现在只产出 `name` / `picture` / `preferred_username` / `updated_at`
 - `auth_time` 取授权码行的 `created_at`——两段式流程中授权码正是在用户点「同意」那一刻创建的，无需额外建列。注意这是 consent 时刻而非真实认证时刻：闲置多日后再次授权会高报认证新鲜度，因此该 claim 会签发但不通告在 `claims_supported` 中（见 API 文档 §8.4）。refresh 轮换不是重新认证，因此保持该 family 首个 refresh token 的创建时刻
 - ID Token 的 `aud` 是 `client_id`，与 access token（`aud` 为本服务）分属两条独立签名路径。若共用一条，要么破坏中间件的 audience 校验，要么签发出能被本服务当作自身 bearer 凭证接受的 ID Token
 
@@ -725,6 +725,6 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [x] OAuth 客户端注册 API（`/admin/oauth-clients` 列表 / 注册 / 更新，打通第三方客户端创建入口与 `client_secret` 校验路径）
 - [x] 管理后台用户管理与审计日志查询（用户列表 / 详情 / 更新 / 软删 / 恢复 / 审计日志）
 - [x] 定时清理过期数据（Go retention worker，非 pg_cron；见 §9.1）
-- [x] 个人卡片端点（`GET /card/:id`；前端页面另计）
+- [ ] 个人卡片端点（`GET /card/:id`）—— 曾实现后下线：顺序 ID 的公开 URL 可枚举全站成员名单。重开需 owner-only + 不可枚举标识（见 §4.14），handler / service / repository 代码保留待重设计
 - [x] 设备管理（`GET /user/devices` / `DELETE /user/devices/:id`；device_id 复用 token family_id；Redis ZSET + Hash，5 台淘汰、30d TTL；登录/注册登记、刷新 last_seen、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备归属校验 fail-closed；按用户限流；审计 `logout_device`）
 - [ ] 测试、联调、上线

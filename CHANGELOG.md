@@ -47,6 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
+- **`GET /card/:id` 下线**（perf 分支）：**破坏性变更**。路由不再注册，公开个人卡片端点暂不响应。顺序数字 ID 的公开 URL 等于开放全站成员名单枚举；重开后为 owner-only + 不可枚举标识，不会原样启用。handler / service / repository 代码保留待重设计，`docs/openapi.yaml` 中该路径标 `deprecated`。
+- **OIDC `profile` URL claim 与 `OAUTH_CARD_BASE_URL` 配置**（perf 分支）：**破坏性变更**。随卡片端点一并移除——claim 若保留即等于给任何第三方客户端一条读取卡片投影的旁路。`profile` scope 现在只产出 `name` / `picture` / `preferred_username` / `updated_at`；`claims_supported` 与 UserInfo / ID Token schema 已同步。
 - **pg_cron 清理方案**（2026-08-01，[PR #33](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/33)）：被进程内 retention worker 取代；不用 pg_cron，因为生产库未安装该扩展且测试镜像无法加载。
 
 ### Fixed
