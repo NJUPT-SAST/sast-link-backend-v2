@@ -130,12 +130,26 @@ type Config struct {
 	LoginFailureLimit        int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
 	LoginFailureWindow       time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
 	// AuthStateCacheTTL bounds how long a cached per-token auth state lives before
-	// a re-read. The revocation paths delete the entry synchronously AND via the
-	// durable outbox, so a stale non-revoked state can only be served in the brief
-	// window between a failed synchronous delete and the outbox's retry landing
-	// (when Redis is down the cache get itself fails and the database is used
-	// instead). This TTL is the backstop for that window and for a state change
-	// that did not revoke the token; it must be short.
+	// a re-read.
+	//
+	// It is NOT what bounds the post-revocation window. Revocation writes a
+	// tombstone rather than deleting the entry, and GetAuthState reads a tombstone
+	// as a miss, so a revoked token falls through to the authoritative
+	// oauth_access_tokens.revoked_at query no matter how long this TTL is; if
+	// Redis is unreachable the cache read fails and the same fallback applies. A
+	// revoked token cannot be admitted at any value here — the tombstone's own TTL
+	// (Store.AuthStateTombstoneTTL, sized from the server WriteTimeout) is what
+	// covers that path.
+	//
+	// What this TTL actually bounds is a state change that does NOT revoke the
+	// token. UpdateAdminUser gates its revocation on roleChanged, so an edit that
+	// only moves "user".state (njupter/on_sast/retired_sast), and RestoreUser,
+	// leave live tokens alone: their cached blob keeps the pre-change state until
+	// this TTL expires. Nothing authorizes on Principal.State today — RequireRole
+	// reads Role, and every role change revokes — so the window is currently
+	// inconsequential. It stops being inconsequential the moment a check gates on
+	// state, which is why this stays short rather than being sized for cache hit
+	// rate alone.
 	AuthStateCacheTTL time.Duration `env:"AUTH_STATE_CACHE_TTL" envDefault:"15s"`
 	// EnablePprof explicitly exposes /debug/pprof in production (default off).
 	// The endpoints can drive CPU sampling and dump goroutine/heap state, so they
@@ -487,8 +501,11 @@ func (c *Config) ValidateAPIAuth() error {
 		// Memory/Threads), or HashPassword would mint hashes VerifyPassword refuses
 		// to verify — a silent total lockout after the first rehash-on-login.
 		return fmt.Errorf("ARGON2_* must not exceed the verify bounds in internal/auth (TIME≤10, MEMORY≤65536 KiB, THREADS≤8)")
+	// Bounded because this is how long a non-revoking state change stays invisible
+	// to the middleware — an account state edit or a restore, neither of which
+	// revokes. Revocation itself is covered by the tombstone, not by this value.
 	case c.AuthStateCacheTTL > time.Minute:
-		return fmt.Errorf("AUTH_STATE_CACHE_TTL must not exceed 1m (it bounds the post-revocation stale window)")
+		return fmt.Errorf("AUTH_STATE_CACHE_TTL must not exceed 1m (it bounds how long a state change that does not revoke stays unseen)")
 	case c.RetentionInterval < time.Minute:
 		return fmt.Errorf("RETENTION_INTERVAL must be at least 1m")
 	case c.RetentionBatchSize <= 0:

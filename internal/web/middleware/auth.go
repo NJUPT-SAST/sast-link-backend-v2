@@ -232,9 +232,16 @@ func (a Authenticator) authenticate(ctx context.Context, header string) (Princip
 // commits cannot re-seed a pre-revocation blob once the tombstone lands. The
 // tombstone TTL is sized from the server WriteTimeout so it outlives any
 // in-flight request's read-to-PUT gap; "cut access now" operations are effective
-// immediately, with the outbox retry covering a failed synchronous write. A state
-// change that does not revoke the token surfaces after the cache entry's own TTL
-// (AUTH_STATE_CACHE_TTL), which is what that TTL bounds.
+// immediately, with the outbox retry covering a failed synchronous write.
+//
+// A state change that does not revoke the token surfaces only after the cache
+// entry's own TTL (AUTH_STATE_CACHE_TTL), which is what that TTL bounds — not the
+// post-revocation window, which the tombstone covers regardless of it. Two paths
+// land here: an admin edit that moves "user".state without touching role
+// (UpdateAdminUser gates revocation on roleChanged), and RestoreUser. Both leave
+// live tokens valid, so their cached blob keeps the pre-change state for up to one
+// TTL. Nothing authorizes on Principal.State today, so that is currently harmless;
+// a future check that gates on state would inherit this window.
 func (a Authenticator) authState(ctx context.Context, jti string) (*repository.AccessAuthState, error) {
 	if a.AuthStateCache != nil {
 		data, found, err := a.AuthStateCache.GetAuthState(ctx, jti)
