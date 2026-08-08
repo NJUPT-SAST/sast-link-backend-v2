@@ -1,0 +1,239 @@
+name: Deploy
+
+# Build the image, push it to Tencent Container Registry (TCR), then have the
+# server pull it from TCR's internal network. The tar-over-scp variant in the SOP
+# is not used: the runner's upload path to the server measures ~2.2 Mbps, and this
+# image carries two Go binaries.
+#
+# This workflow deploys ONE container: api. PostgreSQL and Redis are pre-existing
+# containers on the server, shared with other services and owned by another stack.
+# Nothing here starts, restarts, or waits on them — every compose call passes
+# --no-deps so a deploy can never recreate a store other services depend on. The
+# server's compose file declares neither service and reaches them over an external
+# network; the repository's docker-compose.yml (which provisions its own) is for
+# local development only.
+#
+# Schema migrations are deliberately NOT part of the automatic path. This project's
+# CLI refuses `up` when APP_ENV=production without --confirm-production, and
+# docs/runbooks/manual-migration.md requires a backup, a maintenance window, and a
+# paused deployment first. Running it on every push would defeat that guard, so it
+# sits behind an explicit workflow_dispatch input.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_migration:
+        description: "Run `migrate up --confirm-production` before restarting the API (requires a fresh DB backup)"
+        type: boolean
+        default: false
+      skip_rollback:
+        description: "Do not auto-rollback to :backup when the health check fails (leave the broken version up for diagnosis)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One deploy at a time. cancel-in-progress is off on purpose: cancelling a run
+# mid-SSH would leave the server between tag rotation and `compose up`.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  SERVICE_NAME: sast-link-backend-v2
+  # Local image name on the server, matching every other service already deployed
+  # there (sast/sast-people-next:current, sast/sast-goprint:current, ...) and their
+  # :current / :backup rotation. The repository's docker-compose.yml names
+  # sastlink-api:current instead, but that file provisions its own PostgreSQL and
+  # Redis and is for local development only — the server's compose file is separate.
+  # Every pulled image is retagged to this, so the compose file and the rollback
+  # procedure stay independent of the registry.
+  IMAGE_NAME: sast/sast-link-backend-v2
+  TCR_HOST: ccr.ccs.tencentyun.com
+
+jobs:
+  deploy:
+    name: build and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve image tag
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify registry configuration
+        env:
+          TCR_NAMESPACE: ${{ vars.TCR_NAMESPACE }}
+        run: |
+          test -n "$TCR_NAMESPACE" || {
+            echo "::error::repository variable TCR_NAMESPACE is not set"; exit 1; }
+
+      - uses: docker/setup-buildx-action@v4.2.0
+
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ${{ env.TCR_HOST }}
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          # The server is amd64; naming it keeps the runner from ever emitting a
+          # multi-arch index the pull step would have to resolve.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.TCR_HOST }}/${{ vars.TCR_NAMESPACE }}/${{ env.SERVICE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          # TCR personal edition stores a plain image manifest. Attestations would
+          # add an OCI index that `docker pull` on the server may not resolve.
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy on server
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ vars.SERVER_SSH_PORT || 22 }}
+          command_timeout: 20m
+          envs: RUN_MIGRATION,SKIP_ROLLBACK
+          script_stop: true
+          script: |
+            # -eu only. `set -o pipefail` is not POSIX, and this runs under whatever
+            # login shell the deploy user has; the one pipeline below is guarded by
+            # `if` rather than by the pipe's exit status.
+            set -eu
+
+            SERVICE_DIR="/data/${{ env.SERVICE_NAME }}"
+            IMAGE_NAME="${{ env.IMAGE_NAME }}"
+            REMOTE_IMAGE="${{ env.TCR_HOST }}/${{ vars.TCR_NAMESPACE }}/${{ env.SERVICE_NAME }}"
+            NEW_TAG="${{ steps.vars.outputs.sha_short }}"
+
+            cd "${SERVICE_DIR}"
+
+            echo "deploy start: ${NEW_TAG}"
+
+            # TCR personal edition is shared storage; a just-pushed tag can be
+            # briefly invisible.
+            for attempt in 1 2 3; do
+              docker pull "${REMOTE_IMAGE}:${NEW_TAG}" && break
+              echo "  pull failed (${attempt}/3), retrying in 10s"
+              sleep 10
+            done
+            docker image inspect "${REMOTE_IMAGE}:${NEW_TAG}" >/dev/null 2>&1 || {
+              echo "image pull failed, aborting"; exit 1; }
+
+            docker tag "${REMOTE_IMAGE}:${NEW_TAG}" "${IMAGE_NAME}:${NEW_TAG}"
+
+            # Rotate before migrating: `current` is what the compose file names, so
+            # the migrate service must already point at the new image to apply the
+            # SQL embedded in the version being deployed.
+            if docker image inspect "${IMAGE_NAME}:current" >/dev/null 2>&1; then
+              ROLLBACK_AVAILABLE=1
+              # Keep exactly one backup. `docker rmi` only drops the tag here;
+              # the tag being retagged below still references the same image.
+              if docker image inspect "${IMAGE_NAME}:backup" >/dev/null 2>&1; then
+                docker rmi "${IMAGE_NAME}:backup" >/dev/null || true
+              fi
+              docker tag "${IMAGE_NAME}:current" "${IMAGE_NAME}:backup"
+              echo "previous version saved as :backup"
+            else
+              ROLLBACK_AVAILABLE=0
+              echo "no :current image, first deploy"
+            fi
+            docker tag "${IMAGE_NAME}:${NEW_TAG}" "${IMAGE_NAME}:current"
+
+            # PostgreSQL and Redis are pre-existing containers this deploy does not
+            # own, so nothing here starts, stops, or waits on them. The server's
+            # compose file declares neither service and joins their network as
+            # external; see the deploy notes for that file's shape.
+            #
+            # This version query doubles as the connectivity preflight: it opens a
+            # real connection to the external PostgreSQL using the same DB_* values
+            # the API will use, so a wrong host, password, or network alias fails
+            # here — before the api container is replaced — rather than showing up
+            # as an unexplained health-check timeout.
+            #
+            # Run directly rather than inside "echo $(...)": under set -e a command
+            # substitution that fails still leaves echo's own exit status 0, so a
+            # wrapped failure would pass silently.
+            echo "migration state before:"
+            docker compose run --rm --no-deps migrate /usr/local/bin/migrate version
+
+            if [ "${RUN_MIGRATION:-false}" = "true" ]; then
+              echo "applying migrations"
+              docker compose run --rm --no-deps migrate /usr/local/bin/migrate up --confirm-production
+              echo "migration state after:"
+              docker compose run --rm --no-deps migrate /usr/local/bin/migrate version
+            fi
+
+            echo "starting api"
+            # --no-deps everywhere in this script, for two independent reasons:
+            #
+            # 1. PostgreSQL and Redis are shared containers owned by another stack.
+            #    A dependency edge would let this deploy recreate or restart a store
+            #    that other services are also using.
+            # 2. If the server's compose file keeps an `api.depends_on.migrate` edge,
+            #    compose would run the migrate service, whose command is a bare
+            #    `migrate up` — refused under APP_ENV=production
+            #    ("migration up in production requires --confirm-production") — then
+            #    watch it exit non-zero and never start api. Migrations are handled
+            #    by the explicit, opt-in step above.
+            docker compose up -d --no-deps api
+
+            # /health reports db and redis separately. redis=degraded is a healthy
+            # response by design (PostgreSQL alone can serve authenticated
+            # traffic), so the gate is status=ok, not a whole-body match.
+            #
+            # Probed from inside the container via the image's own wget (alpine
+            # busybox). That keeps the check independent of the host's published
+            # port, so it still works if the port mapping is ever changed.
+            HEALTHY=0
+            for attempt in $(seq 1 20); do
+              if docker compose exec -T api wget -qO- http://127.0.0.1:8080/health 2>/dev/null | grep -q '"status":"ok"'; then
+                HEALTHY=1
+                break
+              fi
+              sleep 3
+            done
+
+            if [ "${HEALTHY}" != "1" ]; then
+              echo "health check failed after ~60s"
+              docker compose logs --tail 80 api || true
+              if [ "${SKIP_ROLLBACK:-false}" = "true" ] || [ "${ROLLBACK_AVAILABLE}" != "1" ]; then
+                echo "not rolling back (skip_rollback=${SKIP_ROLLBACK:-false}, backup_available=${ROLLBACK_AVAILABLE})"
+                exit 1
+              fi
+              # Only safe because migrations are opt-in: an unmigrated deploy has
+              # changed nothing the old binary cannot read. A run with
+              # run_migration=true that reaches this point needs the runbook, not
+              # an image swap — the migration already committed.
+              if [ "${RUN_MIGRATION:-false}" = "true" ]; then
+                echo "migrations were applied in this run; refusing to auto-rollback the image."
+                echo "follow docs/runbooks/manual-migration.md"
+                exit 1
+              fi
+              echo "rolling back to :backup"
+              docker tag "${IMAGE_NAME}:backup" "${IMAGE_NAME}:current"
+              docker compose up -d --no-deps api
+              exit 1
+            fi
+
+            echo "cleaning up"
+            docker rmi "${REMOTE_IMAGE}:${NEW_TAG}" >/dev/null || true
+            docker image prune -f >/dev/null
+
+            echo "deploy ok, running ${NEW_TAG}"
+        env:
+          RUN_MIGRATION: ${{ github.event_name == 'workflow_dispatch' && inputs.run_migration || false }}
+          SKIP_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_rollback || false }}
