@@ -3,13 +3,19 @@
 package errcode
 
 const (
-	CodeBadRequest                  = 40000 // 请求参数错误
-	CodeMissingParameter            = 40001 // 缺少必要参数
-	CodeInvalidParameterFormat      = 40002 // 参数格式错误
-	CodeVerificationCodeWrong       = 40010 // 验证码错误
-	CodeVerificationCodeExpired     = 40011 // 验证码已过期
-	CodeVerificationCodeRateLimited = 40012 // 验证码发送频率过高
-	CodeEmailDomainNotAllowed       = 40020 // 邮箱域名不允许
+	// CodeBadRequest covers every malformed-request outcome, including a missing
+	// field and a type mismatch. 40001 (缺少必要参数) and 40002 (参数格式错误)
+	// were declared here and documented but never emitted: request bodies go
+	// through one strict decode, so the two cases share a single failure path and
+	// the server cannot tell them apart reliably. They were removed rather than
+	// wired up, so the constant set stays exactly what clients can observe.
+	CodeBadRequest              = 40000 // 请求参数错误
+	CodeVerificationCodeWrong   = 40010 // 验证码错误
+	CodeVerificationCodeExpired = 40011 // 验证码已过期
+	// Verification-code send throttling returns CodeRateLimited (42900) like every
+	// other limiter; a dedicated 40012 was declared and documented but never
+	// emitted, and it was removed for the same reason as the two codes above.
+	CodeEmailDomainNotAllowed = 40020 // 邮箱域名不允许
 
 	CodeUnauthenticated       = 40100 // 未登录
 	CodeAccessTokenExpired    = 40101 // Access Token 已过期

@@ -555,8 +555,16 @@ paths:
             type: string
       responses:
         "302":
-          description: 重定向至前端
+          description: >-
+            重定向至前端。失败也走这里：配置了 OAUTH_LOGIN_ERROR_REDIRECT 时，
+            错误以 `?error=<业务码>&error_description=<消息>` 附加在错误页 URL 上
+            （GitHub 不可用即 `error=50300`），而不是返回 4xx/5xx。
           headers: {}
+        "502":
+          $ref: "#/components/responses/BadGateway"
+          description: >-
+            GitHub 不可用，且未配置 OAUTH_LOGIN_ERROR_REDIRECT。该变量为空时失败
+            以信封返回而非重定向，此时才会看到 502 + `50300`。
       security: []
   /oauth/lark:
     get:
@@ -625,8 +633,16 @@ paths:
             type: string
       responses:
         "302":
-          description: 重定向至前端
+          description: >-
+            重定向至前端。失败也走这里：配置了 OAUTH_LOGIN_ERROR_REDIRECT 时，
+            错误以 `?error=<业务码>&error_description=<消息>` 附加在错误页 URL 上
+            （飞书不可用即 `error=50300`），而不是返回 4xx/5xx。
           headers: {}
+        "502":
+          $ref: "#/components/responses/BadGateway"
+          description: >-
+            飞书不可用，且未配置 OAUTH_LOGIN_ERROR_REDIRECT。该变量为空时失败
+            以信封返回而非重定向，此时才会看到 502 + `50300`。
       security: []
   /oauth/exchange-code:
     post:
@@ -999,6 +1015,8 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
+        "502":
+          $ref: "#/components/responses/BadGateway"
       security:
         - bearerAuth: []
   /user/identities/github:
@@ -1049,6 +1067,8 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
+        "502":
+          $ref: "#/components/responses/BadGateway"
       security:
         - bearerAuth: []
   /user/identities/email:
@@ -3665,8 +3685,8 @@ components:
             missing_params:
               summary: missing_params
               value:
-                code: 40001
-                message: 缺少必要参数
+                code: 40000
+                message: 请求参数错误
                 data: null
             invalid_email_domain:
               summary: invalid_email_domain
@@ -3905,6 +3925,34 @@ components:
               value:
                 code: 50001
                 message: 邮件发送失败
+                data: null
+    BadGateway:
+      description: >-
+        第三方 provider（GitHub / 飞书）不可用。业务码是 `50300`，与本服务自身依赖
+        不可用共用同一个码，但 HTTP 状态是 502 而非 503：本服务健康、请求也合法，
+        故障在上游，503 会误导客户端以为重试本服务能解决。`50300` 因此是唯一不满足
+        `{HTTP状态}{序号}` 规则的业务码，客户端不应假定它必然是 503。
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
+                type: integer
+              message:
+                type: string
+              data:
+                nullable: true
+            required:
+              - code
+              - message
+              - data
+          examples:
+            provider_unavailable:
+              summary: provider_unavailable
+              value:
+                code: 50300
+                message: 第三方服务暂时不可用，请稍后重试
                 data: null
   securitySchemes:
     bearerAuth:
