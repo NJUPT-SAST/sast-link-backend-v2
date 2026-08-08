@@ -107,7 +107,9 @@ jobs:
           port: ${{ vars.SERVER_SSH_PORT || 22 }}
           command_timeout: 20m
           envs: RUN_MIGRATION,SKIP_ROLLBACK,TCR_USERNAME,TCR_PASSWORD
-          script_stop: true
+          # No script_stop: it is not an input of this action version and was
+          # rejected with "Unexpected input(s) 'script_stop'". The script sets
+          # `set -eu` itself, which is what actually stops it on the first error.
           script: |
             # -eu only. `set -o pipefail` is not POSIX, and this runs under whatever
             # login shell the deploy user has; the one pipeline below is guarded by
