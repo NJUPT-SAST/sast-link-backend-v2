@@ -106,7 +106,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ vars.SERVER_SSH_PORT || 22 }}
           command_timeout: 20m
-          envs: RUN_MIGRATION,SKIP_ROLLBACK
+          envs: RUN_MIGRATION,SKIP_ROLLBACK,TCR_USERNAME,TCR_PASSWORD
           script_stop: true
           script: |
             # -eu only. `set -o pipefail` is not POSIX, and this runs under whatever
@@ -122,6 +122,23 @@ jobs:
             cd "${SERVICE_DIR}"
 
             echo "deploy start: ${NEW_TAG}"
+
+            # Authenticate to TCR on every run rather than relying on a one-time
+            # manual `docker login`. Docker reads the INVOKING user's
+            # ~/.docker/config.json, so a credential stored for root does nothing
+            # for this deploy user — that mismatch is what made the first run fail
+            # with "unauthorized" even though the push had succeeded. Logging in
+            # here keeps the server's required state to "the SSH key works", with
+            # no undocumented on-disk credential to recreate when an account is
+            # rebuilt. The private repository is deliberate: the image needs no
+            # secrets to run, but there is no reason to publish build output.
+            #
+            # The trap drops the credential on EVERY exit path, not just the happy
+            # one — four of the paths below exit 1, and without this the token
+            # would be left at rest in the deploy user's home after any failure.
+            trap 'docker logout "${{ env.TCR_HOST }}" >/dev/null 2>&1 || true' EXIT
+            echo "${TCR_PASSWORD}" \
+              | docker login "${{ env.TCR_HOST }}" -u "${TCR_USERNAME}" --password-stdin
 
             # TCR personal edition is shared storage; a just-pushed tag can be
             # briefly invisible.
@@ -237,3 +254,9 @@ jobs:
         env:
           RUN_MIGRATION: ${{ github.event_name == 'workflow_dispatch' && inputs.run_migration || false }}
           SKIP_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_rollback || false }}
+          # Forwarded to the remote shell via `envs:` above so the credential is
+          # never interpolated into the script text. ssh-action masks values it
+          # passes this way in its own logging, and GitHub masks the secrets in
+          # the job log regardless.
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
