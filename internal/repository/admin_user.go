@@ -121,6 +121,12 @@ func (r *UserRepository) ListAdminUsers(
 }
 
 // UserStats aggregates the account dimensions the console overview shows.
+//
+// Soft deletion here is a state bit (is_deleted), not a deleted_at column, so the
+// "live account" dimensions must exclude it explicitly. Total, ByRole and
+// ByDepartment / NoDepartment count only accounts whose state is not is_deleted;
+// ByState counts every state, is_deleted included, so the console can show how
+// many accounts were deleted without inflating the usable-account totals.
 type UserStats struct {
 	Total        int64                      `json:"total"`
 	ByRole       map[model.UserRole]int64   `json:"by_role"`
@@ -131,6 +137,13 @@ type UserStats struct {
 	NoDepartment int64 `json:"no_department"`
 }
 
+// liveUser predicates every non-deleted-account count: a soft-deleted row still
+// exists in the table, so an unfiltered COUNT would inflate the totals the
+// console reads as "usable accounts".
+func liveUser(query *gorm.DB) *gorm.DB {
+	return query.Where(`"user".state <> ?`, model.UserStateDeleted)
+}
+
 // Stats returns the aggregate counts for the overview dashboard.
 func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	var stats UserStats
@@ -138,7 +151,8 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	stats.ByState = make(map[model.UserState]int64)
 	stats.ByDepartment = make(map[model.Department]int64)
 
-	if err := r.database.WithContext(ctx).Model(&model.User{}).Count(&stats.Total).Error; err != nil {
+	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
+		Count(&stats.Total).Error; err != nil {
 		return stats, fmt.Errorf("count users: %w", err)
 	}
 
@@ -148,7 +162,7 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	}
 	rows := make([]groupRow, 0, 8)
 
-	if err := r.database.WithContext(ctx).Model(&model.User{}).
+	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
 		Select(`role AS "group", COUNT(*) AS count`).Group("role").Scan(&rows).Error; err != nil {
 		return stats, fmt.Errorf("count users by role: %w", err)
 	}
@@ -157,6 +171,8 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	}
 
 	rows = rows[:0]
+	// ByState deliberately keeps every state, is_deleted included, so the deleted
+	// count stays visible as its own bucket rather than vanishing from the console.
 	if err := r.database.WithContext(ctx).Model(&model.User{}).
 		Select(`state AS "group", COUNT(*) AS count`).Group("state").Scan(&rows).Error; err != nil {
 		return stats, fmt.Errorf("count users by state: %w", err)
@@ -166,7 +182,7 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	}
 
 	rows = rows[:0]
-	if err := r.database.WithContext(ctx).Model(&model.User{}).
+	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
 		Joins(`LEFT JOIN profile ON profile.user_id = "user".id`).
 		Select(`profile.department AS "group", COUNT(*) AS count`).
 		Group("profile.department").Scan(&rows).Error; err != nil {

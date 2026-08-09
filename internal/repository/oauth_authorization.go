@@ -114,15 +114,19 @@ func (r *OAuthAuthorizationRepository) Consume(
 
 // OAuthGrant is one application a user has authorized via the consent screen,
 // with the client's display fields and the most recent authorization's scopes.
+//
+// RedirectURIs and Scopes must be model.StringArray, not []string: the columns
+// are PostgreSQL text[], and []string has no sql.Scanner to decode them — a
+// plain []string scan fails at runtime on a real database.
 type OAuthGrant struct {
-	ClientID         int64     `json:"client_id"`
-	ClientKey        string    `json:"client_key"`
-	ClientName       string    `json:"client_name"`
-	ClientType       string    `json:"client_type"`
-	RedirectURIs     []string  `json:"redirect_uris"`
-	IsActive         *bool     `json:"is_active"`
-	Scopes           []string  `json:"scopes"`
-	LastAuthorizedAt time.Time `json:"last_authorized_at"`
+	ClientID         int64             `json:"client_id"`
+	ClientKey        string            `json:"client_key"`
+	ClientName       string            `json:"client_name"`
+	ClientType       string            `json:"client_type"`
+	RedirectURIs     model.StringArray `gorm:"type:text[]" json:"redirect_uris"`
+	IsActive         *bool             `json:"is_active"`
+	Scopes           model.StringArray `gorm:"type:text[]" json:"scopes"`
+	LastAuthorizedAt time.Time         `json:"last_authorized_at"`
 }
 
 // ListGrantsByUser returns the distinct applications a user has authorized,

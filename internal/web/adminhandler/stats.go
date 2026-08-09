@@ -1,6 +1,8 @@
 package adminhandler
 
 import (
+	"log/slog"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
@@ -48,6 +50,12 @@ func (h Handler) Stats(c *gin.Context) {
 			for _, entry := range result.Logs {
 				recent = append(recent, mapAuditLog(entry))
 			}
+		} else {
+			// Fail-open by design, but the overview must not silently read as "no audit
+			// activity": an empty recent list could otherwise be a real empty table or
+			// a broken query. Log the failure so operators can tell the two apart.
+			slog.WarnContext(ctx, "load overview audit recent",
+				"error", err)
 		}
 	}
 

@@ -47,7 +47,9 @@ func (s Service) ListAuditLogs(ctx context.Context, input ListAuditLogsInput) (*
 		}
 	}
 	// Attach display names so the console shows who, not just a numeric id.
-	// Best effort: a missing name (deleted user) still renders the id.
+	// Best effort: a soft-deleted (state = is_deleted) row still returns its name,
+	// since the row is still in the table; only a physically deleted row or a
+	// failed lookup yields null.
 	if s.Users != nil && len(ids) > 0 {
 		if names, err := s.Users.NamesByIDs(ctx, ids); err == nil {
 			for i := range items {

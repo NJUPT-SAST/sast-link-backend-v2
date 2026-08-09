@@ -189,13 +189,6 @@ func (s Service) updateFields(input UpdateClientInput) (map[string]any, error) {
 	if input.IsActive != nil {
 		fields["is_active"] = *input.IsActive
 	}
-	if input.ClientType != nil {
-		ct, err := validateClientType(*input.ClientType)
-		if err != nil {
-			return nil, err
-		}
-		fields["client_type"] = ct
-	}
 	if input.GrantTypes != nil {
 		grants, err := validateGrantTypes(*input.GrantTypes)
 		if err != nil {

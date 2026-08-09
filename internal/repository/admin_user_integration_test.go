@@ -550,3 +550,50 @@ func TestListAdminUsersRefusesALimitBeyondThePageSize(t *testing.T) {
 		t.Fatalf("rows = %d, want the seeded user", len(rows))
 	}
 }
+
+// Stats must exclude soft-deleted accounts from the usable-account dimensions.
+// Deletion is a state bit, not a deleted_at column, so a bare COUNT would inflate
+// Total / ByRole / ByDepartment with accounts the console cannot use; only ByState
+// keeps the is_deleted bucket so the deleted count stays visible.
+func TestUserRepositoryStatsExcludesSoftDeletedAccounts(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	software := model.DepartmentSoftware
+	media := model.DepartmentMedia
+
+	adminSeed(t, database, "stats-001@njupt.edu.cn", "张三",
+		model.UserRoleMember, model.UserStateOnSAST, &software)
+	adminSeed(t, database, "stats-002@njupt.edu.cn", "李四",
+		model.UserRoleLecturer, model.UserStateOnSAST, &media)
+	adminSeed(t, database, "stats-003@njupt.edu.cn", "王五",
+		model.UserRoleFreshman, model.UserStateNJUPTer, nil)
+	// Same role and department as the first account, but deleted: must not count
+	// toward Total / ByRole / ByDepartment.
+	adminSeed(t, database, "stats-004@njupt.edu.cn", "赵六",
+		model.UserRoleMember, model.UserStateDeleted, &software)
+
+	stats, err := users.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.Total != 3 {
+		t.Fatalf("Total = %d, want 3 (deleted excluded)", stats.Total)
+	}
+	if stats.ByRole[model.UserRoleMember] != 1 {
+		t.Fatalf("ByRole[member] = %d, want 1 (deleted member excluded)", stats.ByRole[model.UserRoleMember])
+	}
+	if stats.ByRole[model.UserRoleLecturer] != 1 || stats.ByRole[model.UserRoleFreshman] != 1 {
+		t.Fatalf("ByRole = %v, want one lecturer and one freshman", stats.ByRole)
+	}
+	// ByState counts every state so the console still sees the deleted bucket.
+	if stats.ByState[model.UserStateOnSAST] != 2 || stats.ByState[model.UserStateNJUPTer] != 1 ||
+		stats.ByState[model.UserStateDeleted] != 1 {
+		t.Fatalf("ByState = %v, want on_sast 2 / njupter 1 / is_deleted 1", stats.ByState)
+	}
+	if stats.ByDepartment[software] != 1 {
+		t.Fatalf("ByDepartment[software] = %d, want 1 (deleted excluded)", stats.ByDepartment[software])
+	}
+	if stats.NoDepartment != 1 {
+		t.Fatalf("NoDepartment = %d, want 1", stats.NoDepartment)
+	}
+}
