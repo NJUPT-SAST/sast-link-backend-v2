@@ -211,6 +211,9 @@ func TestLoadValidConfig(t *testing.T) {
 	if cfg.InternalOAuthClientID != "sast-link-web" {
 		t.Errorf("InternalOAuthClientID = %q, want sast-link-web", cfg.InternalOAuthClientID)
 	}
+	if got := cfg.InternalOAuthClientIDs(); !slices.Equal(got, []string{"sast-link-web"}) {
+		t.Errorf("InternalOAuthClientIDs() = %q, want [sast-link-web]", got)
+	}
 	if cfg.RateLimitLoginRPM != 300 {
 		t.Errorf("RateLimitLoginRPM = %d, want 300", cfg.RateLimitLoginRPM)
 	}
@@ -234,6 +237,27 @@ func TestLoadValidConfig(t *testing.T) {
 	}
 	if cfg.RateLimitDeviceWindow != time.Minute {
 		t.Errorf("RateLimitDeviceWindow = %s, want 60s", cfg.RateLimitDeviceWindow)
+	}
+}
+
+func TestInternalOAuthClientIDsDeduplicatesAndTrims(t *testing.T) {
+	cfg := Config{
+		InternalOAuthClientID:         " sast-link-web ",
+		TrustedInternalOAuthClientIDs: []string{" sast-people ", "sast-link-web", "sast-people", "sast-hotdesk"},
+	}
+	if got, want := cfg.InternalOAuthClientIDs(), []string{"sast-link-web", "sast-people", "sast-hotdesk"}; !slices.Equal(got, want) {
+		t.Errorf("InternalOAuthClientIDs() = %q, want %q", got, want)
+	}
+}
+
+func TestTrustedInternalOAuthClientIDsValidation(t *testing.T) {
+	if hasBlankOrDuplicate([]string{""}, "sast-link-web") {
+		t.Fatal("an empty optional allow-list must be accepted")
+	}
+	for _, ids := range [][]string{{"sast-people", ""}, {"sast-people", "sast-people"}, {"sast-link-web"}} {
+		if !hasBlankOrDuplicate(ids, "sast-link-web") {
+			t.Errorf("hasBlankOrDuplicate(%q) = false, want true", ids)
+		}
 	}
 }
 

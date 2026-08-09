@@ -118,13 +118,13 @@ func newHarness(t *testing.T) *harness {
 	auditLog := &fakeAudit{}
 	return &harness{
 		service: Service{
-			Clients:           clients,
-			Blacklist:         blacklist,
-			Audit:             auditLog,
-			Secrets:           auth.ClientSecretHasher{},
-			NewClientID:       func() (string, error) { return "generated-client-id", nil },
-			Clock:             testClock{value: testNow},
-			ProtectedClientID: testProtectedClientID,
+			Clients:            clients,
+			Blacklist:          blacklist,
+			Audit:              auditLog,
+			Secrets:            auth.ClientSecretHasher{},
+			NewClientID:        func() (string, error) { return "generated-client-id", nil },
+			Clock:              testClock{value: testNow},
+			ProtectedClientIDs: []string{testProtectedClientID},
 		},
 		clients:   clients,
 		blacklist: blacklist,

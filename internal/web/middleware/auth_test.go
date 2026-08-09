@@ -158,7 +158,7 @@ func performAuthRequest(manager *auth.JWTManager, cache *fakeAuthStateCache, sta
 	if cache != nil {
 		cacheStore = cache
 	}
-	authenticator := Authenticator{JWT: manager, Tokens: states, AuthStateCache: cacheStore, AuthStateTTL: time.Minute, Clock: testClock{value: now}, InternalClientID: testInternalClientID}
+	authenticator := Authenticator{JWT: manager, Tokens: states, AuthStateCache: cacheStore, AuthStateTTL: time.Minute, Clock: testClock{value: now}, TrustedInternalClientIDs: []string{testInternalClientID}}
 	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) {
 		principal, _ := PrincipalFrom(c)
 		c.JSON(http.StatusOK, envelope{Code: 0, Message: "ok", Data: map[string]any{"user_id": principal.UserID, "jti": principal.JTI}})
@@ -198,11 +198,11 @@ func TestAuthenticatorRejectsBlankJTIWithoutAuthStateLookup(t *testing.T) {
 		JWT: fakeVerifier{claims: &auth.TokenClaims{RegisteredClaims: jwt.RegisteredClaims{
 			Subject: "42", ID: " \t", ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 		}}},
-		Tokens:           states,
-		AuthStateCache:   cache,
-		AuthStateTTL:     time.Minute,
-		Clock:            testClock{value: now},
-		InternalClientID: testInternalClientID,
+		Tokens:                   states,
+		AuthStateCache:           cache,
+		AuthStateTTL:             time.Minute,
+		Clock:                    testClock{value: now},
+		TrustedInternalClientIDs: []string{testInternalClientID},
 	}
 	router := gin.New()
 	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
@@ -345,9 +345,36 @@ func TestAuthenticatorAcceptsInternalClientToken(t *testing.T) {
 	}
 }
 
-// A missing InternalClientID must reject rather than admit every client: a
+// A separately deployed first-party application must be explicitly configured
+// before its token can reach Link's internal API.
+func TestAuthenticatorAcceptsExplicitlyTrustedClientToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	const peopleClientID = "sast-people"
+	token := signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid", "profile", "email"}, TTL: time.Hour,
+		AuthorizedParty: peopleClientID,
+	})
+	router := gin.New()
+	authenticator := Authenticator{
+		JWT: manager, Tokens: validStates(now), Clock: testClock{value: now},
+		TrustedInternalClientIDs: []string{testInternalClientID, peopleClientID},
+	}
+	router.GET("/protected", authenticator.RequireAuth(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/protected", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("response = %d, want 204", recorder.Code)
+	}
+}
+
+// A missing trusted-client allow-list must reject rather than admit every client: a
 // deployment that forgets it should fail loudly, not silently drop the check.
-func TestAuthenticatorFailsClosedWithoutInternalClientID(t *testing.T) {
+func TestAuthenticatorFailsClosedWithoutTrustedInternalClients(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	manager := newTestJWTManager(t, now)
@@ -378,7 +405,7 @@ func TestAuthenticateAnyClientAcceptsThirdPartyToken(t *testing.T) {
 	})
 	authenticator := Authenticator{
 		JWT: manager, Tokens: validStates(now), Clock: testClock{value: now},
-		InternalClientID: testInternalClientID,
+		TrustedInternalClientIDs: []string{testInternalClientID},
 	}
 	principal, err := authenticator.AuthenticateAnyClient(context.Background(), "Bearer "+token)
 	if err != nil {

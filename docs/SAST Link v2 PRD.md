@@ -579,18 +579,18 @@ sastlink:device:{device_id}   Hash          {ua, ip, login_time, last_seen}
 | CSRF | OAuth state 参数强制；JWT 不存 cookie，不存在 CSRF 攻击面。授权确认走两段式 + Bearer 认证（§4.10）而非 cookie session，正是为了维持这一前提 |
 | Open redirect | `/oauth/authorize` 的错误只在 `client_id` 与 `redirect_uri` 均校验通过后才允许重定向到客户端；`redirect_uri` 精确字符串匹配注册值（§4.10） |
 | Token 泄露 | refresh_token rotation + 重放检测 + 全链撤销；token_version 改密全局失效 |
-| 第三方 Token 越权访问内部接口 | Access Token 携带 `azp`（签发对象 client_id）；内部 API 中间件只接受 `azp` 等于内置 first-party 客户端的 token，第三方 token 一律 403。见下方「第三方 Token 隔离」 |
+| 第三方 Token 越权访问内部接口 | Access Token 携带 `azp`（签发对象 client_id）；内部 API 中间件只接受明确配置为受信任内部客户端的 first-party token，其他 token 一律 403。见下方「第三方 Token 隔离」 |
 | 账号接管 | OAuth 绑定需登录态；registration_state 仅用于新建用户 + OAuth state 双重绑定，registration_state 泄露者无法单独滥用 |
 | SQL 注入 | GORM 参数化查询 |
 | 重放攻击 | 授权码/Register-Ticket/Bind-Ticket/login_code 均为一次性使用；幂等性 key 防敏感写操作重放 |
 
 **第三方 Token 隔离**：内部会话 Token 与第三方 OAuth Access Token 共用同一个 `aud`（本服务），因为两种场景下内部 API 都是 resource server，`aud` 因此无法区分二者。若不加区分，一个仅获得 `openid` scope 的第三方 token 就能通过内部认证中间件拿到完整 principal，进而调用 `PUT /user/profile` 改资料、或走 `POST /user/identities/email` 绑定攻击者邮箱为登录方式——即账号接管。
 
-因此 Access Token 增加 `azp` claim 记录签发对象，内部中间件（`middleware.Authenticate`）只接受 `azp` 等于 `INTERNAL_OAUTH_CLIENT_ID` 的 token，其余返回 403。`azp` 缺失视为内部会话 token（该 claim 引入前签发的 token 仅发给内置客户端）。
+因此 Access Token 增加 `azp` claim 记录签发对象，内部中间件（`middleware.Authenticate`）只接受 `azp` 等于 `INTERNAL_OAUTH_CLIENT_ID` 或 `TRUSTED_INTERNAL_OAUTH_CLIENT_IDS` 明确列出的客户端的 token，其余返回 403。仅在数据库中创建 `first_party` 客户端不会获得内部接口权限。`azp` 缺失视为内部会话 token（该 claim 引入前签发的 token 仅发给内置客户端）。
 
 `/userinfo` 是唯一例外：它的存在意义就是服务第三方 token，因此走 `middleware.AuthenticateAnyClient`，不施加此限制，claims 仍按 token 自身 scope 过滤。该方法命名上即标注了适用范围，内部端点不得使用。
 
-`INTERNAL_OAUTH_CLIENT_ID` 未配置时中间件拒绝所有请求而非放行所有客户端：配置缺失应当显式失败，而不是静默关闭这道检查。
+`INTERNAL_OAUTH_CLIENT_ID` 未配置，或 `TRUSTED_INTERNAL_OAUTH_CLIENT_IDS` 在列出客户端时夹带空值、重复值时服务拒绝启动；完全留空表示没有额外受信任客户端。配置缺失应当显式失败，而不是静默关闭这道检查。
 
 ### 7.2 安全响应头
 

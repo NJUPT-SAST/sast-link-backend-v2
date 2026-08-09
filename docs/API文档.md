@@ -1781,7 +1781,7 @@ POST /admin/oauth-clients
 
 - 第一方应用（`first_party`）不返回 `client_secret`，使用 PKCE 即可。
 - ⚠️ **注册 `first_party` 客户端等同于授予全量 scope**：`/oauth/authorize` 对 `first_party` 跳过「请求 scope 必须落在注册 scope 内」的校验（PRD §4.10），因此提交 `scopes: ["openid"]` 的第一方客户端实际仍可请求 `openid profile email`，注册表上的该列对这类客户端仅作记录用途。它同时是无 secret 的公开客户端。审批时请按「授予全量 scope」对待，需要 scope 约束时注册为 `third_party`。
-  - 边界仍在：`client_id` 由服务端随机生成，无法冒充内置客户端；这类 token 的 `azp` 不等于 `INTERNAL_OAUTH_CLIENT_ID`，因此**打不到内部接口**（`/user/*`、`/auth/*`）；同意页仍展示实际请求的 scope。
+  - 边界仍在：`client_id` 由服务端随机生成，无法冒充内置客户端；除非该 ID 被部署配置 `TRUSTED_INTERNAL_OAUTH_CLIENT_IDS` 明确列为受信任内部客户端，否则这类 token 的 `azp` 无法打到内部接口（`/user/*`、`/auth/*`）；同意页仍展示实际请求的 scope。
 - `client_secret` 只在本次响应中出现一次，服务端仅存哈希，事后无法再取回。丢失只能重新注册客户端。
 - `client_id` 由服务端生成，请求中不接受该字段。传入 `client_id`、`client_secret` 或 `id` 会返回 `400`，而非被忽略。
 - `redirect_uris` 校验规则（注册阶段拒绝，返回 `400`）：
@@ -1843,7 +1843,7 @@ PUT /admin/oauth-clients/:id
 - 停用是安全动作，语义是「立即断开」：已签发的 Access Token 立刻失效（失效 auth-state 缓存 + DB 撤销），Refresh Token 无法再续期，该客户端也无法再发起新的授权请求。
 - 重复对已停用的客户端提交 `is_active: false` 不会重复撤销。
 - `:id` 为客户端主键（列表接口返回的 `id`，非 `client_id`）。非数字或非正整数返回 `404`。
-- **内置客户端受保护**：`INTERNAL_OAUTH_CLIENT_ID`（默认 `sast-link-web`）不可停用，也不可改写 `redirect_uris`，两者均返回 `403`；改名允许。内部会话流程通过 `is_active = TRUE` 解析该客户端，停用它会立刻中断全站登录、刷新与注册，并撤销所有内部会话 token——包括执行该操作的管理员自己的，此后无人能登录回来把开关拨正，只能直连数据库恢复。改写它的 `redirect_uris` 则会把第一方授权码投递到他处。
+- **受信任内部客户端受保护**：`INTERNAL_OAUTH_CLIENT_ID`（默认 `sast-link-web`）以及 `TRUSTED_INTERNAL_OAUTH_CLIENT_IDS` 列出的客户端不可停用，也不可改写 `redirect_uris`，两者均返回 `403`；改名允许。内置客户端通过 `is_active = TRUE` 解析，停用它会立刻中断全站登录、刷新与注册，并撤销所有内部会话 token——包括执行该操作的管理员自己的，此后无人能登录回来把开关拨正，只能直连数据库恢复。改写任一受信任客户端的 `redirect_uris` 则会把可调用内部接口的第一方授权码投递到他处。
 - 被拒的更新同样写入审计日志；客户端不存在（`404`）也会留下审计记录，避免有人靠遍历主键探测哪些 id 存在而不留痕迹。
 
 ---

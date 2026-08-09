@@ -35,7 +35,7 @@ func roleRequest(
 	states.state.UserRole = dbRole
 	authenticator := Authenticator{
 		JWT: manager, Tokens: states, Clock: testClock{value: now},
-		InternalClientID: testInternalClientID,
+		TrustedInternalClientIDs: []string{testInternalClientID},
 	}
 	router := gin.New()
 	router.GET("/admin/thing", authenticator.RequireAuth(), authenticator.RequireRole(allowed...),
@@ -100,7 +100,7 @@ func TestRequireRoleWithNoRolesDeniesEveryone(t *testing.T) {
 // would look like an ordinary denial.
 func TestRequireRoleWithoutAuthenticationIsAnInternalError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	authenticator := Authenticator{InternalClientID: testInternalClientID}
+	authenticator := Authenticator{TrustedInternalClientIDs: []string{testInternalClientID}}
 	router := gin.New()
 	router.GET("/admin/thing", authenticator.RequireRole(model.UserRoleAdmin),
 		func(c *gin.Context) { c.Status(http.StatusNoContent) })
@@ -126,7 +126,7 @@ func TestRequireRoleUnreachableByThirdPartyToken(t *testing.T) {
 	states.state.UserRole = model.UserRoleAdmin
 	authenticator := Authenticator{
 		JWT: manager, Tokens: states, Clock: testClock{value: now},
-		InternalClientID: testInternalClientID,
+		TrustedInternalClientIDs: []string{testInternalClientID},
 	}
 	router := gin.New()
 	reached := false

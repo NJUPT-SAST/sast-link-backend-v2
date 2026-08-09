@@ -595,7 +595,7 @@ func TestE2EThirdPartyTokenIsNotAnInternalSessionCredential(t *testing.T) {
 	// The internal middleware, configured exactly as cmd/api does.
 	internal := gin.New()
 	authenticator := middleware.Authenticator{
-		JWT: h.jwt, Tokens: h.tokens, InternalClientID: "sast-link-web",
+		JWT: h.jwt, Tokens: h.tokens, TrustedInternalClientIDs: []string{"sast-link-web"},
 	}
 	internal.GET("/user/profile", authenticator.RequireAuth(), func(c *gin.Context) {
 		c.Status(http.StatusOK)

@@ -64,7 +64,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 
 	users := repository.NewUser(database)
 	clients := repository.NewOAuthClient(database)
-	if err := validateInternalClient(ctx, clients, cfg.InternalOAuthClientID); err != nil {
+	trustedInternalClientIDs := cfg.InternalOAuthClientIDs()
+	if err := validateInternalClients(ctx, clients, trustedInternalClientIDs); err != nil {
 		return nil, err
 	}
 	tokens := repository.NewToken(database)
@@ -240,9 +241,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Tokens:         tokens,
 		AuthStateCache: store,
 		AuthStateTTL:   cfg.AuthStateCacheTTL,
-		// Pins the internal API to the built-in client, so a third-party OAuth access
-		// token cannot be used as a session credential.
-		InternalClientID: cfg.InternalOAuthClientID,
+		// Pins the internal API to an explicit allow-list, so a third-party OAuth
+		// access token cannot be used as a session credential.
+		TrustedInternalClientIDs: trustedInternalClientIDs,
 	}
 
 	authorizeLimiter := oauthredis.EndpointLimiter{
@@ -382,9 +383,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		// Default random source and hashing; no work factor is bought for a 32-byte
 		// random secret, see auth.ClientSecretHasher.
 		Secrets: auth.ClientSecretHasher{},
-		// The same client the internal API pins its azp gate to. Disabling it would
-		// lock every user out of login with no in-band way back.
-		ProtectedClientID: cfg.InternalOAuthClientID,
+		// These clients may call Link's internal API. Their redirect URIs must not be
+		// rewritten through the admin API, or authorization codes could be diverted.
+		ProtectedClientIDs: trustedInternalClientIDs,
 	}
 
 	return &sessionRuntime{
@@ -420,12 +421,17 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	}, nil
 }
 
-func validateInternalClient(ctx context.Context, clients *repository.OAuthClientRepository, clientID string) error {
-	client, err := clients.FindActiveByClientID(ctx, clientID)
-	if err != nil {
-		return fmt.Errorf("validate internal OAuth client: %w", err)
+func validateInternalClients(ctx context.Context, clients *repository.OAuthClientRepository, clientIDs []string) error {
+	for _, clientID := range clientIDs {
+		client, err := clients.FindActiveByClientID(ctx, clientID)
+		if err != nil {
+			return fmt.Errorf("validate internal OAuth client %q: %w", clientID, err)
+		}
+		if err := validateInternalClientModel(client); err != nil {
+			return fmt.Errorf("validate internal OAuth client %q: %w", clientID, err)
+		}
 	}
-	return validateInternalClientModel(client)
+	return nil
 }
 
 func validateInternalClientModel(client *model.OAuthClient) error {

@@ -64,8 +64,8 @@ type Authenticator struct {
 	// AuthStateTTL bounds how long a cached entry lives without an explicit
 	// revocation invalidating it.
 	AuthStateTTL time.Duration
-	// InternalClientID is the built-in first-party client. Only tokens issued to it
-	// may authenticate on the internal API.
+	// TrustedInternalClientIDs is the explicit list of first-party clients whose
+	// tokens may authenticate on the internal API.
 	//
 	// Every access token carries this service as its audience, because the internal
 	// API is the resource server for first-party sessions and third-party grants
@@ -77,7 +77,7 @@ type Authenticator struct {
 	// Required. An empty value rejects every request rather than admitting all of
 	// them, so a deployment that forgets to set it fails loudly instead of silently
 	// dropping the check.
-	InternalClientID string
+	TrustedInternalClientIDs []string
 }
 
 func (a Authenticator) RequireAuth() gin.HandlerFunc {
@@ -94,7 +94,7 @@ func (a Authenticator) RequireAuth() gin.HandlerFunc {
 }
 
 // Authenticate validates an Authorization header for the internal API and returns
-// its principal. Tokens issued to any client other than InternalClientID are
+// its principal. Tokens issued to a client outside TrustedInternalClientIDs are
 // rejected.
 //
 // Exported so endpoints that answer in a non-standard error format can reuse the
@@ -124,19 +124,29 @@ func (a Authenticator) AuthenticateAnyClient(ctx context.Context, header string)
 	return a.authenticate(ctx, header)
 }
 
-// requireInternalClient pins a principal to the built-in first-party client.
+// requireInternalClient pins a principal to an explicitly trusted first-party
+// client. Database registration alone never passes this gate.
 func (a Authenticator) requireInternalClient(principal Principal) error {
 	// Fail closed on a missing configuration rather than admitting every client.
-	if strings.TrimSpace(a.InternalClientID) == "" {
+	if len(a.TrustedInternalClientIDs) == 0 {
 		return backendError()
 	}
 	// An absent azp means a first-party session token predating the claim; those are
 	// only ever issued to the built-in client.
-	if principal.ClientID != "" && principal.ClientID != a.InternalClientID {
+	if principal.ClientID != "" && !containsClientID(a.TrustedInternalClientIDs, principal.ClientID) {
 		return authBusinessError(http.StatusForbidden, errcode.CodeForbidden,
-			"该 Access Token 由第三方客户端签发，不可用于内部接口")
+			"该 Access Token 由未受信任客户端签发，不可用于内部接口")
 	}
 	return nil
+}
+
+func containsClientID(clientIDs []string, target string) bool {
+	for _, clientID := range clientIDs {
+		if strings.TrimSpace(clientID) == target {
+			return true
+		}
+	}
+	return false
 }
 
 // SetPrincipal stores an already-validated principal on the request context, so a

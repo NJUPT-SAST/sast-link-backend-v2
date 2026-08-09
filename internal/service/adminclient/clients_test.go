@@ -176,6 +176,24 @@ func TestUpdateClientRefusesToBreakTheBuiltinClient(t *testing.T) {
 	}
 }
 
+func TestUpdateClientRefusesToBreakAnAdditionalTrustedClient(t *testing.T) {
+	h := newHarness(t)
+	const peopleClientID = "sast-people"
+	h.service.ProtectedClientIDs = append(h.service.ProtectedClientIDs, peopleClientID)
+	h.clients.findResult = activeClient(2)
+	h.clients.findResult.ClientID = peopleClientID
+	disabled := false
+
+	_, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 2, IsActive: &disabled, AdminUserID: 99,
+	})
+
+	assertKind(t, err, KindProtected)
+	if h.clients.updateCalls != 0 {
+		t.Fatalf("update reached the repository %d times, want 0", h.clients.updateCalls)
+	}
+}
+
 // The guard keys on client_id, not the primary key, so ordinary clients are
 // untouched — and renaming the built-in one is still allowed, since client_name is
 // cosmetic.

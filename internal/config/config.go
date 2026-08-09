@@ -111,10 +111,16 @@ type Config struct {
 	OAuthLoginRegistrationStateTTL time.Duration `env:"OAUTH_LOGIN_REGISTRATION_STATE_TTL" envDefault:"15m"`
 	OAuthLoginCodeTTL              time.Duration `env:"OAUTH_LOGIN_CODE_TTL" envDefault:"60s"`
 
-	InternalOAuthClientID string   `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
-	CORSAllowedOrigins    []string `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
-	TrustedProxies        []string `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
-	HSTSMaxAge            int      `env:"HSTS_MAX_AGE" envDefault:"31536000"`
+	// InternalOAuthClientID is Link's own session client. It remains singular
+	// because Link's password/login flows issue tokens through this registration.
+	InternalOAuthClientID string `env:"INTERNAL_OAUTH_CLIENT_ID" envDefault:"sast-link-web"`
+	// TrustedInternalOAuthClientIDs is the explicit allow-list of additional
+	// first-party clients whose tokens may call Link's internal APIs. Registering a
+	// client in the database alone never grants this privilege.
+	TrustedInternalOAuthClientIDs []string `env:"TRUSTED_INTERNAL_OAUTH_CLIENT_IDS" envSeparator:","`
+	CORSAllowedOrigins            []string `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
+	TrustedProxies                []string `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
+	HSTSMaxAge                    int      `env:"HSTS_MAX_AGE" envDefault:"31536000"`
 	// The per-IP defaults are tuned for the campus NAT reality: hundreds of users
 	// share one egress IP, so any per-IP cap must accommodate the whole campus's
 	// aggregate volume or login breaks during a rush. The login defense is the
@@ -327,6 +333,25 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// InternalOAuthClientIDs returns the complete, de-duplicated internal API
+// allow-list. The built-in session client is always included.
+func (c *Config) InternalOAuthClientIDs() []string {
+	ids := make([]string, 0, 1+len(c.TrustedInternalOAuthClientIDs))
+	seen := make(map[string]struct{}, cap(ids))
+	for _, rawID := range append([]string{c.InternalOAuthClientID}, c.TrustedInternalOAuthClientIDs...) {
+		clientID := strings.TrimSpace(rawID)
+		if clientID == "" {
+			continue
+		}
+		if _, exists := seen[clientID]; exists {
+			continue
+		}
+		seen[clientID] = struct{}{}
+		ids = append(ids, clientID)
+	}
+	return ids
+}
+
 func (c *Config) validate() error {
 	switch {
 	case c.DBUser == "":
@@ -419,6 +444,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("JWT_REFRESH_TOKEN_EXPIRY must be positive")
 	case strings.TrimSpace(c.InternalOAuthClientID) == "":
 		return fmt.Errorf("INTERNAL_OAUTH_CLIENT_ID is required")
+	case hasBlankOrDuplicate(c.TrustedInternalOAuthClientIDs, strings.TrimSpace(c.InternalOAuthClientID)):
+		return fmt.Errorf("TRUSTED_INTERNAL_OAUTH_CLIENT_IDS must contain unique, non-empty client IDs and must not repeat INTERNAL_OAUTH_CLIENT_ID")
 	case c.HSTSMaxAge < minimumHSTSMaxAge:
 		return fmt.Errorf("HSTS_MAX_AGE must be at least %d seconds", minimumHSTSMaxAge)
 	case c.RateLimitLoginRPM <= 0:
@@ -580,6 +607,28 @@ func (c *Config) ValidateAPIAuth() error {
 	// once at the boundary keeps that impossible instead of relying on each consumer.
 	c.JWTIssuer = strings.TrimRight(strings.TrimSpace(c.JWTIssuer), "/")
 	return nil
+}
+
+func hasBlankOrDuplicate(ids []string, initial string) bool {
+	// Docker Compose forwards an unset optional variable as one empty list entry.
+	// Treat that as no extra trusted client; empty entries alongside actual IDs are
+	// still rejected because they almost always indicate a malformed allow-list.
+	if len(ids) == 1 && strings.TrimSpace(ids[0]) == "" {
+		return false
+	}
+	seen := make(map[string]struct{}, len(ids)+1)
+	seen[initial] = struct{}{}
+	for _, rawID := range ids {
+		clientID := strings.TrimSpace(rawID)
+		if clientID == "" {
+			return true
+		}
+		if _, exists := seen[clientID]; exists {
+			return true
+		}
+		seen[clientID] = struct{}{}
+	}
+	return false
 }
 
 // StorageConfigured reports whether object storage settings are present. The
