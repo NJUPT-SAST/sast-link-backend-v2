@@ -265,6 +265,109 @@ WHERE client_id = 'sast-link-web'
 	}
 }
 
+// The delegated-administration client's three load-bearing properties are asserted
+// here rather than trusted to the seed: third_party is what subjects it to the
+// registered-scope check at all, the absent refresh_token grant is what bounds an
+// admin:write token to a single access TTL, and the admin scopes are the grant itself.
+// A seed that drifted on any of the three would still apply cleanly.
+func TestV8SeedsDelegatedAdminClient(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+	if err := instance.Up(); err != nil {
+		t.Fatalf("Up() error = %v", err)
+	}
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+
+	// The array columns are joined in SQL rather than scanned into a driver array
+	// type: lib/pq is not a dependency of this module, and a comma-joined string is
+	// enough to assert both membership and order.
+	var (
+		clientType   string
+		secret       sql.NullString
+		redirectURIs string
+		grantTypes   string
+		scopes       string
+		isActive     bool
+	)
+	if err := database.QueryRowContext(context.Background(), `
+SELECT client_type::text,
+       client_secret,
+       array_to_string(redirect_uris, ','),
+       array_to_string(grant_types, ','),
+       array_to_string(scopes, ','),
+       is_active
+FROM oauth_clients
+WHERE client_id = 'sast-people'
+`).Scan(&clientType, &secret, &redirectURIs, &grantTypes, &scopes, &isActive); err != nil {
+		t.Fatalf("read seeded sast-people client: %v", err)
+	}
+
+	if clientType != "third_party" {
+		t.Fatalf("client_type = %q, want third_party; first_party bypasses the registered-scope check", clientType)
+	}
+	if !secret.Valid || !strings.HasPrefix(secret.String, "sha256-v1$") {
+		t.Fatalf("client_secret = %v, want a sha256-v1 hash", secret)
+	}
+	if strings.Contains(grantTypes, "refresh_token") {
+		t.Fatalf("grant_types = %q, want no refresh_token: the refresh grant does not narrow scopes", grantTypes)
+	}
+	if grantTypes != "authorization_code" {
+		t.Fatalf("grant_types = %q, want authorization_code alone", grantTypes)
+	}
+	if scopes != "openid,admin:read,admin:write" {
+		t.Fatalf("scopes = %q, want openid plus both admin scopes", scopes)
+	}
+	if redirectURIs != "https://people.sast.fun/api/auth/link,http://localhost:3001/api/auth/link" {
+		t.Fatalf("redirect_uris = %q, want the registered callbacks", redirectURIs)
+	}
+	if !isActive {
+		t.Fatal("is_active = false, want the seeded client enabled")
+	}
+}
+
+// Re-applying over an existing but different sast-people must abort rather than
+// overwrite: silently rewriting the row could widen the scopes or repoint the
+// callbacks of a live administrative client.
+func TestV8RejectsNonCanonicalDelegatedAdminClient(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	instance := newMigration(t, databaseURL)
+	if err := instance.Steps(7); err != nil {
+		t.Fatalf("apply V001-V007: %v", err)
+	}
+	database := testutil.OpenSQL(t, databaseURL)
+	t.Cleanup(func() { _ = database.Close() })
+	if _, err := database.ExecContext(context.Background(), `
+INSERT INTO oauth_clients (
+    client_id, client_name, client_type, client_secret, redirect_uris, grant_types, scopes, is_active
+)
+VALUES (
+    'sast-people', 'Impostor', 'third_party', 'sha256-v1$whatever',
+    ARRAY['https://attacker.test/cb'], ARRAY['authorization_code'],
+    ARRAY['openid', 'admin:write'], TRUE
+)
+`); err != nil {
+		t.Fatalf("insert conflicting sast-people client: %v", err)
+	}
+
+	err := instance.Up()
+	if err == nil {
+		t.Fatal("apply V008 over a conflicting sast-people client error = nil")
+	}
+	if !strings.Contains(err.Error(), "non-canonical sast-people client") {
+		t.Fatalf("apply V008 error = %v, want the non-canonical blocker", err)
+	}
+	var redirectURIs string
+	if queryErr := database.QueryRowContext(context.Background(), `
+SELECT array_to_string(redirect_uris, ',') FROM oauth_clients WHERE client_id = 'sast-people'
+`).Scan(&redirectURIs); queryErr != nil {
+		t.Fatalf("read sast-people client after failed V008: %v", queryErr)
+	}
+	if redirectURIs != "https://attacker.test/cb" {
+		t.Fatalf("redirect_uris after failed V008 = %q, want the row left untouched", redirectURIs)
+	}
+}
+
 func TestV3DownKeepsReferencedBuiltinOAuthClient(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	instance := newMigration(t, databaseURL)

@@ -235,6 +235,8 @@ CREATE TABLE audit_logs (
     user_agent TEXT,
     success    BOOLEAN          NOT NULL DEFAULT TRUE,
     err_code   INT,
+    -- V007
+    actor_client_id VARCHAR(255),
     created_at TIMESTAMPTZ      NOT NULL DEFAULT NOW()
 );
 ```
@@ -243,7 +245,7 @@ CREATE TABLE audit_logs (
 |---|---|
 |`id`||
 |`user_id`|删除用户后保留日志|
-|`action`|操作类型：register / login / logout / change_password / reset_password / oauth_bind / oauth_unbind / update_profile / upload_avatar / admin_action|
+|`action`|操作类型：register / login / logout / change_password / reset_password / oauth_bind / oauth_unbind / update_profile / upload_avatar / admin_user_update / admin_user_delete / admin_user_restore / admin_oauth_client_create / admin_oauth_client_update / oauth_authorize / oauth_token / oauth_revoke|
 |`resource`|操作对象类型|
 |`resource_id`|操作对象 ID|
 |`detail`|JSONB 详情，各 action 结构见下文|
@@ -251,7 +253,16 @@ CREATE TABLE audit_logs (
 |`user_agent`|User-Agent|
 |`success`|是否成功|
 |`err_code`|错误码|
+|`actor_client_id`|执行操作的 OAuth 客户端（行为主体，非被操作对象）。详见下方说明|
 |`created_at`||
+
+**`actor_client_id`（V007）**：记录**执行**该操作的 OAuth 客户端，与 `resource_id`（被操作对象）区分。控制台操作显式记录内置客户端 id（`sast-link-web`）而非 NULL，委派调用记录该第三方客户端的 `client_id`，两者据此可区分「管理员亲自操作」与「工具代其操作」。
+
+NULL 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 之前写入的历史行。控制台之所以写显式值而非 NULL，正是为了让 NULL 只有这一层含义；历史行的歧义随 90 天保留期自行消失，无需回填。
+
+刻意**无外键**：审计行必须比它命名的注册活得更久。`ON DELETE SET NULL` 会在注销客户端时把历史悄悄改写成「无凭证」，`RESTRICT` 则会让注销客户端卡在自己的审计尾巴上。同样**未加索引**：基数目前约为 1（仅一个委派客户端），既有 `action` 索引已把常用过滤切得足够小，且表有 90 天上限——等该过滤真有量再按 `EXPLAIN` 决定。
+
+命名不用 `client_id`：本表已在两个不同角色上承载客户端标识——`resource_id` 在 `admin_oauth_client_*` 动作中存的是 oauth_client 主键，`detail` 在 OAuth token 端点中带 `client_id`。裸 `client_id` 在此处会真正产生「行为主体 vs 被操作对象」的歧义。
 
 **detail JSONB 结构**（按 action）：
 
@@ -317,6 +328,19 @@ CREATE TABLE oauth_clients (
 |`is_active`|客户端是否被禁用|
 |`created_at`||
 |`updated_at`||
+
+### 迁移种入的客户端
+
+两个客户端由迁移种入而非通过控制台注册，因为服务本身依赖它们存在：
+
+|`client_id`|迁移|类型|scopes|grant_types|用途|
+|---|---|---|---|---|---|
+|`sast-link-web`|V003|`first_party`（无 secret）|`openid` `profile` `email`|`authorization_code` `refresh_token`|内置控制台。内部 API 通过 `azp` 钉死在此客户端上；停用它是不可自行恢复的锁死（登录/刷新/注册均经由它解析，且同一操作会撤销全部内部会话 token），故控制台接口拒绝停用它，也拒绝改写其 `redirect_uris`|
+|`sast-people`|V008|`third_party`（有 secret）|`openid` `admin:read` `admin:write`|`authorization_code`|委派管理客户端，唯一可代管理员调用 `/admin/*` 的第三方客户端。**刻意不注册 `refresh_token`**：refresh 继承 scope 且不收窄，注册了就等于 `admin:write` 可无限续期；限于 `authorization_code` 后，管理凭证的生命周期是一个 Access Token TTL。可停用（`is_active = false`，同一操作撤销其全部存活 token），但拒绝改写 `redirect_uris`——其授权码携带 admin scope|
+
+`sast-people` 之所以是 `third_party`：`first_party` 客户端不受其 `scopes` 列约束（可请求任意受支持 scope），只有 `third_party` 会被 `ContainsAll` 钉死在注册范围内。控制台注册接口一律拒绝 admin scope，因此不存在自助注册管理凭证的路径。其 `client_secret` 只以 `sha256-v1$...` 哈希入库，明文在迁移之外一次性生成、仅存于该工具自身配置。
+
+两个 seed 迁移形状相同：幂等（重复 apply 为 no-op）、带漂移检测（既有行属性不符则 `RAISE EXCEPTION` 中止而非覆盖——覆盖可能扩大 scope 或改写一个存活管理客户端的回调地址）、并把自己创建的行记入 ownership 表，使 `down` 只删自己建的且未被任何授权码/token 引用过的行。
 
 ## oauth_authorizations 授权码
 

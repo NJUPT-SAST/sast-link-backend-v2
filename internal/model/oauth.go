@@ -2,6 +2,16 @@ package model
 
 import "time"
 
+// AdminDelegatedClientID is the client_id of the one third-party client permitted
+// to call the admin API on an administrator's behalf.
+//
+// A constant rather than configuration, deliberately: the registration is seeded by
+// migration with this exact literal, so an environment variable could only ever
+// disagree with the row it is supposed to name — and a mismatch fails silently as
+// "delegation refused" rather than loudly. Changing the delegate means a migration,
+// which is the same commit that would change this constant.
+const AdminDelegatedClientID = "sast-people"
+
 // OAuthClient persists a registered OAuth client.
 type OAuthClient struct {
 	ID               int64
