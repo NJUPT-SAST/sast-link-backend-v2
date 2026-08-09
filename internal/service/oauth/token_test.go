@@ -98,6 +98,12 @@ func TestTokenAuthorizationCodeIssuesPairAndIDToken(t *testing.T) {
 	if len(h.tokens.auditEntries) != 1 || h.tokens.auditEntries[0].Action != "oauth_token" {
 		t.Fatalf("token audit entries = %#v, want the oauth_token success audit in the pair transaction", h.tokens.auditEntries)
 	}
+	// The provider endpoints are addressed by client, so the row's actor is the
+	// requesting client. Recording it in the column (not only in detail) is what makes
+	// "everything this client did" one predicate across the admin and provider paths.
+	if actor := h.tokens.auditEntries[0].ActorClientID; actor == nil || *actor != testPublicClientID {
+		t.Fatalf("actor client id = %v, want the requesting client %q", actor, testPublicClientID)
+	}
 }
 
 // auth_time must be the moment the user consented, which is when the code row was

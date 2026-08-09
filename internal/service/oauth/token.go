@@ -146,7 +146,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	var codeAudit *model.AuditLog
 	if s.Audit != nil {
 		resourceID := client.ClientID
-		codeAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, true, 0,
+		codeAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, &resourceID, true, 0,
 			input.ClientIP, input.UserAgent, map[string]any{
 				"client_id":  client.ClientID,
 				"grant_type": grantTypeAuthorizationCode,
@@ -273,7 +273,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	var refreshAudit *model.AuditLog
 	if s.Audit != nil {
 		resourceID := client.ClientID
-		refreshAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, true, 0,
+		refreshAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, &resourceID, true, 0,
 			input.ClientIP, input.UserAgent, map[string]any{
 				"client_id":  client.ClientID,
 				"grant_type": grantTypeRefreshToken,

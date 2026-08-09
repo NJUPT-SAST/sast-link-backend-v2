@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 func TestAuthorizeStashesValidatedRequest(t *testing.T) {
@@ -548,6 +549,69 @@ func TestAuthorizeBoundsPersistedParameters(t *testing.T) {
 			// Rejected before anything is stashed, so a flood cannot fill the keyspace.
 			if h.requests.saveCalls != 0 {
 				t.Fatalf("stashed %d requests, want none", h.requests.saveCalls)
+			}
+		})
+	}
+}
+
+// Delegated administration rests entirely on this function. A third-party client
+// is pinned to its registration by ContainsAll, which is the only mechanism that
+// bounds a client's scopes — first-party registrations are advisory, so admin
+// scopes must be refused for them outright or the built-in console could mint an
+// administrative token for itself.
+func TestAuthorizeScopeForClientConfinesAdminScopesToRegisteredThirdParties(t *testing.T) {
+	adminGrant := model.StringArray{scope.OpenID, scope.AdminRead, scope.AdminWrite}
+	tests := []struct {
+		name       string
+		clientType model.ClientType
+		registered model.StringArray
+		requested  []string
+		wantErr    bool
+	}{
+		{
+			name:       "third party registered for admin",
+			clientType: model.ClientTypeThirdParty,
+			registered: adminGrant,
+			requested:  []string{scope.OpenID, scope.AdminWrite},
+		},
+		{
+			name:       "third party not registered for admin",
+			clientType: model.ClientTypeThirdParty,
+			registered: model.StringArray{scope.OpenID, scope.Profile},
+			requested:  []string{scope.OpenID, scope.AdminRead},
+			wantErr:    true,
+		},
+		{
+			name:       "third party registered for read only cannot request write",
+			clientType: model.ClientTypeThirdParty,
+			registered: model.StringArray{scope.OpenID, scope.AdminRead},
+			requested:  []string{scope.OpenID, scope.AdminWrite},
+			wantErr:    true,
+		},
+		{
+			// The whole reason the ops client is third-party rather than first-party.
+			name:       "first party may never request admin",
+			clientType: model.ClientTypeFirstParty,
+			registered: adminGrant,
+			requested:  []string{scope.OpenID, scope.AdminRead},
+			wantErr:    true,
+		},
+		{
+			name:       "first party keeps its advisory allowance for OIDC scopes",
+			clientType: model.ClientTypeFirstParty,
+			registered: model.StringArray{scope.OpenID},
+			requested:  []string{scope.OpenID, scope.Profile, scope.Email},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &model.OAuthClient{ClientType: test.clientType, Scopes: test.registered}
+			err := authorizeScopeForClient(client, test.requested)
+			if test.wantErr && err == nil {
+				t.Fatal("authorizeScopeForClient() = nil, want invalid_scope")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("authorizeScopeForClient() error = %v, want nil", err)
 			}
 		})
 	}

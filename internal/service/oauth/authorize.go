@@ -121,7 +121,7 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 
 	requested, err := parseRequestedScopes(input.Scope)
 	if err != nil {
-		return nil, redirectableError(ErrInvalidScope, "scope 无效：必须包含 openid，且仅支持 openid/profile/email", err)
+		return nil, redirectableError(ErrInvalidScope, "scope 无效：必须包含 openid，且仅支持受支持的取值", err)
 	}
 	if scopeErr := authorizeScopeForClient(client, requested); scopeErr != nil {
 		return nil, scopeErr
@@ -304,7 +304,19 @@ func parseRequestedScopes(raw string) ([]string, error) {
 // first-party client may request any supported scope, a third-party client only
 // what it registered. The returned error is redirectable, since it is reached
 // only after the client and redirect_uri are verified.
+//
+// The admin scopes are the one exception to the first-party allowance, and they
+// are checked before it. The first-party short-circuit exists because a
+// first-party client's registered scope list is advisory — it may ask for
+// anything this provider supports. That is exactly why delegated administration
+// is confined to third-party clients: ContainsAll against the registration is the
+// only mechanism that pins a client to a fixed set, so letting a first-party
+// client request admin:* would mean every first-party registration, including the
+// built-in console, could mint an administrative token.
 func authorizeScopeForClient(client *model.OAuthClient, requested []string) error {
+	if scope.ContainsAdmin(requested) && client.ClientType == model.ClientTypeFirstParty {
+		return redirectableError(ErrInvalidScope, "admin scope 不可授予第一方客户端", nil)
+	}
 	if client.ClientType == model.ClientTypeFirstParty {
 		return nil
 	}
