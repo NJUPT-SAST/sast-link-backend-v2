@@ -27,8 +27,17 @@ func (s Service) auditCreate(
 	if revokedTokens > 0 {
 		detail["revoked_tokens"] = revokedTokens
 	}
-	s.audit(ctx, input.AdminUserID, actionCreateClient, clientID, success, errCode,
-		input.ClientIP, input.UserAgent, detail)
+	s.audit(ctx, auditParams{
+		AdminUserID:   input.AdminUserID,
+		ActorClientID: input.ActorClientID,
+		Action:        actionCreateClient,
+		ResourceID:    clientID,
+		Success:       success,
+		ErrCode:       errCode,
+		ClientIP:      input.ClientIP,
+		UserAgent:     input.UserAgent,
+		Detail:        detail,
+	})
 }
 
 // auditUpdate records an update attempt, naming which fields were touched.
@@ -61,6 +70,15 @@ func (s Service) auditUpdate(
 	if revokedTokens > 0 {
 		detail["revoked_tokens"] = revokedTokens
 	}
-	s.audit(ctx, input.AdminUserID, actionUpdateClient, clientID, success, errCode,
-		input.ClientIP, input.UserAgent, detail)
+	s.audit(ctx, auditParams{
+		AdminUserID:   input.AdminUserID,
+		ActorClientID: input.ActorClientID,
+		Action:        actionUpdateClient,
+		ResourceID:    clientID,
+		Success:       success,
+		ErrCode:       errCode,
+		ClientIP:      input.ClientIP,
+		UserAgent:     input.UserAgent,
+		Detail:        detail,
+	})
 }

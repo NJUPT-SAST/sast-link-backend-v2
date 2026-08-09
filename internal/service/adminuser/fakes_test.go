@@ -170,11 +170,12 @@ func newHarness(t *testing.T) *harness {
 	devices := &fakeDeviceStore{}
 	return &harness{
 		service: Service{
-			Users:     users,
-			Audit:     auditLog,
-			Blacklist: blacklist,
-			Devices:   devices,
-			Clock:     testClock{value: testNow},
+			Users:           users,
+			Audit:           auditLog,
+			Blacklist:       blacklist,
+			Devices:         devices,
+			Clock:           testClock{value: testNow},
+			ConsoleClientID: testConsoleClientID,
 		},
 		users:     users,
 		audit:     auditLog,
@@ -182,6 +183,10 @@ func newHarness(t *testing.T) *harness {
 		devices:   devices,
 	}
 }
+
+// testConsoleClientID stands in for INTERNAL_OAUTH_CLIENT_ID: what the audit records
+// as the actor when a request carries no azp.
+const testConsoleClientID = "sast-link-web"
 
 // targetUser is the account an edit is applied to, by default an ordinary member
 // so a test that cares about the admin guards has to opt into them.

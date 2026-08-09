@@ -77,16 +77,17 @@ func userDetail(user *model.User) UserDetail {
 
 func auditLogItem(entry model.AuditLog) AuditLogItem {
 	item := AuditLogItem{
-		ID:         entry.ID,
-		UserID:     entry.UserID,
-		Action:     entry.Action,
-		Resource:   entry.Resource,
-		ResourceID: entry.ResourceID,
-		Detail:     entry.Detail,
-		ClientIP:   entry.ClientIP,
-		UserAgent:  entry.UserAgent,
-		ErrCode:    entry.ErrCode,
-		CreatedAt:  entry.CreatedAt,
+		ID:            entry.ID,
+		UserID:        entry.UserID,
+		Action:        entry.Action,
+		Resource:      entry.Resource,
+		ResourceID:    entry.ResourceID,
+		Detail:        entry.Detail,
+		ClientIP:      entry.ClientIP,
+		UserAgent:     entry.UserAgent,
+		ErrCode:       entry.ErrCode,
+		ActorClientID: entry.ActorClientID,
+		CreatedAt:     entry.CreatedAt,
 	}
 	// success is NOT NULL with a default in V001, so a null can only come from a row
 	// written before that column existed. Reporting it as false would label a

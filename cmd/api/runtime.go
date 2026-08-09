@@ -243,6 +243,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		// Pins the internal API to the built-in client, so a third-party OAuth access
 		// token cannot be used as a session credential.
 		InternalClientID: cfg.InternalOAuthClientID,
+		// The single delegate permitted on the /admin surface, and only carrying an
+		// admin scope. Every other internal route still refuses it.
+		AdminDelegatedClientID: model.AdminDelegatedClientID,
 	}
 
 	authorizeLimiter := oauthredis.EndpointLimiter{
@@ -373,6 +376,10 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		// Admin session-killing actions clear the user's device records in the
 		// same Redis store, so a demoted/closed account leaves no ghost logins.
 		Devices: sessionredis.DeviceStore{Store: store},
+		// Recorded as the audit actor when a request carries no azp. Same config value
+		// the authenticator pins to and adminclient uses as ProtectedClientID, so the
+		// three cannot name different clients for the same console.
+		ConsoleClientID: cfg.InternalOAuthClientID,
 	}
 
 	adminClientService := adminclient.Service{

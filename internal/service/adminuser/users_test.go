@@ -449,6 +449,81 @@ func TestUpdateUserAuditRecordsFieldNamesNotValues(t *testing.T) {
 	}
 }
 
+// The audit trail must say which credential acted, not just which administrator. A
+// delegated client's token and a console session name the same person, so without
+// actor_client_id the two are indistinguishable after the fact.
+func TestAuditRecordsTheActingClient(t *testing.T) {
+	const delegated = "sast-people"
+	tests := []struct {
+		name  string
+		actor string
+		want  string
+	}{
+		{name: "delegated client", actor: delegated, want: delegated},
+		// An empty azp is a console session: recorded as the built-in client explicitly,
+		// so NULL keeps meaning "no OAuth credential authorized this".
+		{name: "console session", actor: "", want: testConsoleClientID},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Both write paths: one carries a Detail map, the other does not.
+			t.Run("update", func(t *testing.T) {
+				h := newHarness(t)
+				h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+				name := "新名字"
+				_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+					input.Name = &name
+					input.ActorClientID = test.actor
+				}))
+				if err != nil {
+					t.Fatalf("UpdateUser() error = %v", err)
+				}
+				assertActor(t, h, test.want)
+			})
+			t.Run("delete", func(t *testing.T) {
+				h := newHarness(t)
+				h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+				input := targetInput()
+				input.ActorClientID = test.actor
+				if err := h.service.DeleteUser(context.Background(), input); err != nil {
+					t.Fatalf("DeleteUser() error = %v", err)
+				}
+				assertActor(t, h, test.want)
+			})
+		})
+	}
+}
+
+// With no console client configured the column stays NULL rather than being filled
+// with a guess: an audit row naming a client that never acted is worse than one
+// admitting it does not know.
+func TestAuditOmitsActorWhenConsoleClientIsUnset(t *testing.T) {
+	h := newHarness(t)
+	h.service.ConsoleClientID = ""
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+
+	if err := h.service.DeleteUser(context.Background(), targetInput()); err != nil {
+		t.Fatalf("DeleteUser() error = %v", err)
+	}
+	if len(h.audit.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(h.audit.entries))
+	}
+	if got := h.audit.entries[0].ActorClientID; got != nil {
+		t.Fatalf("actor client id = %q, want nil", *got)
+	}
+}
+
+func assertActor(t *testing.T, h *harness, want string) {
+	t.Helper()
+	if len(h.audit.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(h.audit.entries))
+	}
+	actor := h.audit.entries[0].ActorClientID
+	if actor == nil || *actor != want {
+		t.Fatalf("actor client id = %v, want %q", actor, want)
+	}
+}
+
 func TestRestoreUserReportsLiveAccount(t *testing.T) {
 	h := newHarness(t)
 	h.users.restoreErr = repository.ErrStateConflict

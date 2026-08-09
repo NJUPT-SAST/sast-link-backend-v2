@@ -40,14 +40,15 @@ func (h Handler) ListAuditLogs(c *gin.Context) {
 	}
 
 	result, err := h.AuditLogs.ListAuditLogs(c.Request.Context(), adminuser.ListAuditLogsInput{
-		Page:      page,
-		PageSize:  pageSize,
-		UserID:    userID,
-		Action:    c.Query("action"),
-		Resource:  c.Query("resource"),
-		Success:   success,
-		StartTime: startTime,
-		EndTime:   endTime,
+		Page:          page,
+		PageSize:      pageSize,
+		UserID:        userID,
+		Action:        c.Query("action"),
+		Resource:      c.Query("resource"),
+		Success:       success,
+		ActorClientID: c.Query("actor_client_id"),
+		StartTime:     startTime,
+		EndTime:       endTime,
 	})
 	if err != nil {
 		response.Error(c, mapUserServiceError(err))
