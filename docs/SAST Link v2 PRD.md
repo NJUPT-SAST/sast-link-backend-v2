@@ -281,6 +281,8 @@ Body: { "password": "current_password" }
 | ------ | ------ | ------ |
 | `/oauth/authorize` | GET | 授权端点，**无认证**。强制参数：response_type=code / client_id / redirect_uri / scope / state / code_challenge / code_challenge_method；可选：nonce（OIDC） |
 | `/oauth/authorize/consent` | POST | 授权确认端点，Bearer 认证。SAST Link 自有端点，使用标准信封 |
+| `/oauth/grants` | GET | 授权应用列表，Bearer 认证。SAST Link 自有端点，标准信封；每客户端一行，取最近一次授权 |
+| `/oauth/grants/:client_id` | DELETE | 撤销用户对某客户端的授权，Bearer 认证：撤销该 user×client 全部活跃 token（同事务 + 黑名单入队）并删除授权历史，须重新同意 |
 | `/oauth/token` | POST | Token 端点。支持 grant_type: authorization_code / refresh_token。第一方用 PKCE（无 client_secret），第三方用 client_secret_post。scope 含 openid 时额外返回 id_token |
 | `/oauth/revoke` | POST | 撤销整条 token family |
 
@@ -403,8 +405,9 @@ Payload: {
 | `/admin/users/:id/restore` | PUT | admin | 恢复已注销用户（state: is_deleted → njupter） |
 | `/admin/oauth-clients` | GET | admin | 客户端列表 |
 | `/admin/oauth-clients` | POST | admin | 注册新客户端（第三方返回 client_secret，第一方不返回） |
-| `/admin/oauth-clients/:id` | PUT | admin | 更新客户端（名称/回调地址/启用状态） |
-| `/admin/audit-logs` | GET | admin | 分页查询，支持按 user_id / action / resource / success / 时间范围 筛选 |
+| `/admin/oauth-clients/:id` | PUT | admin | 更新客户端（名称/类型/回调地址/授权模式/scope/启用状态；`client_id`/`client_secret`/`id` 不可改）。scope 等契约字段只影响之后的新授权，不回溯已签发 token |
+| `/admin/audit-logs` | GET | admin | 分页查询，支持按 user_id / action / resource / success / 时间范围 筛选；响应含 best-effort 的 `user_name` 显示名 |
+| `/admin/stats` | GET | admin | 概览统计：账户聚合（total / by_role / by_state / by_department / no_department）+ 客户端数 + 最近审计 |
 
 #### 角色权限矩阵
 
@@ -436,7 +439,7 @@ Payload: {
 
 **客户端注册**：`client_id` 由服务端生成，不接受请求指定 —— 否则可注册为内置 first-party 客户端的 ID 并绕过 §7.1 的 `azp` 隔离。`redirect_uris` 在注册阶段即校验（仅 https，http 限 loopback；禁 fragment/userinfo/相对路径/首尾空白），这是开放重定向的第一道闸门：`/oauth/authorize` 做字节精确匹配，但精确匹配无法保护一个本身就危险的注册值。
 
-**客户端停用**：`is_active` 由 `true` 改为 `false` 时，在同一事务内撤销该客户端全部 Access / Refresh Token。停用是安全动作，语义为「立即断开」而非「一小时后随 Access Token 自然过期」。`client_type`、`scopes`、`grant_types` 注册后不可修改。
+**客户端停用**：`is_active` 由 `true` 改为 `false` 时，在同一事务内撤销该客户端全部 Access / Refresh Token。停用是安全动作，语义为「立即断开」而非「一小时后随 Access Token 自然过期」。`client_type`、`scopes`、`grant_types` 注册后可通过 `PUT /admin/oauth-clients/:id` 修改（管理员操作，写入审计），但只影响之后的新授权：已签发的 token 与存量 refresh token 轮换时按原授权 scope 继承，不因注册表修改而回溯。
 
 ### 4.13 审计日志
 
@@ -452,6 +455,7 @@ Payload: {
 | `change_password` | 修改密码 |
 | `reset_password` | 重置密码 |
 | `oauth_bind` / `oauth_unbind` | 第三方账号绑定/解绑 |
+| `oauth_grant_revoke` | 用户在授权应用列表撤销某客户端授权（`resource = oauth`，`resource_id` 为客户端主键） |
 | `update_profile` | 修改个人资料 |
 | `upload_avatar` | 上传头像 |
 | `admin_action` | admin 编辑/注销/恢复用户、管理 OAuth 客户端 |
@@ -702,8 +706,8 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流，以及登录 / 登出 / 刷新审计接入（刷新以 `outcome` 区分 `rotated` 与 `refresh_replayed`，后者即重放防御触发并级联撤销整个 token family） |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
 | 用户资料管理 | 已完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、头像上传（`PUT /user/avatar`，腾讯云 COS + 内容审核，`STORAGE_*` 配置，未配置时返回 50002）。公开个人卡片 `GET /card/:id` 已下线（隐私重设计中） |
-| OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
-| 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）与审计日志查询，读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
+| OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、授权应用管理（`GET /oauth/grants` 列表 + `DELETE /oauth/grants/:client_id` 撤销：撤销该 user×client 全部活跃 token 并删除授权历史，须重新同意）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护；更新侧 `client_type` / `grant_types` / `scopes` 可改且只影响之后的新授权，不回溯已签发 token），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
+| 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）、审计日志查询（含 best-effort 的 `user_name` 显示名）与概览统计（`GET /admin/stats`：账户聚合 / 客户端数 / 最近审计），读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
 | 其余运维接入 | 已完成 — 设备管理：`GET /user/devices` + `DELETE /user/devices/:id`（Redis ZSET + Hash，device_id 复用 token family_id，最多 5 台淘汰最旧，30d TTL；登录/注册登记、刷新更新 last_seen 不续期 TTL、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备的归属校验 fail-closed；按用户限流 `RATE_LIMIT_DEVICE_*`；审计 `logout_device`）。endpoint 限流已全量接入（见 §11）。数据保留清理已接入：由 `internal/worker/retention.go` 在 API 进程内按 ticker 执行，多实例用 advisory lock 协调；不用 pg_cron（生产库未装扩展，测试镜像亦无法加载），详见 §9.1 |
 
 ## 11. 实现顺序

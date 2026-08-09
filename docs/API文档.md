@@ -1402,6 +1402,75 @@ token=rt_abc123...&token_type_hint=refresh_token&client_id=9f3a1c7d2e5b40a8c6d1f
 
 ---
 
+### 5.5 授权应用管理
+
+用户在同意页授权过的应用在本节管理。两个端点都要求 Bearer 认证，使用标准信封。
+
+```
+GET /oauth/grants
+```
+
+**Headers**: `Authorization: Bearer <access_token>`
+
+**Response** `200`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "grants": [
+      {
+        "client_id": 3,
+        "client_key": "9f3a1c7d2e5b40a8c6d1f4b7a2e9c3d5",
+        "client_name": "Evento",
+        "client_type": "third_party",
+        "redirect_uris": ["https://evento.sast.fun/oauth"],
+        "is_active": true,
+        "scopes": ["openid", "profile"],
+        "last_authorized_at": "2026-05-28T12:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+**说明**：
+
+- 返回该用户授权过的**不同应用**，每个客户端一行，取最近一次授权记录：`last_authorized_at` 是该用户对该客户端最近一次点击同意的时间，`scopes` 为那次授权的 scope
+- 客户端被停用（`is_active: false`）仍会列出——用户需要看到「我授权过但已失效」的应用，而不是凭空消失；此时该客户端的 token 已被停用事务撤销
+- `client_id` 是客户端**主键**（与客户端列表的 `id` 一致，即 `DELETE /oauth/grants/:client_id` 要用的值）；`client_key` 才是客户端对外标识（授权端点与 token 交换里的 `client_id`）
+
+```
+DELETE /oauth/grants/:client_id
+```
+
+**Headers**: `Authorization: Bearer <access_token>`
+
+**Response** `200`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "message": "已撤销该应用的授权"
+  }
+}
+```
+
+**说明**：
+
+- `:client_id` 为客户端主键（`GET /oauth/grants` 返回的 `client_id`）
+- 撤销语义是「断开该应用的访问」：先在同一事务内撤销该用户持有该客户端的全部活跃 Access / Refresh Token 并失效对应 auth-state 缓存，再删除与该客户端的授权历史。应用随即从已授权列表消失，下次使用必须重新走同意页
+- 两步各为独立事务，token 撤销在前：即使删除授权历史失败，该应用的访问已被切断（fail-closed），只是列表仍可能短暂显示它
+- 撤销一个从未授权过的客户端返回 `200`（幂等）：用户的诉求「该应用不再有我的授权」已经成立
+- 审计 action 为 `oauth_grant_revoke`（`resource = oauth`）
+
+**错误码**：`40000`（`client_id` 非正整数）、`40100`/`40101`/`40102`（未登录、token 已过期或无效）、`40301`（账号已注销，JWT 中间件即拦下）、`50000`
+
+---
+
 ## 6. 管理后台（Admin）
 
 > **实现状态**：本章全部端点已注册。
@@ -1700,7 +1769,10 @@ PUT /admin/oauth-clients/:id
 ```json
 {
   "client_name": "已更名应用",
+  "client_type": "third_party",
   "redirect_uris": ["https://new-app.example.com/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "scopes": ["openid", "profile"],
   "is_active": false
 }
 ```
@@ -1723,8 +1795,12 @@ PUT /admin/oauth-clients/:id
 
 **说明**:
 
-- 仅 `client_name`、`redirect_uris`、`is_active` 三个字段可改，均为可选；未出现的字段保持不变。
-- `client_id`、`client_type`、`scopes`、`grant_types` **不可修改**，请求中出现这些字段返回 `400`。改 `client_type` 会把机密客户端变成公开客户端（或反之），属于权限变更而非资料修改；收窄 `scopes` 应通过停用并重新注册完成。
+- 六个字段可改，均为可选；未出现的字段保持不变：`client_name`、`client_type`、`redirect_uris`、`grant_types`、`scopes`、`is_active`。
+- `client_id`、`client_secret`、`id` **不可修改**，请求中出现这些字段返回 `400`（strict decoder 拒未知字段，而非静默忽略）——标识符只能由服务端生成，管理员不能把自己的客户端注册成既有标识符。
+- `client_type` / `grant_types` / `scopes` 的更新**不触发 token 撤销**（只有 `is_active` 由 `true` 改 `false` 才会），且只影响**之后**的授权与 token 请求，不会回溯改动已签发的 token：
+  - 改 `client_type`：第三方机密客户端 ⇄ 第一方公开客户端。前者在 `/oauth/token` 需要 `client_secret`，后者走 PKCE；属权限变更，改动写入审计日志
+  - 收窄 `scopes`：`/oauth/authorize` 对 `third_party` 客户端校验「请求 scope 落在注册 scope 内」，因此收窄后新的授权请求只能请求更小集合；存量 refresh token 轮换时按原授权 scope 继承（PRD §4.10「不支持 scope 收窄」），不会因注册表收窄而缩水——要立刻收紧现有会话仍需停用客户端
+  - 改 `grant_types`：同样只约束后续授权流程，已签发的 token 不受影响
 - `redirect_uris` 的校验规则与注册时一致。
 - 停用是安全动作，语义是「立即断开」：已签发的 Access Token 立刻失效（失效 auth-state 缓存 + DB 撤销），Refresh Token 无法再续期，该客户端也无法再发起新的授权请求。
 - 重复对已停用的客户端提交 `is_active: false` 不会重复撤销。
@@ -1757,7 +1833,9 @@ GET /admin/audit-logs
 
 **说明**：时间参数必须带时区偏移（如 `2026-07-01T00:00:00Z`），不带偏移返回 `400` —— `created_at` 是 `timestamptz`，擅自按 UTC 解释会使窗口偏移数小时。`end_time` 早于 `start_time` 返回 `400`。排序为 `created_at DESC, id DESC`（`id` 用于同一时刻内的稳定分页）。
 
-管理端写操作在审计日志中的 `action` 为 `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值。
+管理端写操作在审计日志中的 `action` 为 `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值。
+
+`user_name` 是展示字段：随查询取回对应用户显示名，best-effort——用户已删除或查询失败时为 `null`，此时前端应回退显示 `user_id`。
 
 **错误码**：`40000`（参数格式非法 / 时间窗口倒置）、`40100`、`40300`。
 
@@ -1769,6 +1847,7 @@ GET /admin/audit-logs
     {
       "id": 1,
       "user_id": 1,
+      "user_name": "张三",
       "action": "login",
       "resource": "user",
       "resource_id": "1",
@@ -1785,6 +1864,55 @@ GET /admin/audit-logs
   "page_size": 50
 }
 ```
+
+---
+
+### 6.10 统计概览
+
+```
+GET /admin/stats
+```
+
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+
+控制台概览页的一次性数据源，聚合账户、客户端与最近审计三条视图。
+
+**Response** `200`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "users": {
+      "total": 1500,
+      "by_role": { "freshman": 300, "member": 900, "lecturer": 250, "admin": 50 },
+      "by_state": { "njupter": 400, "on_sast": 900, "retired_sast": 150, "is_deleted": 50 },
+      "by_department": { "software": 400, "media": 300 },
+      "no_department": 800
+    },
+    "clients": {
+      "total": 10,
+      "active": 8
+    },
+    "audit": {
+      "recent": []
+    }
+  }
+}
+```
+
+**说明**：
+
+- `users` 为账户聚合，枚举见附录 A：
+  - `total` 含已注销用户（`is_deleted`），`by_state` 中即可看出注销数
+  - `by_role` / `by_state` 按 `user` 表分组统计
+  - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
+- `clients` 含全部注册（停用的也在内）：`total` 为注册总数，`active` 为 `is_active = true` 的数量
+- `audit.recent` 为最近 5 条审计日志（与 §6.9 同一排序 `created_at DESC`），条目结构同 §6.9；该路读取失败时静默返回空列表（best-effort），不影响其余两路
+- `users` 或 `clients` 聚合失败返回 `500`，不复用缓存——概览数据即时性优先
+
+**错误码**：`40100`、`40300`、`50000`。
 
 ---
 

@@ -26,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **头像上传**（2026-08-03，[PR #34](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/34)）：`PUT /user/avatar`（≤5MB，jpg/png/webp 魔数 + 解码校验）、腾讯云 COS 存储、内容审核（fail-closed）、旧头像删除、按用户限流、审计 `upload_avatar`；`STORAGE_*` 配置；`internal/objectstore` ports + `internal/adapter/cos` 适配器。
 - **设备管理**（2026-08-04，[PR #36](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/36)）：`GET /user/devices` + `DELETE /user/devices/:id`；设备记录存 Redis，`device_id` 复用 token `family_id`——设备生命周期与会话生命周期天然同步。密码 / 注册 / GitHub / Lark 登录均登记设备，任一会话终止路径（登出、登出指定设备、淘汰、改密、重置、刷新重放 / 轮换失败 / 过期、admin 降级 / 注销）同步清记录并审计（`logout_device` / `evict_device`）。5 台上限淘汰最旧设备并**真撤销其 family**（不沦为显示约束）；过期记录刷新时复活（受上限约束）；幻影成员（Hash 丢失）不占名额；设备记录 fail-open、`DeviceOwnedBy` 归属校验 fail-closed。Lua 原子原语（ZADD + HSET + 幻影清扫 + 淘汰）实现；review 修复：淘汰撤销延迟到轮换提交后（被判定死亡的刷新不误伤健康设备）、Hash 丢失重建时 `login_time` 从 ZSET score 还原。
 - **压测工具**（perf 分支，2026-08-04）：`scripts/loadmix/`（client/mix/burst/refresh/pool/stats）与 all-in-one bench 镜像。
+- **授权应用管理**（feat/oauth-grants-admin-stats 分支，2026-08-09）：`GET /oauth/grants` + `DELETE /oauth/grants/:client_id`。用户可查看自己在同意页授权过的应用（每客户端取最近一次授权）并撤销其一：同一事务内撤销该 user×client 全部活跃 Access / Refresh Token 并失效 auth-state 缓存，再删除授权历史，应用从列表消失、下次使用必须重新同意；审计 `oauth_grant_revoke`（`resource = oauth`）。
+- **管理后台概览统计**（feat/oauth-grants-admin-stats 分支，2026-08-09）：`GET /admin/stats`，一次聚合账户（`total` / `by_role` / `by_state` / `by_department` / `no_department`）、客户端（`total` / `active`）与最近 5 条审计日志，供控制台概览页使用。
+- **审计日志显示名**（feat/oauth-grants-admin-stats 分支，2026-08-09）：`GET /admin/audit-logs` 响应新增 best-effort `user_name`（按 `user_id` 批量回查显示名，用户已删除时回退为 `null`）。
 
 ### Changed
 
@@ -44,6 +47,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **管理后台合同收紧**（2026-07-31，[PR #29](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/29)）：`page_size` 超上限直接 422 拒绝而非截断；管理端写的 `login_email` 拒绝不可见 codepoint。
 - **资料编辑与解绑**（2026-07-28，[PR #27](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/27)）：profile 用 upsert 替代读后写；JSONB 修正为 JSON 序列化（之前会 base64）；解绑 cooldown 改为按用户限流。
 - **容器以非特权用户运行**（2026-08-01，[PR #31](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/31)）。
+- **OAuth 客户端更新契约放宽**（feat/oauth-grants-admin-stats 分支，2026-08-09）：`PUT /admin/oauth-clients/:id` 现可改 `client_type` / `grant_types` / `scopes`（此前这三字段不可修改，请求即 `400`），仅 `client_id` / `client_secret` / `id` 仍不可改。此类更新不触发 token 撤销，且只影响之后的新授权——存量 refresh token 轮换时按原授权 scope 继承，收窄注册 scope 不回溯已签发 token。
 
 ### Removed
 
