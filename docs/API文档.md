@@ -1258,6 +1258,45 @@ POST /oauth/authorize/consent
 
 > `40402` 在本端点对应 HTTP `404` 而非 `401`。调用方是已登录的用户，其自身凭证没有问题，出问题的是第三方客户端；返回 `401` 会让授权页把用户推去重新登录，而重新登录无法解决客户端被停用。这也让业务码与 `{HTTP 状态}{序号}` 的编号规则保持一致。
 
+**同路径 GET：同意页元数据**
+
+```
+GET /oauth/authorize/consent?request_id=ar_3f2a1b...
+```
+
+**Headers**: `Authorization: Bearer <access_token>`
+
+同意页在渲染前调用本端点，读取**服务端校验过**的客户端元数据，而不是信任 consent URL 上可被伪造的 `client_name` / `scope` 参数——攻击者可以构造一条指向同意页的链接：带自己发起的合法 `request_id`，却伪造一个可信应用名，受害者看到的是 SAST、点「同意」实际授权给恶意应用。展示值必须来自本端点。
+
+**Response** `200`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "client_name": "Evento",
+    "scopes": ["openid", "profile"],
+    "expires_in": 600
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `client_name` | 应用名，取自暂存（authorize 时从已验证客户端记录写入），URL 无法覆盖 |
+| `scopes` | 该授权请求申请的 scope，同样来自暂存 |
+| `expires_in` | 暂存剩余秒数，供页面显示截止时间并阻止超时后提交 |
+
+**说明**：
+
+- **peek 不消费**：读取暂存但不用 GetDel，查看页面不烧掉请求，用户随后仍可正常提交 `POST /oauth/authorize/consent`
+- `request_id` 为 128-bit 随机值，不可枚举
+- 本端点按**用户**限流（`RATE_LIMIT_CONSENT_INFO_RPM`，默认 60/min），而非 IP——校园 egress 共享一个 NAT IP，按 IP 限流会被单个学生耗尽全校配额；认证用户随机打 `request_id` 刷 Redis GET 有上限
+- 暂存不存在或已过期返回 `40000`；Redis 暂存不可读返回 `50300`（fail-closed，同 POST）
+
+**错误码**: `40000`（`request_id` 缺失 / 无效或已过期）、`40100`/`40101`/`40102`、`40301`（账号已注销）、`42900`（请求过于频繁，按用户限流）、`50300`、`50000`
+
 ---
 
 ### 5.3 Token 端点

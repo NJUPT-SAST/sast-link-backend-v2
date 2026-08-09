@@ -1391,6 +1391,91 @@ paths:
                 format: uri
       security: []
   /oauth/authorize/consent:
+    get:
+      summary: 同意页元数据
+      deprecated: false
+      description: |
+        返回 pending 授权请求的、服务端校验过的客户端元数据，供同意页渲染。
+        SAST Link 自有端点，使用标准信封。
+
+        同意页不应信任 consent URL 上的 client_name / scope —— 攻击者可构造
+        指向同意页的链接，带自己的合法 request_id 却伪造可信应用名，诱导受害者
+        同意给恶意应用 —— 应改从本端点读取。peek 不消费暂存，查看页面不烧请求。
+
+        本端点按用户限流（RATE_LIMIT_CONSENT_INFO_RPM，默认 60/min），而非 IP：
+        校园共享一个 NAT 出口 IP，按 IP 限流会被单个学生耗尽全校配额。
+      operationId: oauthAuthorizeConsentInfo
+      tags:
+        - OAuth 2.1 Server
+      parameters:
+        - name: request_id
+          in: query
+          description: GET /oauth/authorize 重定向携带的暂存标识
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 服务端校验过的客户端元数据
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          client_name:
+                            type: string
+                            description: 应用名（来自暂存，URL 无法覆盖）
+                          scopes:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/OAuthScope"
+                            description: 该授权请求申请的 scope
+                          expires_in:
+                            type: integer
+                            description: 暂存剩余秒数
+          headers: {}
+        "400":
+          description: request_id 缺失、无效或已过期
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "401":
+          description: 未登录或 Access Token 无效
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "403":
+          description: 账号已注销
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "429":
+          description: 请求过于频繁（按用户限流）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "503":
+          description: Redis 暂存不可读（fail-closed）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security:
+        - bearerAuth: []
     post:
       summary: 授权确认
       deprecated: false

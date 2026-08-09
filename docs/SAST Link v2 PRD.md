@@ -281,6 +281,7 @@ Body: { "password": "current_password" }
 | ------ | ------ | ------ |
 | `/oauth/authorize` | GET | 授权端点，**无认证**。强制参数：response_type=code / client_id / redirect_uri / scope / state / code_challenge / code_challenge_method；可选：nonce（OIDC） |
 | `/oauth/authorize/consent` | POST | 授权确认端点，Bearer 认证。SAST Link 自有端点，使用标准信封 |
+| `/oauth/authorize/consent` | GET | 同意页元数据，Bearer 认证。peek 暂存（不消费）返回已验证 `client_name` / `scopes` / `expires_in`——同意页展示值取自本端点而非可伪造的 consent URL 参数 |
 | `/oauth/grants` | GET | 授权应用列表，Bearer 认证。SAST Link 自有端点，标准信封；每客户端一行，取最近一次授权 |
 | `/oauth/grants/:client_id` | DELETE | 撤销用户对某客户端的授权，Bearer 认证：撤销该 user×client 全部活跃 token（同事务 + 黑名单入队）并删除授权历史，须重新同意 |
 | `/oauth/token` | POST | Token 端点。支持 grant_type: authorization_code / refresh_token。第一方用 PKCE（无 client_secret），第三方用 client_secret_post。scope 含 openid 时额外返回 id_token |
@@ -315,6 +316,7 @@ POST /oauth/authorize/consent  → Bearer 认证 → GetDel 消费暂存 → 建
 - 授权码过期不触发级联撤销：过期的 code 从未被兑换，没有需要惩罚的 family
 - `client_secret` 以 SHA-256 存储（非 argon2id）。client_secret 是 32 字节 crypto/rand 高熵值，不存在字典攻击面；而 argon2id（默认 m=19456KiB/t=2）的派生成本会让 token 端点成为 CPU 瓶颈。这与 API key 存 SHA-256 是同一论证
 - `GET /oauth/authorize` 按调用方 IP 限流（默认 100 次/60s）：该端点无认证且每次调用写一个 Redis 暂存键
+- `GET /oauth/authorize/consent`（同意页元数据）按**用户**限流（默认 60 次/60s）而非 IP：该端点已认证，而校园 egress 共享一个 NAT IP，按 IP 限流会被单个学生耗尽全校配额；认证用户随机打 `request_id` 刷 Redis GET 有上限
 - **不支持 scope 收窄**（已知偏差）。RFC 6749 §6 允许 refresh 时请求更小的 scope，但仓储层要求轮换后的 token pair 携带与当前完全一致的 scope。客户端如需更小的 scope 须重新授权
 
 #### 错误重定向规则
@@ -534,7 +536,8 @@ is_deleted ──(恢复)──► njupter
 | 登录失败 | `sastlink:auth:login_failure:{email}` | 15min | String（INCR 计数器） | 连续失败 ≥ 10 次锁定，成功登录后 DEL 清零 |
 | Register-Ticket | `sastlink:auth:register_ticket:{ticket}` | 5min | String（GET 校验 → 建号成功后 DEL） | 注册两步间暂存已验证邮箱。并发由 `login_email` UNIQUE 约束串行化，ticket 不承担选主职责，故保留到建号成功，竞态失败者可重试 |
 | Bind-Ticket | `sastlink:auth:bind_ticket:{ticket}` | 5min | String（GET 校验 → 验证码通过后 DEL） | 绑定邮箱两步间暂存待绑定邮箱 + user_id。不在校验前消费，否则验证码填错会连 ticket 一起作废 |
-| 授权请求暂存 | `sastlink:oauth:authorize_request:{request_id}` | 10min | String（SET NX 写入，GetDel 消费，JSON 值） | 两段式授权流程（§4.10）在 `GET /oauth/authorize` 与 `POST /oauth/authorize/consent` 之间暂存已校验的请求参数：`{client_id, redirect_uri, scopes, state, code_challenge, code_challenge_method, nonce}`。GetDel 保证一个 `request_id` 最多产出一个授权码；写入用 SET NX 而非覆盖，使一个 ID 只能绑定一组授权参数 |
+| 授权请求暂存 | `sastlink:oauth:authorize_request:{request_id}` | 10min | String（SET NX 写入，GetDel 消费，JSON 值） | 两段式授权流程（§4.10）在 `GET /oauth/authorize` 与 `POST /oauth/authorize/consent` 之间暂存已校验的请求参数：`{client_id, client_name, redirect_uri, scopes, state, code_challenge, code_challenge_method, nonce}`。`client_name` 在 authorize 时从已验证客户端记录写入，供同意页经 GET 端点读取，URL 无法覆盖。GetDel 保证一个 `request_id` 最多产出一个授权码；写入用 SET NX 而非覆盖，使一个 ID 只能绑定一组授权参数。GET 端点以 PEEK（GET + PTTL）读取展示信息，不消费 |
+| 同意页元数据限流 | `sastlink:ratelimit:user:{user_id}:consent_info` | 60s | String（INCR 计数器 + EXPIRE） | `GET /oauth/authorize/consent` 按用户限流（默认 60 次/60s）。键按 `user_id` 而非 IP：校园共享一个 NAT 出口 IP，按 IP 限流会被单个学生耗尽全校配额 |
 
 ### 6.0 Redis 不可用时的降级策略
 
@@ -706,7 +709,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流，以及登录 / 登出 / 刷新审计接入（刷新以 `outcome` 区分 `rotated` 与 `refresh_replayed`，后者即重放防御触发并级联撤销整个 token family） |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
 | 用户资料管理 | 已完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、头像上传（`PUT /user/avatar`，腾讯云 COS + 内容审核，`STORAGE_*` 配置，未配置时返回 50002）。公开个人卡片 `GET /card/:id` 已下线（隐私重设计中） |
-| OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、授权应用管理（`GET /oauth/grants` 列表 + `DELETE /oauth/grants/:client_id` 撤销：撤销该 user×client 全部活跃 token 并删除授权历史，须重新同意）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护；更新侧 `client_type` / `grant_types` / `scopes` 可改且只影响之后的新授权，不回溯已签发 token），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
+| OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、同意页元数据（`GET /oauth/authorize/consent`，peek 暂存返回已验证 client_name / scopes / expires_in，防 consent URL 伪造应用名，按用户限流）、授权应用管理（`GET /oauth/grants` 列表 + `DELETE /oauth/grants/:client_id` 撤销：撤销该 user×client 全部活跃 token 并删除授权历史，须重新同意）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护；更新侧 `client_type` / `grant_types` / `scopes` 可改且只影响之后的新授权，不回溯已签发 token），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
 | 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）、审计日志查询（含 best-effort 的 `user_name` 显示名）与概览统计（`GET /admin/stats`：账户聚合 / 客户端数 / 最近审计），读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
 | 其余运维接入 | 已完成 — 设备管理：`GET /user/devices` + `DELETE /user/devices/:id`（Redis ZSET + Hash，device_id 复用 token family_id，最多 5 台淘汰最旧，30d TTL；登录/注册登记、刷新更新 last_seen 不续期 TTL、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备的归属校验 fail-closed；按用户限流 `RATE_LIMIT_DEVICE_*`；审计 `logout_device`）。endpoint 限流已全量接入（见 §11）。数据保留清理已接入：由 `internal/worker/retention.go` 在 API 进程内按 ticker 执行，多实例用 advisory lock 协调；不用 pg_cron（生产库未装扩展，测试镜像亦无法加载），详见 §9.1 |
 

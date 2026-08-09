@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **设备管理**（2026-08-04，[PR #36](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/36)）：`GET /user/devices` + `DELETE /user/devices/:id`；设备记录存 Redis，`device_id` 复用 token `family_id`——设备生命周期与会话生命周期天然同步。密码 / 注册 / GitHub / Lark 登录均登记设备，任一会话终止路径（登出、登出指定设备、淘汰、改密、重置、刷新重放 / 轮换失败 / 过期、admin 降级 / 注销）同步清记录并审计（`logout_device` / `evict_device`）。5 台上限淘汰最旧设备并**真撤销其 family**（不沦为显示约束）；过期记录刷新时复活（受上限约束）；幻影成员（Hash 丢失）不占名额；设备记录 fail-open、`DeviceOwnedBy` 归属校验 fail-closed。Lua 原子原语（ZADD + HSET + 幻影清扫 + 淘汰）实现；review 修复：淘汰撤销延迟到轮换提交后（被判定死亡的刷新不误伤健康设备）、Hash 丢失重建时 `login_time` 从 ZSET score 还原。
 - **压测工具**（perf 分支，2026-08-04）：`scripts/loadmix/`（client/mix/burst/refresh/pool/stats）与 all-in-one bench 镜像。
 - **授权应用管理**（feat/oauth-grants-admin-stats 分支，2026-08-09）：`GET /oauth/grants` + `DELETE /oauth/grants/:client_id`。用户可查看自己在同意页授权过的应用（每客户端取最近一次授权）并撤销其一：同一事务内撤销该 user×client 全部活跃 Access / Refresh Token 并失效 auth-state 缓存，再删除授权历史，应用从列表消失、下次使用必须重新同意；审计 `oauth_grant_revoke`（`resource = oauth`）。
+- **同意页元数据**（feat/oauth-grants-admin-stats 分支，2026-08-09）：`GET /oauth/authorize/consent`。peek 暂存（GET + PTTL，不消费）返回服务端校验过的 `client_name` / `scopes` / `expires_in`，同意页展示值取自本端点而非可伪造的 consent URL 参数。按用户限流（`RATE_LIMIT_CONSENT_INFO_RPM`，默认 60/min），不用 IP——校园共享一个 NAT 出口 IP。
 - **管理后台概览统计**（feat/oauth-grants-admin-stats 分支，2026-08-09）：`GET /admin/stats`，一次聚合账户（`total` / `by_role` / `by_state` / `by_department` / `no_department`）、客户端（`total` / `active`）与最近 5 条审计日志，供控制台概览页使用。
 - **审计日志显示名**（feat/oauth-grants-admin-stats 分支，2026-08-09）：`GET /admin/audit-logs` 响应新增 best-effort `user_name`（按 `user_id` 批量回查显示名，用户已删除时回退为 `null`）。
 
@@ -70,3 +71,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - 忘记密码统一成功响应，不暴露账号存在性（2026-07-28，[PR #26](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/26)）。
 - 第三方回调重定向按精确匹配白名单校验（2026-07-31，[PR #30](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/30)）。
 - provider endpoint URL 常量标 `#nosec G101`（2026-08-03，[PR #35](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/35)）。
+- 同意页防伪造应用名（feat/oauth-grants-admin-stats 分支，2026-08-09）：consent URL 上的 `client_name` / `scope` 可被伪造——攻击者可构造带自己合法 `request_id`、却显示可信应用名的同意页链接，诱导受害者授权给恶意应用。新增 `GET /oauth/authorize/consent` 从暂存返回服务端校验过的元数据，同意页改从该端点渲染，不再信任 URL 值。
