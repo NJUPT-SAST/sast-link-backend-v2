@@ -92,6 +92,18 @@ func (s Service) buildClient(input CreateClientInput) (*model.OAuthClient, strin
 	if err != nil {
 		return nil, "", newError(ErrInvalidInput, "scopes 非法，必须包含 openid 且仅含受支持的值", err)
 	}
+	// The delegated-administration scopes are not registrable here, at all. They are
+	// carried by exactly one client, seeded by migration with a fixed client_id, so
+	// there is deliberately no console path that produces an admin-scoped
+	// registration — not an allow-list, not a named exception, none.
+	//
+	// This matters because scope.Normalize accepts them: it is the shared "is this set
+	// well-formed" predicate, and the authorize endpoint needs it to accept admin
+	// scopes for the one client that legitimately holds them. Without this check, the
+	// console would be a self-service path to an administrative credential.
+	if scope.ContainsAdmin(scopes) {
+		return nil, "", newError(ErrInvalidInput, "admin scope 不可通过控制台注册", nil)
+	}
 	clientID, err := s.newClientID()
 	if err != nil {
 		return nil, "", newError(ErrInternal, "生成 client_id 失败", err)
@@ -200,6 +212,15 @@ func (s Service) updateFields(input UpdateClientInput) (map[string]any, error) {
 		scopes, err := scope.Normalize(*input.Scope)
 		if err != nil {
 			return nil, newError(ErrInvalidInput, "scopes 非法，必须包含 openid 且仅含受支持的值", err)
+		}
+		// The same refusal as registration, for the same reason: scope.Normalize accepts
+		// the admin scopes because /oauth/authorize must accept them for the one seeded
+		// client that holds them. Without this check, updating a registration would be
+		// the self-service path to an administrative credential that buildClient
+		// deliberately denies — grant admin:write to any existing third_party client and
+		// its tokens reach /admin on the authorizing administrator's behalf.
+		if scope.ContainsAdmin(scopes) {
+			return nil, newError(ErrInvalidInput, "admin scope 不可通过控制台授予", nil)
 		}
 		fields["scopes"] = model.StringArray(scopes)
 	}

@@ -28,7 +28,7 @@ type Service interface {
 	// Grants lists the applications a user has authorized; RevokeGrant removes
 	// one application's access (every token with that client is revoked).
 	Grants(ctx context.Context, userID int64) ([]repository.OAuthGrant, error)
-	RevokeGrant(ctx context.Context, userID, clientID int64) error
+	RevokeGrant(ctx context.Context, userID, clientID int64, actorClientID string) error
 }
 
 // Authenticator validates bearer tokens for the OAuth-facing endpoints.

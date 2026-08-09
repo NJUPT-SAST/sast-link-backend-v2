@@ -11,6 +11,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 // A confidential client's secret is returned once in plaintext and stored only as a
@@ -35,6 +36,45 @@ func TestCreateClientIssuesVerifiableSecretForThirdParty(t *testing.T) {
 	}
 	if err := auth.VerifyClientSecret(result.ClientSecret, *h.clients.created.ClientSecretHash); err != nil {
 		t.Fatalf("VerifyClientSecret(returned, stored) error = %v; the issued secret would not authenticate", err)
+	}
+}
+
+// The console must not be a self-service path to an administrative credential.
+// scope.Normalize accepts the admin scopes — the authorize endpoint needs it to, for
+// the one seeded client that holds them — so registration has to refuse them on its
+// own, for every client type and in every combination.
+func TestCreateClientRefusesAdminScopes(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		clientType string
+		scopes     []string
+	}{
+		{name: "third party read", clientType: "third_party", scopes: []string{"openid", scope.AdminRead}},
+		{name: "third party write", clientType: "third_party", scopes: []string{"openid", scope.AdminWrite}},
+		{name: "third party both", clientType: "third_party", scopes: []string{"openid", scope.AdminRead, scope.AdminWrite}},
+		{name: "first party write", clientType: "first_party", scopes: []string{"openid", scope.AdminWrite}},
+		{
+			name: "alongside OIDC scopes", clientType: "third_party",
+			scopes: []string{"openid", "profile", "email", scope.AdminRead},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			h := newHarness(t)
+			input := validCreateInput()
+			input.ClientType = testCase.clientType
+			input.Scopes = testCase.scopes
+
+			_, err := h.service.CreateClient(context.Background(), input)
+			if err == nil {
+				t.Fatal("CreateClient() accepted an admin scope")
+			}
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("CreateClient() error = %v, want ErrInvalidInput", err)
+			}
+			if h.clients.created != nil {
+				t.Fatalf("a client was persisted despite the rejection: %#v", h.clients.created)
+			}
+		})
 	}
 }
 
@@ -197,6 +237,122 @@ func TestUpdateClientGuardIsScopedToTheBuiltinClient(t *testing.T) {
 		ClientPK: 1, ClientName: &name, AdminUserID: 99,
 	}); err != nil {
 		t.Fatalf("renaming the built-in client failed: %v", err)
+	}
+}
+
+// Registry changes are audited with the acting credential too, so a client created
+// by the ops tool is distinguishable from one an administrator registered by hand.
+func TestClientAuditRecordsTheActingClient(t *testing.T) {
+	const delegated = "sast-people"
+	for _, test := range []struct {
+		name  string
+		actor string
+		want  string
+	}{
+		{name: "delegated client", actor: delegated, want: delegated},
+		// An empty azp is the console; ProtectedClientID doubles as its identity.
+		{name: "console session", actor: "", want: testProtectedClientID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			input := validCreateInput()
+			input.ActorClientID = test.actor
+
+			if _, err := h.service.CreateClient(context.Background(), input); err != nil {
+				t.Fatalf("CreateClient() error = %v", err)
+			}
+			if len(h.audit.entries) != 1 {
+				t.Fatalf("audit entries = %d, want 1", len(h.audit.entries))
+			}
+			actor := h.audit.entries[0].ActorClientID
+			if actor == nil || *actor != test.want {
+				t.Fatalf("actor client id = %v, want %q", actor, test.want)
+			}
+		})
+	}
+}
+
+// Registration refuses admin scopes; so must the update path. They are the same
+// door, and `scopes` became editable after the admin-scope guard was written — an
+// administrator who could grant admin:write to any existing third_party client would
+// have the self-service route to an administrative credential that
+// TestCreateClientRefusesAdminScopes exists to deny. The delegated client's own
+// scopes come from the migration, never from this endpoint.
+func TestUpdateClientRefusesAdminScopes(t *testing.T) {
+	for _, scopes := range [][]string{
+		{"openid", scope.AdminRead},
+		{"openid", scope.AdminWrite},
+		{"openid", "profile", scope.AdminRead, scope.AdminWrite},
+	} {
+		t.Run(strings.Join(scopes, "+"), func(t *testing.T) {
+			h := newHarness(t)
+			h.clients.findResult = activeClient(5)
+
+			_, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+				ClientPK: 5, Scope: &scopes, AdminUserID: 99,
+			})
+			if err == nil {
+				t.Fatal("UpdateClient() accepted an admin scope")
+			}
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("UpdateClient() error = %v, want ErrInvalidInput", err)
+			}
+			if h.clients.updateFields != nil {
+				t.Fatalf("fields were written despite the rejection: %#v", h.clients.updateFields)
+			}
+		})
+	}
+}
+
+// delegatedClient is the seeded ops registration, whose authorization codes carry
+// admin scopes.
+func delegatedClient(id int64) *model.OAuthClient {
+	client := activeClient(id)
+	client.ClientID = model.AdminDelegatedClientID
+	client.Scopes = model.StringArray{"openid", scope.AdminRead, scope.AdminWrite}
+	return client
+}
+
+// The delegated client's redirect_uris are as sensitive as the built-in client's: an
+// administrative authorization code sent to an operator-chosen host is the whole
+// grant, handed over.
+func TestUpdateClientRefusesRewritingDelegatedRedirectURIs(t *testing.T) {
+	h := newHarness(t)
+	h.clients.findResult = delegatedClient(7)
+
+	_, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK:     7,
+		RedirectURIs: &[]string{"https://attacker.test/cb"},
+		AdminUserID:  99,
+	})
+
+	assertKind(t, err, KindProtected)
+	if h.clients.updateCalls != 0 {
+		t.Fatalf("update reached the repository %d times, want 0", h.clients.updateCalls)
+	}
+}
+
+// Disabling it, unlike the built-in client, must work: it is the kill switch for
+// delegated administration, and nothing about running this service depends on the
+// ops tool. Renaming stays cosmetic and allowed.
+func TestUpdateClientAllowsDisablingAndRenamingDelegatedClient(t *testing.T) {
+	h := newHarness(t)
+	h.clients.findResult = delegatedClient(7)
+	disabled := false
+
+	if _, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 7, IsActive: &disabled, AdminUserID: 99,
+	}); err != nil {
+		t.Fatalf("disabling the delegated client failed: %v", err)
+	}
+
+	renamed := newHarness(t)
+	renamed.clients.findResult = delegatedClient(7)
+	name := "SAST People (ops)"
+	if _, err := renamed.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 7, ClientName: &name, AdminUserID: 99,
+	}); err != nil {
+		t.Fatalf("renaming the delegated client failed: %v", err)
 	}
 }
 
