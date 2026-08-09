@@ -23,10 +23,14 @@ func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoRe
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "Access Token 无效", nil)
 	}
-	granted, err := scope.Normalize(input.Scopes)
+	normalized, err := scope.Normalize(input.Scopes)
 	if err != nil {
 		return nil, newError(ErrInvalidToken, "Access Token 的 scope 无效", err)
 	}
+	// Admin scopes grant no claim. Dropping them here keeps this endpoint's answer
+	// identical for "openid" and "openid admin:read": sub alone. Rejecting the
+	// latter would break OIDC for a token this service legitimately issued.
+	granted := scope.ClaimScopes(normalized)
 
 	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {

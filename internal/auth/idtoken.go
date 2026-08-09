@@ -76,10 +76,15 @@ type IDTokenInput struct {
 // access-token path would either break the middleware's audience check or ship
 // ID Tokens that this service would accept as its own bearer credentials.
 func (m JWTManager) SignIDToken(input IDTokenInput) (string, error) {
-	granted, err := scope.Normalize(input.Scopes)
+	normalized, err := scope.Normalize(input.Scopes)
 	if err != nil {
 		return "", ErrInvalidInput
 	}
+	// Admin scopes carry no claim, so they are dropped before the mapping rather
+	// than left for applyIDTokenScopeClaims to skip by omission. Filtering here
+	// makes "this scope contributes nothing" an explicit decision instead of a
+	// property of which cases the switch below happens to list.
+	granted := scope.ClaimScopes(normalized)
 	if m.Issuer == "" || strings.TrimSpace(input.Subject) == "" ||
 		strings.TrimSpace(input.ClientID) == "" || input.TTL <= 0 ||
 		m.Active.KID == "" || m.Active.Private == nil {
