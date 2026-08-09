@@ -33,6 +33,8 @@ type fakeUsers struct {
 	deleteInput  adminuser.TargetUserInput
 	restoreErr   error
 	restoreInput adminuser.TargetUserInput
+	statsResult  repository.UserStats
+	statsErr     error
 }
 
 func (f *fakeUsers) ListUsers(
@@ -86,7 +88,10 @@ func (f *fakeUsers) RestoreUser(_ context.Context, input adminuser.TargetUserInp
 }
 
 func (f *fakeUsers) Stats(_ context.Context) (repository.UserStats, error) {
-	return repository.UserStats{}, nil
+	if f.statsErr != nil {
+		return repository.UserStats{}, f.statsErr
+	}
+	return f.statsResult, nil
 }
 
 type fakeAuditLogs struct {

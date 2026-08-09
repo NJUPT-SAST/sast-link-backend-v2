@@ -154,8 +154,8 @@ func decodeStrictJSON(c *gin.Context, destination any) error {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBodyBytes)
 	decoder := json.NewDecoder(c.Request.Body)
 	// Unknown fields are rejected, which is what makes the immutable properties safe:
-	// a request trying to change client_type or scopes is refused outright instead of
-	// having those fields quietly ignored.
+	// a request trying to change client_id / client_secret / client_type / id is
+	// refused outright instead of having those fields quietly ignored.
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err

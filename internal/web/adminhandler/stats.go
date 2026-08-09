@@ -16,13 +16,17 @@ type statsClientSummary struct {
 }
 
 // Stats returns the account, client and audit aggregates for the console
-// overview dashboard. Composes the three read services; a nil dependency is
-// tolerated so the endpoint degrades gracefully rather than 500ing.
+// overview dashboard. Users is the authoritative leg and must be wired; Clients
+// and AuditLogs are optional and degrade to zeroed aggregates when nil, so the
+// endpoint stays up rather than 500ing over a best-effort view.
 func (h Handler) Stats(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	users, err := h.Users.Stats(ctx)
 	if err != nil {
+		// The 500 carries no cause, so the reason must land in the logs here or it
+		// is gone entirely — the same discipline the audit path below follows.
+		slog.ErrorContext(ctx, "load overview user stats", "error", err)
 		response.Error(c, internalError())
 		return
 	}
@@ -31,6 +35,7 @@ func (h Handler) Stats(c *gin.Context) {
 	if h.Clients != nil {
 		list, err := h.Clients.ListClients(ctx)
 		if err != nil {
+			slog.ErrorContext(ctx, "load overview client stats", "error", err)
 			response.Error(c, internalError())
 			return
 		}

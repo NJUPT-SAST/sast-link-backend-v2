@@ -2,6 +2,7 @@ package adminuser
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -61,6 +62,11 @@ func (s Service) ListAuditLogs(ctx context.Context, input ListAuditLogsInput) (*
 					items[i].UserName = &value
 				}
 			}
+		} else {
+			// Best-effort must not be silent: without this log an operator cannot tell a
+			// genuinely missing user (null name, intended) from a broken lookup.
+			slog.WarnContext(ctx, "attach audit user display names",
+				"count", len(ids), "error", err)
 		}
 	}
 	return &ListAuditLogsResult{Logs: items, Total: total, Page: page, PageSize: pageSize}, nil
