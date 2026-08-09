@@ -348,11 +348,13 @@ func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 	// Fail-open: the pair is already committed, and a store outage must not
 	// break the login that just succeeded.
 	if s.Devices != nil {
-		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.Refresh.FamilyID, input.UserAgent, input.ClientIP, s.Clock.Now())
+		// s.now(), not s.Clock.Now(): Clock is not wired in production, and
+		// s.now() falls back to the system clock instead of dereferencing nil.
+		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.Refresh.FamilyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}
-		s.revokeEvictedDevice(ctx, user.ID, evicted, s.Clock.Now(), input.ClientIP, input.UserAgent)
+		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	}
 	return &ExchangeCodeResult{
 		AccessToken:      pair.AccessToken,

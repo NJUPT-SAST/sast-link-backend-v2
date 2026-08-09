@@ -368,6 +368,30 @@ func TestExchangeCodeRegistersDevice(t *testing.T) {
 	}
 }
 
+// The production composition root (cmd/api/runtime.go) wires oauthlogin without a
+// Clock, so device registration must fall back to the system clock via now()
+// instead of dereferencing the nil interface — that combination previously
+// panicked on every third-party login.
+func TestExchangeCodeRegistersDeviceWithoutClock(t *testing.T) {
+	service, doubles := newTestService(t)
+	service.Clock = nil // production leaves Clock unset
+	devices := &fakeDeviceStore{}
+	service.Devices = devices
+	doubles.Users.byID[42] = activeUser(42)
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+		t.Fatalf("seed login code: %v", err)
+	}
+
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{
+		Code: "lc_abc", ClientIP: "10.0.0.7", UserAgent: "browser/7",
+	}); err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	if len(devices.registrations) != 1 {
+		t.Fatalf("registrations = %#v, want exactly one with Clock unset", devices.registrations)
+	}
+}
+
 // Registering a third-party session can displace the oldest device past the
 // per-user cap, and the displaced family must be revoked exactly like a
 // password-login eviction — otherwise the cap is a display constraint again.
