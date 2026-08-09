@@ -12,25 +12,8 @@ func testVerificationData() verificationEmailData {
 		Title:      "绑定邮箱验证码",
 		Action:     "绑定此邮箱到 SAST Link 账号",
 		Code:       "377769",
-		Digits:     splitDigits("377769"),
 		TTLMinutes: 5,
 		Year:       2026,
-	}
-}
-
-func TestSplitDigits(t *testing.T) {
-	digits := splitDigits("377769")
-	want := []string{"3", "7", "7", "7", "6", "9"}
-	if len(digits) != len(want) {
-		t.Fatalf("len(digits)=%d, want %d", len(digits), len(want))
-	}
-	for i := range want {
-		if digits[i] != want[i] {
-			t.Errorf("digits[%d]=%q, want %q", i, digits[i], want[i])
-		}
-	}
-	if got := splitDigits(""); len(got) != 0 {
-		t.Errorf("splitDigits(\"\") has %d digits, want 0", len(got))
 	}
 }
 
@@ -53,21 +36,25 @@ func TestRenderVerificationHTML(t *testing.T) {
 		"你正在绑定此邮箱到 SAST Link 账号", // action sentence
 		"验证码在 5 分钟内有效",
 		"© 2026 NJUPT SAST",
-		"https://sast.fun/share/logos/logo-black.png",
-		"#f5f0e8", // digit box background
-		"#5e3d27", // digit color
-		"#f3f1ec", // canvas background
+		"https://link.sast.fun/icon.svg",
+		"#fafafa",          // --background (light)
+		"#0a0a0a",          // --foreground (light)
+		"#060606",          // --background (dark)
+		"rgba(0,0,0,0.05)", // code box background
+		"prefers-color-scheme: dark",
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("rendered html missing %q", want)
 		}
 	}
-	if got := strings.Count(html, `class="digit"`); got != 6 {
-		t.Errorf("digit cells=%d, want 6", got)
+	// The code is one contiguous text node (letter-spacing is visual only), so
+	// copying it yields "377769", not "3 7 7 7 6 9". Assert it appears whole
+	// and that the old per-digit box cells are gone.
+	if !strings.Contains(html, ">377769</td>") {
+		t.Errorf("rendered html: verification code is not a single text node")
 	}
-	// 5 gap cells between 6 digits
-	if got := strings.Count(html, `class="gap"`); got != 5 {
-		t.Errorf("gap cells=%d, want 5", got)
+	if strings.Contains(html, `class="digit"`) || strings.Contains(html, `class="gap"`) {
+		t.Errorf("rendered html still contains per-digit box/gap cells")
 	}
 
 	// Local visual check: MAIL_PREVIEW_OUT=/tmp/mail.html go test ./internal/mailer/

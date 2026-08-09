@@ -75,7 +75,6 @@ func (m *Mailer) SendVerificationCode(ctx context.Context, to, code string, purp
 		Title:      title,
 		Action:     action,
 		Code:       code,
-		Digits:     splitDigits(code),
 		TTLMinutes: 5,
 		Year:       time.Now().Year(),
 	}
