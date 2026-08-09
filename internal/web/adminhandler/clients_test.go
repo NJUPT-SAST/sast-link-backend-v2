@@ -225,15 +225,14 @@ func TestCreateClientRejectsCallerSuppliedIdentityFields(t *testing.T) {
 	}
 }
 
-// The immutable properties have no field on the update request, so an attempt to
-// change one is a 400 rather than a silently ignored edit. client_type is the
-// dangerous one: flipping it would turn a confidential client public.
-func TestUpdateClientRejectsImmutableFields(t *testing.T) {
+// client_id / client_secret / id have no field on the update request, so an
+// attempt to send one is a 400 from the strict decoder rather than a silently
+// ignored edit: choosing your own identifier is refused, never dropped.
+func TestUpdateClientRejectsCallerSuppliedIdentityFields(t *testing.T) {
 	for _, body := range []string{
-		`{"client_type":"first_party"}`,
-		`{"scopes":["openid","profile","email"]}`,
-		`{"grant_types":["authorization_code","refresh_token"]}`,
 		`{"client_id":"sast-link-web"}`,
+		`{"client_secret":"chosen"}`,
+		`{"id":5}`,
 	} {
 		service := &fakeClients{}
 		router := newRouter(t, service)
@@ -245,6 +244,29 @@ func TestUpdateClientRejectsImmutableFields(t *testing.T) {
 		if service.updateCalls != 0 {
 			t.Fatalf("the service was reached for %s", body)
 		}
+	}
+}
+
+// The consent-relevant contract fields are editable now: client_type, grant_types
+// and scopes. Validation happens in the service; here the handler must forward the
+// submitted pointers untouched.
+func TestUpdateClientForwardsEditableContractFields(t *testing.T) {
+	service := &fakeClients{}
+	router := newRouter(t, service)
+
+	recorder := doRequest(t, router, http.MethodPut, "/admin/oauth-clients/5", "application/json",
+		`{"client_type":"third_party","grant_types":["authorization_code","refresh_token"],"scopes":["openid","profile"]}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if service.updateInput.ClientType == nil || *service.updateInput.ClientType != "third_party" {
+		t.Fatalf("ClientType = %v, want third_party", service.updateInput.ClientType)
+	}
+	if service.updateInput.GrantTypes == nil || len(*service.updateInput.GrantTypes) != 2 {
+		t.Fatalf("GrantTypes = %v, want two entries", service.updateInput.GrantTypes)
+	}
+	if service.updateInput.Scope == nil || len(*service.updateInput.Scope) != 2 {
+		t.Fatalf("Scope = %v, want two entries", service.updateInput.Scope)
 	}
 }
 

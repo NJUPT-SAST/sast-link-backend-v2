@@ -39,8 +39,27 @@ func (s Service) ListAuditLogs(ctx context.Context, input ListAuditLogsInput) (*
 		return nil, internalError(ctx, "list admin audit logs", "查询审计日志失败", err)
 	}
 	items := make([]AuditLogItem, 0, len(entries))
+	ids := make([]int64, 0, len(entries))
 	for _, entry := range entries {
 		items = append(items, auditLogItem(entry))
+		if entry.UserID != nil {
+			ids = append(ids, *entry.UserID)
+		}
+	}
+	// Attach display names so the console shows who, not just a numeric id.
+	// Best effort: a missing name (deleted user) still renders the id.
+	if s.Users != nil && len(ids) > 0 {
+		if names, err := s.Users.NamesByIDs(ctx, ids); err == nil {
+			for i := range items {
+				if items[i].UserID == nil {
+					continue
+				}
+				if name, ok := names[*items[i].UserID]; ok {
+					value := name
+					items[i].UserName = &value
+				}
+			}
+		}
 	}
 	return &ListAuditLogsResult{Logs: items, Total: total, Page: page, PageSize: pageSize}, nil
 }

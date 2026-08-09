@@ -102,6 +102,38 @@ func (f *fakeAuthorizations) Consume(_ context.Context, code string, now time.Ti
 	return &consumed, nil
 }
 
+func (f *fakeAuthorizations) ListGrantsByUser(_ context.Context, _ int64) ([]repository.OAuthGrant, error) {
+	return nil, nil
+}
+
+func (f *fakeAuthorizations) DeleteByUserClient(_ context.Context, _, _ int64) error {
+	return nil
+}
+
+func (f *fakeTokens) RevokeUserClientTokens(_ context.Context, userID, clientID int64, revokedAt time.Time) ([]model.BlacklistEntry, error) {
+	if f.revokeErr != nil {
+		return nil, f.revokeErr
+	}
+	var entries []model.BlacklistEntry
+	for _, access := range f.accessByJTI {
+		if access.UserID != userID || access.ClientID != clientID || access.RevokedAt != nil {
+			continue
+		}
+		at := revokedAt
+		access.RevokedAt = &at
+		if access.ExpiresAt.After(revokedAt) {
+			entries = append(entries, model.BlacklistEntry{TokenID: access.TokenID, ExpiresAt: access.ExpiresAt})
+		}
+	}
+	for _, refresh := range f.refreshByHash {
+		if refresh.UserID == userID && refresh.ClientID == clientID && refresh.RevokedAt == nil {
+			at := revokedAt
+			refresh.RevokedAt = &at
+		}
+	}
+	return entries, nil
+}
+
 type fakeTokens struct {
 	accessByJTI     map[string]*model.OAuthAccessToken
 	refreshByHash   map[string]*model.OAuthRefreshToken

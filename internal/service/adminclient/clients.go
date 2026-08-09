@@ -189,6 +189,27 @@ func (s Service) updateFields(input UpdateClientInput) (map[string]any, error) {
 	if input.IsActive != nil {
 		fields["is_active"] = *input.IsActive
 	}
+	if input.ClientType != nil {
+		ct, err := validateClientType(*input.ClientType)
+		if err != nil {
+			return nil, err
+		}
+		fields["client_type"] = ct
+	}
+	if input.GrantTypes != nil {
+		grants, err := validateGrantTypes(*input.GrantTypes)
+		if err != nil {
+			return nil, err
+		}
+		fields["grant_types"] = grants
+	}
+	if input.Scope != nil {
+		scopes, err := scope.Normalize(*input.Scope)
+		if err != nil {
+			return nil, newError(ErrInvalidInput, "scopes 非法，必须包含 openid 且仅含受支持的值", err)
+		}
+		fields["scopes"] = model.StringArray(scopes)
+	}
 	if len(fields) == 0 {
 		return nil, newError(ErrInvalidInput, "没有可更新的字段", nil)
 	}

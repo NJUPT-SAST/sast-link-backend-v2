@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 )
@@ -70,6 +71,14 @@ func (s *fakeService) Discovery() map[string]any {
 
 func (s *fakeService) JWKS() map[string]any {
 	return map[string]any{"keys": []map[string]string{{"kid": "active"}}}
+}
+
+func (s *fakeService) Grants(_ context.Context, _ int64) ([]repository.OAuthGrant, error) {
+	return nil, nil
+}
+
+func (s *fakeService) RevokeGrant(_ context.Context, _, _ int64) error {
+	return nil
 }
 
 type fakeAuthenticator struct {
@@ -712,11 +721,13 @@ func TestUserInfoWithoutAuthenticatorIsServerError(t *testing.T) {
 	}
 }
 
-// Only the consent endpoint may sit behind the JWT middleware. The others are
-// unauthenticated by protocol (a browser arriving at /oauth/authorize from a third
-// party carries no Authorization header; token/revoke authenticate the client, not
-// a user; discovery and JWKS are public) or authenticate inline so they can answer
-// in RFC 6750 form (/userinfo). A middleware creeping onto any of them would break
+// Only the endpoints that identify the caller from their bearer token may sit
+// behind the JWT middleware: the consent step and the signed-in user's own
+// authorized-apps view (grants list and revoke). The others are unauthenticated
+// by protocol (a browser arriving at /oauth/authorize from a third party carries
+// no Authorization header; token/revoke authenticate the client, not a user;
+// discovery and JWKS are public) or authenticate inline so they can answer in
+// RFC 6750 form (/userinfo). A middleware creeping onto any of them would break
 // the flow for every third-party client.
 func TestAuthMiddlewareCoversOnlyConsent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -746,8 +757,18 @@ func TestAuthMiddlewareCoversOnlyConsent(t *testing.T) {
 		router.ServeHTTP(recorder, request)
 	}
 
-	if len(guarded) != 1 || guarded[0] != http.MethodPost+" /oauth/authorize/consent" {
-		t.Fatalf("middleware covered %v, want only POST /oauth/authorize/consent", guarded)
+	want := []string{
+		http.MethodGet + " /oauth/grants",
+		http.MethodPost + " /oauth/authorize/consent",
+		http.MethodDelete + " /oauth/grants/:client_id",
+	}
+	if len(guarded) != len(want) {
+		t.Fatalf("middleware covered %v, want %v", guarded, want)
+	}
+	for i := range want {
+		if guarded[i] != want[i] {
+			t.Fatalf("middleware covered %v, want %v", guarded, want)
+		}
 	}
 }
 

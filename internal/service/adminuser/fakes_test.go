@@ -94,6 +94,18 @@ func (f *fakeUsers) RestoreUser(_ context.Context, userID int64) error {
 	return f.restoreErr
 }
 
+func (f *fakeUsers) Stats(_ context.Context) (repository.UserStats, error) {
+	return repository.UserStats{
+		ByRole:       map[model.UserRole]int64{},
+		ByState:      map[model.UserState]int64{},
+		ByDepartment: map[model.Department]int64{},
+	}, nil
+}
+
+func (f *fakeUsers) NamesByIDs(_ context.Context, _ []int64) (map[int64]string, error) {
+	return map[int64]string{}, nil
+}
+
 type fakeAudit struct {
 	entries   []*model.AuditLog
 	listed    repository.AuditLogFilter

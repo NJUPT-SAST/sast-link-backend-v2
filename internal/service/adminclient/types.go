@@ -65,6 +65,9 @@ type UpdateClientInput struct {
 	ClientName   *string
 	RedirectURIs *[]string
 	IsActive     *bool
+	ClientType   *string
+	GrantTypes   *[]string
+	Scope        *[]string
 	AdminUserID  int64
 	ClientIP     string
 	UserAgent    string

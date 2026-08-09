@@ -87,6 +87,11 @@ type AuthorizationRepository interface {
 	// repository.ErrAuthorizationReplayed together with the record, whose family
 	// ID the caller must revoke.
 	Consume(ctx context.Context, code string, now time.Time) (*model.OAuthAuthorization, error)
+	// ListGrantsByUser returns the distinct applications a user has authorized.
+	ListGrantsByUser(ctx context.Context, userID int64) ([]repository.OAuthGrant, error)
+	// DeleteByUserClient removes every authorization a user holds with one
+	// client (dropping it from the authorized-apps list).
+	DeleteByUserClient(ctx context.Context, userID, clientID int64) error
 }
 
 // TokenRepository persists and revokes token metadata.
@@ -108,6 +113,9 @@ type TokenRepository interface {
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
+	// RevokeUserClientTokens revokes every live token a user holds with one
+	// client (removing an application's access).
+	RevokeUserClientTokens(ctx context.Context, userID, clientID int64, revokedAt time.Time) ([]model.BlacklistEntry, error)
 }
 
 // AuditRepository records audit events.

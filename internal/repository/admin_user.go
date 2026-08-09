@@ -120,6 +120,69 @@ func (r *UserRepository) ListAdminUsers(
 	return rows, total, nil
 }
 
+// UserStats aggregates the account dimensions the console overview shows.
+type UserStats struct {
+	Total        int64                      `json:"total"`
+	ByRole       map[model.UserRole]int64   `json:"by_role"`
+	ByState      map[model.UserState]int64  `json:"by_state"`
+	ByDepartment map[model.Department]int64 `json:"by_department"`
+	// NoDepartment counts users whose profile has no department (freshman /
+	// njupter before recruitment, or a missing profile row).
+	NoDepartment int64 `json:"no_department"`
+}
+
+// Stats returns the aggregate counts for the overview dashboard.
+func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
+	var stats UserStats
+	stats.ByRole = make(map[model.UserRole]int64)
+	stats.ByState = make(map[model.UserState]int64)
+	stats.ByDepartment = make(map[model.Department]int64)
+
+	if err := r.database.WithContext(ctx).Model(&model.User{}).Count(&stats.Total).Error; err != nil {
+		return stats, fmt.Errorf("count users: %w", err)
+	}
+
+	type groupRow struct {
+		Group string
+		Count int64
+	}
+	rows := make([]groupRow, 0, 8)
+
+	if err := r.database.WithContext(ctx).Model(&model.User{}).
+		Select(`role AS "group", COUNT(*) AS count`).Group("role").Scan(&rows).Error; err != nil {
+		return stats, fmt.Errorf("count users by role: %w", err)
+	}
+	for _, row := range rows {
+		stats.ByRole[model.UserRole(row.Group)] = row.Count
+	}
+
+	rows = rows[:0]
+	if err := r.database.WithContext(ctx).Model(&model.User{}).
+		Select(`state AS "group", COUNT(*) AS count`).Group("state").Scan(&rows).Error; err != nil {
+		return stats, fmt.Errorf("count users by state: %w", err)
+	}
+	for _, row := range rows {
+		stats.ByState[model.UserState(row.Group)] = row.Count
+	}
+
+	rows = rows[:0]
+	if err := r.database.WithContext(ctx).Model(&model.User{}).
+		Joins(`LEFT JOIN profile ON profile.user_id = "user".id`).
+		Select(`profile.department AS "group", COUNT(*) AS count`).
+		Group("profile.department").Scan(&rows).Error; err != nil {
+		return stats, fmt.Errorf("count users by department: %w", err)
+	}
+	for _, row := range rows {
+		if row.Group == "" {
+			stats.NoDepartment = row.Count
+			continue
+		}
+		stats.ByDepartment[model.Department(row.Group)] = row.Count
+	}
+
+	return stats, nil
+}
+
 // adminUserQuery builds the shared predicates of the list and its count.
 //
 // The join is LEFT rather than INNER so a user whose profile row is missing still

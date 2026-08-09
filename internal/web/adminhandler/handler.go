@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminclient"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
 )
@@ -25,6 +26,8 @@ type UserService interface {
 	UpdateUser(ctx context.Context, input adminuser.UpdateUserInput) (*adminuser.UpdateUserResult, error)
 	DeleteUser(ctx context.Context, input adminuser.TargetUserInput) error
 	RestoreUser(ctx context.Context, input adminuser.TargetUserInput) error
+	// Stats returns the aggregate account counts for the console overview.
+	Stats(ctx context.Context) (repository.UserStats, error)
 }
 
 // AuditLogService is the audit-trail query this handler exposes.
@@ -67,6 +70,8 @@ func RegisterRoutes(r gin.IRouter, h Handler, requireAuth, requireAdmin, require
 	admin.PUT("/users/:id/restore", requireAdmin, h.RestoreUser)
 
 	admin.GET("/audit-logs", requireAdmin, h.ListAuditLogs)
+
+	admin.GET("/stats", requireAdmin, h.Stats)
 }
 
 // AdminRole is the role permitted on the write endpoints, exported so the

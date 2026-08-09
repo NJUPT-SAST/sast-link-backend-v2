@@ -43,6 +43,10 @@ type UserRepository interface {
 		revokedAt time.Time,
 	) ([]model.BlacklistEntry, error)
 	RestoreUser(ctx context.Context, userID int64) error
+	// Stats returns the aggregate account counts for the console overview.
+	Stats(ctx context.Context) (repository.UserStats, error)
+	// NamesByIDs returns display names for the given user ids.
+	NamesByIDs(ctx context.Context, ids []int64) (map[int64]string, error)
 }
 
 // AuditLogRepository records and queries audit events.
@@ -169,6 +173,7 @@ type ListAuditLogsResult struct {
 type AuditLogItem struct {
 	ID         int64
 	UserID     *int64
+	UserName   *string
 	Action     string
 	Resource   string
 	ResourceID *string

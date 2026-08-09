@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
@@ -23,6 +24,10 @@ type Service interface {
 	UserInfo(ctx context.Context, input oauth.UserInfoInput) (*oauth.UserInfoResult, error)
 	Discovery() map[string]any
 	JWKS() map[string]any
+	// Grants lists the applications a user has authorized; RevokeGrant removes
+	// one application's access (every token with that client is revoked).
+	Grants(ctx context.Context, userID int64) ([]repository.OAuthGrant, error)
+	RevokeGrant(ctx context.Context, userID, clientID int64) error
 }
 
 // Authenticator validates bearer tokens for the OAuth-facing endpoints.
@@ -65,6 +70,8 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	consent := r.Group("")
 	consent.Use(authMiddleware)
 	consent.POST("/oauth/authorize/consent", h.Consent)
+	consent.GET("/oauth/grants", h.Grants)
+	consent.DELETE("/oauth/grants/:client_id", h.RevokeGrant)
 }
 
 // Authorize validates an authorization request and redirects to the consent page.
