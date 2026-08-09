@@ -321,13 +321,17 @@ func (f *fakeProfiles) FindPublicCardByUserID(_ context.Context, userID int64) (
 type fakeRequests struct {
 	mutex     sync.Mutex
 	byID      map[string]AuthorizeRequestPayload
+	peekTTL   time.Duration
 	saveErr   error
 	loadErr   error
 	saveCalls int
 }
 
 func newFakeRequests() *fakeRequests {
-	return &fakeRequests{byID: map[string]AuthorizeRequestPayload{}}
+	return &fakeRequests{
+		byID:    map[string]AuthorizeRequestPayload{},
+		peekTTL: 10 * time.Minute,
+	}
 }
 
 func (f *fakeRequests) SaveAuthorizeRequest(
@@ -344,6 +348,23 @@ func (f *fakeRequests) SaveAuthorizeRequest(
 	f.saveCalls++
 	f.byID[requestID] = payload
 	return nil
+}
+
+// PeekAuthorizeRequest reads without consuming; the stash survives the peek.
+func (f *fakeRequests) PeekAuthorizeRequest(
+	_ context.Context,
+	requestID string,
+) (AuthorizeRequestPayload, time.Duration, bool, error) {
+	if f.loadErr != nil {
+		return AuthorizeRequestPayload{}, 0, false, f.loadErr
+	}
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	payload, ok := f.byID[requestID]
+	if !ok {
+		return AuthorizeRequestPayload{}, 0, false, nil
+	}
+	return payload, f.peekTTL, true, nil
 }
 
 // ConsumeAuthorizeRequest mirrors GetDel: at most one caller sees a given stash.
@@ -532,17 +553,18 @@ func newHarness(t *testing.T) *harness {
 		Requests:         h.requests,
 		Blacklist:        h.blacklist,
 		AuthorizeLimiter: h.limiter,
-		// Same fake behind both, so a test can throttle either endpoint; the recorded
+		// Same fake behind all three, so a test can throttle any endpoint; the recorded
 		// endpoint name in fakeLimiter.calls distinguishes them.
-		TokenLimiter:  h.limiter,
-		JWT:           jwtManager,
-		RefreshTokens: refreshManager,
-		Clock:         clock,
-		AccessTTL:     time.Hour,
-		RefreshTTL:    30 * 24 * time.Hour,
-		CodeTTL:       5 * time.Minute,
-		RequestTTL:    10 * time.Minute,
-		Issuer:        "https://link.sast.fun/v2",
+		ConsentInfoLimiter: h.limiter,
+		TokenLimiter:       h.limiter,
+		JWT:                jwtManager,
+		RefreshTokens:      refreshManager,
+		Clock:              clock,
+		AccessTTL:          time.Hour,
+		RefreshTTL:         30 * 24 * time.Hour,
+		CodeTTL:            5 * time.Minute,
+		RequestTTL:         10 * time.Minute,
+		Issuer:             "https://link.sast.fun/v2",
 	}
 	return h
 }

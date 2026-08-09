@@ -133,6 +133,7 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	}
 	payload := AuthorizeRequestPayload{
 		ClientID:            client.ClientID,
+		ClientName:          client.ClientName,
 		RedirectURI:         redirectURI,
 		Scopes:              requested,
 		State:               state,
@@ -253,6 +254,33 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	s.auditAuthorize(ctx, input, payload, &user.ID, true, 0, "granted")
 	return &ConsentResult{
 		RedirectURI: successRedirectURI(payload.RedirectURI, payload.State, code),
+	}, nil
+}
+
+// ConsentInfo returns the verified client metadata for a pending authorization
+// request. It peeks the stash rather than consuming it, so merely viewing the
+// consent page does not spend the request. The client name/scopes come from the
+// stash (written by Authorize from the verified client record), never from the
+// consent URL — a crafted link cannot spoof which application is asking.
+func (s Service) ConsentInfo(ctx context.Context, input ConsentInfoInput) (*ConsentInfoResult, error) {
+	if err := s.checkConsentInfoLimit(ctx, input.UserID); err != nil {
+		return nil, err
+	}
+	requestID := strings.TrimSpace(input.RequestID)
+	if requestID == "" {
+		return nil, newError(ErrInvalidRequest, "request_id 不能为空", nil)
+	}
+	payload, ttl, found, err := s.Requests.PeekAuthorizeRequest(ctx, requestID)
+	if err != nil {
+		return nil, newError(ErrDependencyUnavailable, "读取授权请求失败，请重试", err)
+	}
+	if !found {
+		return nil, newError(ErrInvalidRequest, "授权请求无效或已过期，请重新发起授权", nil)
+	}
+	return &ConsentInfoResult{
+		ClientName: payload.ClientName,
+		Scopes:     payload.Scopes,
+		ExpiresIn:  int(ttl.Seconds()),
 	}, nil
 }
 

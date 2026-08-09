@@ -172,6 +172,13 @@ type Config struct {
 	// could fill the keyspace. Fail-open, per PRD §6.0.
 	RateLimitAuthorizeRPM    int           `env:"RATE_LIMIT_AUTHORIZE_RPM" envDefault:"100"`
 	RateLimitAuthorizeWindow time.Duration `env:"RATE_LIMIT_AUTHORIZE_WINDOW" envDefault:"60s"`
+	// Throttles GET /oauth/authorize/consent per user. The endpoint is
+	// authenticated, so it keys on the user rather than the caller IP — campus
+	// egress shares one NAT IP, and an IP budget would let a single student
+	// exhaust everyone's. It reads a Redis stash per call (peek), bounding
+	// repeated random request_id probes. Fail-open, per PRD §6.0.
+	RateLimitConsentInfoRPM    int           `env:"RATE_LIMIT_CONSENT_INFO_RPM" envDefault:"60"`
+	RateLimitConsentInfoWindow time.Duration `env:"RATE_LIMIT_CONSENT_INFO_WINDOW" envDefault:"60s"`
 	// Throttles POST /oauth/token and POST /oauth/revoke per caller IP. Both check
 	// client credentials and presented tokens, so an unlimited rate means unlimited
 	// credential attempts. Set higher than the authorize limit: one authorization
@@ -440,6 +447,10 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_AUTHORIZE_RPM must be positive")
 	case c.RateLimitAuthorizeWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_AUTHORIZE_WINDOW must be at least 1s")
+	case c.RateLimitConsentInfoRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_CONSENT_INFO_RPM must be positive")
+	case c.RateLimitConsentInfoWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_CONSENT_INFO_WINDOW must be at least 1s")
 	case c.RateLimitTokenRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_TOKEN_RPM must be positive")
 	case c.RateLimitTokenWindow < time.Second:

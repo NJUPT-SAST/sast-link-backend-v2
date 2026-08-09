@@ -42,7 +42,11 @@ type TokenBlacklist interface {
 // changed between the two legs, a caller could consent to one request and mint a
 // code for another.
 type AuthorizeRequestPayload struct {
-	ClientID            string   `json:"client_id"`
+	ClientID string `json:"client_id"`
+	// ClientName is captured at authorize time from the verified client record
+	// so the consent page can show who is asking without a client lookup or
+	// trusting any URL-supplied value.
+	ClientName          string   `json:"client_name"`
 	RedirectURI         string   `json:"redirect_uri"`
 	Scopes              []string `json:"scopes"`
 	State               string   `json:"state"`
@@ -56,6 +60,10 @@ type AuthorizeRequestPayload struct {
 // cannot be treated as consented and the user must restart.
 type AuthorizeRequestStore interface {
 	SaveAuthorizeRequest(ctx context.Context, requestID string, payload AuthorizeRequestPayload, ttl time.Duration) error
+	// PeekAuthorizeRequest reads a stashed request WITHOUT consuming it, plus its
+	// remaining lifetime. Used by the consent page to display verified client
+	// metadata before the user decides.
+	PeekAuthorizeRequest(ctx context.Context, requestID string) (payload AuthorizeRequestPayload, ttl time.Duration, found bool, err error)
 	// ConsumeAuthorizeRequest atomically reads and deletes a stashed request, so a
 	// single stash cannot yield two authorization codes.
 	ConsumeAuthorizeRequest(ctx context.Context, requestID string) (payload AuthorizeRequestPayload, found bool, err error)
@@ -169,6 +177,24 @@ type ConsentInput struct {
 // the client as access_denied rather than swallowed here.
 type ConsentResult struct {
 	RedirectURI string
+}
+
+// ConsentInfoInput identifies the pending authorization request whose verified
+// client metadata the consent page wants to display.
+type ConsentInfoInput struct {
+	RequestID string
+	// UserID is the authenticated caller; the consent-info peek is rate limited
+	// per user, not per IP (campus egress shares one NAT IP).
+	UserID int64
+}
+
+// ConsentInfoResult is the verified client metadata for one pending request. The
+// consent page renders these instead of any client-supplied URL values, so a
+// crafted consent link cannot spoof which application is asking.
+type ConsentInfoResult struct {
+	ClientName string
+	Scopes     []string
+	ExpiresIn  int
 }
 
 // TokenInput is a raw /oauth/token request.
