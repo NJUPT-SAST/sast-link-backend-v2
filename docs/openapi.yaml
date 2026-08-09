@@ -2438,8 +2438,6 @@ paths:
                 client_name:
                   type: string
                   description: 应用名称
-                client_type:
-                  $ref: "#/components/schemas/ClientType"
                 redirect_uris:
                   type: array
                   items:
@@ -2469,8 +2467,8 @@ paths:
         "200":
           description: |
             更新成功。停用客户端（`is_active` 由 true 改为 false）会在同一事务内
-            撤销该客户端的全部活跃 token。client_type / grant_types / scopes 的
-            更新不触发 token 撤销，只影响之后的授权与 token 请求。
+            撤销该客户端的全部活跃 token。grant_types / scopes 的更新不触发 token
+            撤销，只影响之后的授权与 token 请求。
           content:
             application/json:
               schema:
@@ -2479,10 +2477,9 @@ paths:
         "400":
           description: |
             校验失败（40000）：请求体为空（未提交任何可更新字段）、未知字段
-            （client_id / client_secret / id）、`redirect_uris` 违反注册规则
-            （与创建时同一套校验）、`grant_types` 含不支持的值或缺少
-            `authorization_code`、`scopes` 缺少 openid 或含不支持的值、
-            `client_type` 非法。
+            （client_id / client_secret / client_type / id）、`redirect_uris` 违反
+            注册规则（与创建时同一套校验）、`grant_types` 含不支持的值或缺少
+            `authorization_code`、`scopes` 缺少 openid 或含不支持的值。
           content:
             application/json:
               schema:
@@ -2710,27 +2707,27 @@ components:
       properties:
         total:
           type: integer
-          description: 用户总数（含已注销）
+          description: 未注销账户总数（state ≠ is_deleted；已注销的见 by_state.is_deleted）
         by_role:
           type: object
-          description: 按角色分组计数（freshman / member / lecturer / admin）
+          description: 按角色分组计数（freshman / member / lecturer / admin），不含已注销账户
           additionalProperties:
             type: integer
         by_state:
           type: object
-          description: 按状态分组计数（njupter / on_sast / retired_sast / is_deleted）
+          description: 按状态分组计数（njupter / on_sast / retired_sast / is_deleted），含 is_deleted
           additionalProperties:
             type: integer
         by_department:
           type: object
           description: |
-            按部门分组计数（software / media），来自 profile 表 LEFT JOIN；
-            no_department 之外的用户都有部门
+            按部门分组计数（software / media），来自 profile 表 LEFT JOIN，
+            不含已注销账户；no_department 之外的用户都有部门
           additionalProperties:
             type: integer
         no_department:
           type: integer
-          description: 没有 profile 行或部门未设的用户数
+          description: 没有 profile 行或部门未设的未注销用户数
     EmailType:
       type: string
       enum:
@@ -3056,8 +3053,9 @@ components:
         user_name:
           type: string
           description: |
-            操作用户显示名（best-effort 展示字段）。用户已删除或查询失败时为
-            null，前端应回退显示 user_id
+            操作用户显示名（best-effort 展示字段）。软删除（state = is_deleted）
+            的行仍在表里、名字照常返回；仅物理删除或查询失败时为 null，前端应
+            回退显示 user_id
           nullable: true
         action:
           type: string

@@ -1834,10 +1834,9 @@ PUT /admin/oauth-clients/:id
 
 **说明**:
 
-- 六个字段可改，均为可选；未出现的字段保持不变：`client_name`、`client_type`、`redirect_uris`、`grant_types`、`scopes`、`is_active`。
-- `client_id`、`client_secret`、`id` **不可修改**，请求中出现这些字段返回 `400`（strict decoder 拒未知字段，而非静默忽略）——标识符只能由服务端生成，管理员不能把自己的客户端注册成既有标识符。
-- `client_type` / `grant_types` / `scopes` 的更新**不触发 token 撤销**（只有 `is_active` 由 `true` 改 `false` 才会），且只影响**之后**的授权与 token 请求，不会回溯改动已签发的 token：
-  - 改 `client_type`：第三方机密客户端 ⇄ 第一方公开客户端。前者在 `/oauth/token` 需要 `client_secret`，后者走 PKCE；属权限变更，改动写入审计日志
+- 五个字段可改，均为可选；未出现的字段保持不变：`client_name`、`redirect_uris`、`grant_types`、`scopes`、`is_active`。
+- `client_id`、`client_secret`、`client_type`、`id` **不可修改**，请求中出现这些字段返回 `400`（strict decoder 拒未知字段，而非静默忽略）——标识符只能由服务端生成，管理员不能把自己的客户端注册成既有标识符。`client_type` 同样不可就地翻转：它决定客户端的凭据模型（有无 `client_secret`）与 scope 授予规则，翻转而不重发 secret 会产生无凭据的第三方客户端；换类型请重新注册一个客户端。
+- `grant_types` / `scopes` 的更新**不触发 token 撤销**（只有 `is_active` 由 `true` 改 `false` 才会），且只影响**之后**的授权与 token 请求，不会回溯改动已签发的 token：
   - 收窄 `scopes`：`/oauth/authorize` 对 `third_party` 客户端校验「请求 scope 落在注册 scope 内」，因此收窄后新的授权请求只能请求更小集合；存量 refresh token 轮换时按原授权 scope 继承（PRD §4.10「不支持 scope 收窄」），不会因注册表收窄而缩水——要立刻收紧现有会话仍需停用客户端
   - 改 `grant_types`：同样只约束后续授权流程，已签发的 token 不受影响
 - `redirect_uris` 的校验规则与注册时一致。
@@ -1874,7 +1873,7 @@ GET /admin/audit-logs
 
 管理端写操作在审计日志中的 `action` 为 `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值。
 
-`user_name` 是展示字段：随查询取回对应用户显示名，best-effort——用户已删除或查询失败时为 `null`，此时前端应回退显示 `user_id`。
+`user_name` 是展示字段：随查询取回对应用户显示名，best-effort。软删除（`state = is_deleted`）的行仍在表里，名字照常返回；仅当用户行被物理删除、或显示名回查失败时为 `null`，此时前端应回退显示 `user_id`。
 
 **错误码**：`40000`（参数格式非法 / 时间窗口倒置）、`40100`、`40300`。
 
@@ -1924,7 +1923,7 @@ GET /admin/stats
   "message": "ok",
   "data": {
     "users": {
-      "total": 1500,
+      "total": 1450,
       "by_role": { "freshman": 300, "member": 900, "lecturer": 250, "admin": 50 },
       "by_state": { "njupter": 400, "on_sast": 900, "retired_sast": 150, "is_deleted": 50 },
       "by_department": { "software": 400, "media": 300 },
@@ -1943,12 +1942,11 @@ GET /admin/stats
 
 **说明**：
 
-- `users` 为账户聚合，枚举见附录 A：
-  - `total` 含已注销用户（`is_deleted`），`by_state` 中即可看出注销数
-  - `by_role` / `by_state` 按 `user` 表分组统计
+- `users` 为账户聚合，枚举见附录 A。本仓软删除是状态位而非 `deleted_at` 列，因此口径为：**`total` / `by_role` / `by_department` / `no_department` 均只统计未注销账户**（`state ≠ is_deleted`），避免「账户总数」被已注销账户虚增；`by_state` 保留全部状态，`is_deleted` 作为独立 bucket 可见注销数。
+  - `by_role` / `by_state` 按 `user` 表分组统计（`by_state` 含 `is_deleted`，其余两个维度不含）
   - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
 - `clients` 含全部注册（停用的也在内）：`total` 为注册总数，`active` 为 `is_active = true` 的数量
-- `audit.recent` 为最近 5 条审计日志（与 §6.9 同一排序 `created_at DESC`），条目结构同 §6.9；该路读取失败时静默返回空列表（best-effort），不影响其余两路
+- `audit.recent` 为最近 5 条审计日志（与 §6.9 同一排序 `created_at DESC`），条目结构同 §6.9；该路读取失败时记 WARN 日志并返回空列表（best-effort），不影响其余两路
 - `users` 或 `clients` 聚合失败返回 `500`，不复用缓存——概览数据即时性优先
 
 **错误码**：`40100`、`40300`、`50000`。
