@@ -78,6 +78,19 @@ type Authenticator struct {
 	// them, so a deployment that forgets to set it fails loudly instead of silently
 	// dropping the check.
 	InternalClientID string
+	// AdminDelegatedClientID is the single third-party client permitted to act on an
+	// administrator's behalf against the /admin endpoints, and only when its token
+	// carries a scope.AdminRead/AdminWrite grant.
+	//
+	// This is the one documented hole in the azp pin above, and it is deliberately
+	// narrow: one named client, admin routes only, and a scope the client must have
+	// registered for. The token's subject is still the administrator, so the ceiling
+	// stays whatever role that user holds in the database — RequireRole reads it from
+	// the row on every request, so a demotion cuts the tool off immediately.
+	//
+	// Optional. Empty means no client may act as a delegate, which is the correct
+	// default: a deployment that has not registered an ops client must not have one.
+	AdminDelegatedClientID string
 }
 
 func (a Authenticator) RequireAuth() gin.HandlerFunc {
@@ -122,6 +135,104 @@ func (a Authenticator) Authenticate(ctx context.Context, header string) (Princip
 // takeover. Prefer Authenticate.
 func (a Authenticator) AuthenticateAnyClient(ctx context.Context, header string) (Principal, error) {
 	return a.authenticate(ctx, header)
+}
+
+// RequireAdminAuth authenticates the /admin endpoints, admitting either an
+// internal console token or the one delegated ops client.
+//
+// It exists as a separate gate rather than a relaxation of RequireAuth so the
+// default stays fail-closed: every other internal route keeps rejecting
+// third-party tokens outright, and widening this one cannot widen those by
+// accident. Pair it with RequireDelegatedScope — this method proves *which client*
+// may speak for an administrator, not *what* it may do.
+func (a Authenticator) RequireAdminAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, err := a.AuthenticateAdminDelegated(c.Request.Context(), c.GetHeader("Authorization"))
+		if err != nil {
+			response.Error(c, err)
+			c.Abort()
+			return
+		}
+		c.Set(principalContextKey, principal)
+		c.Next()
+	}
+}
+
+// AuthenticateAdminDelegated validates an Authorization header for the admin API.
+// It accepts an internal-client token unconditionally and a token from
+// AdminDelegatedClientID only when that token carries an admin scope; every other
+// client is rejected exactly as Authenticate would reject it.
+//
+// The InternalClientID check comes first and fails closed. Ordering it after the
+// delegated branch would mean a deployment that forgot INTERNAL_OAUTH_CLIENT_ID
+// admits every admin-scoped third-party token instead of refusing all of them.
+func (a Authenticator) AuthenticateAdminDelegated(ctx context.Context, header string) (Principal, error) {
+	if strings.TrimSpace(a.InternalClientID) == "" {
+		return Principal{}, backendError()
+	}
+	principal, err := a.authenticate(ctx, header)
+	if err != nil {
+		return Principal{}, err
+	}
+	// An absent azp is a first-party session token predating the claim; those are
+	// only ever issued to the built-in client.
+	if principal.ClientID == "" || principal.ClientID == a.InternalClientID {
+		return principal, nil
+	}
+	delegated := strings.TrimSpace(a.AdminDelegatedClientID)
+	if delegated == "" || principal.ClientID != delegated || !scope.ContainsAdmin(principal.Scopes) {
+		return Principal{}, authBusinessError(http.StatusForbidden, errcode.CodeForbidden,
+			"该 Access Token 由第三方客户端签发，不可用于内部接口")
+	}
+	return principal, nil
+}
+
+// RequireDelegatedScope admits a delegated token only when it holds one of the
+// allowed scopes. It must be chained after RequireAdminAuth, which puts the
+// Principal in the context.
+//
+// The internal console token is exempt. It carries exactly the three session
+// scopes and no admin scope will ever be minted for it, so gating it here would
+// break the console outright; its ceiling is RequireRole, which is unchanged. What
+// this gate bounds is the delegated client, whose registered scopes are the only
+// thing distinguishing "may read the directory" from "may delete accounts".
+//
+// An empty allowed set rejects every request, for the same reason RequireRole
+// fails closed: a wiring slip must surface as a visible 403, not as an admin
+// endpoint that quietly accepts any scope.
+func (a Authenticator) RequireDelegatedScope(allowed ...string) gin.HandlerFunc {
+	permitted := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		permitted[name] = struct{}{}
+	}
+	return func(c *gin.Context) {
+		principal, ok := PrincipalFrom(c)
+		if !ok {
+			response.Error(c, backendError())
+			c.Abort()
+			return
+		}
+		// Mirrors AuthenticateAdminDelegated: an unset internal client cannot be
+		// compared against, so nothing may be exempted from the scope check.
+		if strings.TrimSpace(a.InternalClientID) == "" {
+			response.Error(c, backendError())
+			c.Abort()
+			return
+		}
+		if principal.ClientID == "" || principal.ClientID == a.InternalClientID {
+			c.Next()
+			return
+		}
+		for _, name := range principal.Scopes {
+			if _, allow := permitted[name]; allow {
+				c.Next()
+				return
+			}
+		}
+		response.Error(c, authBusinessError(http.StatusForbidden, errcode.CodeForbidden,
+			"Access Token 缺少所需 scope"))
+		c.Abort()
+	}
 }
 
 // requireInternalClient pins a principal to the built-in first-party client.
