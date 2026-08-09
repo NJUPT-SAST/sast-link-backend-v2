@@ -2,6 +2,7 @@ package adminuser
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -39,8 +40,34 @@ func (s Service) ListAuditLogs(ctx context.Context, input ListAuditLogsInput) (*
 		return nil, internalError(ctx, "list admin audit logs", "查询审计日志失败", err)
 	}
 	items := make([]AuditLogItem, 0, len(entries))
+	ids := make([]int64, 0, len(entries))
 	for _, entry := range entries {
 		items = append(items, auditLogItem(entry))
+		if entry.UserID != nil {
+			ids = append(ids, *entry.UserID)
+		}
+	}
+	// Attach display names so the console shows who, not just a numeric id.
+	// Best effort: a soft-deleted (state = is_deleted) row still returns its name,
+	// since the row is still in the table; only a physically deleted row or a
+	// failed lookup yields null.
+	if s.Users != nil && len(ids) > 0 {
+		if names, err := s.Users.NamesByIDs(ctx, ids); err == nil {
+			for i := range items {
+				if items[i].UserID == nil {
+					continue
+				}
+				if name, ok := names[*items[i].UserID]; ok {
+					value := name
+					items[i].UserName = &value
+				}
+			}
+		} else {
+			// Best-effort must not be silent: without this log an operator cannot tell a
+			// genuinely missing user (null name, intended) from a broken lookup.
+			slog.WarnContext(ctx, "attach audit user display names",
+				"count", len(ids), "error", err)
+		}
 	}
 	return &ListAuditLogsResult{Logs: items, Total: total, Page: page, PageSize: pageSize}, nil
 }

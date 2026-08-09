@@ -111,3 +111,57 @@ func (r *OAuthAuthorizationRepository) Consume(
 	}
 	return &authorization, nil
 }
+
+// OAuthGrant is one application a user has authorized via the consent screen,
+// with the client's display fields and the most recent authorization's scopes.
+//
+// RedirectURIs and Scopes must be model.StringArray, not []string: the columns
+// are PostgreSQL text[], and []string has no sql.Scanner to decode them — a
+// plain []string scan fails at runtime on a real database.
+type OAuthGrant struct {
+	ClientID         int64             `json:"client_id"`
+	ClientKey        string            `json:"client_key"`
+	ClientName       string            `json:"client_name"`
+	ClientType       string            `json:"client_type"`
+	RedirectURIs     model.StringArray `gorm:"type:text[]" json:"redirect_uris"`
+	IsActive         *bool             `json:"is_active"`
+	Scopes           model.StringArray `gorm:"type:text[]" json:"scopes"`
+	LastAuthorizedAt time.Time         `json:"last_authorized_at"`
+}
+
+// ListGrantsByUser returns the distinct applications a user has authorized,
+// newest consent per client, joined with the client's public display fields.
+func (r *OAuthAuthorizationRepository) ListGrantsByUser(ctx context.Context, userID int64) ([]OAuthGrant, error) {
+	grants := make([]OAuthGrant, 0, 8)
+	err := r.database.WithContext(ctx).
+		Model(&model.OAuthAuthorization{}).
+		Select(`DISTINCT ON (oauth_authorizations.client_id)
+			oauth_authorizations.client_id,
+			oauth_clients.client_id AS client_key,
+			oauth_clients.client_name,
+			oauth_clients.client_type,
+			oauth_clients.redirect_uris,
+			oauth_clients.is_active,
+			oauth_authorizations.scopes,
+			oauth_authorizations.created_at AS last_authorized_at`).
+		Joins(`JOIN oauth_clients ON oauth_clients.id = oauth_authorizations.client_id`).
+		Where(`oauth_authorizations.user_id = ?`, userID).
+		Order(`oauth_authorizations.client_id, oauth_authorizations.created_at DESC`).
+		Scan(&grants).Error
+	if err != nil {
+		return nil, fmt.Errorf("list oauth grants: %w", err)
+	}
+	return grants, nil
+}
+
+// DeleteByUserClient removes every authorization a user holds with one client,
+// which drops the application from the user's authorized-apps list.
+func (r *OAuthAuthorizationRepository) DeleteByUserClient(ctx context.Context, userID, clientID int64) error {
+	err := r.database.WithContext(ctx).
+		Where("user_id = ? AND client_id = ?", userID, clientID).
+		Delete(&model.OAuthAuthorization{}).Error
+	if err != nil {
+		return fmt.Errorf("delete user client authorizations: %w", err)
+	}
+	return nil
+}

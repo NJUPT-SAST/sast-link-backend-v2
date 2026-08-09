@@ -120,6 +120,85 @@ func (r *UserRepository) ListAdminUsers(
 	return rows, total, nil
 }
 
+// UserStats aggregates the account dimensions the console overview shows.
+//
+// Soft deletion here is a state bit (is_deleted), not a deleted_at column, so the
+// "live account" dimensions must exclude it explicitly. Total, ByRole and
+// ByDepartment / NoDepartment count only accounts whose state is not is_deleted;
+// ByState counts every state, is_deleted included, so the console can show how
+// many accounts were deleted without inflating the usable-account totals.
+type UserStats struct {
+	Total        int64                      `json:"total"`
+	ByRole       map[model.UserRole]int64   `json:"by_role"`
+	ByState      map[model.UserState]int64  `json:"by_state"`
+	ByDepartment map[model.Department]int64 `json:"by_department"`
+	// NoDepartment counts users whose profile has no department (freshman /
+	// njupter before recruitment, or a missing profile row).
+	NoDepartment int64 `json:"no_department"`
+}
+
+// liveUser predicates every non-deleted-account count: a soft-deleted row still
+// exists in the table, so an unfiltered COUNT would inflate the totals the
+// console reads as "usable accounts".
+func liveUser(query *gorm.DB) *gorm.DB {
+	return query.Where(`"user".state <> ?`, model.UserStateDeleted)
+}
+
+// Stats returns the aggregate counts for the overview dashboard.
+func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
+	var stats UserStats
+	stats.ByRole = make(map[model.UserRole]int64)
+	stats.ByState = make(map[model.UserState]int64)
+	stats.ByDepartment = make(map[model.Department]int64)
+
+	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
+		Count(&stats.Total).Error; err != nil {
+		return stats, fmt.Errorf("count users: %w", err)
+	}
+
+	type groupRow struct {
+		Group string
+		Count int64
+	}
+	rows := make([]groupRow, 0, 8)
+
+	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
+		Select(`role AS "group", COUNT(*) AS count`).Group("role").Scan(&rows).Error; err != nil {
+		return stats, fmt.Errorf("count users by role: %w", err)
+	}
+	for _, row := range rows {
+		stats.ByRole[model.UserRole(row.Group)] = row.Count
+	}
+
+	rows = rows[:0]
+	// ByState deliberately keeps every state, is_deleted included, so the deleted
+	// count stays visible as its own bucket rather than vanishing from the console.
+	if err := r.database.WithContext(ctx).Model(&model.User{}).
+		Select(`state AS "group", COUNT(*) AS count`).Group("state").Scan(&rows).Error; err != nil {
+		return stats, fmt.Errorf("count users by state: %w", err)
+	}
+	for _, row := range rows {
+		stats.ByState[model.UserState(row.Group)] = row.Count
+	}
+
+	rows = rows[:0]
+	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
+		Joins(`LEFT JOIN profile ON profile.user_id = "user".id`).
+		Select(`profile.department AS "group", COUNT(*) AS count`).
+		Group("profile.department").Scan(&rows).Error; err != nil {
+		return stats, fmt.Errorf("count users by department: %w", err)
+	}
+	for _, row := range rows {
+		if row.Group == "" {
+			stats.NoDepartment = row.Count
+			continue
+		}
+		stats.ByDepartment[model.Department(row.Group)] = row.Count
+	}
+
+	return stats, nil
+}
+
 // adminUserQuery builds the shared predicates of the list and its count.
 //
 // The join is LEFT rather than INNER so a user whose profile row is missing still

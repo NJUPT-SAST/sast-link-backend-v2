@@ -572,3 +572,27 @@ func (r *UserRepository) FindAuthStateByID(ctx context.Context, userID int64) (*
 	}
 	return nil, fmt.Errorf("find user auth state by ID: %w", err)
 }
+
+// NamesByIDs returns the display names for the given user ids; missing ids are
+// simply absent from the map (deleted rows, never-written ids).
+func (r *UserRepository) NamesByIDs(ctx context.Context, ids []int64) (map[int64]string, error) {
+	names := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return names, nil
+	}
+	rows := make([]struct {
+		ID   int64
+		Name string
+	}, 0, len(ids))
+	if err := r.database.WithContext(ctx).
+		Model(&model.User{}).
+		Select("id", "name").
+		Where("id IN ?", ids).
+		Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("load user names: %w", err)
+	}
+	for _, row := range rows {
+		names[row.ID] = row.Name
+	}
+	return names, nil
+}

@@ -591,3 +591,71 @@ func TestParseRequestedScopesToleratesWireWhitespace(t *testing.T) {
 		})
 	}
 }
+
+func TestConsentInfoReturnsVerifiedClientMetadata(t *testing.T) {
+	h := newHarness(t)
+	authorized, err := h.service.Authorize(context.Background(), validAuthorizeInput(t))
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+
+	info, err := h.service.ConsentInfo(context.Background(), ConsentInfoInput{
+		RequestID: authorized.RequestID,
+		UserID:    1,
+	})
+	if err != nil {
+		t.Fatalf("ConsentInfo() error = %v", err)
+	}
+	if info.ClientName != "SAST Link Web" {
+		t.Fatalf("ClientName = %q, want %q", info.ClientName, "SAST Link Web")
+	}
+	if strings.Join(info.Scopes, " ") != strings.Join(authorized.Scopes, " ") {
+		t.Fatalf("Scopes = %v, want %v", info.Scopes, authorized.Scopes)
+	}
+	if info.ExpiresIn <= 0 {
+		t.Fatalf("ExpiresIn = %d, want positive", info.ExpiresIn)
+	}
+
+	// Peeking must not consume the stash: the user's decision can still be
+	// submitted after the page loaded.
+	if _, err := h.service.Consent(context.Background(), ConsentInput{
+		RequestID: authorized.RequestID,
+		Approve:   true,
+		UserID:    1,
+		ClientIP:  "203.0.113.10",
+	}); err != nil {
+		t.Fatalf("Consent() after peek error = %v", err)
+	}
+}
+
+func TestConsentInfoRejectsUnknownRequest(t *testing.T) {
+	h := newHarness(t)
+	_, err := h.service.ConsentInfo(context.Background(), ConsentInfoInput{
+		RequestID: "ar_doesnotexist",
+		UserID:    1,
+	})
+	if err == nil {
+		t.Fatal("ConsentInfo() error = nil, want invalid-request error")
+	}
+}
+
+// The consent-info peek is throttled per user, not per caller IP: campus egress
+// shares one NAT address, so an IP budget would be spent by one student for
+// everyone. An authenticated user hammering random request_ids must hit a cap.
+func TestConsentInfoThrottlesByUser(t *testing.T) {
+	h := newHarness(t)
+	h.limiter.result = LimitResult{Allowed: false, RetryAfter: 30 * time.Second}
+
+	_, err := h.service.ConsentInfo(context.Background(), ConsentInfoInput{
+		RequestID: "ar_xyz",
+		UserID:    7,
+	})
+	oauthErr := oauthError(t, err, ErrorTemporarilyUnavail)
+	if oauthErr.Kind != KindRateLimited || oauthErr.RetryAfter != 30*time.Second {
+		t.Fatalf("error = %+v, want a rate-limited error carrying Retry-After", oauthErr)
+	}
+	calls := h.limiter.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "consent_info:user:7" {
+		t.Fatalf("limiter calls = %v, want one keyed by user", calls)
+	}
+}

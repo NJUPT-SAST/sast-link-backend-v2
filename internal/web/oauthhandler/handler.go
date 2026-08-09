@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
@@ -18,11 +19,16 @@ import (
 type Service interface {
 	Authorize(ctx context.Context, input oauth.AuthorizeInput) (*oauth.AuthorizeResult, error)
 	Consent(ctx context.Context, input oauth.ConsentInput) (*oauth.ConsentResult, error)
+	ConsentInfo(ctx context.Context, input oauth.ConsentInfoInput) (*oauth.ConsentInfoResult, error)
 	Token(ctx context.Context, input oauth.TokenInput) (*oauth.TokenResult, error)
 	Revoke(ctx context.Context, input oauth.RevokeInput) error
 	UserInfo(ctx context.Context, input oauth.UserInfoInput) (*oauth.UserInfoResult, error)
 	Discovery() map[string]any
 	JWKS() map[string]any
+	// Grants lists the applications a user has authorized; RevokeGrant removes
+	// one application's access (every token with that client is revoked).
+	Grants(ctx context.Context, userID int64) ([]repository.OAuthGrant, error)
+	RevokeGrant(ctx context.Context, userID, clientID int64) error
 }
 
 // Authenticator validates bearer tokens for the OAuth-facing endpoints.
@@ -64,7 +70,10 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 
 	consent := r.Group("")
 	consent.Use(authMiddleware)
+	consent.GET("/oauth/authorize/consent", h.ConsentInfo)
 	consent.POST("/oauth/authorize/consent", h.Consent)
+	consent.GET("/oauth/grants", h.Grants)
+	consent.DELETE("/oauth/grants/:client_id", h.RevokeGrant)
 }
 
 // Authorize validates an authorization request and redirects to the consent page.
@@ -130,6 +139,31 @@ func (h Handler) Consent(c *gin.Context) {
 		return
 	}
 	response.Ok(c, consentResponse{RedirectURI: result.RedirectURI})
+}
+
+// ConsentInfo serves the pending request's verified client metadata to the
+// consent page. Protected: only an authenticated user can read a pending
+// request's display info. The request_id comes from the URL (it is the opaque
+// handle the page was redirected to); everything shown comes from the stash.
+func (h Handler) ConsentInfo(c *gin.Context) {
+	principal, ok := middleware.PrincipalFrom(c)
+	if !ok {
+		response.Error(c, internalError())
+		return
+	}
+	result, err := h.Service.ConsentInfo(c.Request.Context(), oauth.ConsentInfoInput{
+		RequestID: c.Query("request_id"),
+		UserID:    principal.UserID,
+	})
+	if err != nil {
+		response.Error(c, mapConsentError(err))
+		return
+	}
+	response.Ok(c, consentInfoResponse{
+		ClientName: result.ClientName,
+		Scopes:     result.Scopes,
+		ExpiresIn:  result.ExpiresIn,
+	})
 }
 
 // Token issues or rotates tokens.

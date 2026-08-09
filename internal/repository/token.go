@@ -642,3 +642,38 @@ func revokeAllByUserInTransaction(
 	}
 	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
 }
+
+// RevokeUserClientTokens revokes every live token a user holds with one client
+// — a user removing an application's access. Returns the blacklist entries for
+// the revoked access tokens so the caller can clear the auth-state cache.
+func (r *TokenRepository) RevokeUserClientTokens(
+	ctx context.Context,
+	userID, clientID int64,
+	revokedAt time.Time,
+) ([]model.BlacklistEntry, error) {
+	var entries []model.BlacklistEntry
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Model(&model.OAuthAccessToken{}).
+			Select("token_id", "expires_at").
+			Where("user_id = ? AND client_id = ? AND expires_at > ? AND revoked_at IS NULL",
+				userID, clientID, revokedAt).
+			Find(&entries).Error; err != nil {
+			return fmt.Errorf("select live access tokens: %w", err)
+		}
+		if err := transaction.Model(&model.OAuthAccessToken{}).
+			Where("user_id = ? AND client_id = ? AND revoked_at IS NULL", userID, clientID).
+			Update("revoked_at", revokedAt).Error; err != nil {
+			return fmt.Errorf("revoke access tokens: %w", err)
+		}
+		if err := transaction.Model(&model.OAuthRefreshToken{}).
+			Where("user_id = ? AND client_id = ? AND revoked_at IS NULL", userID, clientID).
+			Update("revoked_at", revokedAt).Error; err != nil {
+			return fmt.Errorf("revoke refresh tokens: %w", err)
+		}
+		return enqueueBlacklistInTransaction(transaction, entries, revokedAt)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}

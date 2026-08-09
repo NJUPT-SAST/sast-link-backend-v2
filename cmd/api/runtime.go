@@ -261,23 +261,34 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Window: cfg.RateLimitTokenWindow,
 		},
 	}
+	// Keyed per user, not per IP: the consent-info peek is authenticated, and the
+	// campus shares one NAT egress IP.
+	consentInfoLimiter := oauthredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb,
+			Keys:   keys,
+			Limit:  cfg.RateLimitConsentInfoRPM,
+			Window: cfg.RateLimitConsentInfoWindow,
+		},
+	}
 	oauthService := oauth.Service{
-		Users:            users,
-		Clients:          clients,
-		Authorizations:   repository.NewOAuthAuthorization(database),
-		Tokens:           tokens,
-		Audit:            audit,
-		Profiles:         users,
-		Requests:         oauthredis.AuthorizeRequestStore{Store: store},
-		Blacklist:        oauthredis.BlacklistStore{Store: store},
-		AuthorizeLimiter: authorizeLimiter,
-		TokenLimiter:     tokenLimiter,
-		JWT:              jwtManager,
-		RefreshTokens:    refreshManager,
-		AccessTTL:        cfg.JWTAccessTokenExpiry,
-		RefreshTTL:       cfg.JWTRefreshTokenExpiry,
-		CodeTTL:          cfg.OAuthCodeTTL,
-		RequestTTL:       cfg.OAuthAuthorizeRequestTTL,
+		Users:              users,
+		Clients:            clients,
+		Authorizations:     repository.NewOAuthAuthorization(database),
+		Tokens:             tokens,
+		Audit:              audit,
+		Profiles:           users,
+		Requests:           oauthredis.AuthorizeRequestStore{Store: store},
+		Blacklist:          oauthredis.BlacklistStore{Store: store},
+		AuthorizeLimiter:   authorizeLimiter,
+		ConsentInfoLimiter: consentInfoLimiter,
+		TokenLimiter:       tokenLimiter,
+		JWT:                jwtManager,
+		RefreshTokens:      refreshManager,
+		AccessTTL:          cfg.JWTAccessTokenExpiry,
+		RefreshTTL:         cfg.JWTRefreshTokenExpiry,
+		CodeTTL:            cfg.OAuthCodeTTL,
+		RequestTTL:         cfg.OAuthAuthorizeRequestTTL,
 		// The discovery document's issuer must equal the iss claim of every issued
 		// token, so both read the same setting.
 		Issuer: cfg.JWTIssuer,

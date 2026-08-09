@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 )
@@ -21,21 +22,24 @@ import (
 const testConsentURL = "https://link.sast.fun/oauth/consent"
 
 type fakeService struct {
-	authorizeResult *oauth.AuthorizeResult
-	consentResult   *oauth.ConsentResult
-	tokenResult     *oauth.TokenResult
-	userInfoResult  *oauth.UserInfoResult
-	authorizeErr    error
-	consentErr      error
-	tokenErr        error
-	revokeErr       error
-	userInfoErr     error
-	authorizeInput  oauth.AuthorizeInput
-	consentInput    oauth.ConsentInput
-	tokenInput      oauth.TokenInput
-	revokeInput     oauth.RevokeInput
-	userInfoInput   oauth.UserInfoInput
-	revokeCalls     int
+	authorizeResult   *oauth.AuthorizeResult
+	consentResult     *oauth.ConsentResult
+	consentInfoResult *oauth.ConsentInfoResult
+	tokenResult       *oauth.TokenResult
+	userInfoResult    *oauth.UserInfoResult
+	authorizeErr      error
+	consentErr        error
+	consentInfoErr    error
+	tokenErr          error
+	revokeErr         error
+	userInfoErr       error
+	authorizeInput    oauth.AuthorizeInput
+	consentInput      oauth.ConsentInput
+	consentInfoInput  oauth.ConsentInfoInput
+	tokenInput        oauth.TokenInput
+	revokeInput       oauth.RevokeInput
+	userInfoInput     oauth.UserInfoInput
+	revokeCalls       int
 }
 
 func (s *fakeService) Authorize(_ context.Context, input oauth.AuthorizeInput) (*oauth.AuthorizeResult, error) {
@@ -46,6 +50,11 @@ func (s *fakeService) Authorize(_ context.Context, input oauth.AuthorizeInput) (
 func (s *fakeService) Consent(_ context.Context, input oauth.ConsentInput) (*oauth.ConsentResult, error) {
 	s.consentInput = input
 	return s.consentResult, s.consentErr
+}
+
+func (s *fakeService) ConsentInfo(_ context.Context, input oauth.ConsentInfoInput) (*oauth.ConsentInfoResult, error) {
+	s.consentInfoInput = input
+	return s.consentInfoResult, s.consentInfoErr
 }
 
 func (s *fakeService) Token(_ context.Context, input oauth.TokenInput) (*oauth.TokenResult, error) {
@@ -70,6 +79,14 @@ func (s *fakeService) Discovery() map[string]any {
 
 func (s *fakeService) JWKS() map[string]any {
 	return map[string]any{"keys": []map[string]string{{"kid": "active"}}}
+}
+
+func (s *fakeService) Grants(_ context.Context, _ int64) ([]repository.OAuthGrant, error) {
+	return nil, nil
+}
+
+func (s *fakeService) RevokeGrant(_ context.Context, _, _ int64) error {
+	return nil
 }
 
 type fakeAuthenticator struct {
@@ -297,6 +314,51 @@ func TestConsentDenialStillRedirects(t *testing.T) {
 	}
 	if service.consentInput.Approve {
 		t.Fatal("approve=false was forwarded as true")
+	}
+}
+
+func TestConsentInfoReturnsVerifiedClientMetadata(t *testing.T) {
+	service := &fakeService{consentInfoResult: &oauth.ConsentInfoResult{
+		ClientName: "SAST Link Web",
+		Scopes:     []string{"openid", "profile"},
+		ExpiresIn:  600,
+	}}
+	router := newRouter(t, service, &fakeAuthenticator{})
+
+	recorder := doRequest(t, router, http.MethodGet, "/oauth/authorize/consent?request_id=ar_abc", "", "")
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	var body struct {
+		Code int `json:"code"`
+		Data struct {
+			ClientName string   `json:"client_name"`
+			Scopes     []string `json:"scopes"`
+			ExpiresIn  int      `json:"expires_in"`
+		} `json:"data"`
+	}
+	decodeJSON(t, recorder, &body)
+	if body.Code != 0 || body.Data.ClientName != "SAST Link Web" || body.Data.ExpiresIn != 600 {
+		t.Fatalf("body = %+v, want the verified client metadata", body)
+	}
+	if service.consentInfoInput.RequestID != "ar_abc" || service.consentInfoInput.UserID != 1 {
+		t.Fatalf("consent info input = %+v, want request_id from the query and the principal's user id", service.consentInfoInput)
+	}
+}
+
+func TestConsentInfoMapsErrorsToBusinessCodes(t *testing.T) {
+	service := &fakeService{consentInfoErr: &oauth.Error{
+		Kind:        oauth.KindInvalidRequest,
+		Code:        oauth.ErrorInvalidRequest,
+		Description: "授权请求无效或已过期，请重新发起授权",
+	}}
+	router := newRouter(t, service, &fakeAuthenticator{})
+
+	recorder := doRequest(t, router, http.MethodGet, "/oauth/authorize/consent?request_id=ar_bad", "", "")
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an invalid request", recorder.Code)
 	}
 }
 
@@ -712,11 +774,13 @@ func TestUserInfoWithoutAuthenticatorIsServerError(t *testing.T) {
 	}
 }
 
-// Only the consent endpoint may sit behind the JWT middleware. The others are
-// unauthenticated by protocol (a browser arriving at /oauth/authorize from a third
-// party carries no Authorization header; token/revoke authenticate the client, not
-// a user; discovery and JWKS are public) or authenticate inline so they can answer
-// in RFC 6750 form (/userinfo). A middleware creeping onto any of them would break
+// Only the endpoints that identify the caller from their bearer token may sit
+// behind the JWT middleware: the consent step and the signed-in user's own
+// authorized-apps view (grants list and revoke). The others are unauthenticated
+// by protocol (a browser arriving at /oauth/authorize from a third party carries
+// no Authorization header; token/revoke authenticate the client, not a user;
+// discovery and JWKS are public) or authenticate inline so they can answer in
+// RFC 6750 form (/userinfo). A middleware creeping onto any of them would break
 // the flow for every third-party client.
 func TestAuthMiddlewareCoversOnlyConsent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -746,8 +810,19 @@ func TestAuthMiddlewareCoversOnlyConsent(t *testing.T) {
 		router.ServeHTTP(recorder, request)
 	}
 
-	if len(guarded) != 1 || guarded[0] != http.MethodPost+" /oauth/authorize/consent" {
-		t.Fatalf("middleware covered %v, want only POST /oauth/authorize/consent", guarded)
+	want := []string{
+		http.MethodGet + " /oauth/authorize/consent",
+		http.MethodGet + " /oauth/grants",
+		http.MethodPost + " /oauth/authorize/consent",
+		http.MethodDelete + " /oauth/grants/:client_id",
+	}
+	if len(guarded) != len(want) {
+		t.Fatalf("middleware covered %v, want %v", guarded, want)
+	}
+	for i := range want {
+		if guarded[i] != want[i] {
+			t.Fatalf("middleware covered %v, want %v", guarded, want)
+		}
 	}
 }
 

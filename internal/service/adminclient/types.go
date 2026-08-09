@@ -57,14 +57,19 @@ type CreateClientInput struct {
 }
 
 // UpdateClientInput is a partial update. A nil field is left unchanged; the
-// immutable properties (client_id, client_type, scopes, grant_types) are absent by
+// immutable properties (client_id, client_type, client_secret) are absent by
 // construction rather than validated away, so this type cannot express a change to
-// them.
+// them. client_type decides the client's credential model (secret vs public PKCE)
+// and its scope-granting rules, so flipping it in place without reissuing a secret
+// would create a credential-less third_party client — changing type means
+// registering a new client.
 type UpdateClientInput struct {
 	ClientPK     int64
 	ClientName   *string
 	RedirectURIs *[]string
 	IsActive     *bool
+	GrantTypes   *[]string
+	Scope        *[]string
 	AdminUserID  int64
 	ClientIP     string
 	UserAgent    string

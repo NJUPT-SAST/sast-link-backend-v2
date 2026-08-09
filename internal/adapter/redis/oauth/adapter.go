@@ -54,6 +54,30 @@ func (s AuthorizeRequestStore) SaveAuthorizeRequest(
 	return s.Store.SetOneTime(ctx, s.Store.Keys.AuthorizeRequest(requestID), payload, ttl)
 }
 
+// PeekAuthorizeRequest reads a stashed request without consuming it and reports
+// its remaining lifetime, so the consent page can display verified client
+// metadata before the user decides. A missing or already-expired key is reported
+// as not-found rather than an error.
+func (s AuthorizeRequestStore) PeekAuthorizeRequest(
+	ctx context.Context,
+	requestID string,
+) (oauth.AuthorizeRequestPayload, time.Duration, bool, error) {
+	var payload oauth.AuthorizeRequestPayload
+	if err := s.Store.PeekOneTime(ctx, s.Store.Keys.AuthorizeRequest(requestID), &payload); err != nil {
+		if errors.Is(err, internalredis.ErrMiss) {
+			return oauth.AuthorizeRequestPayload{}, 0, false, nil
+		}
+		return oauth.AuthorizeRequestPayload{}, 0, false, err
+	}
+	// PeekOneTime succeeded, so the key exists; guard the TTL edge where it
+	// expired between the GET and the PTTL (PTTL returns a negative duration).
+	ttl := s.Store.Client.PTTL(ctx, s.Store.Keys.AuthorizeRequest(requestID)).Val()
+	if ttl <= 0 {
+		return oauth.AuthorizeRequestPayload{}, 0, false, nil
+	}
+	return payload, ttl, true, nil
+}
+
 // ConsumeAuthorizeRequest atomically reads and deletes a stashed request.
 //
 // GetDel is what makes one authorize request yield at most one authorization

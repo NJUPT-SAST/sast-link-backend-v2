@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,8 @@ type Service struct {
 	Blacklist      TokenBlacklist
 	// AuthorizeLimiter throttles the unauthenticated authorize endpoint per IP.
 	AuthorizeLimiter EndpointLimiter
+	// ConsentInfoLimiter throttles the authenticated consent-info peek per user.
+	ConsentInfoLimiter EndpointLimiter
 	// TokenLimiter throttles the token and revocation endpoints per IP. Both accept
 	// client credentials and refresh tokens, so an unlimited rate is an unlimited
 	// number of credential attempts and DB round trips.
@@ -100,7 +103,7 @@ func (s Service) issuer() tokenissue.Issuer {
 // the limiter guards against stash flooding, and refusing every authorization
 // during a Redis blip would take third-party login down entirely.
 func (s Service) checkAuthorizeLimit(ctx context.Context, clientIP string) error {
-	return s.checkLimit(ctx, s.AuthorizeLimiter, "authorize", clientIP)
+	return s.checkLimit(ctx, s.AuthorizeLimiter, "authorize", "ip:"+clientIP)
 }
 
 // checkTokenLimit throttles the token and revocation endpoints per caller IP.
@@ -115,15 +118,24 @@ func (s Service) checkAuthorizeLimit(ctx context.Context, clientIP string) error
 // the ones where the client_id is attacker-chosen and therefore worthless as a
 // throttling key.
 func (s Service) checkTokenLimit(ctx context.Context, clientIP string) error {
-	return s.checkLimit(ctx, s.TokenLimiter, "oauth_token", clientIP)
+	return s.checkLimit(ctx, s.TokenLimiter, "oauth_token", "ip:"+clientIP)
 }
 
-func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, clientIP string) error {
-	subject := strings.TrimSpace(clientIP)
+// checkConsentInfoLimit throttles the consent-info peek per user. The endpoint is
+// authenticated, so it keys on the user rather than the caller IP: campus egress
+// shares one NAT IP, and an IP budget would let one student exhaust the whole
+// campus's. Same fail-open rationale as the others — a Redis blip must not take
+// the consent page down.
+func (s Service) checkConsentInfoLimit(ctx context.Context, userID int64) error {
+	return s.checkLimit(ctx, s.ConsentInfoLimiter, "consent_info", "user:"+strconv.FormatInt(userID, 10))
+}
+
+func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, subject string) error {
+	subject = strings.TrimSpace(subject)
 	if limiter == nil || subject == "" {
 		return nil
 	}
-	result, err := limiter.Allow(ctx, endpoint, "ip:"+subject)
+	result, err := limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
 		slog.WarnContext(ctx, "oauth limiter unavailable, allowing request",
 			"endpoint", endpoint, "error", err)

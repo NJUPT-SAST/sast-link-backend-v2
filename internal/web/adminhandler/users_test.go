@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 )
@@ -32,6 +33,8 @@ type fakeUsers struct {
 	deleteInput  adminuser.TargetUserInput
 	restoreErr   error
 	restoreInput adminuser.TargetUserInput
+	statsResult  repository.UserStats
+	statsErr     error
 }
 
 func (f *fakeUsers) ListUsers(
@@ -82,6 +85,13 @@ func (f *fakeUsers) DeleteUser(_ context.Context, input adminuser.TargetUserInpu
 func (f *fakeUsers) RestoreUser(_ context.Context, input adminuser.TargetUserInput) error {
 	f.restoreInput = input
 	return f.restoreErr
+}
+
+func (f *fakeUsers) Stats(_ context.Context) (repository.UserStats, error) {
+	if f.statsErr != nil {
+		return repository.UserStats{}, f.statsErr
+	}
+	return f.statsResult, nil
 }
 
 type fakeAuditLogs struct {

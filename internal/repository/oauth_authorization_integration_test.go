@@ -159,6 +159,153 @@ func TestOAuthAuthorizationRepositoryConsumeReportsExpiryWithoutMarkingUsed(t *t
 	assertAuthorizationUsed(t, database, "code-expired", false)
 }
 
+// ListGrantsByUser is only exercised through fakes elsewhere, so this is the one
+// test that proves the wire types scan against a real database. OAuthGrant's
+// redirect_uris and scopes are text[] columns: a []string field has no
+// sql.Scanner and would fail this Scan on the first grant. The test also pins the
+// DISTINCT ON semantics — per client only the most recent consent comes back —
+// and the user_id filter, without which another user's consent could leak into
+// the list.
+func TestOAuthAuthorizationRepositoryListGrantsScansTextArraysAndPicksLatest(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "grants-scan@njupt.edu.cn")
+	otherUser := createUserWithProfile(t, repository.NewUser(database), "grants-scan-2@njupt.edu.cn")
+	authorizations := repository.NewOAuthAuthorization(database)
+
+	firstClient := &model.OAuthClient{
+		ClientID:     "grants-client-a",
+		ClientName:   "Grants Client A",
+		ClientType:   model.ClientTypeFirstParty,
+		RedirectURIs: model.StringArray{"https://a.test/cb"},
+		GrantTypes:   model.StringArray{"authorization_code", "refresh_token"},
+		Scopes:       model.StringArray{"openid", "profile"},
+	}
+	secondClient := &model.OAuthClient{
+		ClientID:     "grants-client-b",
+		ClientName:   "Grants Client B",
+		ClientType:   model.ClientTypeThirdParty,
+		RedirectURIs: model.StringArray{"https://b.test/cb", "https://b.test/cb2"},
+		GrantTypes:   model.StringArray{"authorization_code"},
+		Scopes:       model.StringArray{"openid", "email"},
+	}
+	// A disabled client's grants must still be listed — the user needs to see "an
+	// app I authorized that is now off" — with is_active scanned as an explicit
+	// false rather than nil.
+	disabledClient := &model.OAuthClient{
+		ClientID:     "grants-client-c",
+		ClientName:   "Grants Client C",
+		ClientType:   model.ClientTypeFirstParty,
+		RedirectURIs: model.StringArray{"https://c.test/cb"},
+		GrantTypes:   model.StringArray{"authorization_code"},
+		Scopes:       model.StringArray{"openid"},
+		IsActive:     boolPtr(false),
+	}
+	for _, client := range []*model.OAuthClient{firstClient, secondClient, disabledClient} {
+		if err := database.Create(client).Error; err != nil {
+			t.Fatalf("create OAuth client %s: %v", client.ClientID, err)
+		}
+	}
+
+	// Two consents for client A, older then newer, with different scope sets.
+	// created_at carries microsecond precision in PostgreSQL, so truncate the
+	// source values or the round-tripped read-back never matches.
+	older := testAuthorization("code-grant-a-old", firstClient.ID, user.ID, time.Now().Add(5*time.Minute))
+	older.CreatedAt = time.Now().Add(-2 * time.Hour).Truncate(time.Microsecond)
+	older.Scopes = model.StringArray{"openid"}
+	if err := authorizations.Create(context.Background(), older); err != nil {
+		t.Fatalf("Create(older) error = %v", err)
+	}
+	newer := testAuthorization("code-grant-a-new", firstClient.ID, user.ID, time.Now().Add(5*time.Minute))
+	newer.CreatedAt = time.Now().Add(-1 * time.Hour).Truncate(time.Microsecond)
+	newer.Scopes = model.StringArray{"openid", "profile"}
+	if err := authorizations.Create(context.Background(), newer); err != nil {
+		t.Fatalf("Create(newer) error = %v", err)
+	}
+	// Scopes come from the authorization row (what the user actually consented to),
+	// not the client registration — the grant's scopes are the granted set.
+	only := testAuthorization("code-grant-b", secondClient.ID, user.ID, time.Now().Add(5*time.Minute))
+	only.CreatedAt = time.Now().Add(-30 * time.Minute).Truncate(time.Microsecond)
+	only.Scopes = model.StringArray{"openid", "email"}
+	if err := authorizations.Create(context.Background(), only); err != nil {
+		t.Fatalf("Create(client B) error = %v", err)
+	}
+	// Another user consents to client A *after* user's newest consent, with a
+	// different scope set. If the user_id filter regressed, DISTINCT ON would
+	// surface this row instead and grantA's scopes / last_authorized_at would flip.
+	intruder := testAuthorization("code-grant-a-intruder", firstClient.ID, otherUser.ID, time.Now().Add(5*time.Minute))
+	intruder.CreatedAt = time.Now().Add(-30 * time.Minute).Truncate(time.Microsecond)
+	intruder.Scopes = model.StringArray{"openid"}
+	if err := authorizations.Create(context.Background(), intruder); err != nil {
+		t.Fatalf("Create(other user consent) error = %v", err)
+	}
+	// A consent to the disabled client C, so the list has a grant to show there.
+	disabledGrant := testAuthorization("code-grant-c", disabledClient.ID, user.ID, time.Now().Add(5*time.Minute))
+	disabledGrant.CreatedAt = time.Now().Add(-15 * time.Minute).Truncate(time.Microsecond)
+	if err := authorizations.Create(context.Background(), disabledGrant); err != nil {
+		t.Fatalf("Create(client C consent) error = %v", err)
+	}
+
+	grants, err := authorizations.ListGrantsByUser(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("ListGrantsByUser() error = %v", err)
+	}
+	if len(grants) != 3 {
+		t.Fatalf("grants = %d, want 3 (one per client)", len(grants))
+	}
+
+	var grantA *repository.OAuthGrant
+	for i := range grants {
+		if grants[i].ClientKey == firstClient.ClientID {
+			grantA = &grants[i]
+		}
+	}
+	if grantA == nil {
+		t.Fatalf("grants = %+v, want client %s present", grants, firstClient.ClientID)
+	}
+	// The text[] columns must have scanned through model.StringArray...
+	if len(grantA.RedirectURIs) != 1 || grantA.RedirectURIs[0] != "https://a.test/cb" {
+		t.Fatalf("grantA.RedirectURIs = %v, want the scanned text[]", grantA.RedirectURIs)
+	}
+	// ...the DISTINCT ON must have surfaced the newer consent's scopes...
+	if len(grantA.Scopes) != 2 || grantA.Scopes[0] != "openid" || grantA.Scopes[1] != "profile" {
+		t.Fatalf("grantA.Scopes = %v, want the newer authorization's scopes", grantA.Scopes)
+	}
+	// ...and the user_id filter must have kept the other user's later consent out.
+	if !grantA.LastAuthorizedAt.Equal(newer.CreatedAt) {
+		t.Fatalf("grantA.LastAuthorizedAt = %v, want the user's own newer consent %v (other user's consent leaked)",
+			grantA.LastAuthorizedAt, newer.CreatedAt)
+	}
+
+	var grantB *repository.OAuthGrant
+	for i := range grants {
+		if grants[i].ClientKey == secondClient.ClientID {
+			grantB = &grants[i]
+		}
+	}
+	if grantB == nil {
+		t.Fatalf("grants = %+v, want client %s present", grants, secondClient.ClientID)
+	}
+	if len(grantB.RedirectURIs) != 2 || grantB.RedirectURIs[0] != "https://b.test/cb" || grantB.RedirectURIs[1] != "https://b.test/cb2" {
+		t.Fatalf("grantB.RedirectURIs = %v, want both values scanned", grantB.RedirectURIs)
+	}
+	if len(grantB.Scopes) != 2 || grantB.Scopes[0] != "openid" || grantB.Scopes[1] != "email" {
+		t.Fatalf("grantB.Scopes = %v, want both scanned", grantB.Scopes)
+	}
+
+	var grantC *repository.OAuthGrant
+	for i := range grants {
+		if grants[i].ClientKey == disabledClient.ClientID {
+			grantC = &grants[i]
+		}
+	}
+	if grantC == nil {
+		t.Fatalf("grants = %+v, want the disabled client %s present", grants, disabledClient.ClientID)
+	}
+	if grantC.IsActive == nil || *grantC.IsActive {
+		t.Fatalf("grantC.IsActive = %v, want an explicit false", grantC.IsActive)
+	}
+}
+
 func TestOAuthAuthorizationRepositoryConsumeUnknownCode(t *testing.T) {
 	database := setupDatabase(t)
 	authorizations := repository.NewOAuthAuthorization(database)

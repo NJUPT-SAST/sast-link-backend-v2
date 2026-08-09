@@ -79,14 +79,17 @@ func (h Handler) CreateClient(c *gin.Context) {
 // updateClientRequest is a partial update.
 //
 // Pointers so an omitted field is left alone rather than being read as "clear it".
-// Only these three properties are mutable; client_id, client_type, scopes and
-// grant_types have no field here, and the strict decoder turns an attempt to send
-// one into a 400. Changing client_type in particular would convert a confidential
-// client into a public one, which is a privilege change disguised as an edit.
+// client_id / client_secret / client_type / id have no field here, and the strict
+// decoder turns an attempt to send one into a 400 — an operator cannot choose
+// their own identifier, and client_type is immutable because flipping it without
+// reissuing a secret would create a credential-less third_party client. The
+// remaining fields are validated in the service.
 type updateClientRequest struct {
 	ClientName   *string   `json:"client_name"`
 	RedirectURIs *[]string `json:"redirect_uris"`
 	IsActive     *bool     `json:"is_active"`
+	GrantTypes   *[]string `json:"grant_types"`
+	Scope        *[]string `json:"scopes"`
 }
 
 // UpdateClient applies a partial update to a registration.
@@ -113,6 +116,8 @@ func (h Handler) UpdateClient(c *gin.Context) {
 		ClientName:   req.ClientName,
 		RedirectURIs: req.RedirectURIs,
 		IsActive:     req.IsActive,
+		GrantTypes:   req.GrantTypes,
+		Scope:        req.Scope,
 		AdminUserID:  principal.UserID,
 		ClientIP:     c.ClientIP(),
 		UserAgent:    c.Request.UserAgent(),

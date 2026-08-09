@@ -93,6 +93,7 @@ type userIdentityDTO struct {
 type auditLogDTO struct {
 	ID         int64       `json:"id"`
 	UserID     *int64      `json:"user_id"`
+	UserName   *string     `json:"user_name"`
 	Action     string      `json:"action"`
 	Resource   string      `json:"resource"`
 	ResourceID *string     `json:"resource_id"`
@@ -177,6 +178,7 @@ func mapAuditLog(entry adminuser.AuditLogItem) auditLogDTO {
 	return auditLogDTO{
 		ID:         entry.ID,
 		UserID:     entry.UserID,
+		UserName:   entry.UserName,
 		Action:     entry.Action,
 		Resource:   entry.Resource,
 		ResourceID: entry.ResourceID,

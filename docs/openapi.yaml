@@ -884,7 +884,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/StandardEnvelope"
         "429":
           $ref: "#/components/responses/RateLimited"
           description: 请求过于频繁（42900）
@@ -896,7 +896,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/StandardEnvelope"
       security:
         - bearerAuth: []
   /card/{id}:
@@ -1391,6 +1391,91 @@ paths:
                 format: uri
       security: []
   /oauth/authorize/consent:
+    get:
+      summary: 同意页元数据
+      deprecated: false
+      description: |
+        返回 pending 授权请求的、服务端校验过的客户端元数据，供同意页渲染。
+        SAST Link 自有端点，使用标准信封。
+
+        同意页不应信任 consent URL 上的 client_name / scope —— 攻击者可构造
+        指向同意页的链接，带自己的合法 request_id 却伪造可信应用名，诱导受害者
+        同意给恶意应用 —— 应改从本端点读取。peek 不消费暂存，查看页面不烧请求。
+
+        本端点按用户限流（RATE_LIMIT_CONSENT_INFO_RPM，默认 60/min），而非 IP：
+        校园共享一个 NAT 出口 IP，按 IP 限流会被单个学生耗尽全校配额。
+      operationId: oauthAuthorizeConsentInfo
+      tags:
+        - OAuth 2.1 Server
+      parameters:
+        - name: request_id
+          in: query
+          description: GET /oauth/authorize 重定向携带的暂存标识
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 服务端校验过的客户端元数据
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          client_name:
+                            type: string
+                            description: 应用名（来自暂存，URL 无法覆盖）
+                          scopes:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/OAuthScope"
+                            description: 该授权请求申请的 scope
+                          expires_in:
+                            type: integer
+                            description: 暂存剩余秒数
+          headers: {}
+        "400":
+          description: request_id 缺失、无效或已过期
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "401":
+          description: 未登录或 Access Token 无效
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "403":
+          description: 账号已注销
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "429":
+          description: 请求过于频繁（按用户限流）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "503":
+          description: Redis 暂存不可读（fail-closed）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security:
+        - bearerAuth: []
     post:
       summary: 授权确认
       deprecated: false
@@ -1664,6 +1749,130 @@ paths:
                 $ref: "#/components/schemas/OAuthError"
           headers: {}
       security: []
+  /oauth/grants:
+    get:
+      summary: 授权应用列表
+      deprecated: false
+      description: |
+        返回当前用户授权过的应用列表（同意页点过同意的客户端），每个客户端一行，
+        取最近一次授权记录（含 scopes 与授权时间）。客户端被停用仍会列出——
+        用户需要看到「我授权过但已失效」的应用。SAST Link 自有端点，使用标准信封。
+      operationId: oauthListGrants
+      tags:
+        - OAuth 2.1 Server
+      parameters: []
+      responses:
+        "200":
+          description: 授权应用列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          grants:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/OAuthGrant"
+          headers: {}
+        "401":
+          description: 未登录或 Access Token 无效
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "403":
+          description: 账号已注销
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "500":
+          description: 服务器内部错误
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security:
+        - bearerAuth: []
+  /oauth/grants/{client_id}:
+    delete:
+      summary: 撤销一个应用的授权
+      deprecated: false
+      description: |
+        撤销当前用户对该客户端的全部授权：先在独立事务中撤销该用户持有该客户端的
+        全部活跃 Access / Refresh Token 并失效 auth-state 缓存，再删除授权历史，
+        应用从已授权列表消失，下次使用必须重新走同意页。
+
+        两步各为独立事务，token 撤销在前：删除授权历史失败时该应用的访问已被切断
+        （fail-closed），只是列表可能仍显示它。撤销从未授权过的客户端同样返回 200
+        （幂等）。审计 action 为 oauth_grant_revoke。
+      operationId: oauthRevokeGrant
+      tags:
+        - OAuth 2.1 Server
+      parameters:
+        - name: client_id
+          in: path
+          description: 客户端主键（授权应用列表返回的 client_id，非对外标识 client_key）
+          required: true
+          example: 3
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: 已撤销该应用的授权
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          message:
+                            type: string
+                            example: 已撤销该应用的授权
+          headers: {}
+        "400":
+          description: client_id 非正整数
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "401":
+          description: 未登录或 Access Token 无效
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "403":
+          description: 账号已注销
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "500":
+          description: 服务器内部错误
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security:
+        - bearerAuth: []
   /.well-known/openid-configuration:
     get:
       summary: OIDC Discovery
@@ -2235,6 +2444,21 @@ paths:
                     type: string
                     format: uri
                   description: 回调地址列表
+                grant_types:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - authorization_code
+                      - refresh_token
+                  description: 授权模式（必须包含 authorization_code）
+                scopes:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/OAuthScope"
+                  description: |
+                    授权范围，必须包含 openid 且仅含受支持的值。
+                    只影响之后的授权请求，不回溯已签发的 token。
                 is_active:
                   type: boolean
                   description: 是否启用
@@ -2243,7 +2467,8 @@ paths:
         "200":
           description: |
             更新成功。停用客户端（`is_active` 由 true 改为 false）会在同一事务内
-            撤销该客户端的全部活跃 token。
+            撤销该客户端的全部活跃 token。grant_types / scopes 的更新不触发 token
+            撤销，只影响之后的授权与 token 请求。
           content:
             application/json:
               schema:
@@ -2251,8 +2476,10 @@ paths:
           headers: {}
         "400":
           description: |
-            校验失败（40000）：请求体为空（未提交任何可更新字段）、未知字段，
-            或 `redirect_uris` 违反注册规则（与创建时同一套校验）。
+            校验失败（40000）：请求体为空（未提交任何可更新字段）、未知字段
+            （client_id / client_secret / client_type / id）、`redirect_uris` 违反
+            注册规则（与创建时同一套校验）、`grant_types` 含不支持的值或缺少
+            `authorization_code`、`scopes` 缺少 openid 或含不支持的值。
           content:
             application/json:
               schema:
@@ -2363,6 +2590,68 @@ paths:
           description: 无权限（403xx）
       security:
         - bearerAuth: []
+  /admin/stats:
+    get:
+      summary: 统计概览
+      deprecated: false
+      description: |
+        控制台概览页的一次性数据源，聚合账户、客户端与最近审计三条视图。
+        需 admin 角色。
+
+        users 或 clients 聚合失败返回 500；audit.recent 读取失败静默返回
+        空列表（best-effort），不影响其余两路。
+      operationId: adminStats
+      tags:
+        - Admin
+      parameters: []
+      responses:
+        "200":
+          description: 统计概览
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          users:
+                            $ref: "#/components/schemas/UserStats"
+                          clients:
+                            type: object
+                            properties:
+                              total:
+                                type: integer
+                                description: 客户端注册总数（含停用）
+                              active:
+                                type: integer
+                                description: 启用中的客户端数
+                          audit:
+                            type: object
+                            properties:
+                              recent:
+                                type: array
+                                description: 最近 5 条审计日志（读取失败时为空列表）
+                                items:
+                                  $ref: "#/components/schemas/AuditLog"
+          headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 无权限（403xx）
+        "500":
+          description: 服务器内部错误（50000）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security:
+        - bearerAuth: []
   /health:
     get:
       summary: 健康检查
@@ -2412,6 +2701,33 @@ components:
         - software
         - media
       description: 部门 — software（软件部）/ media（媒体部）
+    UserStats:
+      type: object
+      description: 账户聚合统计（admin 概览）
+      properties:
+        total:
+          type: integer
+          description: 未注销账户总数（state ≠ is_deleted；已注销的见 by_state.is_deleted）
+        by_role:
+          type: object
+          description: 按角色分组计数（freshman / member / lecturer / admin），不含已注销账户
+          additionalProperties:
+            type: integer
+        by_state:
+          type: object
+          description: 按状态分组计数（njupter / on_sast / retired_sast / is_deleted），含 is_deleted
+          additionalProperties:
+            type: integer
+        by_department:
+          type: object
+          description: |
+            按部门分组计数（software / media），来自 profile 表 LEFT JOIN，
+            不含已注销账户；no_department 之外的用户都有部门
+          additionalProperties:
+            type: integer
+        no_department:
+          type: integer
+          description: 没有 profile 行或部门未设的未注销用户数
     EmailType:
       type: string
       enum:
@@ -2644,6 +2960,39 @@ components:
           type: string
           format: date-time
           description: 更新时间
+    OAuthGrant:
+      type: object
+      description: 用户授权过的应用（GET /oauth/grants 的一项）
+      properties:
+        client_id:
+          type: integer
+          description: 客户端主键（撤销时作为路径参数）
+        client_key:
+          type: string
+          description: 客户端对外标识（授权端点与 token 交换里的 client_id）
+        client_name:
+          type: string
+          description: 应用名称
+        client_type:
+          $ref: "#/components/schemas/ClientType"
+        redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: 允许的重定向 URI 列表
+        is_active:
+          type: boolean
+          description: 客户端是否启用（停用仍会列出）
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/OAuthScope"
+          description: 最近一次授权的 scope
+        last_authorized_at:
+          type: string
+          format: date-time
+          description: 最近一次点击同意的时间
     OAuthClientWithSecret:
       type: object
       properties:
@@ -2700,6 +3049,13 @@ components:
         user_id:
           type: integer
           description: 操作用户 ID
+          nullable: true
+        user_name:
+          type: string
+          description: |
+            操作用户显示名（best-effort 展示字段）。软删除（state = is_deleted）
+            的行仍在表里、名字照常返回；仅物理删除或查询失败时为 null，前端应
+            回退显示 user_id
           nullable: true
         action:
           type: string

@@ -36,6 +36,14 @@ type consentResponse struct {
 	RedirectURI string `json:"redirect_uri"`
 }
 
+// consentInfoResponse is the verified client metadata for a pending request,
+// served to the consent page so it never renders URL-supplied values.
+type consentInfoResponse struct {
+	ClientName string   `json:"client_name"`
+	Scopes     []string `json:"scopes"`
+	ExpiresIn  int      `json:"expires_in"`
+}
+
 // tokenResponse is the RFC 6749 §5.1 success body. IDToken is omitempty so a
 // grant without openid — which this service does not currently issue — would not
 // advertise an empty ID token.
