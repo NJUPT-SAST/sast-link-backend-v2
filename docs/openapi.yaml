@@ -845,7 +845,8 @@ paths:
       description: >-
         上传头像至对象存储（腾讯云 COS），经内容审核后写入 profile.avatar。
         依赖 STORAGE_* 配置；未配置时返回 50002。
-        图片限制 5MB，格式 jpg/png/webp。
+        图片限制 1MB、任一维不超过 4096，格式 jpg/png/webp。压缩在前端完成，
+        后端只做上限、格式与分辨率校验，不重新编码。
       operationId: userUploadAvatar
       tags:
         - Profile
@@ -859,7 +860,7 @@ paths:
                 file:
                   type: string
                   format: binary
-                  description: 图片文件（限制 5MB，格式 jpg/png/webp）
+                  description: 图片文件（限制 1MB、任一维 ≤4096，格式 jpg/png/webp）
                   example: ""
               required:
                 - file
