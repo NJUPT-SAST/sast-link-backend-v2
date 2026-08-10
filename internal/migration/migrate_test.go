@@ -265,31 +265,21 @@ WHERE client_id = 'sast-link-web'
 	}
 }
 
-// The delegated-administration client's three load-bearing properties are asserted
-// here rather than trusted to the seed: third_party is what subjects it to the
-// registered-scope check at all, the absent refresh_token grant is what bounds an
-// admin:write token to a single access TTL, and the admin scopes are the grant itself.
-// A seed that drifted on any of the three would still apply cleanly.
-func TestV8SeedsDelegatedAdminClient(t *testing.T) {
-	databaseURL := testutil.StartPostgres(t)
-	instance := newMigration(t, databaseURL)
-	if err := instance.Up(); err != nil {
-		t.Fatalf("Up() error = %v", err)
-	}
-	database := testutil.OpenSQL(t, databaseURL)
-	t.Cleanup(func() { _ = database.Close() })
+// seededClient is one row of V008's seed, with the array columns joined in SQL: lib/pq
+// is not a dependency of this module, and a comma-joined string asserts both membership
+// and order.
+type seededClient struct {
+	clientType   string
+	secret       sql.NullString
+	redirectURIs string
+	grantTypes   string
+	scopes       string
+	isActive     bool
+}
 
-	// The array columns are joined in SQL rather than scanned into a driver array
-	// type: lib/pq is not a dependency of this module, and a comma-joined string is
-	// enough to assert both membership and order.
-	var (
-		clientType   string
-		secret       sql.NullString
-		redirectURIs string
-		grantTypes   string
-		scopes       string
-		isActive     bool
-	)
+func readSeededClient(t *testing.T, database *sql.DB, clientID string) seededClient {
+	t.Helper()
+	var got seededClient
 	if err := database.QueryRowContext(context.Background(), `
 SELECT client_type::text,
        client_secret,
@@ -298,73 +288,129 @@ SELECT client_type::text,
        array_to_string(scopes, ','),
        is_active
 FROM oauth_clients
-WHERE client_id = 'sast-people'
-`).Scan(&clientType, &secret, &redirectURIs, &grantTypes, &scopes, &isActive); err != nil {
-		t.Fatalf("read seeded sast-people client: %v", err)
+WHERE client_id = $1
+`, clientID).Scan(&got.clientType, &got.secret, &got.redirectURIs,
+		&got.grantTypes, &got.scopes, &got.isActive); err != nil {
+		t.Fatalf("read seeded %s client: %v", clientID, err)
 	}
-
-	if clientType != "third_party" {
-		t.Fatalf("client_type = %q, want third_party; first_party bypasses the registered-scope check", clientType)
-	}
-	if !secret.Valid || !strings.HasPrefix(secret.String, "sha256-v1$") {
-		t.Fatalf("client_secret = %v, want a sha256-v1 hash", secret)
-	}
-	if strings.Contains(grantTypes, "refresh_token") {
-		t.Fatalf("grant_types = %q, want no refresh_token: the refresh grant does not narrow scopes", grantTypes)
-	}
-	if grantTypes != "authorization_code" {
-		t.Fatalf("grant_types = %q, want authorization_code alone", grantTypes)
-	}
-	if scopes != "openid,admin:read,admin:write" {
-		t.Fatalf("scopes = %q, want openid plus both admin scopes", scopes)
-	}
-	if redirectURIs != "https://people.sast.fun/api/auth/link,http://localhost:3001/api/auth/link" {
-		t.Fatalf("redirect_uris = %q, want the registered callbacks", redirectURIs)
-	}
-	if !isActive {
-		t.Fatal("is_active = false, want the seeded client enabled")
-	}
+	return got
 }
 
-// Re-applying over an existing but different sast-people must abort rather than
-// overwrite: silently rewriting the row could widen the scopes or repoint the
-// callbacks of a live administrative client.
-func TestV8RejectsNonCanonicalDelegatedAdminClient(t *testing.T) {
+// V008's two clients are asserted property by property rather than trusted to the seed:
+// a drifted seed still applies cleanly, and each of these properties is load-bearing.
+//
+// The split itself is the point. The admin client must not be refreshable — the refresh
+// flow inherits scopes without narrowing, so a refreshable admin:write token renews
+// itself indefinitely — while the session client must be, since keeping a sign-in alive
+// is its whole job and it holds nothing administrative. Both must be third_party, which
+// is what subjects them to the registered-scope check at all.
+func TestV8SeedsDelegatedAdminAndSessionClients(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	instance := newMigration(t, databaseURL)
-	if err := instance.Steps(7); err != nil {
-		t.Fatalf("apply V001-V007: %v", err)
+	if err := instance.Up(); err != nil {
+		t.Fatalf("Up() error = %v", err)
 	}
 	database := testutil.OpenSQL(t, databaseURL)
 	t.Cleanup(func() { _ = database.Close() })
-	if _, err := database.ExecContext(context.Background(), `
+
+	const wantRedirects = "https://people.sast.fun/api/auth/link,http://localhost:3001/api/auth/link"
+
+	admin := readSeededClient(t, database, "sast-people-admin")
+	if admin.clientType != "third_party" {
+		t.Fatalf("admin client_type = %q, want third_party; first_party bypasses the registered-scope check", admin.clientType)
+	}
+	if !admin.secret.Valid || !strings.HasPrefix(admin.secret.String, "sha256-v1$") {
+		t.Fatalf("admin client_secret = %v, want a sha256-v1 hash", admin.secret)
+	}
+	if strings.Contains(admin.grantTypes, "refresh_token") {
+		t.Fatalf("admin grant_types = %q, want no refresh_token: the refresh grant does not narrow scopes", admin.grantTypes)
+	}
+	if admin.grantTypes != "authorization_code" {
+		t.Fatalf("admin grant_types = %q, want authorization_code alone", admin.grantTypes)
+	}
+	if admin.scopes != "openid,admin:read,admin:write" {
+		t.Fatalf("admin scopes = %q, want openid plus both admin scopes", admin.scopes)
+	}
+	if admin.redirectURIs != wantRedirects {
+		t.Fatalf("admin redirect_uris = %q, want the registered callbacks", admin.redirectURIs)
+	}
+	if !admin.isActive {
+		t.Fatal("admin is_active = false, want the seeded client enabled")
+	}
+
+	session := readSeededClient(t, database, "sast-people-session")
+	if session.clientType != "third_party" {
+		t.Fatalf("session client_type = %q, want third_party", session.clientType)
+	}
+	if !session.secret.Valid || !strings.HasPrefix(session.secret.String, "sha256-v1$") {
+		t.Fatalf("session client_secret = %v, want a sha256-v1 hash", session.secret)
+	}
+	if session.secret.String == admin.secret.String {
+		t.Fatal("both clients share one secret hash; a leak of either would compromise both")
+	}
+	if session.grantTypes != "authorization_code,refresh_token" {
+		t.Fatalf("session grant_types = %q, want authorization_code plus refresh_token", session.grantTypes)
+	}
+	// The session credential must hold nothing administrative: that is what makes it
+	// safe to refresh indefinitely.
+	if strings.Contains(session.scopes, "admin:") {
+		t.Fatalf("session scopes = %q, want no admin scope on a refreshable client", session.scopes)
+	}
+	if session.scopes != "openid,profile,email" {
+		t.Fatalf("session scopes = %q, want the three OIDC scopes", session.scopes)
+	}
+	if session.redirectURIs != wantRedirects {
+		t.Fatalf("session redirect_uris = %q, want the registered callbacks", session.redirectURIs)
+	}
+	if !session.isActive {
+		t.Fatal("session is_active = false, want the seeded client enabled")
+	}
+}
+
+// Re-applying over an existing but different row must abort rather than overwrite:
+// silently rewriting could widen the scopes or repoint the callbacks of a live client.
+// Both seeded ids are checked, since the migration inserts them in sequence and a guard
+// present on only the first would leave the second overwritable.
+func TestV8RejectsNonCanonicalSeededClients(t *testing.T) {
+	for _, clientID := range []string{"sast-people-admin", "sast-people-session"} {
+		t.Run(clientID, func(t *testing.T) {
+			databaseURL := testutil.StartPostgres(t)
+			instance := newMigration(t, databaseURL)
+			if err := instance.Steps(7); err != nil {
+				t.Fatalf("apply V001-V007: %v", err)
+			}
+			database := testutil.OpenSQL(t, databaseURL)
+			t.Cleanup(func() { _ = database.Close() })
+			if _, err := database.ExecContext(context.Background(), `
 INSERT INTO oauth_clients (
     client_id, client_name, client_type, client_secret, redirect_uris, grant_types, scopes, is_active
 )
 VALUES (
-    'sast-people', 'Impostor', 'third_party', 'sha256-v1$whatever',
+    $1, 'Impostor', 'third_party', 'sha256-v1$whatever',
     ARRAY['https://attacker.test/cb'], ARRAY['authorization_code'],
     ARRAY['openid', 'admin:write'], TRUE
 )
-`); err != nil {
-		t.Fatalf("insert conflicting sast-people client: %v", err)
-	}
+`, clientID); err != nil {
+				t.Fatalf("insert conflicting %s client: %v", clientID, err)
+			}
 
-	err := instance.Up()
-	if err == nil {
-		t.Fatal("apply V008 over a conflicting sast-people client error = nil")
-	}
-	if !strings.Contains(err.Error(), "non-canonical sast-people client") {
-		t.Fatalf("apply V008 error = %v, want the non-canonical blocker", err)
-	}
-	var redirectURIs string
-	if queryErr := database.QueryRowContext(context.Background(), `
-SELECT array_to_string(redirect_uris, ',') FROM oauth_clients WHERE client_id = 'sast-people'
-`).Scan(&redirectURIs); queryErr != nil {
-		t.Fatalf("read sast-people client after failed V008: %v", queryErr)
-	}
-	if redirectURIs != "https://attacker.test/cb" {
-		t.Fatalf("redirect_uris after failed V008 = %q, want the row left untouched", redirectURIs)
+			err := instance.Up()
+			if err == nil {
+				t.Fatalf("apply V008 over a conflicting %s client error = nil", clientID)
+			}
+			if !strings.Contains(err.Error(), "non-canonical "+clientID+" client") {
+				t.Fatalf("apply V008 error = %v, want the non-canonical %s blocker", err, clientID)
+			}
+			var redirectURIs string
+			if queryErr := database.QueryRowContext(context.Background(), `
+SELECT array_to_string(redirect_uris, ',') FROM oauth_clients WHERE client_id = $1
+`, clientID).Scan(&redirectURIs); queryErr != nil {
+				t.Fatalf("read %s client after failed V008: %v", clientID, queryErr)
+			}
+			if redirectURIs != "https://attacker.test/cb" {
+				t.Fatalf("redirect_uris after failed V008 = %q, want the row left untouched", redirectURIs)
+			}
+		})
 	}
 }
 

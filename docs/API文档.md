@@ -1534,9 +1534,22 @@ DELETE /oauth/grants/:client_id
 - **角色门**回答「这个用户是否被允许」。角色取自数据库行而非 token claim，因此降权在下一个请求即生效。
 - **scope 门**回答「这个凭证是否被授权」，只约束委派调用。内置控制台 token（`azp` 等于 `INTERNAL_OAUTH_CLIENT_ID` 或无 `azp`）豁免此门，其上限即角色门。
 
-**委派调用**：唯一可代管理员调用本章端点的第三方客户端由迁移种入（`client_id = sast-people`，`third_party`，`grant_types` 仅 `authorization_code`），它必须持有对应 admin scope —— 读端点接受 `admin:read` 或 `admin:write`，写端点要求 `admin:write`。其余第三方客户端一律被拒，无论其用户角色为何。
+**委派调用**：唯一可代管理员调用本章端点的第三方客户端由迁移种入（`client_id = sast-people-admin`，`third_party`，`grant_types` 仅 `authorization_code`），它必须持有对应 admin scope —— 读端点接受 `admin:read` 或 `admin:write`，写端点要求 `admin:write`。其余第三方客户端一律被拒，无论其用户角色为何。
 
 委派 token 的 `sub` 仍是那位管理员本人，权限上限始终是该用户的角色；`admin:write` 的生命周期是一个 Access Token TTL —— 该客户端未注册 `refresh_token` grant（refresh 继承 scope 且不收窄，注册了就等于 `admin:write` 可无限续期）。停用方式是把该客户端置为 `is_active = false`，同一操作会撤销它的全部存活 token。
+
+**两个客户端，两类凭证**：V008 为 SAST People 种入的是一对客户端，职责不重叠。
+
+| `client_id` | scopes | refresh | 用途 |
+| ------ | ------ | ------ | ------ |
+| `sast-people-admin` | `openid` `admin:read` `admin:write` | 否 | 调用本章端点。过期即止，需管理员重新授权 |
+| `sast-people-session` | `openid` `profile` `email` | 是 | 普通登录会话，经 `/userinfo` 读当前登录者，可长期续期 |
+
+拆开的理由是两类凭证的生命周期与影响面不同：登录会话需要长期保活，管理能力应尽快过期。两者互相到不了对方的地盘 —— `sast-people-session` 不在委派白名单内，打本章端点一律 `403`；`sast-people-admin` 不持有 `profile`/`email`，其 `/userinfo` 只返回 `sub`。
+
+**第三方客户端不能调 `/user/*`**：那些是内部接口，`azp` 门会拒绝任何第三方 token（`403 40300`）。要读当前登录用户，用 `GET /userinfo`（见 §8.3）——它是全服务唯一按设计服务第三方 token 的端点。字段对应关系：`login_email` → `email`，`nickname` → `preferred_username`（无昵称时回落为真名），`avatar` → `picture`，用户 ID 为字符串形式的 `sub`，角色为 `role`（`profile` scope，取自签发时的数据库行）。`/userinfo` **不返回** `state`、`student_id`、`college`、`major`、`phone_number`、`qq_number`，需要这些字段时用 admin token 走 `GET /admin/users/:id`。
+
+两个客户端共用同一组 `redirect_uris`：`redirect_uri` 只需存在于**该 client 自己**的注册列表中，不要求全局唯一，因此 People 用一个回调端点即可，按 `state` 区分是哪条腿。
 
 ### 6.1 用户列表
 
@@ -1805,7 +1818,7 @@ POST /admin/oauth-clients
   - 最多 10 条，单条最长 2048 字符，不允许重复
 - `grant_types` 只允许 `authorization_code` 与 `refresh_token`，且必须包含 `authorization_code`。
 - `scopes` 必须包含 `openid`，且仅含受支持的值，与 `/oauth/authorize` 使用同一套校验。
-- **`scopes` 一律不接受 `admin:read` / `admin:write`**，返回 `400`。这两个 scope 只属于由迁移种入的委派管理客户端（`sast-people`），本接口不存在自助注册管理凭证的路径。注意 `/oauth/authorize` 的校验器**会**接受 admin scope（那个客户端要靠它走通授权流），因此这道拒绝必须由本接口自己把守。
+- **`scopes` 一律不接受 `admin:read` / `admin:write`**，返回 `400`。这两个 scope 只属于由迁移种入的委派管理客户端（`sast-people-admin`），本接口不存在自助注册管理凭证的路径。注意 `/oauth/authorize` 的校验器**会**接受 admin scope（那个客户端要靠它走通授权流），因此这道拒绝必须由本接口自己把守。
 - scope 注册后不可修改（见 §6.8），因此 admin scope 既无法事后嫁接到已有的普通客户端上，也无法从委派客户端剥离。停用手段是 `is_active = false`。
 
 ---
@@ -1851,7 +1864,7 @@ PUT /admin/oauth-clients/:id
 
 - 五个字段可改，均为可选；未出现的字段保持不变：`client_name`、`redirect_uris`、`grant_types`、`scopes`、`is_active`。
 - `client_id`、`client_secret`、`client_type`、`id` **不可修改**，请求中出现这些字段返回 `400`（strict decoder 拒未知字段，而非静默忽略）——标识符只能由服务端生成，管理员不能把自己的客户端注册成既有标识符。`client_type` 同样不可就地翻转：它决定客户端的凭据模型（有无 `client_secret`）与 scope 授予规则，翻转而不重发 secret 会产生无凭据的第三方客户端；换类型请重新注册一个客户端。
-- `scopes` 中出现 `admin:read` / `admin:write` 返回 `400`：与注册接口同一条规则。委派管理 scope 只由迁移种入唯一的 `sast-people` 客户端持有，控制台既不能注册也不能授予——否则给任意既有 `third_party` 客户端加上 `admin:write`，其 token 便可代授权管理员访问 `/admin`。该客户端自身的 scope 也不通过本接口维护。
+- `scopes` 中出现 `admin:read` / `admin:write` 返回 `400`：与注册接口同一条规则。委派管理 scope 只由迁移种入唯一的 `sast-people-admin` 客户端持有，控制台既不能注册也不能授予——否则给任意既有 `third_party` 客户端加上 `admin:write`，其 token 便可代授权管理员访问 `/admin`。该客户端自身的 scope 也不通过本接口维护。
 - `grant_types` / `scopes` 的更新**不触发 token 撤销**（只有 `is_active` 由 `true` 改 `false` 才会），且只影响**之后**的授权与 token 请求，不会回溯改动已签发的 token：
   - 收窄 `scopes`：`/oauth/authorize` 对 `third_party` 客户端校验「请求 scope 落在注册 scope 内」，因此收窄后新的授权请求只能请求更小集合；存量 refresh token 轮换时按原授权 scope 继承（PRD §4.10「不支持 scope 收窄」），不会因注册表收窄而缩水——要立刻收紧现有会话仍需停用客户端
   - 改 `grant_types`：同样只约束后续授权流程，已签发的 token 不受影响
@@ -1933,7 +1946,7 @@ GET /admin/audit-logs
 GET /admin/stats
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
 控制台概览页的一次性数据源，聚合账户、客户端与最近审计三条视图。
 
@@ -2047,7 +2060,7 @@ GET /.well-known/openid-configuration
   "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
   "claims_supported": [
     "sub", "iss", "aud", "exp", "iat", "nonce",
-    "name", "picture", "preferred_username",
+    "name", "picture", "preferred_username", "role",
     "email", "email_verified", "updated_at"
   ],
   "code_challenge_methods_supported": ["S256"],
@@ -2122,6 +2135,7 @@ POST /userinfo
   "name": "张三",
   "picture": "https://cos.example.com/avatar/1.jpg",
   "preferred_username": "张三",
+  "role": "on_sast",
   "email": "b2404****@njupt.edu.cn",
   "email_verified": true,
   "updated_at": 1717396400
@@ -2142,6 +2156,9 @@ POST /userinfo
 - `sub` 为用户唯一标识（`user.id` 字符串），始终返回
 - `email` 为注册邮箱（非对外展示邮箱）。`email_verified` 固定为 `true`（SAST Link 注册时已校验邮箱）
 - `updated_at` 为 Unix timestamp
+- `role` 是 SAST Link 自有 claim（非 OIDC 标准），随 `profile` scope 返回，取值见附录 A 的 `user_role`。它取自**签发那一刻的数据库行**，而非请求方 token 里的 `role` claim——后者是签发时快照，用户降权后仍带原角色。客户端应把它当展示提示用：它与所在 token 同样会过期，不应作为授权判断依据（本服务自己的鉴权也不读 token 的 role claim，见 §7.1）
+- 本端点是全服务唯一按设计服务第三方 token 的接口。第三方客户端读取当前登录用户只能经由此处，`/user/*` 会被 `azp` 门拒绝（`403 40300`）
+- `admin:read` / `admin:write` 不贡献任何 claim：只持有 admin scope 的 token 在此处只得到 `sub`
 - 响应体为裸 claim 集合，**不使用标准信封**——通用 OIDC 客户端库不解析本项目的信封格式
 - 授权范围之外的 claim **完全不出现**，而非返回空值。relying party 无法区分 `"name": ""` 与「该用户没有名字」
 - `preferred_username` 取 `profile.nickname`，未设置或为空白时回退到 `user.name`，保证 relying party 总有可展示的值
@@ -2198,6 +2215,7 @@ Content-Type: application/json
   "name": "张三",
   "picture": "https://cos.example.com/avatar/1.jpg",
   "preferred_username": "张三",
+  "role": "on_sast",
   "email": "b2404****@njupt.edu.cn",
   "email_verified": true,
   "updated_at": 1717396400
@@ -2218,6 +2236,7 @@ Content-Type: application/json
 | `name` | `profile` | 真实姓名 |
 | `picture` | `profile` | 头像 URL |
 | `preferred_username` | `profile` | 昵称 |
+| `role` | `profile` | 用户当前角色（SAST Link 自有 claim，非 OIDC 标准）。取自签发时的数据库行；与所在 token 同样会过期，仅作展示提示，不应用于授权判断 |
 | `email` | `email` | 注册邮箱 |
 | `email_verified` | `email` | 邮箱已验证，固定 `true` |
 | `updated_at` | `profile` | 用户信息最后修改时间 |

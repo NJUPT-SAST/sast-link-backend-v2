@@ -383,12 +383,14 @@ Payload: {
 | Scope | ID Token / UserInfo Claims |
 | ------- | --------------------------- |
 | `openid`（必选） | `sub` |
-| `profile` | `name`, `picture`, `preferred_username`, `profile`, `updated_at` |
+| `profile` | `name`, `picture`, `preferred_username`, `role`, `updated_at` |
 | `email` | `email`, `email_verified` |
+| `admin:read` / `admin:write` | 无（不贡献任何 claim） |
 
 授权范围之外的 claim **完全不出现**，而非返回空值：relying party 无法区分 `"name": ""` 与「该用户没有名字」。ID Token 与 UserInfo 共用同一套 claim 构造与同一道 scope 闸门，因此两个端点对同一 token 不会给出不一致的结论。
 
 - `preferred_username` 取 `profile.nickname`，未设置或为空白时回退到 `user.name`
+- `role` 是本服务自有 claim 而非 OIDC 标准，取自签发那一刻的数据库行，而非请求方 token 的 `role` claim（后者是签发时快照，降权后仍带原角色，本服务自身鉴权也不读它，见 §4.1）。它随所在 token 一同过期，relying party 应视其为展示提示，不得据以做授权判断。命名不加 URI 命名空间：OIDC 未保留 `role` 这一名称，本服务的 claim 集合是封闭且受校验的，加前缀只会让每个 relying party 多解析一段字符串
 - `profile` URL claim 已移除（连同 `OAUTH_CARD_BASE_URL` 配置）。它指向的公开名片端点 `GET /card/:id` 因顺序 ID 可枚举全站成员名单而下线（见 §4.14），claim 若保留即等于给任何第三方客户端一条读取该投影的旁路。`profile` scope 现在只产出 `name` / `picture` / `preferred_username` / `updated_at`
 - `auth_time` 取授权码行的 `created_at`——两段式流程中授权码正是在用户点「同意」那一刻创建的，无需额外建列。注意这是 consent 时刻而非真实认证时刻：闲置多日后再次授权会高报认证新鲜度，因此该 claim 会签发但不通告在 `claims_supported` 中（见 API 文档 §8.4）。refresh 轮换不是重新认证，因此保持该 family 首个 refresh token 的创建时刻
 - ID Token 的 `aud` 是 `client_id`，与 access token（`aud` 为本服务）分属两条独立签名路径。若共用一条，要么破坏中间件的 audience 校验，要么签发出能被本服务当作自身 bearer 凭证接受的 ID Token
@@ -414,7 +416,9 @@ Payload: {
 
 **委派管理**：本章是唯一允许第三方 token 到达的内部端点组。角色门与 scope 门互不蕴含，缺任一均 `403`：角色门回答「这个用户是否被允许」（角色读数据库行，降权下一请求生效），scope 门回答「这个凭证是否被授权」，只约束委派调用——内置控制台 token 豁免 scope 门，其上限即角色门。「委派 scope」列中 `admin:read` 处 `admin:write` 亦可通行（写蕴含读）。
 
-唯一可代管理员调用的第三方客户端由迁移种入（`sast-people`，`third_party`，`grant_types` 仅 `authorization_code`）。控制台注册接口一律拒绝 admin scope，不存在自助注册管理凭证的路径。委派 token 的 `sub` 是管理员本人，故权限上限始终是该用户角色；不注册 `refresh_token` 使 `admin:write` 的生命周期限于一个 Access Token TTL（refresh 继承 scope 且不收窄）。停用手段是 `is_active = false`，同一操作撤销其全部存活 token。
+唯一可代管理员调用的第三方客户端由迁移种入（`sast-people-admin`，`third_party`，`grant_types` 仅 `authorization_code`）。控制台注册接口一律拒绝 admin scope，不存在自助注册管理凭证的路径。委派 token 的 `sub` 是管理员本人，故权限上限始终是该用户角色；不注册 `refresh_token` 使 `admin:write` 的生命周期限于一个 Access Token TTL（refresh 继承 scope 且不收窄）。停用手段是 `is_active = false`，同一操作撤销其全部存活 token。
+
+V008 同时种入 `sast-people-session`（`openid profile email`，带 `refresh_token`）承载 SAST People 的普通登录会话。拆成两个客户端而非一个，是因为两类凭证的生命周期与影响面不同：会话需长期保活，管理能力应尽快过期。会话客户端不在委派白名单内，打 `/admin/*` 一律 403；管理客户端不持有 `profile`/`email`，其 `/userinfo` 只返回 `sub`。第三方客户端读当前登录用户只能经 `/userinfo`（§4.11），`/user/*` 由 `azp` 门拒绝（§7.1）。
 
 `client_type` 不可通过更新接口修改：它同时决定客户端的凭据模型（是否持有 client_secret）与 scope 授予规则（仅 `third_party` 受注册 scope 约束，且 admin scope 只能授予 `third_party`）。就地翻转类型而不同步 secret 会产出无需凭据即可换 token 的 `third_party` 客户端，等于绕过 admin scope 的凭据前提；需要换类型时重新注册一个客户端。
 
@@ -714,7 +718,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 模块 | 状态 |
 | ------ | ------ |
 | Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
-| 数据基础层 | 已完成 — V001–V008 SQL migrations、固定内置 `sast-link-web` first-party Client、V008 种入 `sast-people` 委派管理 Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
+| 数据基础层 | 已完成 — V001–V008 SQL migrations、固定内置 `sast-link-web` first-party Client、V008 种入 `sast-people-admin` 委派管理 Client 与 `sast-people-session` 会话 Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
 | 认证基础设施 | 已完成 — 单方案 argon2id 密码哈希（默认 m=19456KiB/t2，存量 pbkdf2-sha512-v1 只读验证 + 登录时重哈希迁移）、EdDSA（Ed25519）JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope（另有 `admin:read`/`admin:write` 委派 scope，仅第三方客户端可持有，不产生 OIDC claim）、token-family rotation/replay、Redis 一次性状态/auth-state 缓存/登录失败计数与 fixed-window limiter |
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流，以及登录 / 登出 / 刷新审计接入（刷新以 `outcome` 区分 `rotated` 与 `refresh_replayed`，后者即重放防御触发并级联撤销整个 token family） |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
@@ -726,7 +730,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ## 11. 实现顺序
 
 - [x] Go 服务骨架（配置 / DB 与 Redis 连接 / Web 基础设施 / 健康检查）
-- [x] 数据基础层（V001–V008 migrations / 内置 first-party Client / V008 委派管理 Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
+- [x] 数据基础层（V001–V008 migrations / 内置 first-party Client / V008 委派管理 + 会话 Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
 - [x] 认证基础设施（单方案 argon2id 密码哈希（默认 m=19456KiB/t2，存量 pbkdf2-sha512-v1 只读验证 + 登录时重哈希）/ JWT + JWKS（EdDSA）/ Refresh Token / PKCE-S256 / scope / Redis auth-state 缓存 + limiter / token-family rotation）
 - [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
 - [x] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码 / 第三方邮箱绑定）

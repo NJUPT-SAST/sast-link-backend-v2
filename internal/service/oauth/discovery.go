@@ -43,9 +43,11 @@ func (s Service) Discovery() map[string]any {
 		// omitting an optional claim is honest, publishing a wrong one is not. Restore this
 		// entry together with a real authentication timestamp — see the note on
 		// signIDToken's authTime parameter.
+		// role is this provider's own claim, not an OIDC one, advertised here because a
+		// relying party has no other way to discover it. It rides the profile scope.
 		"claims_supported": []string{
 			"sub", "iss", "aud", "exp", "iat", "nonce",
-			"name", "picture", "preferred_username",
+			"name", "picture", "preferred_username", "role",
 			"email", "email_verified", "updated_at",
 		},
 		"code_challenge_methods_supported": []string{pkceMethodS256},

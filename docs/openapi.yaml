@@ -33,11 +33,19 @@ tags:
       **scope 门** 回答「这个凭证是否被授权」，只约束委派调用。内置控制台
       token（azp 为 `INTERNAL_OAUTH_CLIENT_ID` 或无 azp）豁免 scope 门，其上限
       即角色门。唯一一个可代管理员调用本章端点的第三方客户端由迁移种入
-      （`sast-people`，见 OAuthScope），它必须持有对应的 admin scope：读端点接受
+      （`sast-people-admin`，见 OAuthScope），它必须持有对应的 admin scope：读端点接受
       `admin:read` 或 `admin:write`，写端点要求 `admin:write`。
 
       其余第三方客户端一律被拒（403 `40300`），无论其用户角色为何。委派 token 的
       sub 仍是那位管理员本人，因此权限上限始终是该用户的角色。
+
+      V008 同时种入 `sast-people-session`（`openid profile email`，带 refresh），
+      承载 SAST People 的普通登录会话。它不在委派白名单内，打本章端点一律 403；
+      反过来 `sast-people-admin` 不持有 profile/email，其 `/userinfo` 只返回 sub。
+      两类凭证的生命周期与影响面不同，故刻意分开：会话可长期续期，管理能力过期即止。
+
+      第三方客户端读当前登录用户只能经 `GET /userinfo`；`/user/*` 是内部接口，
+      `azp` 门会拒绝任何第三方 token。
   - name: Health
   - name: OIDC
   - name: Card
@@ -3144,7 +3152,7 @@ components:
 
             null 表示没有任何 OAuth 凭证授权该操作：未认证流程（登录、注册、
             重置密码）、后台任务，以及 V007 迁移之前写入的历史行。
-          example: sast-people
+          example: sast-people-admin
         created_at:
           type: string
           format: date-time
@@ -3966,8 +3974,12 @@ components:
       description: |
         OIDC UserInfo 端点响应。返回的 claims 取决于 Access Token 的 scope：
         - `openid` → sub（必返）
-        - `profile` → name, picture, preferred_username, updated_at
+        - `profile` → name, picture, preferred_username, updated_at, role
         - `email` → email, email_verified
+        - `admin:read` / `admin:write` → 不贡献任何 claim
+
+        本端点是全服务唯一按设计服务第三方 token 的接口（`/user/*` 由 azp 门拒绝），
+        因此第三方客户端读取当前登录用户只能经由此处。
 
         未授权或用户未填写的 claim 一律**不出现在响应中**，而不是返回 `null`
         或空值——所有字段均为 `omitempty`。客户端应按「键是否存在」判断，
@@ -3990,6 +4002,16 @@ components:
           type: string
           description: 昵称（fallback 至姓名）。需 profile scope
           example: 张三
+        role:
+          type: string
+          description: |
+            用户当前角色，取自数据库行。需 profile scope。
+
+            这是 SAST Link 自有 claim 而非 OIDC 标准 claim。它反映的是签发那一刻的
+            数据库取值，而非请求方 token 里的 role claim（后者是签发时快照，降权后
+            仍带原角色）。客户端应把它当作展示用途的提示：它与所在 token 同样会过期，
+            不应作为授权判断依据。
+          example: on_sast
         email:
           type: string
           format: email
@@ -4056,6 +4078,13 @@ components:
           type: string
           description: 昵称 / 常用用户名（需 profile scope）
           example: 张三
+          nullable: true
+        role:
+          type: string
+          description: |
+            用户当前角色（需 profile scope）。SAST Link 自有 claim，非 OIDC 标准。
+            取自签发时的数据库行，与所在 ID Token 同样会过期，仅作展示提示。
+          example: on_sast
           nullable: true
         email:
           type: string

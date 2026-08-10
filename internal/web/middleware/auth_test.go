@@ -393,7 +393,7 @@ func TestAuthenticateAnyClientAcceptsThirdPartyToken(t *testing.T) {
 	}
 }
 
-const testDelegatedClientID = "sast-people"
+const testDelegatedClientID = "sast-people-admin"
 
 // performAdminAuthRequest drives RequireAdminAuth followed by RequireDelegatedScope,
 // mirroring how the /admin group is wired, so the two gates are exercised in the

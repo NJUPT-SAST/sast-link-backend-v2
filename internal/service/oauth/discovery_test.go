@@ -91,6 +91,8 @@ func TestDiscoveryClaimsMatchIssuedClaims(t *testing.T) {
 		"auth_time": true, "nonce": true, "name": true, "picture": true,
 		"preferred_username": true, "email": true,
 		"email_verified": true, "updated_at": true,
+		// role is this provider's own claim, under the profile scope.
+		"role": true,
 	}
 	// auth_time is issued but not advertised: the value available today is the consent
 	// instant rather than the authentication instant, which overstates how recently the

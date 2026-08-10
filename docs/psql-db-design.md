@@ -331,14 +331,17 @@ CREATE TABLE oauth_clients (
 
 ### 迁移种入的客户端
 
-两个客户端由迁移种入而非通过控制台注册，因为服务本身依赖它们存在：
+三个客户端由迁移种入而非通过控制台注册，因为服务本身依赖它们存在：
 
 |`client_id`|迁移|类型|scopes|grant_types|用途|
 |---|---|---|---|---|---|
 |`sast-link-web`|V003|`first_party`（无 secret）|`openid` `profile` `email`|`authorization_code` `refresh_token`|内置控制台。内部 API 通过 `azp` 钉死在此客户端上；停用它是不可自行恢复的锁死（登录/刷新/注册均经由它解析，且同一操作会撤销全部内部会话 token），故控制台接口拒绝停用它，也拒绝改写其 `redirect_uris`|
-|`sast-people`|V008|`third_party`（有 secret）|`openid` `admin:read` `admin:write`|`authorization_code`|委派管理客户端，唯一可代管理员调用 `/admin/*` 的第三方客户端。**刻意不注册 `refresh_token`**：refresh 继承 scope 且不收窄，注册了就等于 `admin:write` 可无限续期；限于 `authorization_code` 后，管理凭证的生命周期是一个 Access Token TTL。可停用（`is_active = false`，同一操作撤销其全部存活 token），但拒绝改写 `redirect_uris`——其授权码携带 admin scope|
+|`sast-people-admin`|V008|`third_party`（有 secret）|`openid` `admin:read` `admin:write`|`authorization_code`|委派管理客户端，唯一可代管理员调用 `/admin/*` 的第三方客户端（`model.AdminDelegatedClientID`）。**刻意不注册 `refresh_token`**：refresh 继承 scope 且不收窄，注册了就等于 `admin:write` 可无限续期；限于 `authorization_code` 后，管理凭证的生命周期是一个 Access Token TTL。可停用（`is_active = false`，同一操作撤销其全部存活 token），但拒绝改写 `redirect_uris`——其授权码携带 admin scope|
+|`sast-people-session`|V008|`third_party`（有 secret）|`openid` `profile` `email`|`authorization_code` `refresh_token`|SAST People 的普通登录会话。经 `/userinfo`（唯一服务第三方 token 的端点）读取当前登录者，并**可长期续期**——它不持有任何管理能力，故 refresh 无扩权风险。不在 `AdminDelegatedClientID` 白名单内，打 `/admin/*` 一律 403|
 
-`sast-people` 之所以是 `third_party`：`first_party` 客户端不受其 `scopes` 列约束（可请求任意受支持 scope），只有 `third_party` 会被 `ContainsAll` 钉死在注册范围内。控制台注册接口一律拒绝 admin scope，因此不存在自助注册管理凭证的路径。其 `client_secret` 只以 `sha256-v1$...` 哈希入库，明文在迁移之外一次性生成、仅存于该工具自身配置。
+拆成两个客户端而非一个，是因为两类凭证的生命周期与影响面不同：会话需要长期保活，管理能力应尽快过期。两者职责不重叠且互相打不到对方的接口——会话客户端不是 `AdminDelegatedClientID`，管理客户端不持有 `profile`/`email`，其 `/userinfo` 只能得到 `sub`。二者共用同一组 `redirect_uris`：`authorize` 校验的是「该 URI 在**这个** client 的注册列表内」，不要求全局唯一，因此 People 用一个回调端点即可。
+
+两个 `sast-people-*` 都是 `third_party`：`first_party` 客户端不受其 `scopes` 列约束（可请求任意受支持 scope），只有 `third_party` 会被 `ContainsAll` 钉死在注册范围内。控制台注册接口一律拒绝 admin scope，因此不存在自助注册管理凭证的路径。`client_secret` 只以 `sha256-v1$...` 哈希入库，两个明文各自在迁移之外一次性生成、仅存于 People 自身配置。
 
 两个 seed 迁移形状相同：幂等（重复 apply 为 no-op）、带漂移检测（既有行属性不符则 `RAISE EXCEPTION` 中止而非覆盖——覆盖可能扩大 scope 或改写一个存活管理客户端的回调地址）、并把自己创建的行记入 ownership 表，使 `down` 只删自己建的且未被任何授权码/token 引用过的行。
 

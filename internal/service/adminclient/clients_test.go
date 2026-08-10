@@ -243,7 +243,7 @@ func TestUpdateClientGuardIsScopedToTheBuiltinClient(t *testing.T) {
 // Registry changes are audited with the acting credential too, so a client created
 // by the ops tool is distinguishable from one an administrator registered by hand.
 func TestClientAuditRecordsTheActingClient(t *testing.T) {
-	const delegated = "sast-people"
+	const delegated = "sast-people-admin"
 	for _, test := range []struct {
 		name  string
 		actor string

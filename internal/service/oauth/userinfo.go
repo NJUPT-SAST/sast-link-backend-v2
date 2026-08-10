@@ -54,6 +54,7 @@ func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoRe
 		result.Name = claims.Name
 		result.Picture = claims.Picture
 		result.PreferredUsername = claims.PreferredUsername
+		result.Role = claims.Role
 		if !claims.UpdatedAt.IsZero() {
 			result.UpdatedAt = claims.UpdatedAt.UTC().Unix()
 		}
@@ -75,7 +76,11 @@ func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoRe
 // then omit.
 func (s Service) idTokenClaims(ctx context.Context, user *model.User, granted []string) (auth.IDTokenSubjectClaims, error) {
 	claims := auth.IDTokenSubjectClaims{
-		Name:      user.Name,
+		Name: user.Name,
+		// The role as it stands in the database right now. The requesting token's own
+		// role claim is a signing-time snapshot that outlives a demotion, so it is not
+		// what gets reported here.
+		Role:      string(user.Role),
 		UpdatedAt: user.UpdatedAt,
 		Email:     user.LoginEmail,
 		// preferred_username falls back to the real name when no nickname is set, so
