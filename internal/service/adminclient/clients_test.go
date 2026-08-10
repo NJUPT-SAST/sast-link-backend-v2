@@ -39,23 +39,40 @@ func TestCreateClientIssuesVerifiableSecretForThirdParty(t *testing.T) {
 	}
 }
 
-// The console must not be a self-service path to an administrative credential.
-// scope.Normalize accepts the admin scopes — the authorize endpoint needs it to, for
-// the one seeded client that holds them — so registration has to refuse them on its
-// own, for every client type and in every combination.
-func TestCreateClientRefusesAdminScopes(t *testing.T) {
+// Delegated administration is grantable at registration time, but only under the
+// conditions checkAdminScopeGrant enforces. This is the create door; the update door
+// has to refuse the same things, and both are covered because with the delegate no
+// longer pinned by client_id the registration is the only barrier left.
+func TestCreateClientAdminScopeGuards(t *testing.T) {
 	for _, testCase := range []struct {
 		name       string
 		clientType string
 		scopes     []string
+		grantTypes []string
+		actor      string
+		wantKind   Kind
 	}{
-		{name: "third party read", clientType: "third_party", scopes: []string{"openid", scope.AdminRead}},
-		{name: "third party write", clientType: "third_party", scopes: []string{"openid", scope.AdminWrite}},
-		{name: "third party both", clientType: "third_party", scopes: []string{"openid", scope.AdminRead, scope.AdminWrite}},
-		{name: "first party write", clientType: "first_party", scopes: []string{"openid", scope.AdminWrite}},
 		{
-			name: "alongside OIDC scopes", clientType: "third_party",
-			scopes: []string{"openid", "profile", "email", scope.AdminRead},
+			// A first-party registration's scopes are advisory — it may request anything this
+			// provider supports — so admin scope there would let every first-party client,
+			// the built-in console included, mint an administrative token.
+			name: "first party is refused", clientType: "first_party",
+			scopes: []string{"openid", scope.AdminWrite}, grantTypes: []string{"authorization_code"},
+			wantKind: KindInvalidInput,
+		},
+		{
+			// The refresh grant inherits scopes without narrowing, so this would renew itself
+			// indefinitely.
+			name: "refresh_token is refused", clientType: "third_party",
+			scopes: []string{"openid", scope.AdminRead}, grantTypes: []string{"authorization_code", "refresh_token"},
+			wantKind: KindInvalidInput,
+		},
+		{
+			// Otherwise a delegate could register another delegate, and the set of clients
+			// reaching /admin would grow without an operator approving it.
+			name: "a delegated actor is refused", clientType: "third_party",
+			scopes: []string{"openid", scope.AdminWrite}, grantTypes: []string{"authorization_code"},
+			actor: "sast-people-admin", wantKind: KindProtected,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -63,18 +80,46 @@ func TestCreateClientRefusesAdminScopes(t *testing.T) {
 			input := validCreateInput()
 			input.ClientType = testCase.clientType
 			input.Scopes = testCase.scopes
+			input.GrantTypes = testCase.grantTypes
+			input.ActorClientID = testCase.actor
 
 			_, err := h.service.CreateClient(context.Background(), input)
-			if err == nil {
-				t.Fatal("CreateClient() accepted an admin scope")
-			}
-			if !errors.Is(err, ErrInvalidInput) {
-				t.Fatalf("CreateClient() error = %v, want ErrInvalidInput", err)
-			}
+			assertKind(t, err, testCase.wantKind)
 			if h.clients.created != nil {
 				t.Fatalf("a client was persisted despite the rejection: %#v", h.clients.created)
 			}
 		})
+	}
+}
+
+// The console may grant delegated administration to a confidential client that holds
+// no refresh grant. This is the whole point of the change: onboarding an ops tool is a
+// console action, not a migration.
+func TestCreateClientAcceptsAdminScopeFromConsole(t *testing.T) {
+	h := newHarness(t)
+	input := validCreateInput()
+	input.Scopes = []string{"openid", scope.AdminRead, scope.AdminWrite}
+	input.GrantTypes = []string{"authorization_code"}
+
+	result, err := h.service.CreateClient(context.Background(), input)
+	if err != nil {
+		t.Fatalf("CreateClient() error = %v, want success", err)
+	}
+	if h.clients.created == nil {
+		t.Fatal("no client was persisted")
+	}
+	if !scope.ContainsAdmin([]string(h.clients.created.Scopes)) {
+		t.Fatalf("persisted scopes = %v, want the admin scopes", h.clients.created.Scopes)
+	}
+	if result.ClientSecret == "" {
+		t.Fatal("a delegated client must be confidential and receive a secret")
+	}
+	// The audit row has to be findable without joining the row it created.
+	if len(h.audit.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(h.audit.entries))
+	}
+	if detail := string(h.audit.entries[0].Detail); !strings.Contains(detail, "admin_scope") {
+		t.Fatalf("audit detail = %s, want an admin_scope marker", detail)
 	}
 }
 
@@ -272,45 +317,133 @@ func TestClientAuditRecordsTheActingClient(t *testing.T) {
 	}
 }
 
-// Registration refuses admin scopes; so must the update path. They are the same
-// door, and `scopes` became editable after the admin-scope guard was written — an
-// administrator who could grant admin:write to any existing third_party client would
-// have the self-service route to an administrative credential that
-// TestCreateClientRefusesAdminScopes exists to deny. The delegated client's own
-// scopes come from the migration, never from this endpoint.
-func TestUpdateClientRefusesAdminScopes(t *testing.T) {
-	for _, scopes := range [][]string{
-		{"openid", scope.AdminRead},
-		{"openid", scope.AdminWrite},
-		{"openid", "profile", scope.AdminRead, scope.AdminWrite},
-	} {
-		t.Run(strings.Join(scopes, "+"), func(t *testing.T) {
-			h := newHarness(t)
-			h.clients.findResult = activeClient(5)
+// The update door must refuse everything the create door refuses, and it has to
+// decide on the MERGED registration rather than on the submitted fields. A guard that
+// only inspected the request would be bypassable by splitting a change in two.
+func TestUpdateClientAdminScopeGuards(t *testing.T) {
+	adminScopes := []string{"openid", scope.AdminWrite}
+	refreshGrants := []string{"authorization_code", "refresh_token"}
+	otherURIs := []string{"https://ops.test/cb"}
+	openIDOnly := []string{"openid"}
 
-			_, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
-				ClientPK: 5, Scope: &scopes, AdminUserID: 99,
-			})
-			if err == nil {
-				t.Fatal("UpdateClient() accepted an admin scope")
-			}
-			if !errors.Is(err, ErrInvalidInput) {
-				t.Fatalf("UpdateClient() error = %v, want ErrInvalidInput", err)
-			}
-			if h.clients.updateFields != nil {
-				t.Fatalf("fields were written despite the rejection: %#v", h.clients.updateFields)
+	for _, testCase := range []struct {
+		name     string
+		current  *model.OAuthClient
+		input    UpdateClientInput
+		wantKind Kind
+	}{
+		{
+			name:    "granting to a first_party client is refused",
+			current: firstPartyClient(5),
+			// client_type is absent from UpdateClientInput by design, so the guard has to read
+			// it from the stored row.
+			input:    UpdateClientInput{ClientPK: 5, Scope: &adminScopes, AdminUserID: 99},
+			wantKind: KindInvalidInput,
+		},
+		{
+			name:     "granting alongside a refresh grant is refused",
+			current:  activeClient(5),
+			input:    UpdateClientInput{ClientPK: 5, Scope: &adminScopes, GrantTypes: &refreshGrants, AdminUserID: 99},
+			wantKind: KindInvalidInput,
+		},
+		{
+			// This is the split-request bypass. The client already holds admin scope, so a
+			// request naming only grant_types would slip past any input-only check — and
+			// tokenissue has already minted refresh halves for it, which adding the grant
+			// type would bring to life.
+			name:     "adding refresh_token to an already delegated client is refused",
+			current:  delegatedClient(5),
+			input:    UpdateClientInput{ClientPK: 5, GrantTypes: &refreshGrants, AdminUserID: 99},
+			wantKind: KindProtected,
+		},
+		{
+			name:     "a delegated actor may not grant admin scope",
+			current:  activeClient(5),
+			input:    UpdateClientInput{ClientPK: 5, Scope: &adminScopes, AdminUserID: 99, ActorClientID: "sast-people-admin"},
+			wantKind: KindProtected,
+		},
+		{
+			name:     "a delegated actor may not edit a delegated client at all",
+			current:  delegatedClient(5),
+			input:    UpdateClientInput{ClientPK: 5, IsActive: boolPointer(true), AdminUserID: 99, ActorClientID: "sast-people-admin"},
+			wantKind: KindProtected,
+		},
+		{
+			// Granting and repointing in one request would collapse two things worth reading
+			// separately into a single audit row.
+			name:     "granting while rewriting redirect_uris is refused",
+			current:  activeClient(5),
+			input:    UpdateClientInput{ClientPK: 5, Scope: &adminScopes, RedirectURIs: &otherURIs, AdminUserID: 99},
+			wantKind: KindInvalidInput,
+		},
+		{
+			// The built-in client's scopes are asserted at startup, so editing them here is a
+			// delayed refusal to boot, recoverable only through the database.
+			name:     "the built-in client's scopes are immutable",
+			current:  protectedClient(5),
+			input:    UpdateClientInput{ClientPK: 5, Scope: &openIDOnly, AdminUserID: 99},
+			wantKind: KindProtected,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.clients.findResult = testCase.current
+
+			_, err := h.service.UpdateClient(context.Background(), testCase.input)
+			assertKind(t, err, testCase.wantKind)
+			if h.clients.updateCalls != 0 {
+				t.Fatalf("update reached the repository %d times, want 0", h.clients.updateCalls)
 			}
 		})
 	}
 }
 
-// delegatedClient is the seeded ops registration, whose authorization codes carry
-// admin scopes.
-func delegatedClient(id int64) *model.OAuthClient {
-	client := activeClient(id)
-	client.ClientID = model.AdminDelegatedClientID
-	client.Scopes = model.StringArray{"openid", scope.AdminRead, scope.AdminWrite}
-	return client
+// Granting delegated administration revokes the target's existing tokens, and so does
+// narrowing any client's scopes. Both are "the capability changed, credentials
+// asserting the old one must stop working now" — the same reasoning as disabling.
+func TestUpdateClientRevokesOnCapabilityChange(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		current    *model.OAuthClient
+		scopes     []string
+		wantRevoke bool
+	}{
+		{
+			// A promoted client already has refresh families in the database; cutting them
+			// forces a fresh authorization under the new scope set.
+			name: "granting admin scope revokes", current: activeClient(5),
+			scopes: []string{"openid", scope.AdminWrite}, wantRevoke: true,
+		},
+		{
+			// An access token carries the scope it was signed with, so without this the
+			// narrowed registration leaves credentials asserting a revoked capability.
+			name: "narrowing revokes", current: delegatedClient(5),
+			scopes: []string{"openid"}, wantRevoke: true,
+		},
+		{
+			// Widening must not revoke: existing tokens do not gain the new scope, so cutting
+			// them would log users out for a change that grants them nothing.
+			name: "widening does not revoke", current: activeClient(5),
+			scopes: []string{"openid", "profile", "email"}, wantRevoke: false,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.clients.findResult = testCase.current
+
+			if _, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+				ClientPK: 5, Scope: &testCase.scopes, AdminUserID: 99,
+			}); err != nil {
+				t.Fatalf("UpdateClient() error = %v", err)
+			}
+			if h.clients.updateFields == nil {
+				t.Fatal("no fields were written")
+			}
+			if h.clients.updateRevoked != testCase.wantRevoke {
+				t.Fatalf("revokeTokens = %v, want %v", h.clients.updateRevoked, testCase.wantRevoke)
+			}
+		})
+	}
 }
 
 // The delegated client's redirect_uris are as sensitive as the built-in client's: an

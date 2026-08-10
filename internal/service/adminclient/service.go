@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 // Clock is the service's time source.
@@ -75,39 +77,89 @@ func (s Service) newClientID() (string, error) {
 	return newClientID()
 }
 
-// checkProtected refuses an update that would break the built-in client.
+// checkProtected refuses an update that would break the built-in client or weaken a
+// client that currently holds delegated administration.
 //
-// Renaming it is allowed: client_name is cosmetic and appears only on the consent
-// page. Disabling it and rewriting its redirect_uris are not — the first is the
-// lockout described on ProtectedClientID, and the second would let an
-// administrator redirect first-party authorization codes to a host of their
-// choosing, which is the one registration this service cannot afford to have
-// pointed elsewhere.
+// It keys on the stored row, never on the submitted fields, which is what makes it
+// unbypassable by splitting a change across two requests.
 func (s Service) checkProtected(current *model.OAuthClient, input UpdateClientInput) error {
 	if current == nil {
 		return nil
 	}
 	if protected := strings.TrimSpace(s.ProtectedClientID); protected != "" && current.ClientID == protected {
+		// Renaming is allowed: client_name is cosmetic and appears only on the consent
+		// page. The rest are not.
 		if input.IsActive != nil && !*input.IsActive {
 			return newError(ErrProtectedClient, "内置客户端不可停用", nil)
 		}
 		if input.RedirectURIs != nil {
+			// Would let an administrator redirect first-party authorization codes to a host
+			// of their choosing — the one registration this service cannot afford to have
+			// pointed elsewhere.
 			return newError(ErrProtectedClient, "内置客户端的 redirect_uris 不可通过本接口修改", nil)
+		}
+		if input.Scope != nil {
+			// cmd/api asserts this client's scopes against scope.InternalSessionScopes at
+			// startup, so editing them here is a delayed self-destruct: the running process
+			// keeps working, and the next restart refuses to boot with no way back except
+			// direct database access. Narrowing them would additionally trip the
+			// scope-removal revocation below and cut every user's internal session at once.
+			//
+			// grant_types is deliberately not refused here: startup asserts only the type,
+			// secret and scopes, and the internal flows resolve this client for the
+			// authorization_code leg that validateGrantTypes already makes mandatory.
+			return newError(ErrProtectedClient, "内置客户端的 scopes 不可通过本接口修改", nil)
 		}
 		return nil
 	}
-	// The delegated-administration client's authorization codes carry admin scopes, so
-	// its redirect_uris are as sensitive as the built-in client's: rewriting them
-	// points an administrative code at a host of the operator's choosing.
-	//
-	// Disabling it, unlike the built-in client, is deliberately permitted. It is the
-	// kill switch for delegated administration — is_active=false already revokes the
-	// client's live tokens — and unlike the console there is no lockout risk, because
-	// nothing about administering this service depends on the ops tool working.
-	if current.ClientID == model.AdminDelegatedClientID && input.RedirectURIs != nil {
+	// Delegated administration is held by whichever registration carries an admin
+	// scope, so the guard is a predicate over the stored scopes rather than a match
+	// against a known client_id. That is what lets a second ops tool be onboarded
+	// through the console without a code change, while keeping every restriction the
+	// named client used to get for free.
+	if !scope.ContainsAdmin([]string(current.Scopes)) {
+		return nil
+	}
+	if input.RedirectURIs != nil {
+		// This client's authorization codes carry admin scopes, so its redirect_uris are
+		// as sensitive as the built-in client's: rewriting them points an administrative
+		// code at a host of the operator's choosing.
 		return newError(ErrProtectedClient, "委派管理客户端的 redirect_uris 不可通过本接口修改", nil)
 	}
+	if input.GrantTypes != nil && slices.Contains(*input.GrantTypes, grantRefreshToken) {
+		// The refresh grant inherits a family's scopes without narrowing, so a
+		// refreshable admin token renews itself indefinitely until its family is
+		// revoked. Refused on the stored row rather than only when scopes and grants
+		// arrive together, because tokenissue mints a refresh half for every pair: a
+		// client granted admin scope already has dormant refresh families, and adding
+		// the grant type in a second request would activate them.
+		return newError(ErrProtectedClient, "持有 admin scope 的客户端不可注册 refresh_token", nil)
+	}
+	// Only the console may administer a client that holds administrative capability.
+	// Without this, one delegated client can re-enable another that an operator
+	// disabled — the documented kill switch — or edit it back into usefulness, which
+	// makes the set of delegates self-sustaining rather than console-controlled.
+	//
+	// Disabling such a client from the console remains permitted: is_active=false
+	// already revokes its live tokens, and unlike the console there is no lockout
+	// risk, because nothing about administering this service depends on an ops tool.
+	if !s.actorIsConsole(input.ActorClientID) {
+		return newError(ErrProtectedClient, "委派管理客户端只能由控制台维护", nil)
+	}
 	return nil
+}
+
+// actorIsConsole reports whether this call was authorized by the built-in console
+// client rather than by a delegated third-party token.
+//
+// An empty azp counts as the console: nothing can mint an azp-less token today, so
+// the only tokens without one are built-in sessions predating the claim — the same
+// reading middleware.AuthenticateAdminDelegated applies. Fails closed when
+// ProtectedClientID is unset: an unknown console identity cannot be matched, so no
+// third-party actor is treated as one.
+func (s Service) actorIsConsole(actorClientID string) bool {
+	actor := strings.TrimSpace(actorClientID)
+	return actor == "" || actor == strings.TrimSpace(s.ProtectedClientID)
 }
 
 // auditParams describes one admin audit row. A struct rather than positional
