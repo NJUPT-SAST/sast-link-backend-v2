@@ -3895,7 +3895,7 @@ components:
             - name
             - picture
             - preferred_username
-            - profile
+            - role
             - email
             - email_verified
             - updated_at
