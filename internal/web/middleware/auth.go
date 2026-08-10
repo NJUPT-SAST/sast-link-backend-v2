@@ -78,19 +78,6 @@ type Authenticator struct {
 	// them, so a deployment that forgets to set it fails loudly instead of silently
 	// dropping the check.
 	InternalClientID string
-	// AdminDelegatedClientID is the single third-party client permitted to act on an
-	// administrator's behalf against the /admin endpoints, and only when its token
-	// carries a scope.AdminRead/AdminWrite grant.
-	//
-	// This is the one documented hole in the azp pin above, and it is deliberately
-	// narrow: one named client, admin routes only, and a scope the client must have
-	// registered for. The token's subject is still the administrator, so the ceiling
-	// stays whatever role that user holds in the database — RequireRole reads it from
-	// the row on every request, so a demotion cuts the tool off immediately.
-	//
-	// Optional. Empty means no client may act as a delegate, which is the correct
-	// default: a deployment that has not registered an ops client must not have one.
-	AdminDelegatedClientID string
 }
 
 func (a Authenticator) RequireAuth() gin.HandlerFunc {
@@ -137,8 +124,8 @@ func (a Authenticator) AuthenticateAnyClient(ctx context.Context, header string)
 	return a.authenticate(ctx, header)
 }
 
-// RequireAdminAuth authenticates the /admin endpoints, admitting either an
-// internal console token or the one delegated ops client.
+// RequireAdminAuth authenticates the /admin endpoints, admitting an internal
+// console token or any third-party token that carries an admin scope.
 //
 // It exists as a separate gate rather than a relaxation of RequireAuth so the
 // default stays fail-closed: every other internal route keeps rejecting
@@ -159,9 +146,32 @@ func (a Authenticator) RequireAdminAuth() gin.HandlerFunc {
 }
 
 // AuthenticateAdminDelegated validates an Authorization header for the admin API.
-// It accepts an internal-client token unconditionally and a token from
-// AdminDelegatedClientID only when that token carries an admin scope; every other
-// client is rejected exactly as Authenticate would reject it.
+// It accepts an internal-client token unconditionally, and a third-party token only
+// when it carries an admin scope; every other client is rejected exactly as
+// Authenticate would reject it.
+//
+// The admin scope in the token IS the delegation marker, and it is not self-asserted.
+// A third-party token can only carry one if scope.ContainsAll passed against that
+// client's registered scopes at authorize time, and oauth.authorizeScopeForClient
+// refuses the admin scopes for first-party clients outright — a first-party
+// registration's scope list is advisory, so allowing them there would let the
+// built-in console mint an administrative token. So "this token has admin:read"
+// already proves "an operator granted this registration delegated administration".
+//
+// That replaces an earlier design where one client_id was hardcoded here. Naming the
+// delegate meant onboarding a second ops tool took a migration and a release; it also
+// meant escalation needed to break two independent barriers, the registration's
+// scopes and this name check. With the name gone, the registration is the only
+// barrier: any write of an admin scope onto a third-party registration creates a
+// credential that reaches /admin. adminclient.checkAdminScopeGrant is what guards
+// that write, on both the create and the update door, and it must stay covered by
+// tests on both.
+//
+// The token's subject is still the administrator, so the ceiling stays whatever role
+// that user holds in the database — RequireRole reads it from the row on every
+// request, so a demotion cuts the tool off immediately. Pair this with
+// RequireDelegatedScope, which decides what the credential may do rather than whether
+// it may speak.
 //
 // The InternalClientID check comes first and fails closed. Ordering it after the
 // delegated branch would mean a deployment that forgot INTERNAL_OAUTH_CLIENT_ID
@@ -179,8 +189,7 @@ func (a Authenticator) AuthenticateAdminDelegated(ctx context.Context, header st
 	if principal.ClientID == "" || principal.ClientID == a.InternalClientID {
 		return principal, nil
 	}
-	delegated := strings.TrimSpace(a.AdminDelegatedClientID)
-	if delegated == "" || principal.ClientID != delegated || !scope.ContainsAdmin(principal.Scopes) {
+	if !scope.ContainsAdmin(principal.Scopes) {
 		return Principal{}, authBusinessError(http.StatusForbidden, errcode.CodeForbidden,
 			"该 Access Token 由第三方客户端签发，不可用于内部接口")
 	}

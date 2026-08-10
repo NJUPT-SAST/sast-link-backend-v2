@@ -243,9 +243,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		// Pins the internal API to the built-in client, so a third-party OAuth access
 		// token cannot be used as a session credential.
 		InternalClientID: cfg.InternalOAuthClientID,
-		// The single delegate permitted on the /admin surface, and only carrying an
-		// admin scope. Every other internal route still refuses it.
-		AdminDelegatedClientID: model.AdminDelegatedClientID,
+		// Delegated administration needs no wiring here: a third-party token reaches
+		// /admin by carrying an admin scope, which only a registration an operator granted
+		// one can produce. See AuthenticateAdminDelegated.
 	}
 
 	authorizeLimiter := oauthredis.EndpointLimiter{

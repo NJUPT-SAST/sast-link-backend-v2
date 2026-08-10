@@ -48,6 +48,11 @@ import (
 const (
 	delegatedE2EInternalClientID = "sast-link-web"
 	delegatedE2ESessionClientID  = "sast-people-session"
+	// delegatedE2EDelegatedClientID is the V008-seeded client that holds the admin
+	// scopes. Nothing in the middleware knows this name — a token reaches /admin by
+	// carrying an admin scope, which only a registration granted one can produce — so
+	// this constant names a fixture, not a rule.
+	delegatedE2EDelegatedClientID = "sast-people-admin"
 )
 
 type delegatedHarness struct {
@@ -108,16 +113,18 @@ func setupDelegated(t *testing.T) *delegatedHarness {
 	// V008 seeded the delegated client; its primary key is what the access-token rows
 	// have to reference.
 	var delegatedClient model.OAuthClient
-	if err := database.Where("client_id = ?", model.AdminDelegatedClientID).
+	if err := database.Where("client_id = ?", delegatedE2EDelegatedClientID).
 		First(&delegatedClient).Error; err != nil {
-		t.Fatalf("read seeded %s client: %v", model.AdminDelegatedClientID, err)
+		t.Fatalf("read seeded %s client: %v", delegatedE2EDelegatedClientID, err)
 	}
 
+	// No delegated client is named here. The authenticator admits a third-party token
+	// on the strength of its admin scope alone, so this wiring is what production uses
+	// for every delegate rather than for one blessed client_id.
 	authenticator := middleware.Authenticator{
-		JWT:                    jwtManager,
-		Tokens:                 tokens,
-		InternalClientID:       delegatedE2EInternalClientID,
-		AdminDelegatedClientID: model.AdminDelegatedClientID,
+		JWT:              jwtManager,
+		Tokens:           tokens,
+		InternalClientID: delegatedE2EInternalClientID,
 	}
 
 	router := gin.New()
@@ -228,17 +235,22 @@ func TestDelegatedAdminAccessMatrix(t *testing.T) {
 	h := setupDelegated(t)
 	memberPath := "/admin/users/" + strconv.FormatInt(h.member.ID, 10)
 
-	adminReadToken := h.issueToken(t, h.admin, model.AdminDelegatedClientID,
+	adminReadToken := h.issueToken(t, h.admin, delegatedE2EDelegatedClientID,
 		[]string{scope.OpenID, scope.AdminRead})
-	adminWriteToken := h.issueToken(t, h.admin, model.AdminDelegatedClientID,
+	adminWriteToken := h.issueToken(t, h.admin, delegatedE2EDelegatedClientID,
 		[]string{scope.OpenID, scope.AdminRead, scope.AdminWrite})
-	noScopeToken := h.issueToken(t, h.admin, model.AdminDelegatedClientID,
+	noScopeToken := h.issueToken(t, h.admin, delegatedE2EDelegatedClientID,
 		[]string{scope.OpenID})
 	sessionToken := h.issueToken(t, h.admin, delegatedE2ESessionClientID,
 		[]string{scope.OpenID, scope.Profile, scope.Email})
 	consoleToken := h.issueToken(t, h.admin, delegatedE2EInternalClientID,
 		[]string{scope.OpenID, scope.Profile, scope.Email})
-	demotedToken := h.issueToken(t, h.member, model.AdminDelegatedClientID,
+	demotedToken := h.issueToken(t, h.member, delegatedE2EDelegatedClientID,
+		[]string{scope.OpenID, scope.AdminRead, scope.AdminWrite})
+	// A client_id no migration ever seeded and no constant names. This is the feature's
+	// actual claim: an operator onboards a second ops tool through the console, and its
+	// tokens work without a code change.
+	otherDelegateToken := h.issueToken(t, h.admin, "some-other-ops-tool",
 		[]string{scope.OpenID, scope.AdminRead, scope.AdminWrite})
 
 	for _, test := range []struct {
@@ -291,6 +303,12 @@ func TestDelegatedAdminAccessMatrix(t *testing.T) {
 			name: "admin scopes do not lift a non-admin user", token: demotedToken,
 			method: http.MethodGet, path: "/admin/audit-logs", wantStatus: http.StatusForbidden,
 		},
+		{
+			// An unnamed delegate reaches the surface on its scope alone.
+			name: "any client holding admin:write reaches a write route", token: otherDelegateToken,
+			method: http.MethodPut, path: memberPath, body: `{"name":"第二个工具改名"}`,
+			wantStatus: http.StatusOK,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := h.request(t, test.method, test.path, test.token, test.body)
@@ -321,7 +339,7 @@ func TestDelegatedAdminWriteRecordsActorClientID(t *testing.T) {
 	h := setupDelegated(t)
 	memberPath := "/admin/users/" + strconv.FormatInt(h.member.ID, 10)
 
-	delegated := h.issueToken(t, h.admin, model.AdminDelegatedClientID,
+	delegated := h.issueToken(t, h.admin, delegatedE2EDelegatedClientID,
 		[]string{scope.OpenID, scope.AdminRead, scope.AdminWrite})
 	if recorder := h.request(t, http.MethodPut, memberPath, delegated,
 		`{"name":"工具改名"}`); recorder.Code != http.StatusOK {
@@ -361,8 +379,8 @@ func TestDelegatedAdminWriteRecordsActorClientID(t *testing.T) {
 	if len(actors) != 2 {
 		t.Fatalf("audit actors = %v, want two rows naming their client", actors)
 	}
-	if actors[0] != model.AdminDelegatedClientID {
-		t.Fatalf("delegated write actor = %q, want %q", actors[0], model.AdminDelegatedClientID)
+	if actors[0] != delegatedE2EDelegatedClientID {
+		t.Fatalf("delegated write actor = %q, want %q", actors[0], delegatedE2EDelegatedClientID)
 	}
 	// The console records the built-in client explicitly rather than NULL, which is what
 	// keeps NULL meaning "no OAuth credential authorized this".

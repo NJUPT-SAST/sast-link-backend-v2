@@ -393,6 +393,9 @@ func TestAuthenticateAnyClientAcceptsThirdPartyToken(t *testing.T) {
 	}
 }
 
+// testDelegatedClientID is an arbitrary third-party client_id. Nothing in the
+// middleware knows this value — delegation is proven by the token's admin scope, not
+// by its azp — so the tests below use it only to show that an azp is present.
 const testDelegatedClientID = "sast-people-admin"
 
 // performAdminAuthRequest drives RequireAdminAuth followed by RequireDelegatedScope,
@@ -400,12 +403,12 @@ const testDelegatedClientID = "sast-people-admin"
 // order production uses them.
 func performAdminAuthRequest(
 	manager *auth.JWTManager, states *fakeAccessStates, now time.Time,
-	internalClientID, delegatedClientID string, allowedScopes []string, header string,
+	internalClientID string, allowedScopes []string, header string,
 ) (*httptest.ResponseRecorder, envelope, bool) {
 	router := gin.New()
 	authenticator := Authenticator{
 		JWT: manager, Tokens: states, Clock: testClock{value: now},
-		InternalClientID: internalClientID, AdminDelegatedClientID: delegatedClientID,
+		InternalClientID: internalClientID,
 	}
 	reached := false
 	router.GET("/admin/probe",
@@ -434,9 +437,9 @@ func signAdminToken(t *testing.T, manager *auth.JWTManager, azp string, scopes [
 	})
 }
 
-// The delegated client reaches /admin only with an admin scope, and only the scope
-// the route asks for. Everything else about the token is identical across rows, so
-// the scope set and the azp are the only variables.
+// A third-party token reaches /admin only with an admin scope, and only the scope the
+// route asks for. Everything else about the token is identical across rows, so the
+// scope set and the azp are the only variables.
 func TestRequireAdminAuthAndDelegatedScope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
@@ -474,9 +477,22 @@ func TestRequireAdminAuthAndDelegatedScope(t *testing.T) {
 			allowed: []string{scope.AdminRead, scope.AdminWrite}, wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
 		},
 		{
-			name: "a different third-party client is refused even holding admin:write",
+			// The delegate is not named anywhere: any third-party client holding an admin
+			// scope is admitted, because only a registration an operator granted that scope
+			// can produce such a token. This is what lets a second ops tool be onboarded
+			// through the console instead of through a migration.
+			name: "any third-party client holding admin:write is admitted",
 			azp:  "some-other-app", tokenScopes: []string{"openid", scope.AdminWrite},
-			allowed: []string{scope.AdminWrite}, wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
+			allowed: []string{scope.AdminWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+		{
+			// The companion to the row above: without an admin scope an arbitrary
+			// third-party token is still refused outright, so widening the delegate set did
+			// not widen what an ordinary third-party token may reach.
+			name: "an arbitrary third-party client without an admin scope is refused",
+			azp:  "some-other-app", tokenScopes: []string{"openid", "profile", "email"},
+			allowed:    []string{scope.AdminRead, scope.AdminWrite},
+			wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
 		},
 		{
 			// The console holds only session scopes and must stay exempt from the scope gate.
@@ -495,7 +511,7 @@ func TestRequireAdminAuthAndDelegatedScope(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			token := signAdminToken(t, manager, test.azp, test.tokenScopes)
 			recorder, body, reached := performAdminAuthRequest(manager, validStates(now), now,
-				testInternalClientID, testDelegatedClientID, test.allowed, "Bearer "+token)
+				testInternalClientID, test.allowed, "Bearer "+token)
 			if recorder.Code != test.wantStatus || reached != test.wantHandler {
 				t.Fatalf("status = %d (handler reached %v), want %d (%v): %#v",
 					recorder.Code, reached, test.wantStatus, test.wantHandler, body)
@@ -504,22 +520,6 @@ func TestRequireAdminAuthAndDelegatedScope(t *testing.T) {
 				t.Fatalf("body.Code = %d, want %d", body.Code, test.wantCode)
 			}
 		})
-	}
-}
-
-// With no delegated client configured, no third-party token may act as one. This is
-// the default deployment shape, so it must not depend on the scope check failing.
-func TestRequireAdminAuthRefusesDelegationWhenUnconfigured(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
-	manager := newTestJWTManager(t, now)
-	token := signAdminToken(t, manager, testDelegatedClientID, []string{"openid", scope.AdminWrite})
-
-	recorder, body, reached := performAdminAuthRequest(manager, validStates(now), now,
-		testInternalClientID, "", []string{scope.AdminWrite}, "Bearer "+token)
-	if recorder.Code != http.StatusForbidden || body.Code != errcode.CodeForbidden || reached {
-		t.Fatalf("status = %d %#v (handler reached %v), want 403/%d and no handler",
-			recorder.Code, body, reached, errcode.CodeForbidden)
 	}
 }
 
@@ -533,7 +533,7 @@ func TestRequireAdminAuthFailsClosedWithoutInternalClientID(t *testing.T) {
 	token := signAdminToken(t, manager, testDelegatedClientID, []string{"openid", scope.AdminWrite})
 
 	recorder, _, reached := performAdminAuthRequest(manager, validStates(now), now,
-		"", testDelegatedClientID, []string{scope.AdminWrite}, "Bearer "+token)
+		"", []string{scope.AdminWrite}, "Bearer "+token)
 	if recorder.Code != http.StatusInternalServerError || reached {
 		t.Fatalf("status = %d (handler reached %v), want 500 and no handler", recorder.Code, reached)
 	}
@@ -548,7 +548,7 @@ func TestRequireDelegatedScopeFailsClosedOnEmptyAllowedSet(t *testing.T) {
 	token := signAdminToken(t, manager, testDelegatedClientID, []string{"openid", scope.AdminWrite})
 
 	recorder, body, reached := performAdminAuthRequest(manager, validStates(now), now,
-		testInternalClientID, testDelegatedClientID, nil, "Bearer "+token)
+		testInternalClientID, nil, "Bearer "+token)
 	if recorder.Code != http.StatusForbidden || body.Code != errcode.CodeForbidden || reached {
 		t.Fatalf("status = %d %#v (handler reached %v), want 403 and no handler", recorder.Code, body, reached)
 	}

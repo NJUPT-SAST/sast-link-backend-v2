@@ -2,21 +2,6 @@ package model
 
 import "time"
 
-// AdminDelegatedClientID is the client_id of the one third-party client permitted
-// to call the admin API on an administrator's behalf.
-//
-// A constant rather than configuration, deliberately: the registration is seeded by
-// migration with this exact literal, so an environment variable could only ever
-// disagree with the row it is supposed to name — and a mismatch fails silently as
-// "delegation refused" rather than loudly. Changing the delegate means a migration,
-// which is the same commit that would change this constant.
-//
-// Its counterpart, the session client seeded alongside it, is deliberately absent
-// from this file: it holds openid/profile/email and reads the signed-in user through
-// /userinfo, so nothing in this service needs to know its name. Only the client that
-// may reach /admin/* has to be named here.
-const AdminDelegatedClientID = "sast-people-admin"
-
 // OAuthClient persists a registered OAuth client.
 type OAuthClient struct {
 	ID               int64

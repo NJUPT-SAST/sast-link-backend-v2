@@ -79,8 +79,9 @@ type Gates struct {
 // gate answers "is this user allowed to do this", reading the role from the
 // database row so a demotion lands on the next request. The scope gate answers
 // "was this credential granted the right to act", which only constrains a
-// delegated third-party token — the one named ops client may reach these routes on
-// an administrator's behalf, but only within the scopes it registered. Neither
+// delegated third-party token — any client holding an admin scope may reach these
+// routes on an administrator's behalf, but only within the scopes it registered
+// (that scope set is itself what marks it as a delegate). Neither
 // gate implies the other: an administrator's token issued to a read-only delegate
 // must not perform writes, and a write-scoped token belonging to a demoted user
 // must not do anything.
