@@ -32,17 +32,22 @@ tags:
 
       **scope 门** 回答「这个凭证是否被授权」，只约束委派调用。内置控制台
       token（azp 为 `INTERNAL_OAUTH_CLIENT_ID` 或无 azp）豁免 scope 门，其上限
-      即角色门。唯一一个可代管理员调用本章端点的第三方客户端由迁移种入
-      （`sast-people-admin`，见 OAuthScope），它必须持有对应的 admin scope：读端点接受
-      `admin:read` 或 `admin:write`，写端点要求 `admin:write`。
+      即角色门。任何 `third_party` 客户端只要其注册持有 admin scope，即可代管理员
+      调用本章端点：读端点接受 `admin:read` 或 `admin:write`，写端点要求
+      `admin:write`。没有被硬编码的客户端名单——委派身份完全由注册表的 scopes
+      决定（见 OAuthScope 与 `POST /admin/oauth-clients`），因此接入一个新的运维
+      工具是一次控制台操作。
 
-      其余第三方客户端一律被拒（403 `40300`），无论其用户角色为何。委派 token 的
-      sub 仍是那位管理员本人，因此权限上限始终是该用户的角色。
+      不持有 admin scope 的第三方 token 一律被拒（403 `40300`），无论其用户角色
+      为何。委派 token 的 sub 仍是那位管理员本人，因此权限上限始终是该用户的角色。
 
-      V008 同时种入 `sast-people-session`（`openid profile email`，带 refresh），
-      承载 SAST People 的普通登录会话。它不在委派白名单内，打本章端点一律 403；
-      反过来 `sast-people-admin` 不持有 profile/email，其 `/userinfo` 只返回 sub。
-      两类凭证的生命周期与影响面不同，故刻意分开：会话可长期续期，管理能力过期即止。
+      一个既要读当前登录用户、又要调用本章端点的应用，宜注册两个客户端而非一个：
+      一个持 `openid admin:read admin:write` 且不带 refresh（调用本章端点），一个持
+      `openid profile email` 且带 refresh（普通登录会话）。两类凭证的生命周期与影响面
+      不同——会话需长期保活，管理能力应尽快过期——且合成一个即意味着一份可无限续期
+      的凭证同时握有管理能力，而持有 admin scope 的客户端不允许注册 refresh_token。
+      拆开后会话客户端不持有 admin scope，打本章端点一律 403；管理客户端不持有
+      profile/email，其 `/userinfo` 只返回 sub。
 
       第三方客户端读当前登录用户只能经 `GET /userinfo`；`/user/*` 是内部接口，
       `azp` 门会拒绝任何第三方 token。
@@ -2352,8 +2357,11 @@ paths:
       description: |
         需 admin 角色。委派调用需 `admin:write` scope。第一方应用不返回 client_secret。
 
-        `scopes` 一律不接受 `admin:read` / `admin:write`（400）：委派管理客户端只能由
-        迁移种入，本接口不存在自助注册管理凭证的路径。
+        `scopes` 含 `admin:read` / `admin:write` 即授予委派管理，须同时满足：目标为
+        `third_party`（否则 400）、`grant_types` 不含 `refresh_token`（否则 400，
+        refresh 继承 scope 不收窄，可续期的管理凭证会无限自我续期）、且本次请求由
+        内置控制台客户端发起（否则 403 —— 委派 token 不能授予委派，否则委派集合会
+        脱离运维批准自行增长）。授予与改写 `redirect_uris` 不可同请求完成（400）。
       operationId: adminCreateOAuthClient
       tags:
         - Admin
@@ -2448,7 +2456,22 @@ paths:
     put:
       summary: 更新 OAuth 客户端
       deprecated: false
-      description: 需 admin 角色。委派调用需 `admin:write` scope。
+      description: |
+        需 admin 角色。委派调用需 `admin:write` scope。
+
+        `scopes` 的 admin 授予条件与注册接口一致，且判定基于**合并后的状态**：给已
+        持有 admin scope 的客户端单独追加 `refresh_token`（本次请求不含 `scopes`）
+        同样被拒（403），否则拆成两步提交即可绕过。已持有 admin scope 的客户端还
+        不可改写 `redirect_uris`，且只能由控制台维护（均 403）；停用仍允许，那是
+        委派管理的 kill switch。
+
+        能力变化会连带撤销该客户端存量 token：收窄 `scopes` 或新授予 admin scope
+        都在同一事务内撤销其全部 Access / Refresh Token；扩大 `scopes` 不撤销。
+        收回即时生效——存量 token 当场失效，未提交同意的暂存请求与未兑换的授权码
+        分别在 consent 与 token 端点被重新校验并拒绝。
+
+        内置客户端（`INTERNAL_OAUTH_CLIENT_ID`）的 `scopes` 不可修改（403）：启动时
+        会断言其为规范值，改动会导致下次重启拒绝引导。
       operationId: adminUpdateOAuthClient
       tags:
         - Admin
@@ -2488,8 +2511,9 @@ paths:
                   items:
                     $ref: "#/components/schemas/OAuthScope"
                   description: |
-                    授权范围，必须包含 openid 且仅含受支持的值。
-                    只影响之后的授权请求，不回溯已签发的 token。
+                    授权范围，必须包含 openid 且仅含受支持的值。含 admin scope 即
+                    授予委派管理，条件见本操作 description。收窄该集合或新授予
+                    admin scope 会撤销该客户端存量 token；扩大不会。
                 is_active:
                   type: boolean
                   description: 是否启用
@@ -2497,9 +2521,10 @@ paths:
       responses:
         "200":
           description: |
-            更新成功。停用客户端（`is_active` 由 true 改为 false）会在同一事务内
-            撤销该客户端的全部活跃 token。grant_types / scopes 的更新不触发 token
-            撤销，只影响之后的授权与 token 请求。
+            更新成功。以下三种情形会在同一事务内撤销该客户端的全部活跃 token：
+            停用（`is_active` 由 true 改为 false）、收窄 `scopes`（旧集合中有值不在
+            新集合里）、新授予 admin scope。扩大 `scopes` 或仅改 `grant_types`
+            不撤销，只影响之后的授权与 token 请求。message 会在发生撤销时相应变化。
           content:
             application/json:
               schema:
@@ -2521,11 +2546,19 @@ paths:
           description: 未认证（401xx）
         "403":
           description: |
-            无权限（403xx）。除角色不足外，还包括针对内置客户端
-            （`INTERNAL_OAUTH_CLIENT_ID`，默认 `sast-link-web`）的受保护操作：
-            停用它会使 `findInternalClient` 解析失败，令全站登录/刷新/注册立即中断
-            且管理员自己也无法登录回来恢复，因此一律拒绝；改写它的 `redirect_uris`
-            同样拒绝。改名允许。
+            无权限（403xx）。除角色不足外，还包括两类受保护目标上的操作。
+
+            内置客户端（`INTERNAL_OAUTH_CLIENT_ID`，默认 `sast-link-web`）：停用它会使
+            `findInternalClient` 解析失败，令全站登录/刷新/注册立即中断且管理员自己
+            也无法登录回来恢复；改写它的 `redirect_uris` 会把第一方授权码投递到他处；
+            修改它的 `scopes` 会令下次启动拒绝引导。三者一律拒绝，改名允许。
+
+            已持有 admin scope 的客户端：改写 `redirect_uris`（管理级授权码会被投递到
+            自选主机）、追加 `refresh_token`（即使本次请求不含 `scopes`——判定基于
+            合并后状态，以防拆成两步绕过），以及由委派 token 发起的任何修改（委派
+            不能维护委派）。停用仍允许，那是委派管理的 kill switch。
+
+            此外，由非控制台凭证授予 admin scope 亦返回本状态。
           content:
             application/json:
               schema:
@@ -2740,8 +2773,14 @@ components:
         两者仅可授予 `third_party` 客户端。`first_party` 客户端不受其注册 scopes
         列约束（见 OAuthClient.scopes），因此若允许其请求 admin scope，等同于任何
         第一方客户端都能自行签发管理凭证；/oauth/authorize 对该组合返回
-        invalid_scope。控制台注册接口也一律拒绝 admin scope，此类客户端只能由
-        迁移种入。
+        invalid_scope。
+
+        持有其一即为「委派管理客户端」——这就是委派身份的**唯一**判定依据，中间件
+        不认任何客户端名单。因此 token 携带 admin scope 已经证明了「某位运维人员
+        通过控制台为该注册授予过该 scope」：`third_party` 的请求 scope 被
+        scope.ContainsAll 钉死在其注册 scopes 内，而 `first_party` 拿不到 admin
+        scope。授予路径由 `POST`/`PUT /admin/oauth-clients` 把守，其条件见那两个
+        端点。
     UserState:
       type: string
       enum:
@@ -3152,7 +3191,7 @@ components:
 
             null 表示没有任何 OAuth 凭证授权该操作：未认证流程（登录、注册、
             重置密码）、后台任务，以及 V007 迁移之前写入的历史行。
-          example: sast-people-admin
+          example: sast-link-web
         created_at:
           type: string
           format: date-time

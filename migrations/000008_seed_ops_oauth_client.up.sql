@@ -1,7 +1,8 @@
--- Seeds the two clients SAST People authenticates through. They are created here
--- rather than via the console because adminclient refuses every admin scope outright:
--- there is deliberately no self-service path to an administrative credential, so the
--- registration has to arrive as schema.
+-- Seeds the two clients SAST People authenticates through. They arrived as schema
+-- because adminclient refused every admin scope outright when this migration was
+-- written. The console can now grant delegated administration under the guards in
+-- adminclient.checkAdminScopeGrant, so an equivalent registration no longer needs a
+-- migration. These rows stay because production already has them.
 --
 -- Two registrations rather than one, because the two credentials have different
 -- lifetimes and different blast radii:
@@ -21,9 +22,13 @@
 --                       grants administrative access.
 --
 -- Splitting them is what lets the session stay long-lived while administrative
--- capability expires promptly. Neither can do the other job: the session client is
--- not model.AdminDelegatedClientID so RequireAdminAuth rejects it, and the admin
--- client holds no profile/email scope so /userinfo tells it only who the subject is.
+-- capability expires promptly. Neither can do the other job: the session client holds
+-- no admin scope so RequireAdminAuth rejects it, and the admin client holds no
+-- profile/email scope so /userinfo tells it only who the subject is.
+--
+-- Neither client is special-cased anywhere in the code. Delegated administration is
+-- whatever registration carries an admin scope, and the console can grant it, so these
+-- two rows are ordinary registrations that happen to arrive as schema.
 --
 -- Both are third_party, and that is load-bearing rather than incidental.
 -- authorizeScopeForClient short-circuits first_party with no scope check at all, so a
@@ -35,7 +40,7 @@
 -- serves both legs from one callback endpoint.
 --
 -- client_secret holds only the sha256-v1 hash. Each plaintext was generated once,
--- outside this repository, and lives in People own configuration.
+-- outside this repository, and lives in the integrator own configuration.
 --
 -- Idempotent with drift detection, following V003: re-running against a database that
 -- already has these clients is a no-op, but a client whose properties do not match
