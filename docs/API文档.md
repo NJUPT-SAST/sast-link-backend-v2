@@ -1198,9 +1198,9 @@ GET /oauth/authorize
 
 RFC 6749 §4.1.2.1 禁止把错误重定向到未经校验的 `redirect_uri`——否则任何人填入任意地址即可让本服务把浏览器重定向到那里，端点退化为 open redirector。`redirect_uri` 必须与 `oauth_clients.redirect_uris` 之一**精确字符串相等**，前缀匹配不成立（`https://app.example.com/cb/../evil` 会被拒绝）。
 
-**scope 限制**：`first_party` 客户端可请求任意受支持的**非 admin** scope，不受其注册 scopes 列约束；`third_party` 客户端只能请求注册时声明的子集，超出返回 `invalid_scope`。
+**scope 限制**：任何客户端（含 `first_party`）只能请求注册时声明的子集，超出返回 `invalid_scope`。此外 `admin:read` / `admin:write` 仅 `third_party` 可持有，`first_party` 请求它们一律返回 `invalid_scope`，即使注册值中含有——理由是公开客户端在 token 端点无客户端认证，见 §6.7。
 
-`admin:read` / `admin:write` 是上述规则的唯一例外，且方向相反：**仅 `third_party` 客户端可持有**，`first_party` 客户端请求任一 admin scope 返回 `invalid_scope`。原因正是上一段的宽松规则——第一方客户端的注册 scopes 列仅作记录，若允许其请求 admin scope，则新增任何第一方客户端都等同于授予管理权限。只有 `third_party` 会被 `ContainsAll` 钉死在注册范围内，这是唯一能限定客户端能力上限的机制。
+`admin:read` / `admin:write` 在注册值约束之上再加一条限制：**仅 `third_party` 客户端可持有**，`first_party` 客户端请求任一 admin scope 返回 `invalid_scope`，即使其注册值中含有。原因是凭证能力——`first_party` 是公开客户端，token 端点仅凭 PKCE 认证它，因此从授权码被签出到管理 token 存在之间只有 `redirect_uri` 精确匹配一道屏障，而机密客户端有两道独立屏障。委派管理不应跑在更薄的那一侧。
 
 **限流**：按调用方 IP 固定窗口限流（默认 100 次/60s，`RATE_LIMIT_AUTHORIZE_RPM`）。本端点无认证且每次调用写一个 Redis 暂存键，若不限流可被灌满键空间。限流器故障时 fail-open（PRD §6.0）。
 
@@ -1537,7 +1537,7 @@ DELETE /oauth/grants/:client_id
 
 **委派调用**：任何 `third_party` 客户端，只要其注册的 `scopes` 含 admin scope，即可代管理员调用本章端点 —— 读端点接受 `admin:read` 或 `admin:write`，写端点要求 `admin:write`。不持有 admin scope 的第三方 token 一律被拒，无论其用户角色为何。
 
-判定依据只有注册表的 `scopes` 一列，不存在被硬编码的客户端名单：`third_party` 的可请求 scope 被钉死在其注册值内，而 `first_party` 拿不到 admin scope（见 §5.1），因此「token 携带 admin scope」本身就证明了「该注册被授予过它」。授予由 `POST` / `PUT /admin/oauth-clients` 把守，条件见 §6.7。
+判定依据只有注册表的 `scopes` 一列，不存在被硬编码的客户端名单：任何客户端的可请求 scope 都被钉死在其注册值内，而 `first_party` 无论注册值如何都拿不到 admin scope（见 §5.1），因此「token 携带 admin scope」本身就证明了「该注册被授予过它」。授予由 `POST` / `PUT /admin/oauth-clients` 把守，条件见 §6.7。
 
 委派 token 的 `sub` 仍是那位管理员本人，权限上限始终是该用户的角色。`admin:write` 的生命周期是一个 Access Token TTL：持有 admin scope 的客户端不得注册 `refresh_token` grant（refresh 继承 scope 且不收窄，注册了就等于 `admin:write` 可无限续期），该限制由注册接口强制。停用方式是把该客户端置为 `is_active = false`，同一操作会撤销它的全部存活 token。
 
@@ -1808,9 +1808,9 @@ POST /admin/oauth-clients
 
 **说明**:
 
-- 第一方应用（`first_party`）不返回 `client_secret`，使用 PKCE 即可。
-- ⚠️ **注册 `first_party` 客户端等同于授予全量 scope**：`/oauth/authorize` 对 `first_party` 跳过「请求 scope 必须落在注册 scope 内」的校验（PRD §4.10），因此提交 `scopes: ["openid"]` 的第一方客户端实际仍可请求 `openid profile email`，注册表上的该列对这类客户端仅作记录用途。它同时是无 secret 的公开客户端。审批时请按「授予全量 scope」对待，需要 scope 约束时注册为 `third_party`。
-  - 边界仍在：`client_id` 由服务端随机生成，无法冒充内置客户端；这类 token 的 `azp` 不等于 `INTERNAL_OAUTH_CLIENT_ID`，因此**打不到内部接口**（`/user/*`、`/auth/*`）；同意页仍展示实际请求的 scope。
+- `first_party` 不返回 `client_secret`：它是公开客户端，仅靠 PKCE。PKCE 对 `third_party` 同样强制，两者的差别只是后者还需再带 `client_secret`。
+- `scopes` 对两类客户端一律生效：注册 `["openid"]` 的客户端请求 `profile` 会被 `/oauth/authorize` 拒绝，需要新增 scope 就得改注册（留下 `update_oauth_client` 审计行）。第一方曾被豁免此校验，已移除。
+  - 其他边界：`client_id` 由服务端随机生成，无法冒充内置客户端；`first_party` token 的 `azp` 不等于 `INTERNAL_OAUTH_CLIENT_ID`，因此**打不到内部接口**（`/user/*`、`/auth/*`）；同意页展示的是服务端暂存的 scope，不是同意 URL 里的值。
 - `client_secret` 只在本次响应中出现一次，服务端仅存哈希，事后无法再取回。丢失只能重新注册客户端。
 - `client_id` 由服务端生成，请求中不接受该字段。传入 `client_id`、`client_secret` 或 `id` 会返回 `400`，而非被忽略。
 - `redirect_uris` 校验规则（注册阶段拒绝，返回 `400`）：
@@ -1822,7 +1822,7 @@ POST /admin/oauth-clients
 - `grant_types` 只允许 `authorization_code` 与 `refresh_token`，且必须包含 `authorization_code`。
 - `scopes` 必须包含 `openid`，且仅含受支持的值，与 `/oauth/authorize` 使用同一套校验。
 - **`scopes` 可包含 `admin:read` / `admin:write`，即「委派管理」**：持有 admin scope 的注册，其 token 可代授权管理员访问 `/admin/*`。委派身份**只由注册表的 scopes 决定**，不存在被硬编码的客户端名单——因此接入一个新的运维工具是一次控制台操作，不需要改代码或写迁移。授予须同时满足以下四条，任一不满足即拒：
-  - 目标必须是 `third_party`（`400`）。`first_party` 的注册 scope 仅作记录用途（见上一条），admin scope 挂在其上等于任何第一方客户端都能签出管理凭证，内置控制台也在内
+  - 目标必须是 `third_party`（`400`）。`first_party` 是公开客户端，token 端点仅凭 PKCE 认证它，从授权码被签出到管理 token 存在之间只剩 `redirect_uri` 精确匹配一道屏障；机密客户端有两道。`/oauth/authorize` 同样拒绝第一方的 admin scope，所以这里挡住的是一条永远无法行使的授予
   - `grant_types` 不得包含 `refresh_token`（`400`）。refresh 继承 scope 且不收窄，可续期的 `admin:write` 会无限自我续期；委派管理的有效期因此被限定为单个 access token TTL，到期后由管理员重新授权
   - 发起该请求的凭证必须是内置控制台客户端（`403`）。委派 token 不能授予或维护委派——否则委派客户端可互相注册、互相复活，管理能力的集合将脱离运维人员的批准而自行增长
   - 授予 admin scope 与改写 `redirect_uris` 不可在同一请求内完成（`400`）。这两件事各自都值得单独审计

@@ -592,11 +592,11 @@ func TestAuthorizeBoundsPersistedParameters(t *testing.T) {
 	}
 }
 
-// Delegated administration rests entirely on this function. A third-party client
-// is pinned to its registration by ContainsAll, which is the only mechanism that
-// bounds a client's scopes — first-party registrations are advisory, so admin
-// scopes must be refused for them outright or the built-in console could mint an
-// administrative token for itself.
+// Delegated administration rests entirely on this function. Every client type is
+// pinned to its registration by ContainsAll, and the admin scopes additionally
+// require a third-party client: a first-party client is public, so its token
+// requests are authenticated by PKCE alone and an intercepted code is one barrier
+// away from an administrative token rather than two.
 func TestAuthorizeScopeForClientConfinesAdminScopesToRegisteredThirdParties(t *testing.T) {
 	adminGrant := model.StringArray{scope.OpenID, scope.AdminRead, scope.AdminWrite}
 	tests := []struct {
@@ -628,6 +628,8 @@ func TestAuthorizeScopeForClientConfinesAdminScopesToRegisteredThirdParties(t *t
 		},
 		{
 			// The whole reason the ops client is third-party rather than first-party.
+			// Refused even though the registration grants it, because a public client
+			// authenticates its token request by PKCE alone.
 			name:       "first party may never request admin",
 			clientType: model.ClientTypeFirstParty,
 			registered: adminGrant,
@@ -635,10 +637,21 @@ func TestAuthorizeScopeForClientConfinesAdminScopesToRegisteredThirdParties(t *t
 			wantErr:    true,
 		},
 		{
-			name:       "first party keeps its advisory allowance for OIDC scopes",
+			name:       "first party within its registration",
+			clientType: model.ClientTypeFirstParty,
+			registered: model.StringArray{scope.OpenID, scope.Profile, scope.Email},
+			requested:  []string{scope.OpenID, scope.Profile, scope.Email},
+		},
+		{
+			// The exemption that used to live here: a first-party client could request
+			// any supported non-admin scope regardless of its registration, which made
+			// the scopes column advisory and any future scope retroactively granted to
+			// every existing first-party client. Both client types are now pinned.
+			name:       "first party beyond its registration",
 			clientType: model.ClientTypeFirstParty,
 			registered: model.StringArray{scope.OpenID},
 			requested:  []string{scope.OpenID, scope.Profile, scope.Email},
+			wantErr:    true,
 		},
 	}
 	for _, test := range tests {

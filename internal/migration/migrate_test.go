@@ -317,7 +317,7 @@ func TestV8SeedsDelegatedAdminAndSessionClients(t *testing.T) {
 
 	admin := readSeededClient(t, database, "sast-people-admin")
 	if admin.clientType != "third_party" {
-		t.Fatalf("admin client_type = %q, want third_party; first_party bypasses the registered-scope check", admin.clientType)
+		t.Fatalf("admin client_type = %q, want third_party; a first_party client is public and may not hold admin scope", admin.clientType)
 	}
 	if !admin.secret.Valid || !strings.HasPrefix(admin.secret.String, "sha256-v1$") {
 		t.Fatalf("admin client_secret = %v, want a sha256-v1 hash", admin.secret)

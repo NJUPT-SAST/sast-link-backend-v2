@@ -151,11 +151,10 @@ func (a Authenticator) RequireAdminAuth() gin.HandlerFunc {
 // Authenticate would reject it.
 //
 // The admin scope in the token IS the delegation marker, and it is not self-asserted.
-// A third-party token can only carry one if scope.ContainsAll passed against that
-// client's registered scopes at authorize time, and oauth.authorizeScopeForClient
-// refuses the admin scopes for first-party clients outright — a first-party
-// registration's scope list is advisory, so allowing them there would let the
-// built-in console mint an administrative token. So "this token has admin:read"
+// Any token can only carry one if scope.ContainsAll passed against that client's
+// registered scopes at authorize time, and oauth.authorizeScopeForClient additionally
+// refuses the admin scopes for first-party clients outright, since a public client
+// authenticates its token request by PKCE alone. So "this token has admin:read"
 // already proves "an operator granted this registration delegated administration".
 //
 // That replaces an earlier design where one client_id was hardcoded here. Naming the

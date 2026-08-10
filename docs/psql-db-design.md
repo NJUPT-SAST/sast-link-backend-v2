@@ -321,7 +321,7 @@ CREATE TABLE oauth_clients (
 |---|---|
 |`id`|内部主键|
 |`client_id`|公开客户端标识符（随机字符串）|
-|`client_secret`|密钥 hash（bcrypt）。第一方应用存 NULL|
+|`client_secret`|密钥 hash（SHA-256，`sha256-v1$` 版本前缀；非 argon2id/bcrypt，理由见 PRD §4.10）。NULL 表示公开客户端，当前即 `first_party`|
 |`client_name`|应用名称|
 |`client_type`|第一方应用 / 第三方应用|
 |`redirect_uris`|允许的重定向 URI 列表|
@@ -343,7 +343,7 @@ CREATE TABLE oauth_clients (
 
 拆成两个客户端而非一个，是因为两类凭证的生命周期与影响面不同：会话需要长期保活，管理能力应尽快过期。两者职责不重叠且互相打不到对方的接口——会话客户端不持有 admin scope，管理客户端不持有 `profile`/`email`，其 `/userinfo` 只能得到 `sub`。二者共用同一组 `redirect_uris`：`authorize` 校验的是「该 URI 在**这个** client 的注册列表内」，不要求全局唯一，因此一个接入方用一个回调端点承载两条腿即可。
 
-后两个都是 `third_party`，这是载荷性的而非偶然：`first_party` 客户端不受其 `scopes` 列约束（可请求任意受支持 scope），只有 `third_party` 会被 `ContainsAll` 钉死在注册范围内。控制台可授予 admin scope，但受四道守卫约束（必须 `third_party`、不得含 `refresh_token`、只能由内置控制台客户端发起、不得与改写 `redirect_uris` 同请求），且判定基于合并后状态以防拆包绕过；收窄 scope 或新授予 admin scope 都会连带撤销该客户端存量 token。`client_secret` 只以 `sha256-v1$...` 哈希入库，两个明文各自在迁移之外一次性生成、仅存于接入方自身配置。
+后两个都是 `third_party`，这是载荷性的而非偶然：管理那半必须是 `third_party` 才能持有 admin scope，因为 `first_party` 是公开客户端、token 端点仅凭 PKCE 认证它。scope 本身对两类客户端一律受 `ContainsAll` 约束。控制台可授予 admin scope，但受四道守卫约束（必须 `third_party`、不得含 `refresh_token`、只能由内置控制台客户端发起、不得与改写 `redirect_uris` 同请求），且判定基于合并后状态以防拆包绕过；收窄 scope 或新授予 admin scope 都会连带撤销该客户端存量 token。`client_secret` 只以 `sha256-v1$...` 哈希入库，两个明文各自在迁移之外一次性生成、仅存于接入方自身配置。
 
 两个 seed 迁移形状相同：幂等（重复 apply 为 no-op）、带漂移检测（既有行属性不符则 `RAISE EXCEPTION` 中止而非覆盖——覆盖可能扩大 scope 或改写一个存活管理客户端的回调地址）、并把自己创建的行记入 ownership 表，使 `down` 只删自己建的且未被任何授权码/token 引用过的行。
 

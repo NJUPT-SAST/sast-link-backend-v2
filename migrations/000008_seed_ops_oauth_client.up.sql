@@ -30,10 +30,10 @@
 -- whatever registration carries an admin scope, and the console can grant it, so these
 -- two rows are ordinary registrations that happen to arrive as schema.
 --
--- Both are third_party, and that is load-bearing rather than incidental.
--- authorizeScopeForClient short-circuits first_party with no scope check at all, so a
--- first-party client may request anything this provider supports. Only a third_party
--- registration is pinned to its scopes column by scope.ContainsAll.
+-- The admin half being third_party is load-bearing rather than incidental. A
+-- first_party client is public — the token endpoint authenticates it by PKCE alone —
+-- so checkScopeForClient refuses the admin scopes for it outright, whatever its
+-- registration says. Only a confidential client may hold delegated administration.
 --
 -- Both share the same redirect_uris. authorize validates that the URI appears in the
 -- registration of the client being used, not that it is globally unique, so People

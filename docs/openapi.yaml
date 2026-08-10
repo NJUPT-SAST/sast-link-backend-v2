@@ -1376,8 +1376,9 @@ paths:
             授权范围，空格分隔（如 `openid profile`）。OAuth 线协议字段为单数 `scope`，数据库列保留 `scopes`。
             取值见 OAuthScope 枚举，必须包含 `openid`。
 
-            `admin:read` / `admin:write` 仅 `third_party` 客户端可请求，且必须在其注册
-            scopes 之内；`first_party` 客户端请求任一 admin scope 返回 `invalid_scope`。
+            任何客户端请求的 scope 都必须在其注册 scopes 之内，超出返回 `invalid_scope`。
+            此外 `admin:read` / `admin:write` 仅 `third_party` 客户端可请求，`first_party`
+            请求任一 admin scope 一律返回 `invalid_scope`，即使注册值中含有。
           required: true
           schema:
             type: string
@@ -2770,17 +2771,17 @@ components:
         /userinfo 与 ID Token 中得到的字段，与只持有 openid 的 token 完全一致。
         它们只用于 /admin/* 的 scope 门禁。
 
-        两者仅可授予 `third_party` 客户端。`first_party` 客户端不受其注册 scopes
-        列约束（见 OAuthClient.scopes），因此若允许其请求 admin scope，等同于任何
-        第一方客户端都能自行签发管理凭证；/oauth/authorize 对该组合返回
-        invalid_scope。
+        两者仅可授予 `third_party` 客户端，即使 `first_party` 的注册值中含有也会被
+        /oauth/authorize 拒为 invalid_scope。理由是凭证能力：`first_party` 是公开
+        客户端，token 端点仅凭 PKCE 认证它，因此从授权码被签出到管理 token 存在
+        之间只有 redirect_uri 精确匹配一道屏障，而机密客户端有两道。
 
         持有其一即为「委派管理客户端」——这就是委派身份的**唯一**判定依据，中间件
         不认任何客户端名单。因此 token 携带 admin scope 已经证明了「某位运维人员
-        通过控制台为该注册授予过该 scope」：`third_party` 的请求 scope 被
-        scope.ContainsAll 钉死在其注册 scopes 内，而 `first_party` 拿不到 admin
-        scope。授予路径由 `POST`/`PUT /admin/oauth-clients` 把守，其条件见那两个
-        端点。
+        通过控制台为该注册授予过该 scope」：任何客户端的请求 scope 都被
+        scope.ContainsAll 钉死在其注册 scopes 内，而 `first_party` 无论注册值如何
+        都拿不到 admin scope。授予路径由 `POST`/`PUT /admin/oauth-clients` 把守，
+        其条件见那两个端点。
     UserState:
       type: string
       enum:

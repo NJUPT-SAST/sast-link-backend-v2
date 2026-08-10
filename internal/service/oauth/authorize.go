@@ -314,19 +314,13 @@ func parseRequestedScopes(raw string) ([]string, error) {
 	return scope.Normalize(strings.Fields(value))
 }
 
-// authorizeScopeForClient enforces PRD §4.10's per-client scope rule: a
-// first-party client may request any supported scope, a third-party client only
-// what it registered. The returned error is redirectable, since it is reached
-// only after the client and redirect_uri are verified.
+// authorizeScopeForClient enforces PRD §4.10's per-client scope rule: every client,
+// first-party included, may only request what its registration grants. The returned
+// error is redirectable, since it is reached only after the client and redirect_uri
+// are verified.
 //
-// The admin scopes are the one exception to the first-party allowance, and they
-// are checked before it. The first-party short-circuit exists because a
-// first-party client's registered scope list is advisory — it may ask for
-// anything this provider supports. That is exactly why delegated administration
-// is confined to third-party clients: ContainsAll against the registration is the
-// only mechanism that pins a client to a fixed set, so letting a first-party
-// client request admin:* would mean every first-party registration, including the
-// built-in console, could mint an administrative token.
+// The admin scopes carry an additional restriction on top of that, checked first:
+// they may only be granted to a third-party client. See checkScopeForClient.
 func authorizeScopeForClient(client *model.OAuthClient, requested []string) error {
 	if err := checkScopeForClient(client, requested); err != nil {
 		err.Redirectable = true
@@ -342,12 +336,22 @@ func authorizeScopeForClient(client *model.OAuthClient, requested []string) erro
 // caller directly rather than through a redirect. A registration's scopes can change
 // between legs, and this check is what makes a revoked grant take effect on the codes
 // already in flight instead of one TTL later.
+//
+// The admin scopes are refused for a first-party client regardless of what its
+// registration says. A first-party client is a public client — it holds no
+// client_secret, so the token endpoint authenticates it by PKCE alone (see
+// authenticateClient). Between an authorization code being signed out and an
+// administrative token existing there is then exactly one barrier, the exact-match
+// redirect_uri, where a confidential client has two independent ones. Delegated
+// administration is the last capability that should run on the thinner of the two,
+// so it is confined to third-party clients.
+//
+// Note this is no longer derived from the registration being unenforced for
+// first-party clients — ContainsAll below now pins every client type. Removing that
+// exemption does not make this check redundant.
 func checkScopeForClient(client *model.OAuthClient, requested []string) *Error {
 	if scope.ContainsAdmin(requested) && client.ClientType == model.ClientTypeFirstParty {
 		return newError(ErrInvalidScope, "admin scope 不可授予第一方客户端", nil)
-	}
-	if client.ClientType == model.ClientTypeFirstParty {
-		return nil
 	}
 	granted, err := scope.ContainsAll([]string(client.Scopes), requested)
 	if err != nil {

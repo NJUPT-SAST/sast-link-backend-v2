@@ -46,8 +46,10 @@ func (s Service) ListClients(ctx context.Context) ([]Client, error) {
 // CreateClient registers a new OAuth client.
 //
 // A third_party client gets a generated secret whose plaintext is returned exactly
-// once; only the hash is persisted. A first_party client gets none — it is public
-// and authenticates with PKCE, matching the built-in client seeded by V003.
+// once; only the hash is persisted. A first_party client gets none, making it a
+// public client, matching the built-in client seeded by V003. PKCE is required of
+// both — the secret is an additional client authentication factor, not an
+// alternative to it.
 func (s Service) CreateClient(ctx context.Context, input CreateClientInput) (*CreateClientResult, error) {
 	if s.Clients == nil {
 		return nil, newError(ErrInternal, "客户端仓储未配置", nil)
@@ -170,11 +172,10 @@ func (s Service) checkAdminScopeGrant(grant adminScopeGrant) error {
 	if !scope.ContainsAdmin(grant.scopes) {
 		return nil
 	}
-	// Mirrors authorizeScopeForClient: a first-party client's registered scopes are
-	// advisory (it may request anything this provider supports), so only a third_party
-	// registration is actually pinned to its scopes column. Admin scope on a
-	// first-party client would mean every first-party client could mint an
-	// administrative token, the built-in console included.
+	// Mirrors checkScopeForClient: a first-party client is public, so the token
+	// endpoint authenticates it by PKCE alone and an intercepted authorization code is
+	// one barrier short of an administrative token. Refused at the grant door too, not
+	// only at authorize, so the registry never holds a grant that can never be used.
 	if grant.clientType != model.ClientTypeThirdParty {
 		return newError(ErrInvalidInput, "admin scope 仅可授予 third_party 客户端", nil)
 	}

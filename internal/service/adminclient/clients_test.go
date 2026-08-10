@@ -53,9 +53,10 @@ func TestCreateClientAdminScopeGuards(t *testing.T) {
 		wantKind   Kind
 	}{
 		{
-			// A first-party registration's scopes are advisory — it may request anything this
-			// provider supports — so admin scope there would let every first-party client,
-			// the built-in console included, mint an administrative token.
+			// A first-party client is public: the token endpoint authenticates it by PKCE
+			// alone, so an intercepted authorization code is one barrier short of an
+			// administrative token. Refused here as well as at authorize, so the registry
+			// never stores a grant that could never be exercised.
 			name: "first party is refused", clientType: "first_party",
 			scopes: []string{"openid", scope.AdminWrite}, grantTypes: []string{"authorization_code"},
 			wantKind: KindInvalidInput,
