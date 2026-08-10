@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-本仓库尚未发布版本，全部条目暂记在 `[Unreleased]` 下。每条标注日期与 PR（#N），可据此追到对应 commit。标注「perf 分支」的条目来自分支 `perf/optimization`，标注 [PR #41] 的条目来自分支 `feat/oauth-grants-admin-stats`，两者均尚未合入 `main`；其余条目均已合入 `main`。
+本仓库尚未发布版本，全部条目暂记在 `[Unreleased]` 下。每条标注日期与 PR（#N），可据此追到对应 commit。标注「perf 分支」的条目来自分支 `perf/optimization`，标注 [PR #41] 的条目来自分支 `feat/oauth-grants-admin-stats`，标注 [PR #44] 的条目来自分支 `feat/admin-delegated-scope`（基于 #41），三者均尚未合入 `main`；其余条目均已合入 `main`。
 
 ## [Unreleased]
 
@@ -29,6 +29,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **授权应用管理**（[PR #41](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/41)，2026-08-09）：`GET /oauth/grants` + `DELETE /oauth/grants/:client_id`。用户可查看自己在同意页授权过的应用（每客户端取最近一次授权）并撤销其一：同一事务内撤销该 user×client 全部活跃 Access / Refresh Token 并失效 auth-state 缓存，再删除授权历史，应用从列表消失、下次使用必须重新同意；审计 `oauth_grant_revoke`（`resource = oauth`）。
 - **同意页元数据**（[PR #41](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/41)，2026-08-09）：`GET /oauth/authorize/consent`。peek 暂存（GET + PTTL，不消费）返回服务端校验过的 `client_name` / `scopes` / `expires_in`，同意页展示值取自本端点而非可伪造的 consent URL 参数。按用户限流（`RATE_LIMIT_CONSENT_INFO_RPM`，默认 60/min），不用 IP——校园共享一个 NAT 出口 IP。
 - **管理后台概览统计**（[PR #41](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/41)，2026-08-09）：`GET /admin/stats`，一次聚合账户（`total` / `by_role` / `by_state` / `by_department` / `no_department`）、客户端（`total` / `active`）与最近 5 条审计日志，供控制台概览页使用。软删除是状态位而非 `deleted_at` 列，故 `total` / `by_role` / `by_department` 只计未注销账户（`state ≠ is_deleted`），`by_state` 保留 `is_deleted` bucket 让注销数可见。
+- **委派管理**（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：第三方 token 可代管理员调用 `/admin/*`，这是全服务唯一允许第三方 token 到达的内部端点组。新增 `admin:read` / `admin:write` 两个 scope，均不产生任何 OIDC claim（`scope.ClaimScopes` 在 ID Token signer 与 `/userinfo` 映射前滤掉，故 `openid admin:read` 拿到的字段与 `openid` 完全一致），仅可授予 `third_party` 客户端——`first_party` 的注册 scopes 列仅作记录用途，`ContainsAll` 是唯一能限定客户端能力上限的机制。`/admin` 改由 `RequireAdminAuth` 认证（其余内部路由的 `azp` 门不变，仍一律拒绝第三方 token），每条路由显式叠加 scope 门与角色门，两者互不蕴含且缺一即 403：角色门读数据库行（降权下一请求生效），scope 门只约束委派调用（内置控制台 token 豁免）。路由经 `adminhandler.Gates` 结构体挂载，任一 gate 为 nil 则启动即 panic——新增路由不会因遗漏而继承权限。V007 新增 `audit_logs.actor_client_id` 记录行为主体（控制台操作显式记内置客户端 id 而非 NULL，使 NULL 保持「无 OAuth 凭证授权该操作」的单一含义）；V008 种入一对 third_party 客户端（管理半边不带 refresh，会话半边带 refresh），这也是接入方同时需要两种能力时的推荐形状。`profile` scope 另增 `role` claim，取自签发时的数据库行而非请求 token 的 role 快照，文档定位为展示提示而非授权依据。
+- **委派管理的通用授予流程**（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：控制台可为任意 `third_party` 客户端授予 admin scope，接入新运维工具不再需要改代码或写迁移。`adminclient.checkAdminScopeGrant` 在注册与更新两扇门上把守，四条缺一即拒：目标必须 `third_party`（400）、`grant_types` 不得含 `refresh_token`（400，refresh 继承 scope 且不收窄，可续期的 `admin:write` 会无限自我续期，故管理凭证的生命周期被限定为单个 access token TTL）、发起请求的凭证必须是内置控制台客户端（403，委派 token 不能授予或维护委派，否则委派集合会脱离运维批准自行增长）、不得与改写 `redirect_uris` 同请求完成（400）。四条均基于**合并后的状态**判定而非本次提交的字段。
 - **审计日志显示名**（[PR #41](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/41)，2026-08-09）：`GET /admin/audit-logs` 响应新增 best-effort `user_name`（按 `user_id` 批量回查显示名；软删除的行仍在表里、名字照常返回，仅物理删除或回查失败时为 `null`）。
 
 ### Changed
@@ -50,6 +52,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **容器以非特权用户运行**（2026-08-01，[PR #31](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/31)）。
 - **OAuth 客户端更新契约放宽**（[PR #41](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/41)，2026-08-09）：`PUT /admin/oauth-clients/:id` 现可改 `grant_types` / `scopes`（此前这两字段不可修改，请求即 `400`），`client_id` / `client_secret` / `client_type` / `id` 仍不可改——`client_type` 决定客户端的凭据模型（有无 secret）与 scope 授予规则，就地翻转而不重发 secret 会产生无凭据的第三方客户端，换类型需重新注册。此类更新不触发 token 撤销，且只影响之后的新授权——存量 refresh token 轮换时按原授权 scope 继承，收窄注册 scope 不回溯已签发 token。
 
+- **委派身份改由能力判定，拆除硬编码客户端名单**（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：**破坏性变更**。删除 `model.AdminDelegatedClientID` 常量与 `Authenticator` 上对应字段，`AuthenticateAdminDelegated` 改为凭 token 携带的 admin scope 放行任何第三方客户端。该 scope 并非自证：`third_party` 的可请求 scope 被 `ContainsAll` 钉死在注册值内，而 `authorizeScopeForClient` 对 `first_party` 一律拒绝 admin scope，因此「token 持有 admin:read」已证明「运维人员为该注册授予过它」，名字校验只是对同一事实的第二次断言，代价是接入第二个运维工具需要一次迁移加一次发布。取舍是自觉的：提权原先需同时突破「注册表 scopes」与「azp 名单」两道，如今注册表是唯一屏障，足够提权的单点 bug 就是「把 admin scope 写到某个 third_party 注册上」——这正是上述四道守卫要防的，理由记在方法注释里，以免日后有人认为守卫多余。**影响面**：曾给某客户端授过 admin scope、却靠名字校验把它挡在 `/admin/*` 之外的部署，需从该注册移除这两个 scope。
+- **OAuth 客户端 scope 变更的撤销语义**（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：修正 [PR #41] 条目中「此类更新不触发 token 撤销，且只影响之后的新授权」的描述——能力收缩现在会回溯。`PUT /admin/oauth-clients/:id` 在三种情形下于同一事务内撤销该客户端全部 Access / Refresh Token：停用、**收窄 `scopes`**（旧集合中有值不在新集合里）、**新授予 admin scope**。收窄必须撤销，因为 access token 携带的是签发时的 scope，否则注册表已收窄而凭证仍在断言被收回的能力；新授予必须撤销，因为签发 token pair 时总会一并铸出 refresh 半边，被提升的客户端库里已有休眠的 refresh family。**扩大** `scopes` 刻意不撤销：存量 token 不会因此获得新 scope，撤销只是为一次不增加其权限的变更把用户登出。仅改 `grant_types` 亦不撤销。审计 detail 相应新增 `admin_scope_granted` / `admin_scope_revoked` / `scopes_removed`，并补上此前漏记的 `grant_types` / `scopes` 两个 `changed_fields`。
+- **内置客户端保护扩展至 `scopes`**（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：`PUT /admin/oauth-clients/:id` 现拒绝修改 `INTERNAL_OAUTH_CLIENT_ID` 的 `scopes`（403）。`cmd/api` 启动时对其做 `scope.Equal` 断言，此前一次 `PUT` 即可造成延迟自毁：运行中的进程照常工作，下次重启直接拒绝引导，只能直连数据库恢复；叠加上述收窄撤销逻辑，还会一次性切断全体用户的内部会话。已持有 admin scope 的客户端同样受额外保护：不可改写 `redirect_uris`、不可追加 `refresh_token`（即使请求不含 `scopes`——判定基于合并状态，防拆包绕过）、且只能由控制台维护；停用仍允许，那是委派管理的 kill switch。
+
 ### Removed
 
 - **`GET /card/:id` 下线**（perf 分支）：**破坏性变更**。路由不再注册，公开个人卡片端点暂不响应。顺序数字 ID 的公开 URL 等于开放全站成员名单枚举；重开后为 owner-only + 不可枚举标识，不会原样启用。handler / service / repository 代码保留待重设计，`docs/openapi.yaml` 中该路径标 `deprecated`。
@@ -65,6 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - refresh 失败审计补录（2026-08-01，[PR #32](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/32)），此前只记成功轮换。
 - 头像上传加固（2026-08-03，[PR #34](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/34)）：COS HTTP client 加往返超时、被拒文件名记诊断日志、内容审核结果用专用错误码。
 - 第三方登录设备登记修复（[PR #41](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/41)，2026-08-09）：`oauthlogin.ExchangeCode` 登记设备用 `s.Clock.Now()`，而 production 组合根（`cmd/api/runtime.go`）未给 oauthlogin 注入 Clock——GitHub / Lark 登录每次登记设备都会 nil 解引用 panic。改为走 `now()`，未注入 Clock 时回退系统时钟；补了 `service.Clock = nil` 模拟 production 的回归测试（临时回退到旧调用实测 panic）。
+- 管理审计 detail 文档与实现对齐（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：PRD 与 `docs/psql-db-design.md` 长期把管理端审计 detail 记作 `{"target_user_id", "sub_action"}`，而 `adminclient` 从未写过这两个字段。改为实际写入的字段。该错误早于本次改动。
+- 委派管理相关文档自相矛盾修正（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：`docs/openapi.yaml` 同一 operation 的 `200` 块声称 scope 更新不撤销 token，与其 description 冲突；`403` 块漏列内置客户端的 scopes 拒绝与整个委派客户端分支；PRD §4.12 在正确描述四段之后又称注册表修改不回溯；`API文档.md` §5.2 / §5.3 的错误码表未列新增的 `invalid_scope` 拒绝。
+- V008 迁移注释中的分号移除（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：runner 按分号切分语句且不识别 SQL 注释，注释内的分号会截断整个迁移文件。
 
 ### Security
 
@@ -72,4 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - 忘记密码统一成功响应，不暴露账号存在性（2026-07-28，[PR #26](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/26)）。
 - 第三方回调重定向按精确匹配白名单校验（2026-07-31，[PR #30](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/30)）。
 - provider endpoint URL 常量标 `#nosec G101`（2026-08-03，[PR #35](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/35)）。
+- **收回委派 scope 的时间窗口关闭**（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：`Consent` 此前只对活注册重查客户端启用状态与 `redirect_uri`，`tokenByAuthorizationCode` 只重查 `grant_types`，两者均不重查 scope。因此收回一个客户端的 admin scope 后，收回前已暂存的授权请求仍能继续签出管理级授权码（直到 authorize-request TTL 耗尽），已签发未兑换的授权码仍能换出管理级 access token（直到 code TTL 耗尽）。两处补上与第一段同源的 scope 活查（非可重定向：请求发起时是合法的，是运维人员的变更使其失效，故告知用户重新发起而非把错误抛给无从处理的客户端）；code 兑换处的校验排在消费之后，使拒绝仍然烧掉该 code，不给窃得授权码者留下可无限试探的目标。配合上述存量 token 撤销，收回三个时间窗口全部关闭。
+- **委派客户端的自我增殖闭环封堵**（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：拆除硬编码名单后，若不加约束，持有 `admin:write` 的委派 token 可自行注册或提升另一个委派客户端、乃至重新启用运维人员刚停用的那个（即绕过 kill switch），使可达 `/admin/*` 的客户端集合脱离人工批准自行增长。`checkAdminScopeGrant` 与 `checkProtected` 均要求 actor 为内置控制台客户端。
+- **拆包提权路径封堵**（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-10）：`updateFields` 早于 `FindByID` 执行，只能看到本次提交的字段，因此任何只校验入参的守卫都可两步绕过——先授予 admin scope（此时 `grant_types` 尚无 `refresh_token`，校验通过），再单独提交只改 `grant_types` 的请求追加 `refresh_token`（此时请求根本不含 `scopes`，校验不触发）。而签发 token pair 时总会一并铸出 refresh 半边、`/oauth/token` 只在兑换时活查 `grant_types`，于是那批休眠 refresh family 被激活，refresh 又继承 scope 不收窄，`admin:write` 即可无限自我续期。所有守卫改为在加载存量行之后、基于合并状态判定，并有专门的回归测试。
 - 同意页防伪造应用名（[PR #41](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/41)，2026-08-09）：consent URL 上的 `client_name` / `scope` 可被伪造——攻击者可构造带自己合法 `request_id`、却显示可信应用名的同意页链接，诱导受害者授权给恶意应用。新增 `GET /oauth/authorize/consent` 从暂存返回服务端校验过的元数据，同意页改从该端点渲染，不再信任 URL 值。
