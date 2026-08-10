@@ -207,6 +207,20 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	if !slices.Contains([]string(client.RedirectURIs), payload.RedirectURI) {
 		return nil, newError(ErrInvalidRequest, "redirect_uri 已不在客户端注册值中，请重新发起授权", nil)
 	}
+	// The scopes are re-checked against the registration as it stands now, for the
+	// same reason as the redirect_uri above: the stash was validated on the first leg
+	// and the registration can change before consent is submitted. Without this, an
+	// administrator who revokes a client's admin scope keeps minting administrative
+	// codes from stashes written before the revocation, for the rest of their TTL.
+	//
+	// Deliberately not redirectable. The first leg's error goes to the client's
+	// redirect_uri because the client is the one that asked for a bad scope; here the
+	// request was valid when made and it is the operator's change that invalidated
+	// it, so the user gets told to restart rather than the client being handed an
+	// error it cannot act on.
+	if scopeErr := checkScopeForClient(client, payload.Scopes); scopeErr != nil {
+		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
+	}
 
 	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
@@ -314,18 +328,33 @@ func parseRequestedScopes(raw string) ([]string, error) {
 // client request admin:* would mean every first-party registration, including the
 // built-in console, could mint an administrative token.
 func authorizeScopeForClient(client *model.OAuthClient, requested []string) error {
+	if err := checkScopeForClient(client, requested); err != nil {
+		err.Redirectable = true
+		return err
+	}
+	return nil
+}
+
+// checkScopeForClient is the predicate itself, returning a non-redirectable error.
+//
+// Split out from authorizeScopeForClient because the same rule has to be re-applied
+// on the two later legs — consent and code redemption — where the answer goes to the
+// caller directly rather than through a redirect. A registration's scopes can change
+// between legs, and this check is what makes a revoked grant take effect on the codes
+// already in flight instead of one TTL later.
+func checkScopeForClient(client *model.OAuthClient, requested []string) *Error {
 	if scope.ContainsAdmin(requested) && client.ClientType == model.ClientTypeFirstParty {
-		return redirectableError(ErrInvalidScope, "admin scope 不可授予第一方客户端", nil)
+		return newError(ErrInvalidScope, "admin scope 不可授予第一方客户端", nil)
 	}
 	if client.ClientType == model.ClientTypeFirstParty {
 		return nil
 	}
 	granted, err := scope.ContainsAll([]string(client.Scopes), requested)
 	if err != nil {
-		return redirectableError(ErrInvalidScope, "客户端注册的 scope 无效", err)
+		return newError(ErrInvalidScope, "客户端注册的 scope 无效", err)
 	}
 	if !granted {
-		return redirectableError(ErrInvalidScope, "请求的 scope 超出客户端注册范围", nil)
+		return newError(ErrInvalidScope, "请求的 scope 超出客户端注册范围", nil)
 	}
 	return nil
 }

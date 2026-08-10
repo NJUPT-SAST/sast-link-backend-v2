@@ -15,6 +15,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 // issueCode drives the full authorize + consent flow and returns the code.
@@ -790,4 +791,33 @@ func parseIDTokenClaims(t *testing.T, h *harness, idToken string) *auth.IDTokenC
 		t.Fatal("parsed ID token is not valid")
 	}
 	return claims
+}
+
+// A code is minted before it is redeemed, so the consent-time re-check is only half
+// the window. Without this one, revoking a client's delegated administration left
+// every outstanding code redeemable for an administrative token until it expired.
+func TestTokenAuthorizationCodeRejectsScopeRevokedAfterConsent(t *testing.T) {
+	h := newHarness(t)
+	delegated := h.clients.byClientID[testConfidentialClientID]
+	delegated.Scopes = model.StringArray{"openid", scope.AdminWrite}
+
+	code := issueCode(t, h, testConfidentialClientID, "openid "+scope.AdminWrite)
+
+	// The operator revokes delegated administration between consent and redemption.
+	delegated.Scopes = model.StringArray{"openid"}
+
+	input := validCodeTokenInput(code)
+	input.ClientID = testConfidentialClientID
+	input.ClientSecret = testClientSecret
+	_, err := h.service.Token(context.Background(), input)
+
+	requireOAuthError(t, err, ErrorInvalidScope)
+	if h.tokens.createdAccess != nil {
+		t.Fatalf("an access token was issued despite the revoked scope: %#v", h.tokens.createdAccess)
+	}
+	// The code is still burned: this function consumes before it validates bindings, so
+	// a rejection here must not leave a replayable code behind.
+	if _, err := h.service.Token(context.Background(), input); err == nil {
+		t.Fatal("the code survived a rejected redemption and was redeemable again")
+	}
 }

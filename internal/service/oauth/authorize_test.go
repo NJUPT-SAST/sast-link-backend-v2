@@ -522,6 +522,44 @@ func TestConsentRejectsRedirectURIRemovedBetweenLegs(t *testing.T) {
 	}
 }
 
+// Scopes are re-checked between the legs for the same reason as the redirect_uri, and
+// it matters most for the admin scopes: revoking a client's delegated administration
+// has to stop administrative codes at once, not once the stash expires. Without this
+// the console's revocation left a window equal to the authorize-request TTL in which
+// the client could still complete a consent it had already started.
+func TestConsentRejectsScopeRemovedBetweenLegs(t *testing.T) {
+	h := newHarness(t)
+	delegated := h.clients.byClientID[testConfidentialClientID]
+	delegated.Scopes = model.StringArray{"openid", scope.AdminRead}
+
+	input := validAuthorizeInput(t)
+	input.ClientID = testConfidentialClientID
+	input.Scope = "openid " + scope.AdminRead
+	result, err := h.service.Authorize(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+
+	// The operator revokes delegated administration while the consent page is open.
+	delegated.Scopes = model.StringArray{"openid"}
+
+	_, err = h.service.Consent(context.Background(), ConsentInput{
+		RequestID: result.RequestID, Approve: true, UserID: 1,
+	})
+
+	requireOAuthError(t, err, ErrorInvalidScope)
+	if len(h.authorizations.created) != 0 {
+		t.Fatalf("created %d codes, want none once the scope was revoked",
+			len(h.authorizations.created))
+	}
+	// Non-redirectable: the request was valid when made, so the user is told to restart
+	// rather than the client being handed an error about a change it did not cause.
+	var oauthErr *Error
+	if errors.As(err, &oauthErr) && oauthErr.Redirectable {
+		t.Fatal("the scope re-check error must not be redirectable")
+	}
+}
+
 // code_challenge and nonce are persisted in VARCHAR(255) columns, so an oversized
 // value has to be refused on the first leg — as a redirectable invalid_request the
 // client can act on — rather than becoming a 500 at consent time, after the
