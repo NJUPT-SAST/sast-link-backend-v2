@@ -106,7 +106,7 @@
 
 | 业务码 | 说明 |
 | -------- | ------ |
-| `40300` | 无权限（需 admin / lecturer 角色） |
+| `40300` | 无权限。三种情形共用此码：角色不足（需 admin / lecturer 角色）；第三方客户端签发的 token 打内部接口（`该 Access Token 由第三方客户端签发，不可用于内部接口`）；委派 token 缺少所需 admin scope（`Access Token 缺少所需 scope`） |
 | `40301` | 账号已注销（`state = is_deleted`） |
 | `40302` | 非 SAST 企业飞书用户 |
 
@@ -1163,7 +1163,7 @@ GET /oauth/authorize
 | `response_type` | 是 | 固定 `code` |
 | `client_id` | 是 | 客户端标识 |
 | `redirect_uri` | 是 | 回调地址 |
-| `scope` | 是 | 授权范围，空格分隔，取值：`openid`（必选）/ `profile` / `email`；线协议字段为 OAuth 标准单数 `scope`，数据库列仍为 `scopes` |
+| `scope` | 是 | 授权范围，空格分隔，取值：`openid`（必选）/ `profile` / `email` / `admin:read` / `admin:write`；线协议字段为 OAuth 标准单数 `scope`，数据库列仍为 `scopes` |
 | `state` | 是 | CSRF 防护，客户端生成随机字符串，回调时原样返回。最长 512 字符 |
 | `code_challenge` | 是 | PKCE challenge，固定 43 字符 base64url（`BASE64URL(SHA256(verifier))` 的长度）；其他长度返回 `invalid_request` |
 | `code_challenge_method` | 是 | 固定 `S256`；不接受 `plain` |
@@ -1198,7 +1198,9 @@ GET /oauth/authorize
 
 RFC 6749 §4.1.2.1 禁止把错误重定向到未经校验的 `redirect_uri`——否则任何人填入任意地址即可让本服务把浏览器重定向到那里，端点退化为 open redirector。`redirect_uri` 必须与 `oauth_clients.redirect_uris` 之一**精确字符串相等**，前缀匹配不成立（`https://app.example.com/cb/../evil` 会被拒绝）。
 
-**scope 限制**：`first_party` 客户端可请求任意受支持 scope；`third_party` 客户端只能请求注册时声明的子集，超出返回 `invalid_scope`。
+**scope 限制**：任何客户端（含 `first_party`）只能请求注册时声明的子集，超出返回 `invalid_scope`。此外 `admin:read` / `admin:write` 仅 `third_party` 可持有，`first_party` 请求它们一律返回 `invalid_scope`，即使注册值中含有——理由是公开客户端在 token 端点无客户端认证，见 §6.7。
+
+`admin:read` / `admin:write` 在注册值约束之上再加一条限制：**仅 `third_party` 客户端可持有**，`first_party` 客户端请求任一 admin scope 返回 `invalid_scope`，即使其注册值中含有。原因是凭证能力——`first_party` 是公开客户端，token 端点仅凭 PKCE 认证它，因此从授权码被签出到管理 token 存在之间只有 `redirect_uri` 精确匹配一道屏障，而机密客户端有两道独立屏障。委派管理不应跑在更薄的那一侧。
 
 **限流**：按调用方 IP 固定窗口限流（默认 100 次/60s，`RATE_LIMIT_AUTHORIZE_RPM`）。本端点无认证且每次调用写一个 Redis 暂存键，若不限流可被灌满键空间。限流器故障时 fail-open（PRD §6.0）。
 
@@ -1252,9 +1254,9 @@ POST /oauth/authorize/consent
 - 暂存内容以 GetDel 原子消费，一个 `request_id` 最多产出一个授权码；并发重复提交只有一个成功，其余返回 `40000`
 - `approve: false` 同样返回 `200` 与一个 `redirect_uri`，其中携带 `error=access_denied` 与原始 `state`（RFC 6749 §4.1.2.1 要求把拒绝告知客户端，而非静默丢弃）
 - 授权码有效期 5min，一次性使用，`family_id` 在此刻生成并由授权码传递给后续 token pair
-- 客户端状态与 `redirect_uri` 在本段**重新校验**：两段之间客户端被停用返回 `40402`，暂存的 `redirect_uri` 已不在客户端当前注册值中则返回 `40000`。管理员摘掉一个被攻陷的回调地址后，不应该还有授权码继续投递到那里
+- 客户端状态、`redirect_uri` 与 `scopes` 在本段**重新校验**：两段之间客户端被停用返回 `40402`，暂存的 `redirect_uri` 或 `scopes` 已不在客户端当前注册值中则返回 `40000`。管理员摘掉一个被攻陷的回调地址、或收回一个客户端的 admin scope 之后，不应该还有授权码继续按旧注册签发
 
-**错误码**: `40000`（`request_id` / `approve` 缺失、未知字段、Content-Type 非 JSON、暂存已过期或已消费、`redirect_uri` 已不在客户端注册值中）、`40100`/`40101`/`40102`（未登录、token 已过期或 token 无效）、`40402`（两段之间客户端被停用，HTTP 状态为 `404`）、`40301`（账号已注销——本端点在 JWT 中间件之后，注销账号在中间件即被拦下，返回 `40301` 而非 service 层的 `40300`）、`50300`（Redis 暂存不可读，fail-closed）、`50000`（服务器内部错误）
+**错误码**: `40000`（`request_id` / `approve` 缺失、未知字段、Content-Type 非 JSON、暂存已过期或已消费、`redirect_uri` 已不在客户端注册值中、暂存的 `scopes` 已超出客户端当前注册范围）、`40100`/`40101`/`40102`（未登录、token 已过期或 token 无效）、`40402`（两段之间客户端被停用，HTTP 状态为 `404`）、`40301`（账号已注销——本端点在 JWT 中间件之后，注销账号在中间件即被拦下，返回 `40301` 而非 service 层的 `40300`）、`50300`（Redis 暂存不可读，fail-closed）、`50000`（服务器内部错误）
 
 > `40402` 在本端点对应 HTTP `404` 而非 `401`。调用方是已登录的用户，其自身凭证没有问题，出问题的是第三方客户端；返回 `401` 会让授权页把用户推去重新登录，而重新登录无法解决客户端被停用。这也让业务码与 `{HTTP 状态}{序号}` 的编号规则保持一致。
 
@@ -1377,6 +1379,7 @@ grant_type=refresh_token&refresh_token=rt_abc123...&client_id=9f3a1c7d2e5b40a8c6
 | `400` | `invalid_grant` | 授权码无效/已过期/已使用、PKCE 校验失败、`redirect_uri` 不一致、授权码或 refresh token 不属于该客户端、refresh token 已撤销或过期、账号已注销 |
 | `400` | `unsupported_grant_type` | `grant_type` 非 `authorization_code` / `refresh_token` |
 | `400` | `unauthorized_client` | 客户端未注册该 grant type |
+| `400` | `invalid_scope` | 授权码携带的 scope 已不在客户端当前注册范围内（签发后被管理员收回）。该授权码仍被消耗，不可重放 |
 | `401` | `invalid_client` | 客户端认证失败（RFC 6749 §5.2 单独规定此项为 401，其余皆为 400）。**不附带 `WWW-Authenticate`**：本服务只从表单体读取 `client_secret`，discovery 仅通告 `none` 与 `client_secret_post`，通告未实现的 Basic 方案会让客户端反复重试并始终失败 |
 | `429` | `temporarily_unavailable` | 按调用方 IP 限流（`RATE_LIMIT_TOKEN_RPM`，默认 100 次/60s），附带 `Retry-After`。`/oauth/revoke` 与本端点共用同一限流器 |
 | `500` | `server_error` | 服务器内部错误 |
@@ -1504,7 +1507,7 @@ DELETE /oauth/grants/:client_id
 - 撤销语义是「断开该应用的访问」：先在同一事务内撤销该用户持有该客户端的全部活跃 Access / Refresh Token 并失效对应 auth-state 缓存，再删除与该客户端的授权历史。应用随即从已授权列表消失，下次使用必须重新走同意页
 - 两步各为独立事务，token 撤销在前：即使删除授权历史失败，该应用的访问已被切断（fail-closed），只是列表仍可能短暂显示它
 - 撤销一个从未授权过的客户端返回 `200`（幂等）：用户的诉求「该应用不再有我的授权」已经成立
-- 审计 action 为 `oauth_grant_revoke`（`resource = oauth`）
+- 审计 action 为 `oauth_grant_revoke`（`resource = oauth`）。`resource_id` 是被撤销客户端的主键，`actor_client_id` 是调用方自己的 `azp`：这条 action 的行为主体与被操作对象不是同一个客户端
 
 **错误码**：`40000`（`client_id` 非正整数）、`40100`/`40101`/`40102`（未登录、token 已过期或无效）、`40301`（账号已注销，JWT 中间件即拦下）、`50000`
 
@@ -1525,13 +1528,39 @@ DELETE /oauth/grants/:client_id
 >
 > `department` 筛选跨表关联 `profile`，采用 `LEFT JOIN`，因此无 `profile` 行的用户在**不带** `department` 筛选时正常出现在列表中（`department` 为 `null`）；带该筛选时自然被排除。
 
+**鉴权：两道互不蕴含的门**
+
+本章每个端点同时经过角色门与 scope 门，缺任一均返回 `403 40300`：
+
+- **角色门**回答「这个用户是否被允许」。角色取自数据库行而非 token claim，因此降权在下一个请求即生效。
+- **scope 门**回答「这个凭证是否被授权」，只约束委派调用。内置控制台 token（`azp` 等于 `INTERNAL_OAUTH_CLIENT_ID` 或无 `azp`）豁免此门，其上限即角色门。
+
+**委派调用**：任何 `third_party` 客户端，只要其注册的 `scopes` 含 admin scope，即可代管理员调用本章端点 —— 读端点接受 `admin:read` 或 `admin:write`，写端点要求 `admin:write`。不持有 admin scope 的第三方 token 一律被拒，无论其用户角色为何。
+
+判定依据只有注册表的 `scopes` 一列，不存在被硬编码的客户端名单：任何客户端的可请求 scope 都被钉死在其注册值内，而 `first_party` 无论注册值如何都拿不到 admin scope（见 §5.1），因此「token 携带 admin scope」本身就证明了「该注册被授予过它」。授予由 `POST` / `PUT /admin/oauth-clients` 把守，条件见 §6.7。
+
+委派 token 的 `sub` 仍是那位管理员本人，权限上限始终是该用户的角色。`admin:write` 的生命周期是一个 Access Token TTL：持有 admin scope 的客户端不得注册 `refresh_token` grant（refresh 继承 scope 且不收窄，注册了就等于 `admin:write` 可无限续期），该限制由注册接口强制。停用方式是把该客户端置为 `is_active = false`，同一操作会撤销它的全部存活 token。
+
+**会话与管理宜分两个客户端**：一个应用若既要读当前登录用户、又要调用本章端点，建议注册两个客户端而非一个。
+
+| 用途 | scopes | refresh |
+| ------ | ------ | ------ |
+| 调用本章端点 | `openid` `admin:read` `admin:write` | 否（不允许） |
+| 普通登录会话 | `openid` `profile` `email` | 是 |
+
+理由是两类凭证的生命周期与影响面不同：登录会话需要长期保活，管理能力应尽快过期。拆开后两者互相到不了对方的地盘 —— 会话客户端不持有 admin scope，打本章端点一律 `403`；管理客户端不持有 `profile` / `email`，其 `/userinfo` 只返回 `sub`。合成一个则意味着一份可无限续期的凭证同时握有管理能力，而这正是上面那条 `refresh_token` 限制要排除的情形。
+
+**第三方客户端不能调 `/user/*`**：那些是内部接口，`azp` 门会拒绝任何第三方 token（`403 40300`）。要读当前登录用户，用 `GET /userinfo`（见 §8.3）——它是全服务唯一按设计服务第三方 token 的端点。字段对应关系：`login_email` → `email`，`nickname` → `preferred_username`（无昵称时回落为真名），`avatar` → `picture`，用户 ID 为字符串形式的 `sub`，角色为 `role`（`profile` scope，取自签发时的数据库行）。`/userinfo` **不返回** `state`、`student_id`、`college`、`major`、`phone_number`、`qq_number`，需要这些字段时用 admin token 走 `GET /admin/users/:id`。
+
+两个客户端可以共用同一组 `redirect_uris`：`redirect_uri` 只需存在于**该 client 自己**的注册列表中，不要求全局唯一，因此一个应用用一个回调端点承载两条腿即可，按 `state` 区分。
+
 ### 6.1 用户列表
 
 ```
 GET /admin/users
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
 **Query Parameters**:
 
@@ -1585,7 +1614,7 @@ GET /admin/users
 GET /admin/users/:id
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
 **说明**：`id` 非数字或非正整数一律返回 `404`（与用户不存在同一响应），不区分两者。`identities` 不含第三方 `access_token` / `refresh_token`，也不含 `identity_data`——该字段存的是第三方返回的完整用户对象（飞书含 `mobile`、`email`、`enterprise_email`、`employee_no`），本端点 lecturer 亦可读，列出绑定不等于交出绑定背后的联系方式。
 
@@ -1621,7 +1650,7 @@ GET /admin/users/:id
 PUT /admin/users/:id
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
 
 **Request**（所有字段可选，仅传需要修改的字段）:
 
@@ -1666,7 +1695,7 @@ PUT /admin/users/:id
 DELETE /admin/users/:id
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
 
 **Response** `200`:
 
@@ -1690,7 +1719,7 @@ DELETE /admin/users/:id
 PUT /admin/users/:id/restore
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
 
 **Response** `200`:
 
@@ -1714,7 +1743,7 @@ PUT /admin/users/:id/restore
 GET /admin/oauth-clients
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
 **Response** `200`:
 
@@ -1745,7 +1774,7 @@ GET /admin/oauth-clients
 POST /admin/oauth-clients
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
 
 **Request**:
 
@@ -1779,9 +1808,9 @@ POST /admin/oauth-clients
 
 **说明**:
 
-- 第一方应用（`first_party`）不返回 `client_secret`，使用 PKCE 即可。
-- ⚠️ **注册 `first_party` 客户端等同于授予全量 scope**：`/oauth/authorize` 对 `first_party` 跳过「请求 scope 必须落在注册 scope 内」的校验（PRD §4.10），因此提交 `scopes: ["openid"]` 的第一方客户端实际仍可请求 `openid profile email`，注册表上的该列对这类客户端仅作记录用途。它同时是无 secret 的公开客户端。审批时请按「授予全量 scope」对待，需要 scope 约束时注册为 `third_party`。
-  - 边界仍在：`client_id` 由服务端随机生成，无法冒充内置客户端；这类 token 的 `azp` 不等于 `INTERNAL_OAUTH_CLIENT_ID`，因此**打不到内部接口**（`/user/*`、`/auth/*`）；同意页仍展示实际请求的 scope。
+- `first_party` 不返回 `client_secret`：它是公开客户端，仅靠 PKCE。PKCE 对 `third_party` 同样强制，两者的差别只是后者还需再带 `client_secret`。
+- `scopes` 对两类客户端一律生效：注册 `["openid"]` 的客户端请求 `profile` 会被 `/oauth/authorize` 拒绝，需要新增 scope 就得改注册（留下 `update_oauth_client` 审计行）。第一方曾被豁免此校验，已移除。
+  - 其他边界：`client_id` 由服务端随机生成，无法冒充内置客户端；`first_party` token 的 `azp` 不等于 `INTERNAL_OAUTH_CLIENT_ID`，因此**打不到内部接口**（`/user/*`、`/auth/*`）；同意页展示的是服务端暂存的 scope，不是同意 URL 里的值。
 - `client_secret` 只在本次响应中出现一次，服务端仅存哈希，事后无法再取回。丢失只能重新注册客户端。
 - `client_id` 由服务端生成，请求中不接受该字段。传入 `client_id`、`client_secret` 或 `id` 会返回 `400`，而非被忽略。
 - `redirect_uris` 校验规则（注册阶段拒绝，返回 `400`）：
@@ -1792,6 +1821,13 @@ POST /admin/oauth-clients
   - 最多 10 条，单条最长 2048 字符，不允许重复
 - `grant_types` 只允许 `authorization_code` 与 `refresh_token`，且必须包含 `authorization_code`。
 - `scopes` 必须包含 `openid`，且仅含受支持的值，与 `/oauth/authorize` 使用同一套校验。
+- **`scopes` 可包含 `admin:read` / `admin:write`，即「委派管理」**：持有 admin scope 的注册，其 token 可代授权管理员访问 `/admin/*`。委派身份**只由注册表的 scopes 决定**，不存在被硬编码的客户端名单——因此接入一个新的运维工具是一次控制台操作，不需要改代码或写迁移。授予须同时满足以下四条，任一不满足即拒：
+  - 目标必须是 `third_party`（`400`）。`first_party` 是公开客户端，token 端点仅凭 PKCE 认证它，从授权码被签出到管理 token 存在之间只剩 `redirect_uri` 精确匹配一道屏障；机密客户端有两道。`/oauth/authorize` 同样拒绝第一方的 admin scope，所以这里挡住的是一条永远无法行使的授予
+  - `grant_types` 不得包含 `refresh_token`（`400`）。refresh 继承 scope 且不收窄，可续期的 `admin:write` 会无限自我续期；委派管理的有效期因此被限定为单个 access token TTL，到期后由管理员重新授权
+  - 发起该请求的凭证必须是内置控制台客户端（`403`）。委派 token 不能授予或维护委派——否则委派客户端可互相注册、互相复活，管理能力的集合将脱离运维人员的批准而自行增长
+  - 授予 admin scope 与改写 `redirect_uris` 不可在同一请求内完成（`400`）。这两件事各自都值得单独审计
+- 注意 `/oauth/authorize` 的校验器同样接受 admin scope（它是共享的「scope 集是否合法」判定），因此上述能力规则由本接口把守，而非由授权端点把守。
+- scope 可事后修改（见 §6.8），收窄与授予都会连带撤销该客户端的存量 token。
 
 ---
 
@@ -1801,7 +1837,7 @@ POST /admin/oauth-clients
 PUT /admin/oauth-clients/:id
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
 
 **Request**:
 
@@ -1836,14 +1872,19 @@ PUT /admin/oauth-clients/:id
 
 - 五个字段可改，均为可选；未出现的字段保持不变：`client_name`、`redirect_uris`、`grant_types`、`scopes`、`is_active`。
 - `client_id`、`client_secret`、`client_type`、`id` **不可修改**，请求中出现这些字段返回 `400`（strict decoder 拒未知字段，而非静默忽略）——标识符只能由服务端生成，管理员不能把自己的客户端注册成既有标识符。`client_type` 同样不可就地翻转：它决定客户端的凭据模型（有无 `client_secret`）与 scope 授予规则，翻转而不重发 secret 会产生无凭据的第三方客户端；换类型请重新注册一个客户端。
-- `grant_types` / `scopes` 的更新**不触发 token 撤销**（只有 `is_active` 由 `true` 改 `false` 才会），且只影响**之后**的授权与 token 请求，不会回溯改动已签发的 token：
-  - 收窄 `scopes`：`/oauth/authorize` 对 `third_party` 客户端校验「请求 scope 落在注册 scope 内」，因此收窄后新的授权请求只能请求更小集合；存量 refresh token 轮换时按原授权 scope 继承（PRD §4.10「不支持 scope 收窄」），不会因注册表收窄而缩水——要立刻收紧现有会话仍需停用客户端
-  - 改 `grant_types`：同样只约束后续授权流程，已签发的 token 不受影响
+- `scopes` 中出现 `admin:read` / `admin:write` 即授予委派管理，四条前置条件与注册接口完全一致（见 §6.7）。判定基于**合并后的状态**而非本次提交的字段：例如给已持有 admin scope 的客户端单独追加 `refresh_token`，即使本次请求根本没提 `scopes`，也会被拒（`403`）——否则「先授 scope、再单独加 refresh」这种拆包写法就能绕过限制。
+- **已持有 admin scope 的客户端受额外保护**（均返回 `403`）：不可改写 `redirect_uris`（管理级授权码被投递到运维人员自选的主机，等于把整个授权交出去）；不可追加 `refresh_token`；只能由控制台维护，委派 token 对其任何字段的修改都会被拒。停用它仍然允许，那是委派管理的 kill switch。
+- **能力变化会连带撤销 token**，这是与其他字段的关键区别：
+  - **收窄 `scopes`**（旧集合中有值不在新集合里）：在同一事务内撤销该客户端全部存量 Access / Refresh Token。access token 携带的是签发时的 scope，若不撤销，注册表已收窄而凭证仍在断言被收回的能力
+  - **新授予 admin scope**：同样撤销该客户端存量 token。签发 token pair 时总会一并铸出 refresh 半边，被提升的客户端因此在库中已有休眠的 refresh family；撤销它们才能强制在新 scope 集下重新授权
+  - **扩大 `scopes`** 不撤销：存量 token 不会因此获得新 scope，撤销只会为一次不增加其权限的变更而把用户登出
+  - 改 `grant_types` 本身不撤销，只约束后续授权流程
+- 收回 admin scope 是**即时生效**的，三个时间窗口全部关闭：存量 token 当场撤销；已暂存但未提交同意的授权请求在 `/oauth/authorize/consent` 处被重新校验并拒绝；已签发但未兑换的授权码在 `/oauth/token` 处被重新校验并拒绝（该 code 仍会被消耗，不能重放）。
 - `redirect_uris` 的校验规则与注册时一致。
 - 停用是安全动作，语义是「立即断开」：已签发的 Access Token 立刻失效（失效 auth-state 缓存 + DB 撤销），Refresh Token 无法再续期，该客户端也无法再发起新的授权请求。
 - 重复对已停用的客户端提交 `is_active: false` 不会重复撤销。
 - `:id` 为客户端主键（列表接口返回的 `id`，非 `client_id`）。非数字或非正整数返回 `404`。
-- **内置客户端受保护**：`INTERNAL_OAUTH_CLIENT_ID`（默认 `sast-link-web`）不可停用，也不可改写 `redirect_uris`，两者均返回 `403`；改名允许。内部会话流程通过 `is_active = TRUE` 解析该客户端，停用它会立刻中断全站登录、刷新与注册，并撤销所有内部会话 token——包括执行该操作的管理员自己的，此后无人能登录回来把开关拨正，只能直连数据库恢复。改写它的 `redirect_uris` 则会把第一方授权码投递到他处。
+- **内置客户端受保护**：`INTERNAL_OAUTH_CLIENT_ID`（默认 `sast-link-web`）不可停用，不可改写 `redirect_uris`，也不可修改 `scopes` 与 `grant_types`，四者均返回 `403`；改名允许。修改它的 `scopes` 是一次延迟自毁：服务启动时会断言该客户端的 scope 为规范值，进程当下照常运行，下次重启却直接拒绝引导，只能直连数据库恢复；若是收窄，还会立刻触发上述撤销逻辑，一次性切断全体用户的内部会话。修改它的 `grant_types` 同样是自毁：V003 种子值为 `authorization_code` + `refresh_token`，控制台自身的 OAuth 会话经该客户端的 refresh grant 续期（token 端点对 refresh 活查 `grant_types`），收窄会立即切断续期；且 V003 的 drift 检测把该行钉死在种子值上，改动会中止下一次 `migrate up`。内部会话流程通过 `is_active = TRUE` 解析该客户端，停用它会立刻中断全站登录、刷新与注册，并撤销所有内部会话 token——包括执行该操作的管理员自己的，此后无人能登录回来把开关拨正，只能直连数据库恢复。改写它的 `redirect_uris` 则会把第一方授权码投递到他处。
 - 被拒的更新同样写入审计日志；客户端不存在（`404`）也会留下审计记录，避免有人靠遍历主键探测哪些 id 存在而不留痕迹。
 
 ---
@@ -1854,7 +1895,7 @@ PUT /admin/oauth-clients/:id
 GET /admin/audit-logs
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
 **Query Parameters**:
 
@@ -1866,14 +1907,19 @@ GET /admin/audit-logs
 | `action` | 按操作类型筛选（精确匹配） |
 | `resource` | 按资源类型筛选（精确匹配） |
 | `success` | 是否成功：仅接受 `true` / `false`，`1` / `yes` / `TRUE` 返回 `400` |
+| `actor_client_id` | 按执行操作的 OAuth 客户端筛选（精确匹配），回答「这个客户端做过什么」 |
 | `start_time` | 开始时间（RFC 3339，含时区偏移），**含**该时刻 |
 | `end_time` | 结束时间（RFC 3339，含时区偏移），**不含**该时刻 |
 
 **说明**：时间参数必须带时区偏移（如 `2026-07-01T00:00:00Z`），不带偏移返回 `400` —— `created_at` 是 `timestamptz`，擅自按 UTC 解释会使窗口偏移数小时。`end_time` 早于 `start_time` 返回 `400`。排序为 `created_at DESC, id DESC`（`id` 用于同一时刻内的稳定分页）。
 
-管理端写操作在审计日志中的 `action` 为 `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值。
+管理端写操作在审计日志中的 `action` 为 `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值——`redirect_uris` 列表冗长，事后要问的是「管理员改了哪些属性、是否切断了现有会话」。委派管理能力的变化是唯一的例外，会额外记录取值：`admin_scope_granted`（本次授予的 admin scope 列表）、`admin_scope_revoked`（布尔）与 `scopes_removed`（被移除的 scope 列表）。事后复盘一次管理事件的起点正是「这个客户端不再持有哪些 scope」，而这个问题无法从字段名加一份事后快照推出。
 
 `user_name` 是展示字段：随查询取回对应用户显示名，best-effort。软删除（`state = is_deleted`）的行仍在表里，名字照常返回；仅当用户行被物理删除、或显示名回查失败时为 `null`，此时前端应回退显示 `user_id`。
+
+`actor_client_id` 记录**执行**该操作的 OAuth 客户端（行为主体，而非被操作对象——后者在 `resource_id`）。控制台操作记录内置客户端 id，委派调用记录该第三方客户端的 `client_id`，两者据此可区分「管理员亲自操作」与「工具代其操作」。
+
+目前写入该字段的是管理端五个 action 与 OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
 
 **错误码**：`40000`（参数格式非法 / 时间窗口倒置）、`40100`、`40300`。
 
@@ -1894,6 +1940,7 @@ GET /admin/audit-logs
       "user_agent": "Mozilla/5.0...",
       "success": true,
       "err_code": null,
+      "actor_client_id": null,
       "created_at": "2026-05-28T12:00:00Z"
     }
   ],
@@ -1911,7 +1958,7 @@ GET /admin/audit-logs
 GET /admin/stats
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色）
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
 控制台概览页的一次性数据源，聚合账户、客户端与最近审计三条视图。
 
@@ -2017,7 +2064,7 @@ GET /.well-known/openid-configuration
   "userinfo_endpoint": "https://link.sast.fun/v2/userinfo",
   "jwks_uri": "https://link.sast.fun/v2/.well-known/jwks.json",
   "revocation_endpoint": "https://link.sast.fun/v2/oauth/revoke",
-  "scopes_supported": ["openid", "profile", "email"],
+  "scopes_supported": ["openid", "profile", "email", "admin:read", "admin:write"],
   "response_types_supported": ["code"],
   "grant_types_supported": ["authorization_code", "refresh_token"],
   "subject_types_supported": ["public"],
@@ -2025,7 +2072,7 @@ GET /.well-known/openid-configuration
   "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
   "claims_supported": [
     "sub", "iss", "aud", "exp", "iat", "nonce",
-    "name", "picture", "preferred_username",
+    "name", "picture", "preferred_username", "role",
     "email", "email_verified", "updated_at"
   ],
   "code_challenge_methods_supported": ["S256"],
@@ -2100,6 +2147,7 @@ POST /userinfo
   "name": "张三",
   "picture": "https://cos.example.com/avatar/1.jpg",
   "preferred_username": "张三",
+  "role": "on_sast",
   "email": "b2404****@njupt.edu.cn",
   "email_verified": true,
   "updated_at": 1717396400
@@ -2120,6 +2168,9 @@ POST /userinfo
 - `sub` 为用户唯一标识（`user.id` 字符串），始终返回
 - `email` 为注册邮箱（非对外展示邮箱）。`email_verified` 固定为 `true`（SAST Link 注册时已校验邮箱）
 - `updated_at` 为 Unix timestamp
+- `role` 是 SAST Link 自有 claim（非 OIDC 标准），随 `profile` scope 返回，取值见附录 A 的 `user_role`。它取自**签发那一刻的数据库行**，而非请求方 token 里的 `role` claim——后者是签发时快照，用户降权后仍带原角色。客户端应把它当展示提示用：它与所在 token 同样会过期，不应作为授权判断依据（本服务自己的鉴权也不读 token 的 role claim，见 §7.1）
+- 本端点是全服务唯一按设计服务第三方 token 的接口。第三方客户端读取当前登录用户只能经由此处，`/user/*` 会被 `azp` 门拒绝（`403 40300`）
+- `admin:read` / `admin:write` 不贡献任何 claim：只持有 admin scope 的 token 在此处只得到 `sub`
 - 响应体为裸 claim 集合，**不使用标准信封**——通用 OIDC 客户端库不解析本项目的信封格式
 - 授权范围之外的 claim **完全不出现**，而非返回空值。relying party 无法区分 `"name": ""` 与「该用户没有名字」
 - `preferred_username` 取 `profile.nickname`，未设置或为空白时回退到 `user.name`，保证 relying party 总有可展示的值
@@ -2176,6 +2227,7 @@ Content-Type: application/json
   "name": "张三",
   "picture": "https://cos.example.com/avatar/1.jpg",
   "preferred_username": "张三",
+  "role": "on_sast",
   "email": "b2404****@njupt.edu.cn",
   "email_verified": true,
   "updated_at": 1717396400
@@ -2196,6 +2248,7 @@ Content-Type: application/json
 | `name` | `profile` | 真实姓名 |
 | `picture` | `profile` | 头像 URL |
 | `preferred_username` | `profile` | 昵称 |
+| `role` | `profile` | 用户当前角色（SAST Link 自有 claim，非 OIDC 标准）。取自签发时的数据库行；与所在 token 同样会过期，仅作展示提示，不应用于授权判断 |
 | `email` | `email` | 注册邮箱 |
 | `email_verified` | `email` | 邮箱已验证，固定 `true` |
 | `updated_at` | `profile` | 用户信息最后修改时间 |

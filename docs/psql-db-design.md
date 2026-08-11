@@ -235,6 +235,8 @@ CREATE TABLE audit_logs (
     user_agent TEXT,
     success    BOOLEAN          NOT NULL DEFAULT TRUE,
     err_code   INT,
+    -- V007
+    actor_client_id VARCHAR(255),
     created_at TIMESTAMPTZ      NOT NULL DEFAULT NOW()
 );
 ```
@@ -243,7 +245,7 @@ CREATE TABLE audit_logs (
 |---|---|
 |`id`||
 |`user_id`|删除用户后保留日志|
-|`action`|操作类型：register / login / logout / change_password / reset_password / oauth_bind / oauth_unbind / update_profile / upload_avatar / admin_action|
+|`action`|操作类型：register / login / logout / change_password / reset_password / oauth_bind / oauth_unbind / update_profile / upload_avatar / admin_user_update / admin_user_delete / admin_user_restore / admin_oauth_client_create / admin_oauth_client_update / oauth_authorize / oauth_token / oauth_revoke|
 |`resource`|操作对象类型|
 |`resource_id`|操作对象 ID|
 |`detail`|JSONB 详情，各 action 结构见下文|
@@ -251,7 +253,16 @@ CREATE TABLE audit_logs (
 |`user_agent`|User-Agent|
 |`success`|是否成功|
 |`err_code`|错误码|
+|`actor_client_id`|执行操作的 OAuth 客户端（行为主体，非被操作对象）。详见下方说明|
 |`created_at`||
+
+**`actor_client_id`（V007）**：记录**执行**该操作的 OAuth 客户端，与 `resource_id`（被操作对象）区分。控制台操作显式记录内置客户端 id（`sast-link-web`）而非 NULL，委派调用记录该第三方客户端的 `client_id`，两者据此可区分「管理员亲自操作」与「工具代其操作」。
+
+NULL 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 之前写入的历史行。控制台之所以写显式值而非 NULL，正是为了让 NULL 只有这一层含义；历史行的歧义随 90 天保留期自行消失，无需回填。
+
+刻意**无外键**：审计行必须比它命名的注册活得更久。`ON DELETE SET NULL` 会在注销客户端时把历史悄悄改写成「无凭证」，`RESTRICT` 则会让注销客户端卡在自己的审计尾巴上。同样**未加索引**：基数目前约为 1（仅一个委派客户端），既有 `action` 索引已把常用过滤切得足够小，且表有 90 天上限——等该过滤真有量再按 `EXPLAIN` 决定。
+
+命名不用 `client_id`：本表已在两个不同角色上承载客户端标识——`resource_id` 在 `admin_oauth_client_*` 动作中存的是 oauth_client 主键，`detail` 在 OAuth token 端点中带 `client_id`。裸 `client_id` 在此处会真正产生「行为主体 vs 被操作对象」的歧义。
 
 **detail JSONB 结构**（按 action）：
 
@@ -266,7 +277,9 @@ CREATE TABLE audit_logs (
 | `oauth_unbind` | `{"provider": "github" \| "lark" \| "other_mail", "provider_id": "string"}` |
 | `update_profile` | `{"changed_fields": ["field1", "field2", ...]}` |
 | `upload_avatar` | `{"avatar_url": "string"}` |
-| `admin_action` | `{"target_user_id": 123, "sub_action": "edit_user" \| "delete_user" \| "restore_user" \| "manage_oauth_client"}` |
+| 用户管理（`admin_user_update` / `admin_user_delete` / `admin_user_restore`） | `{"target_user_id": 123, ...}` |
+| 客户端注册（`admin_oauth_client_create`） | `{"client_name": "string", "client_type": "third_party", "admin_scope": true}`（`admin_scope` 仅在提交含 admin scope 时出现） |
+| 客户端更新（`admin_oauth_client_update`） | `{"changed_fields": [...], "is_active": bool, "revoked_tokens": 3, "admin_scope_granted": ["admin:write"], "admin_scope_revoked": true, "scopes_removed": [...]}`（后四项按发生情况出现） |
 
 > **历史兼容**：dump 中现有 `audit_logs` 数据为 V1 people_link 迁移产物，detail 格式为
 > `{"source": "people_link_merge", "action_type": "migration", "migrated_at": "...", "needs_password_reset": false}`。
@@ -308,7 +321,7 @@ CREATE TABLE oauth_clients (
 |---|---|
 |`id`|内部主键|
 |`client_id`|公开客户端标识符（随机字符串）|
-|`client_secret`|密钥 hash（bcrypt）。第一方应用存 NULL|
+|`client_secret`|密钥 hash（SHA-256，`sha256-v1$` 版本前缀；非 argon2id/bcrypt，理由见 PRD §4.10）。NULL 表示公开客户端，当前即 `first_party`|
 |`client_name`|应用名称|
 |`client_type`|第一方应用 / 第三方应用|
 |`redirect_uris`|允许的重定向 URI 列表|
@@ -317,6 +330,22 @@ CREATE TABLE oauth_clients (
 |`is_active`|客户端是否被禁用|
 |`created_at`||
 |`updated_at`||
+
+### 迁移种入的客户端
+
+只有 `sast-link-web` 由迁移种入，因为服务本身依赖它存在（内部 API 的 `azp` 门钉死在这个 `client_id` 上）。其余客户端——包括持有 admin scope 的委派管理客户端——一律经控制台注册（见 API 文档 §6.5 / §6.7），迁移不再种入任何接入方客户端。
+
+|`client_id`|迁移|类型|scopes|grant_types|用途|
+|---|---|---|---|---|---|
+|`sast-link-web`|V003|`first_party`（无 secret）|`openid` `profile` `email`|`authorization_code` `refresh_token`|内置控制台。内部 API 通过 `azp` 钉死在此客户端上；停用它是不可自行恢复的锁死（登录/刷新/注册均经由它解析，且同一操作会撤销全部内部会话 token），故控制台接口拒绝停用、改写其 `redirect_uris`、修改其 `scopes` 与 `grant_types`（`grant_types` 由 V003 种子值钉死，控制台自身的 OAuth 会话经 refresh grant 续期）|
+
+**为什么接入方客户端不走迁移**：`client_secret` 是需要轮换的凭证，而 seed 迁移必须带漂移检测（既有行属性不符则中止，否则重复 apply 会覆盖一个存活客户端的 scope 或回调地址）。两者不相容——凭证一经轮换，库里的哈希就不再等于迁移里写死的那个，任何需要重跑该迁移的路径（`down` 后再 `up`、灾备重建、从生产 dump 恢复后跑迁移）都会中止且无法绕过。把 secret 从漂移检测中排除也不成立：那样 `down`/`up` 会把轮换后的行删掉并重建成迁移里的旧 secret，等于让一个已作废的凭证重新生效。
+
+一个既要读当前登录用户、又要调用 `/admin/*` 的接入方，宜注册两个客户端而非一个：一个持 `openid admin:read admin:write` 且不带 refresh，一个持 `openid profile email` 且带 refresh 承载普通登录会话。两类凭证的生命周期与影响面不同：会话需要长期保活，管理能力应尽快过期。两者职责不重叠且互相打不到对方的接口——会话客户端不持有 admin scope，管理客户端不持有 `profile`/`email`，其 `/userinfo` 只能得到 `sub`。二者可共用同一组 `redirect_uris`：`authorize` 校验的是「该 URI 在**这个** client 的注册列表内」，不要求全局唯一，因此一个接入方用一个回调端点承载两条腿即可。
+
+管理那半必须是 `third_party` 才能持有 admin scope，因为 `first_party` 是公开客户端、token 端点仅凭 PKCE 认证它。scope 本身对两类客户端一律受 `ContainsAll` 约束。控制台授予 admin scope 受四道守卫约束（必须 `third_party`、不得含 `refresh_token`、只能由内置控制台客户端发起、不得与改写 `redirect_uris` 同请求），且判定基于合并后状态以防拆包绕过；收窄 scope 或新授予 admin scope 都会连带撤销该客户端存量 token。`client_secret` 只以 `sha256-v1$...` 哈希入库，明文仅在注册响应中出现一次。
+
+V003 是幂等的：重复 apply 为 no-op，带漂移检测（既有行属性不符则 `RAISE EXCEPTION` 中止而非覆盖），并把自己创建的行记入 ownership 表，使 `down` 只删自己建的且未被任何授权码/token 引用过的行。它的 `client_secret` 为 NULL，因此不受上述凭证轮换问题影响。
 
 ## oauth_authorizations 授权码
 

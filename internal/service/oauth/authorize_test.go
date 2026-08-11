@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 func TestAuthorizeStashesValidatedRequest(t *testing.T) {
@@ -521,6 +522,51 @@ func TestConsentRejectsRedirectURIRemovedBetweenLegs(t *testing.T) {
 	}
 }
 
+// Scopes are re-checked between the legs for the same reason as the redirect_uri, and
+// it matters most for the admin scopes: revoking a client's delegated administration
+// has to stop administrative codes at once, not once the stash expires. Without this
+// the console's revocation left a window equal to the authorize-request TTL in which
+// the client could still complete a consent it had already started.
+func TestConsentRejectsScopeRemovedBetweenLegs(t *testing.T) {
+	h := newHarness(t)
+	delegated := h.clients.byClientID[testConfidentialClientID]
+	delegated.Scopes = model.StringArray{"openid", scope.AdminRead}
+
+	input := validAuthorizeInput(t)
+	input.ClientID = testConfidentialClientID
+	input.Scope = "openid " + scope.AdminRead
+	result, err := h.service.Authorize(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+
+	// The operator revokes delegated administration while the consent page is open.
+	delegated.Scopes = model.StringArray{"openid"}
+
+	_, err = h.service.Consent(context.Background(), ConsentInput{
+		RequestID: result.RequestID, Approve: true, UserID: 1,
+	})
+
+	requireOAuthError(t, err, ErrorInvalidScope)
+	if len(h.authorizations.created) != 0 {
+		t.Fatalf("created %d codes, want none once the scope was revoked",
+			len(h.authorizations.created))
+	}
+	// Non-redirectable: the request was valid when made, so the user is told to restart
+	// rather than the client being handed an error about a change it did not cause.
+	var oauthErr *Error
+	if errors.As(err, &oauthErr) && oauthErr.Redirectable {
+		t.Fatal("the scope re-check error must not be redirectable")
+	}
+	// The refusal is audited: an operator's mid-flight revocation that kills an
+	// in-flight consent is exactly the event an incident review wants to find, and
+	// it must not vanish with the spent stash.
+	if len(h.audit.entries) != 1 || h.audit.entries[0].Action != "oauth_authorize" ||
+		h.audit.entries[0].Success == nil || *h.audit.entries[0].Success {
+		t.Fatalf("audit entries = %+v, want one failed oauth_authorize", h.audit.entries)
+	}
+}
+
 // code_challenge and nonce are persisted in VARCHAR(255) columns, so an oversized
 // value has to be refused on the first leg — as a redirectable invalid_request the
 // client can act on — rather than becoming a 500 at consent time, after the
@@ -548,6 +594,82 @@ func TestAuthorizeBoundsPersistedParameters(t *testing.T) {
 			// Rejected before anything is stashed, so a flood cannot fill the keyspace.
 			if h.requests.saveCalls != 0 {
 				t.Fatalf("stashed %d requests, want none", h.requests.saveCalls)
+			}
+		})
+	}
+}
+
+// Delegated administration rests entirely on this function. Every client type is
+// pinned to its registration by ContainsAll, and the admin scopes additionally
+// require a third-party client: a first-party client is public, so its token
+// requests are authenticated by PKCE alone and an intercepted code is one barrier
+// away from an administrative token rather than two.
+func TestAuthorizeScopeForClientConfinesAdminScopesToRegisteredThirdParties(t *testing.T) {
+	adminGrant := model.StringArray{scope.OpenID, scope.AdminRead, scope.AdminWrite}
+	tests := []struct {
+		name       string
+		clientType model.ClientType
+		registered model.StringArray
+		requested  []string
+		wantErr    bool
+	}{
+		{
+			name:       "third party registered for admin",
+			clientType: model.ClientTypeThirdParty,
+			registered: adminGrant,
+			requested:  []string{scope.OpenID, scope.AdminWrite},
+		},
+		{
+			name:       "third party not registered for admin",
+			clientType: model.ClientTypeThirdParty,
+			registered: model.StringArray{scope.OpenID, scope.Profile},
+			requested:  []string{scope.OpenID, scope.AdminRead},
+			wantErr:    true,
+		},
+		{
+			name:       "third party registered for read only cannot request write",
+			clientType: model.ClientTypeThirdParty,
+			registered: model.StringArray{scope.OpenID, scope.AdminRead},
+			requested:  []string{scope.OpenID, scope.AdminWrite},
+			wantErr:    true,
+		},
+		{
+			// The whole reason the ops client is third-party rather than first-party.
+			// Refused even though the registration grants it, because a public client
+			// authenticates its token request by PKCE alone.
+			name:       "first party may never request admin",
+			clientType: model.ClientTypeFirstParty,
+			registered: adminGrant,
+			requested:  []string{scope.OpenID, scope.AdminRead},
+			wantErr:    true,
+		},
+		{
+			name:       "first party within its registration",
+			clientType: model.ClientTypeFirstParty,
+			registered: model.StringArray{scope.OpenID, scope.Profile, scope.Email},
+			requested:  []string{scope.OpenID, scope.Profile, scope.Email},
+		},
+		{
+			// The exemption that used to live here: a first-party client could request
+			// any supported non-admin scope regardless of its registration, which made
+			// the scopes column advisory and any future scope retroactively granted to
+			// every existing first-party client. Both client types are now pinned.
+			name:       "first party beyond its registration",
+			clientType: model.ClientTypeFirstParty,
+			registered: model.StringArray{scope.OpenID},
+			requested:  []string{scope.OpenID, scope.Profile, scope.Email},
+			wantErr:    true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &model.OAuthClient{ClientType: test.clientType, Scopes: test.registered}
+			err := authorizeScopeForClient(client, test.requested)
+			if test.wantErr && err == nil {
+				t.Fatal("authorizeScopeForClient() = nil, want invalid_scope")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("authorizeScopeForClient() error = %v, want nil", err)
 			}
 		})
 	}
@@ -626,6 +748,32 @@ func TestConsentInfoReturnsVerifiedClientMetadata(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Consent() after peek error = %v", err)
 	}
+}
+
+// The consent-info peek is re-validated against the live registration like the
+// consent submission itself: an operator's mid-flight scope revocation must not
+// leave the page rendering scopes the client can no longer be granted.
+func TestConsentInfoRejectsScopeRevokedAfterAuthorize(t *testing.T) {
+	h := newHarness(t)
+	delegated := h.clients.byClientID[testConfidentialClientID]
+	delegated.Scopes = model.StringArray{"openid", scope.AdminRead}
+
+	input := validAuthorizeInput(t)
+	input.ClientID = testConfidentialClientID
+	input.Scope = "openid " + scope.AdminRead
+	authorized, err := h.service.Authorize(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+
+	// The operator revokes delegated administration while the consent page is open.
+	delegated.Scopes = model.StringArray{"openid"}
+
+	_, err = h.service.ConsentInfo(context.Background(), ConsentInfoInput{
+		RequestID: authorized.RequestID,
+		UserID:    1,
+	})
+	requireOAuthError(t, err, ErrorInvalidScope)
 }
 
 func TestConsentInfoRejectsUnknownRequest(t *testing.T) {

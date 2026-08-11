@@ -40,6 +40,11 @@ type fakeService struct {
 	revokeInput       oauth.RevokeInput
 	userInfoInput     oauth.UserInfoInput
 	revokeCalls       int
+	// What RevokeGrant was handed: the actor is the caller's azp, not the client
+	// being revoked, so it has to come from the principal rather than the path.
+	revokeGrantUserID   int64
+	revokeGrantClientID int64
+	revokeGrantActor    string
 }
 
 func (s *fakeService) Authorize(_ context.Context, input oauth.AuthorizeInput) (*oauth.AuthorizeResult, error) {
@@ -85,7 +90,10 @@ func (s *fakeService) Grants(_ context.Context, _ int64) ([]repository.OAuthGran
 	return nil, nil
 }
 
-func (s *fakeService) RevokeGrant(_ context.Context, _, _ int64) error {
+func (s *fakeService) RevokeGrant(_ context.Context, userID, clientID int64, actorClientID string) error {
+	s.revokeGrantUserID = userID
+	s.revokeGrantClientID = clientID
+	s.revokeGrantActor = actorClientID
 	return nil
 }
 
@@ -119,6 +127,35 @@ func allowAuthWith(principal middleware.Principal) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		middleware.SetPrincipal(c, principal)
 		c.Next()
+	}
+}
+
+// The actor recorded for a grant revocation is the caller's own client (the token's
+// azp), never the client being revoked. Those are different parties on this route —
+// the whole point of the endpoint is that a user cuts off some *other* application —
+// so passing the path's client_id through as the actor would attribute the action to
+// the application that was just kicked out. The service aliases resource and actor
+// on the client-addressed endpoints, which is exactly why this one has to be checked.
+func TestRevokeGrantRecordsCallerClientAsActor(t *testing.T) {
+	service := &fakeService{}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, ConsentURL: testConsentURL},
+		allowAuthWith(middleware.Principal{
+			UserID: 7, JTI: "jti", ClientID: "sast-link-web", Scopes: []string{"openid"},
+		}))
+
+	recorder := doRequest(t, router, http.MethodDelete, "/oauth/grants/42", "", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if service.revokeGrantUserID != 7 {
+		t.Errorf("user id = %d, want 7", service.revokeGrantUserID)
+	}
+	if service.revokeGrantClientID != 42 {
+		t.Errorf("revoked client = %d, want 42", service.revokeGrantClientID)
+	}
+	if service.revokeGrantActor != "sast-link-web" {
+		t.Errorf("actor = %q, want the caller's azp sast-link-web", service.revokeGrantActor)
 	}
 }
 

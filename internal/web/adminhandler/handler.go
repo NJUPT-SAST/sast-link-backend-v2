@@ -8,6 +8,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminclient"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
 )
@@ -42,36 +43,72 @@ type Handler struct {
 	AuditLogs AuditLogService
 }
 
+// Gates are the middleware the admin routes are mounted behind. They are passed
+// in rather than built here so the composition root stays the only place that
+// decides how authentication works.
+//
+// A struct rather than positional parameters: there are five, three of them
+// interchangeable-looking gin.HandlerFuncs, and a transposed pair would compile
+// into a route gated by the wrong permission.
+type Gates struct {
+	// RequireAuth authenticates the group. On the admin surface this is the
+	// delegated-aware gate, not the strict internal-client one.
+	RequireAuth gin.HandlerFunc
+	// RequireReadScope and RequireWriteScope bound what a delegated third-party
+	// token may do. They are no-ops for an internal console token, whose ceiling is
+	// the role gates below.
+	RequireReadScope  gin.HandlerFunc
+	RequireWriteScope gin.HandlerFunc
+	// RequireAdmin and RequireReader are the role gates.
+	RequireAdmin  gin.HandlerFunc
+	RequireReader gin.HandlerFunc
+}
+
 // RegisterRoutes mounts the admin endpoints.
 //
-// requireAuth must precede the role gates: they read the Principal that
-// authentication puts in the context. All three are passed in rather than built
-// here so the composition root stays the only place that decides how
-// authentication works.
+// RequireAuth must precede every other gate: they all read the Principal that
+// authentication puts in the context.
 //
 // Two role gates rather than one, because PRD §4.12 splits the console: a lecturer
 // may read the user list and detail, everything else is admin-only. The group
-// carries authentication alone and each route names the gate it needs, so a new
-// route with no gate fails to compile a permission by omission — it simply has
-// none, which is why every route below states one explicitly.
+// carries authentication alone and each route names the gates it needs, so a new
+// route with no gate fails to gain a permission by omission — it simply has none,
+// which is why every route below states both a scope and a role gate explicitly.
 //
-// Third-party OAuth tokens cannot reach any of these: RequireAuth's azp gate
-// rejects them before a role check runs.
-func RegisterRoutes(r gin.IRouter, h Handler, requireAuth, requireAdmin, requireReader gin.HandlerFunc) {
-	admin := r.Group("/admin", requireAuth)
-	admin.GET("/oauth-clients", requireAdmin, h.ListClients)
-	admin.POST("/oauth-clients", requireAdmin, h.CreateClient)
-	admin.PUT("/oauth-clients/:id", requireAdmin, h.UpdateClient)
+// Two independent dimensions guard these routes, and both are required. The role
+// gate answers "is this user allowed to do this", reading the role from the
+// database row so a demotion lands on the next request. The scope gate answers
+// "was this credential granted the right to act", which only constrains a
+// delegated third-party token — any client holding an admin scope may reach these
+// routes on an administrator's behalf, but only within the scopes it registered
+// (that scope set is itself what marks it as a delegate). Neither
+// gate implies the other: an administrator's token issued to a read-only delegate
+// must not perform writes, and a write-scoped token belonging to a demoted user
+// must not do anything.
+func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
+	// Fail at boot rather than serve an ungated admin route. gin would happily mount
+	// a nil handler and panic on the first request instead.
+	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil ||
+		g.RequireAdmin == nil || g.RequireReader == nil {
+		panic("adminhandler: every gate in Gates must be set")
+	}
 
-	admin.GET("/users", requireReader, h.ListUsers)
-	admin.GET("/users/:id", requireReader, h.GetUser)
-	admin.PUT("/users/:id", requireAdmin, h.UpdateUser)
-	admin.DELETE("/users/:id", requireAdmin, h.DeleteUser)
-	admin.PUT("/users/:id/restore", requireAdmin, h.RestoreUser)
+	admin := r.Group("/admin", g.RequireAuth)
+	admin.GET("/oauth-clients", g.RequireReadScope, g.RequireAdmin, h.ListClients)
+	admin.POST("/oauth-clients", g.RequireWriteScope, g.RequireAdmin, h.CreateClient)
+	admin.PUT("/oauth-clients/:id", g.RequireWriteScope, g.RequireAdmin, h.UpdateClient)
 
-	admin.GET("/audit-logs", requireAdmin, h.ListAuditLogs)
+	admin.GET("/users", g.RequireReadScope, g.RequireReader, h.ListUsers)
+	admin.GET("/users/:id", g.RequireReadScope, g.RequireReader, h.GetUser)
+	admin.PUT("/users/:id", g.RequireWriteScope, g.RequireAdmin, h.UpdateUser)
+	admin.DELETE("/users/:id", g.RequireWriteScope, g.RequireAdmin, h.DeleteUser)
+	admin.PUT("/users/:id/restore", g.RequireWriteScope, g.RequireAdmin, h.RestoreUser)
 
-	admin.GET("/stats", requireAdmin, h.Stats)
+	admin.GET("/audit-logs", g.RequireReadScope, g.RequireAdmin, h.ListAuditLogs)
+
+	// Read-only aggregate, so the read scope: a delegate trusted to list the
+	// directory is not further restrained by being refused its counts.
+	admin.GET("/stats", g.RequireReadScope, g.RequireAdmin, h.Stats)
 }
 
 // AdminRole is the role permitted on the write endpoints, exported so the
@@ -82,3 +119,14 @@ const AdminRole = model.UserRoleAdmin
 // for the same reason as AdminRole: the set of roles that may read the directory
 // is a contract decision, not a wiring detail.
 var ReaderRoles = []model.UserRole{model.UserRoleAdmin, model.UserRoleLecturer}
+
+// ReadScopes and WriteScopes are the delegated scopes each class of admin route
+// accepts, exported for the same reason as the roles above.
+//
+// admin:write appears in ReadScopes because write implies read: a delegate trusted
+// to modify the directory is not meaningfully restrained by being refused a read
+// of it, and requiring both scopes would just make every caller request both.
+var (
+	ReadScopes  = []string{scope.AdminRead, scope.AdminWrite}
+	WriteScopes = []string{scope.AdminWrite}
+)

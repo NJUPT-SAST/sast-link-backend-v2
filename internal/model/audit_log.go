@@ -14,7 +14,11 @@ type AuditLog struct {
 	UserAgent  *string
 	Success    *bool `gorm:"default:(-)"`
 	ErrCode    *int
-	CreatedAt  time.Time
+	// ActorClientID is the OAuth client whose credential authorized this action —
+	// the acting party, not the subject. NULL means no OAuth credential was involved:
+	// an unauthenticated flow, a background worker, or a row predating V007.
+	ActorClientID *string
+	CreatedAt     time.Time
 }
 
 // TableName returns the exact V001 table name for AuditLog.

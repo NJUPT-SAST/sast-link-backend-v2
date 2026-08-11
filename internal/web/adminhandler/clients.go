@@ -51,14 +51,15 @@ func (h Handler) CreateClient(c *gin.Context) {
 		return
 	}
 	result, err := h.Clients.CreateClient(c.Request.Context(), adminclient.CreateClientInput{
-		ClientName:   req.ClientName,
-		ClientType:   req.ClientType,
-		RedirectURIs: req.RedirectURIs,
-		GrantTypes:   req.GrantTypes,
-		Scopes:       req.Scopes,
-		AdminUserID:  principal.UserID,
-		ClientIP:     c.ClientIP(),
-		UserAgent:    c.Request.UserAgent(),
+		ClientName:    req.ClientName,
+		ClientType:    req.ClientType,
+		RedirectURIs:  req.RedirectURIs,
+		GrantTypes:    req.GrantTypes,
+		Scopes:        req.Scopes,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))
@@ -112,15 +113,16 @@ func (h Handler) UpdateClient(c *gin.Context) {
 		return
 	}
 	result, err := h.Clients.UpdateClient(c.Request.Context(), adminclient.UpdateClientInput{
-		ClientPK:     clientPK,
-		ClientName:   req.ClientName,
-		RedirectURIs: req.RedirectURIs,
-		IsActive:     req.IsActive,
-		GrantTypes:   req.GrantTypes,
-		Scope:        req.Scope,
-		AdminUserID:  principal.UserID,
-		ClientIP:     c.ClientIP(),
-		UserAgent:    c.Request.UserAgent(),
+		ClientPK:      clientPK,
+		ClientName:    req.ClientName,
+		RedirectURIs:  req.RedirectURIs,
+		IsActive:      req.IsActive,
+		GrantTypes:    req.GrantTypes,
+		Scope:         req.Scope,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))

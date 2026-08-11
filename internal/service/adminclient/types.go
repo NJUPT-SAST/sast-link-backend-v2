@@ -52,8 +52,11 @@ type CreateClientInput struct {
 	Scopes       []string
 	// AdminUserID is the authenticated administrator, for the audit trail.
 	AdminUserID int64
-	ClientIP    string
-	UserAgent   string
+	// ActorClientID is the azp of the token that authorized this call. Empty means a
+	// console session, which the audit records as ProtectedClientID.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 // UpdateClientInput is a partial update. A nil field is left unchanged; the
@@ -71,8 +74,11 @@ type UpdateClientInput struct {
 	GrantTypes   *[]string
 	Scope        *[]string
 	AdminUserID  int64
-	ClientIP     string
-	UserAgent    string
+	// ActorClientID is the azp of the token that authorized this call. Empty means a
+	// console session, which the audit records as ProtectedClientID.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 // Client is one registration as reported to the console. It deliberately omits the

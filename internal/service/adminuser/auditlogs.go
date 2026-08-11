@@ -3,6 +3,7 @@ package adminuser
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -27,14 +28,15 @@ func (s Service) ListAuditLogs(ctx context.Context, input ListAuditLogsInput) (*
 	page, pageSize := normalizePaging(input.Page, input.PageSize, defaultAuditPageSize)
 
 	entries, total, err := s.Audit.List(ctx, repository.AuditLogFilter{
-		UserID:    input.UserID,
-		Action:    input.Action,
-		Resource:  input.Resource,
-		Success:   input.Success,
-		StartTime: input.StartTime,
-		EndTime:   input.EndTime,
-		Limit:     pageSize,
-		Offset:    (page - 1) * pageSize,
+		UserID:        input.UserID,
+		Action:        input.Action,
+		Resource:      input.Resource,
+		Success:       input.Success,
+		ActorClientID: strings.TrimSpace(input.ActorClientID),
+		StartTime:     input.StartTime,
+		EndTime:       input.EndTime,
+		Limit:         pageSize,
+		Offset:        (page - 1) * pageSize,
 	})
 	if err != nil {
 		return nil, internalError(ctx, "list admin audit logs", "查询审计日志失败", err)

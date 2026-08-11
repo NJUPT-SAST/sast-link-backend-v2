@@ -127,8 +127,7 @@ func newUserRouter(t *testing.T, users UserService, auditLogs AuditLogService) *
 		})
 		c.Next()
 	}
-	allow := func(c *gin.Context) { c.Next() }
-	RegisterRoutes(r, Handler{Users: users, AuditLogs: auditLogs}, injectPrincipal, allow, allow)
+	RegisterRoutes(r, Handler{Users: users, AuditLogs: auditLogs}, testGates(injectPrincipal))
 	return r
 }
 
@@ -521,7 +520,7 @@ func TestUserWritesWithoutPrincipalAreInternalErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	allow := func(c *gin.Context) { c.Next() }
-	RegisterRoutes(r, Handler{Users: &fakeUsers{}}, allow, allow, allow)
+	RegisterRoutes(r, Handler{Users: &fakeUsers{}}, testGates(allow))
 
 	for _, testCase := range []struct{ method, path, body string }{
 		{http.MethodPut, "/admin/users/5", `{"name":"X"}`},

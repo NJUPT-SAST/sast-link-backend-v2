@@ -123,6 +123,19 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, newError(ErrInvalidGrant, "账号已注销", nil)
 	}
 
+	// The code's scopes are re-checked against the registration as it stands now, the
+	// same live re-check Consent applies to a stash and this function already applies
+	// to grant_types. A code is minted before it is redeemed, so without this an
+	// administrator who revokes a client's admin scope still has every outstanding
+	// code redeemable for an administrative token until it expires. Consent closes
+	// the stash half of that window; this closes the code half.
+	//
+	// Checked after the code was consumed, matching this function's stated ordering:
+	// a rejection here must still burn the code.
+	if scopeErr := checkScopeForClient(client, []string(authorization.Scopes)); scopeErr != nil {
+		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
+	}
+
 	scopes := []string(authorization.Scopes)
 	familyID := ""
 	if authorization.FamilyID != nil {
@@ -146,7 +159,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	var codeAudit *model.AuditLog
 	if s.Audit != nil {
 		resourceID := client.ClientID
-		codeAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, true, 0,
+		codeAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, &resourceID, true, 0,
 			input.ClientIP, input.UserAgent, map[string]any{
 				"client_id":  client.ClientID,
 				"grant_type": grantTypeAuthorizationCode,
@@ -248,6 +261,16 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	// inherit them unchanged. A client wanting fewer scopes must start a new
 	// authorization.
 	scopes := []string(current.Scopes)
+	// Defense-in-depth, mirroring the code-redemption leg. The family's scopes were
+	// checked against the registration when its first pair was minted; a change
+	// that did not go through the revoking update (a direct database edit, a future
+	// path that narrows scopes without UpdateAndRevoke) would otherwise let the
+	// family keep minting access tokens that assert a scope the registration no
+	// longer holds. The revoking update normally cuts the family first, so this is
+	// a backstop rather than the primary control.
+	if scopeErr := checkScopeForClient(client, scopes); scopeErr != nil {
+		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
+	}
 	pair, err := s.issuer().Issue(tokenissue.Request{
 		User:       user,
 		Client:     client,
@@ -273,7 +296,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	var refreshAudit *model.AuditLog
 	if s.Audit != nil {
 		resourceID := client.ClientID
-		refreshAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, true, 0,
+		refreshAudit, err = s.buildAuditEntry(&user.ID, "oauth_token", &resourceID, &resourceID, true, 0,
 			input.ClientIP, input.UserAgent, map[string]any{
 				"client_id":  client.ClientID,
 				"grant_type": grantTypeRefreshToken,

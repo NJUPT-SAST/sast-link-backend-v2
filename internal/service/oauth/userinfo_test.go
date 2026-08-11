@@ -7,6 +7,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 func stringPtr(value string) *string { return &value }
@@ -93,6 +94,53 @@ func TestUserInfoFiltersClaimsByScope(t *testing.T) {
 
 // preferred_username falls back to the real name so a relying party always has
 // something displayable, and an account with no profile row is not an error.
+// role rides the profile scope. It is this provider's own claim rather than an OIDC
+// one, so it needs its own assertion that the gate applies to it too — a claim that
+// leaked without its scope would hand every openid-only client the user's standing.
+func TestUserInfoGatesRoleByProfileScope(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		scopes   []string
+		wantRole string
+	}{
+		{name: "openid only", scopes: []string{"openid"}},
+		{name: "openid email", scopes: []string{"openid", "email"}},
+		{name: "openid profile", scopes: []string{"openid", "profile"}, wantRole: string(model.UserRoleMember)},
+		{name: "all scopes", scopes: []string{"openid", "profile", "email"}, wantRole: string(model.UserRoleMember)},
+		// An admin scope contributes no claim, so it must not smuggle role in either.
+		{name: "openid admin:read", scopes: []string{"openid", scope.AdminRead}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			result, err := h.service.UserInfo(context.Background(), UserInfoInput{UserID: 1, Scopes: test.scopes})
+			if err != nil {
+				t.Fatalf("UserInfo() error = %v", err)
+			}
+			if result.Role != test.wantRole {
+				t.Fatalf("role = %q, want %q", result.Role, test.wantRole)
+			}
+		})
+	}
+}
+
+// The role reported is the database's, not the requesting token's. A token's own role
+// claim is a signing-time snapshot that survives a demotion, so reporting it would
+// tell a relying party the user still holds a role this service has already revoked.
+func TestUserInfoRoleTracksTheDatabaseRow(t *testing.T) {
+	h := newHarness(t)
+	h.users.byID[1].Role = model.UserRoleAdmin
+
+	result, err := h.service.UserInfo(context.Background(), UserInfoInput{
+		UserID: 1, Scopes: []string{"openid", "profile"},
+	})
+	if err != nil {
+		t.Fatalf("UserInfo() error = %v", err)
+	}
+	if result.Role != string(model.UserRoleAdmin) {
+		t.Fatalf("role = %q, want the current database role %q", result.Role, model.UserRoleAdmin)
+	}
+}
+
 func TestUserInfoFallsBackWithoutProfileRow(t *testing.T) {
 	h := newHarness(t)
 

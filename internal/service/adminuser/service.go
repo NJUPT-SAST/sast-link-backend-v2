@@ -26,6 +26,26 @@ type Service struct {
 	Blacklist TokenBlacklist
 	Devices   DeviceStore
 	Clock     Clock
+	// ConsoleClientID is the built-in first-party client, recorded as the actor when
+	// a request carries no azp.
+	//
+	// A first-party session token predates the azp claim, so an empty azp on the admin
+	// surface means the console — the service cannot derive that name itself, so the
+	// composition root supplies it from the same config value the auth middleware pins
+	// to. Naming it explicitly keeps NULL in actor_client_id meaning exactly one thing:
+	// no OAuth credential authorized the action. Left empty, the column stays NULL
+	// rather than inventing a value.
+	ConsoleClientID string
+}
+
+// actorClientID resolves what to record as the acting client: the token's azp when
+// present, otherwise the console. Returns empty when neither is known, which the
+// caller stores as NULL.
+func (s Service) actorClientID(tokenClientID string) string {
+	if tokenClientID != "" {
+		return tokenClientID
+	}
+	return s.ConsoleClientID
 }
 
 func (s Service) now() time.Time {
@@ -36,36 +56,52 @@ func (s Service) now() time.Time {
 	return clock.Now().UTC()
 }
 
+// auditParams describes one admin audit row.
+//
+// A struct rather than positional parameters: there are now nine, three of them
+// adjacent strings, and a transposed clientIP/userAgent/actorClientID would compile
+// into a row that misattributes the action.
+type auditParams struct {
+	AdminUserID int64
+	// ActorClientID is the azp of the token that authorized this action. Empty means
+	// the request came from the console, which the audit records explicitly rather
+	// than as NULL — see Service.ConsoleClientID.
+	ActorClientID string
+	Action        string
+	TargetUserID  int64
+	Success       bool
+	ErrCode       int
+	ClientIP      string
+	UserAgent     string
+	Detail        map[string]any
+}
+
 // audit records an admin action. Failures are logged, never returned: losing an
 // audit row must not fail an otherwise valid change, but it must not pass
 // silently either.
-func (s Service) audit(
-	ctx context.Context,
-	adminUserID int64,
-	action string,
-	targetUserID int64,
-	success bool,
-	errCode int,
-	clientIP, userAgent string,
-	detail map[string]any,
-) {
+func (s Service) audit(ctx context.Context, params auditParams) {
 	if s.Audit == nil {
 		return
 	}
-	resourceID := strconv.FormatInt(targetUserID, 10)
+	resourceID := strconv.FormatInt(params.TargetUserID, 10)
+	action := params.Action
+	success := params.Success
 	entry := &model.AuditLog{
-		UserID:     &adminUserID,
-		Action:     action,
-		Resource:   auditResourceUser,
-		ResourceID: &resourceID,
-		Success:    &success,
-		ClientIP:   nullableString(clientIP),
-		UserAgent:  nullableString(userAgent),
-		CreatedAt:  s.now(),
+		UserID:        &params.AdminUserID,
+		Action:        action,
+		Resource:      auditResourceUser,
+		ResourceID:    &resourceID,
+		Success:       &success,
+		ClientIP:      nullableString(params.ClientIP),
+		UserAgent:     nullableString(params.UserAgent),
+		ActorClientID: nullableString(s.actorClientID(params.ActorClientID)),
+		CreatedAt:     s.now(),
 	}
-	if errCode != 0 {
+	if params.ErrCode != 0 {
+		errCode := params.ErrCode
 		entry.ErrCode = &errCode
 	}
+	detail := params.Detail
 	if len(detail) > 0 {
 		encoded, err := json.Marshal(detail)
 		if err != nil {

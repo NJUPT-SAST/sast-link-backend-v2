@@ -121,7 +121,7 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 
 	requested, err := parseRequestedScopes(input.Scope)
 	if err != nil {
-		return nil, redirectableError(ErrInvalidScope, "scope 无效：必须包含 openid，且仅支持 openid/profile/email", err)
+		return nil, redirectableError(ErrInvalidScope, "scope 无效：必须包含 openid，且仅支持受支持的取值", err)
 	}
 	if scopeErr := authorizeScopeForClient(client, requested); scopeErr != nil {
 		return nil, scopeErr
@@ -207,6 +207,25 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	if !slices.Contains([]string(client.RedirectURIs), payload.RedirectURI) {
 		return nil, newError(ErrInvalidRequest, "redirect_uri 已不在客户端注册值中，请重新发起授权", nil)
 	}
+	// The scopes are re-checked against the registration as it stands now, for the
+	// same reason as the redirect_uri above: the stash was validated on the first leg
+	// and the registration can change before consent is submitted. Without this, an
+	// administrator who revokes a client's admin scope keeps minting administrative
+	// codes from stashes written before the revocation, for the rest of their TTL.
+	//
+	// Deliberately not redirectable. The first leg's error goes to the client's
+	// redirect_uri because the client is the one that asked for a bad scope; here the
+	// request was valid when made and it is the operator's change that invalidated
+	// it, so the user gets told to restart rather than the client being handed an
+	// error it cannot act on.
+	if scopeErr := checkScopeForClient(client, payload.Scopes); scopeErr != nil {
+		// Recorded like every other refusal outcome on this path: an operator's
+		// mid-flight revocation that kills an in-flight consent is exactly the event
+		// an incident review wants to find. The stash is already spent, so the
+		// decision is final either way.
+		s.auditAuthorize(ctx, input, payload, nil, false, errcode.CodeForbidden, "scope_revoked")
+		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
+	}
 
 	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
@@ -277,6 +296,23 @@ func (s Service) ConsentInfo(ctx context.Context, input ConsentInfoInput) (*Cons
 	if !found {
 		return nil, newError(ErrInvalidRequest, "授权请求无效或已过期，请重新发起授权", nil)
 	}
+	// The stash was validated on the first leg, and the registration can change
+	// before the page loads. Re-read the client and re-check the scope set against
+	// the live registration, exactly as Consent does on submission, so the page
+	// cannot render scopes the registration no longer grants — an operator's
+	// mid-flight revocation would otherwise keep showing the revoked admin scope
+	// until the stash expired. The stash is peeked, not consumed, so a page that
+	// re-renders after the revocation simply gets the fresh answer.
+	client, err := s.Clients.FindActiveByClientID(ctx, payload.ClientID)
+	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
+		return nil, newError(ErrInvalidClient, "客户端已停用，请重新发起授权", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+	if scopeErr := checkScopeForClient(client, payload.Scopes); scopeErr != nil {
+		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
+	}
 	return &ConsentInfoResult{
 		ClientName: payload.ClientName,
 		Scopes:     payload.Scopes,
@@ -300,20 +336,51 @@ func parseRequestedScopes(raw string) ([]string, error) {
 	return scope.Normalize(strings.Fields(value))
 }
 
-// authorizeScopeForClient enforces PRD §4.10's per-client scope rule: a
-// first-party client may request any supported scope, a third-party client only
-// what it registered. The returned error is redirectable, since it is reached
-// only after the client and redirect_uri are verified.
+// authorizeScopeForClient enforces PRD §4.10's per-client scope rule: every client,
+// first-party included, may only request what its registration grants. The returned
+// error is redirectable, since it is reached only after the client and redirect_uri
+// are verified.
+//
+// The admin scopes carry an additional restriction on top of that, checked first:
+// they may only be granted to a third-party client. See checkScopeForClient.
 func authorizeScopeForClient(client *model.OAuthClient, requested []string) error {
-	if client.ClientType == model.ClientTypeFirstParty {
-		return nil
+	if err := checkScopeForClient(client, requested); err != nil {
+		err.Redirectable = true
+		return err
+	}
+	return nil
+}
+
+// checkScopeForClient is the predicate itself, returning a non-redirectable error.
+//
+// Split out from authorizeScopeForClient because the same rule has to be re-applied
+// on the two later legs — consent and code redemption — where the answer goes to the
+// caller directly rather than through a redirect. A registration's scopes can change
+// between legs, and this check is what makes a revoked grant take effect on the codes
+// already in flight instead of one TTL later.
+//
+// The admin scopes are refused for a first-party client regardless of what its
+// registration says. A first-party client is a public client — it holds no
+// client_secret, so the token endpoint authenticates it by PKCE alone (see
+// authenticateClient). Between an authorization code being signed out and an
+// administrative token existing there is then exactly one barrier, the exact-match
+// redirect_uri, where a confidential client has two independent ones. Delegated
+// administration is the last capability that should run on the thinner of the two,
+// so it is confined to third-party clients.
+//
+// Note this is no longer derived from the registration being unenforced for
+// first-party clients — ContainsAll below now pins every client type. Removing that
+// exemption does not make this check redundant.
+func checkScopeForClient(client *model.OAuthClient, requested []string) *Error {
+	if scope.ContainsAdmin(requested) && client.ClientType == model.ClientTypeFirstParty {
+		return newError(ErrInvalidScope, "admin scope 不可授予第一方客户端", nil)
 	}
 	granted, err := scope.ContainsAll([]string(client.Scopes), requested)
 	if err != nil {
-		return redirectableError(ErrInvalidScope, "客户端注册的 scope 无效", err)
+		return newError(ErrInvalidScope, "客户端注册的 scope 无效", err)
 	}
 	if !granted {
-		return redirectableError(ErrInvalidScope, "请求的 scope 超出客户端注册范围", nil)
+		return newError(ErrInvalidScope, "请求的 scope 超出客户端注册范围", nil)
 	}
 	return nil
 }

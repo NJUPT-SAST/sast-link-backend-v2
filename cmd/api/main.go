@@ -95,10 +95,16 @@ func run() error {
 	sessionhandler.RegisterRoutes(router, runtime.Handler, runtime.Auth.RequireAuth())
 	oauthhandler.RegisterRoutes(router, runtime.OAuth, runtime.Auth.RequireAuth())
 	oauthloginhandler.RegisterRoutes(router, runtime.OAuthLogin, runtime.Auth.RequireAuth())
-	adminhandler.RegisterRoutes(router, runtime.Admin,
-		runtime.Auth.RequireAuth(),
-		runtime.Auth.RequireRole(adminhandler.AdminRole),
-		runtime.Auth.RequireRole(adminhandler.ReaderRoles...))
+	// The admin group authenticates through RequireAdminAuth, not RequireAuth: it is
+	// the one surface a delegated third-party token may reach, and only within the
+	// scopes that token holds. Every other group keeps the strict internal-client pin.
+	adminhandler.RegisterRoutes(router, runtime.Admin, adminhandler.Gates{
+		RequireAuth:       runtime.Auth.RequireAdminAuth(),
+		RequireReadScope:  runtime.Auth.RequireDelegatedScope(adminhandler.ReadScopes...),
+		RequireWriteScope: runtime.Auth.RequireDelegatedScope(adminhandler.WriteScopes...),
+		RequireAdmin:      runtime.Auth.RequireRole(adminhandler.AdminRole),
+		RequireReader:     runtime.Auth.RequireRole(adminhandler.ReaderRoles...),
+	})
 
 	slog.Info("server starting", slog.String("port", cfg.AppPort))
 	return serve(ctx, ":"+cfg.AppPort, router, runtime.Workers)

@@ -36,7 +36,13 @@ func newStatsRouter(t *testing.T, users UserService, clients ClientService, audi
 		c.Next()
 	}
 	allow := func(c *gin.Context) { c.Next() }
-	RegisterRoutes(r, Handler{Users: users, Clients: clients, AuditLogs: auditLogs}, injectPrincipal, allow, allow)
+	RegisterRoutes(r, Handler{Users: users, Clients: clients, AuditLogs: auditLogs}, Gates{
+		RequireAuth:       injectPrincipal,
+		RequireReadScope:  allow,
+		RequireWriteScope: allow,
+		RequireAdmin:      allow,
+		RequireReader:     allow,
+	})
 	return r
 }
 

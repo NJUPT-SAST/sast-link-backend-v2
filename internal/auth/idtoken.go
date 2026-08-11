@@ -29,6 +29,21 @@ type IDTokenClaims struct {
 	Picture           string `json:"picture,omitempty"`
 	PreferredUsername string `json:"preferred_username,omitempty"`
 	UpdatedAt         int64  `json:"updated_at,omitempty"`
+	// Role is this service's own claim, not an OIDC one, carried under the profile
+	// scope because a member's standing in SAST is part of who they are here.
+	//
+	// Named without a URI namespace: OIDC reserves no `role` claim (the neighbouring
+	// specs use `roles`/`groups`), this provider's claim set is closed and validated
+	// against scope.canonicalOrder, and a namespaced key would only make every relying
+	// party parse a longer string. If a future standard claims the name, the migration
+	// is a version bump on this claim, not a silent collision.
+	//
+	// It is always the user's *current* role, read from the database row when the token
+	// is issued — never the role claim of whatever access token asked for it, which is
+	// a snapshot that survives a demotion. A relying party must still treat it as a
+	// display hint: it ages exactly like the ID Token it rides in, so it must not be
+	// the basis of an authorization decision this service would make itself.
+	Role string `json:"role,omitempty"`
 
 	// email scope. EmailVerified is a pointer so it can be omitted entirely
 	// without the email scope, rather than defaulting to a misleading false.
@@ -47,6 +62,8 @@ type IDTokenSubjectClaims struct {
 	PreferredUsername string
 	UpdatedAt         time.Time
 	Email             string
+	// Role is the user's current role from the database row.
+	Role string
 }
 
 // IDTokenInput contains data required to issue an ID Token.
@@ -76,10 +93,15 @@ type IDTokenInput struct {
 // access-token path would either break the middleware's audience check or ship
 // ID Tokens that this service would accept as its own bearer credentials.
 func (m JWTManager) SignIDToken(input IDTokenInput) (string, error) {
-	granted, err := scope.Normalize(input.Scopes)
+	normalized, err := scope.Normalize(input.Scopes)
 	if err != nil {
 		return "", ErrInvalidInput
 	}
+	// Admin scopes carry no claim, so they are dropped before the mapping rather
+	// than left for applyIDTokenScopeClaims to skip by omission. Filtering here
+	// makes "this scope contributes nothing" an explicit decision instead of a
+	// property of which cases the switch below happens to list.
+	granted := scope.ClaimScopes(normalized)
 	if m.Issuer == "" || strings.TrimSpace(input.Subject) == "" ||
 		strings.TrimSpace(input.ClientID) == "" || input.TTL <= 0 ||
 		m.Active.KID == "" || m.Active.Private == nil {
@@ -123,6 +145,7 @@ func applyIDTokenScopeClaims(claims *IDTokenClaims, granted []string, subject ID
 			claims.Name = subject.Name
 			claims.Picture = subject.Picture
 			claims.PreferredUsername = subject.PreferredUsername
+			claims.Role = subject.Role
 			if !subject.UpdatedAt.IsZero() {
 				claims.UpdatedAt = subject.UpdatedAt.UTC().Unix()
 			}
