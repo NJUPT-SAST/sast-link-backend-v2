@@ -533,6 +533,29 @@ func TestTokenRefreshGrantRotates(t *testing.T) {
 	}
 }
 
+// A family's scopes were checked against the registration when its first pair was
+// minted. If a change narrows the registration without going through the revoking
+// update (a direct database edit, a future path), the refresh leg must stop
+// minting the dropped scope rather than keep rotating it.
+func TestTokenRefreshRejectsScopeNarrowedOutsideUpdate(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	first, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+
+	// The registration narrows behind the family's back, bypassing UpdateAndRevoke.
+	h.clients.byClientID[testPublicClientID].Scopes = model.StringArray{"openid"}
+
+	_, err = h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: first.RefreshToken,
+		ClientID:     testPublicClientID,
+	})
+	requireOAuthError(t, err, ErrorInvalidScope)
+}
+
 // Replaying an already-rotated refresh token is the classic stolen-token signal;
 // the family must be cut rather than a new pair issued.
 func TestTokenRefreshGrantReplayRevokesFamily(t *testing.T) {

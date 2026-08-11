@@ -219,6 +219,11 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	// it, so the user gets told to restart rather than the client being handed an
 	// error it cannot act on.
 	if scopeErr := checkScopeForClient(client, payload.Scopes); scopeErr != nil {
+		// Recorded like every other refusal outcome on this path: an operator's
+		// mid-flight revocation that kills an in-flight consent is exactly the event
+		// an incident review wants to find. The stash is already spent, so the
+		// decision is final either way.
+		s.auditAuthorize(ctx, input, payload, nil, false, errcode.CodeForbidden, "scope_revoked")
 		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
 
@@ -290,6 +295,23 @@ func (s Service) ConsentInfo(ctx context.Context, input ConsentInfoInput) (*Cons
 	}
 	if !found {
 		return nil, newError(ErrInvalidRequest, "授权请求无效或已过期，请重新发起授权", nil)
+	}
+	// The stash was validated on the first leg, and the registration can change
+	// before the page loads. Re-read the client and re-check the scope set against
+	// the live registration, exactly as Consent does on submission, so the page
+	// cannot render scopes the registration no longer grants — an operator's
+	// mid-flight revocation would otherwise keep showing the revoked admin scope
+	// until the stash expired. The stash is peeked, not consumed, so a page that
+	// re-renders after the revocation simply gets the fresh answer.
+	client, err := s.Clients.FindActiveByClientID(ctx, payload.ClientID)
+	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
+		return nil, newError(ErrInvalidClient, "客户端已停用，请重新发起授权", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+	if scopeErr := checkScopeForClient(client, payload.Scopes); scopeErr != nil {
+		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
 	return &ConsentInfoResult{
 		ClientName: payload.ClientName,

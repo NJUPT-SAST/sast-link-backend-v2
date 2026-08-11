@@ -261,6 +261,16 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	// inherit them unchanged. A client wanting fewer scopes must start a new
 	// authorization.
 	scopes := []string(current.Scopes)
+	// Defense-in-depth, mirroring the code-redemption leg. The family's scopes were
+	// checked against the registration when its first pair was minted; a change
+	// that did not go through the revoking update (a direct database edit, a future
+	// path that narrows scopes without UpdateAndRevoke) would otherwise let the
+	// family keep minting access tokens that assert a scope the registration no
+	// longer holds. The revoking update normally cuts the family first, so this is
+	// a backstop rather than the primary control.
+	if scopeErr := checkScopeForClient(client, scopes); scopeErr != nil {
+		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
+	}
 	pair, err := s.issuer().Issue(tokenissue.Request{
 		User:       user,
 		Client:     client,

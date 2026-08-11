@@ -558,6 +558,13 @@ func TestConsentRejectsScopeRemovedBetweenLegs(t *testing.T) {
 	if errors.As(err, &oauthErr) && oauthErr.Redirectable {
 		t.Fatal("the scope re-check error must not be redirectable")
 	}
+	// The refusal is audited: an operator's mid-flight revocation that kills an
+	// in-flight consent is exactly the event an incident review wants to find, and
+	// it must not vanish with the spent stash.
+	if len(h.audit.entries) != 1 || h.audit.entries[0].Action != "oauth_authorize" ||
+		h.audit.entries[0].Success == nil || *h.audit.entries[0].Success {
+		t.Fatalf("audit entries = %+v, want one failed oauth_authorize", h.audit.entries)
+	}
 }
 
 // code_challenge and nonce are persisted in VARCHAR(255) columns, so an oversized
@@ -741,6 +748,32 @@ func TestConsentInfoReturnsVerifiedClientMetadata(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Consent() after peek error = %v", err)
 	}
+}
+
+// The consent-info peek is re-validated against the live registration like the
+// consent submission itself: an operator's mid-flight scope revocation must not
+// leave the page rendering scopes the client can no longer be granted.
+func TestConsentInfoRejectsScopeRevokedAfterAuthorize(t *testing.T) {
+	h := newHarness(t)
+	delegated := h.clients.byClientID[testConfidentialClientID]
+	delegated.Scopes = model.StringArray{"openid", scope.AdminRead}
+
+	input := validAuthorizeInput(t)
+	input.ClientID = testConfidentialClientID
+	input.Scope = "openid " + scope.AdminRead
+	authorized, err := h.service.Authorize(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+
+	// The operator revokes delegated administration while the consent page is open.
+	delegated.Scopes = model.StringArray{"openid"}
+
+	_, err = h.service.ConsentInfo(context.Background(), ConsentInfoInput{
+		RequestID: authorized.RequestID,
+		UserID:    1,
+	})
+	requireOAuthError(t, err, ErrorInvalidScope)
 }
 
 func TestConsentInfoRejectsUnknownRequest(t *testing.T) {
