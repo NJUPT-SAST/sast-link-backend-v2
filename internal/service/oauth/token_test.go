@@ -15,6 +15,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 // issueCode drives the full authorize + consent flow and returns the code.
@@ -97,6 +98,12 @@ func TestTokenAuthorizationCodeIssuesPairAndIDToken(t *testing.T) {
 	}
 	if len(h.tokens.auditEntries) != 1 || h.tokens.auditEntries[0].Action != "oauth_token" {
 		t.Fatalf("token audit entries = %#v, want the oauth_token success audit in the pair transaction", h.tokens.auditEntries)
+	}
+	// The provider endpoints are addressed by client, so the row's actor is the
+	// requesting client. Recording it in the column (not only in detail) is what makes
+	// "everything this client did" one predicate across the admin and provider paths.
+	if actor := h.tokens.auditEntries[0].ActorClientID; actor == nil || *actor != testPublicClientID {
+		t.Fatalf("actor client id = %v, want the requesting client %q", actor, testPublicClientID)
 	}
 }
 
@@ -526,6 +533,29 @@ func TestTokenRefreshGrantRotates(t *testing.T) {
 	}
 }
 
+// A family's scopes were checked against the registration when its first pair was
+// minted. If a change narrows the registration without going through the revoking
+// update (a direct database edit, a future path), the refresh leg must stop
+// minting the dropped scope rather than keep rotating it.
+func TestTokenRefreshRejectsScopeNarrowedOutsideUpdate(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	first, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+
+	// The registration narrows behind the family's back, bypassing UpdateAndRevoke.
+	h.clients.byClientID[testPublicClientID].Scopes = model.StringArray{"openid"}
+
+	_, err = h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: first.RefreshToken,
+		ClientID:     testPublicClientID,
+	})
+	requireOAuthError(t, err, ErrorInvalidScope)
+}
+
 // Replaying an already-rotated refresh token is the classic stolen-token signal;
 // the family must be cut rather than a new pair issued.
 func TestTokenRefreshGrantReplayRevokesFamily(t *testing.T) {
@@ -784,4 +814,33 @@ func parseIDTokenClaims(t *testing.T, h *harness, idToken string) *auth.IDTokenC
 		t.Fatal("parsed ID token is not valid")
 	}
 	return claims
+}
+
+// A code is minted before it is redeemed, so the consent-time re-check is only half
+// the window. Without this one, revoking a client's delegated administration left
+// every outstanding code redeemable for an administrative token until it expired.
+func TestTokenAuthorizationCodeRejectsScopeRevokedAfterConsent(t *testing.T) {
+	h := newHarness(t)
+	delegated := h.clients.byClientID[testConfidentialClientID]
+	delegated.Scopes = model.StringArray{"openid", scope.AdminWrite}
+
+	code := issueCode(t, h, testConfidentialClientID, "openid "+scope.AdminWrite)
+
+	// The operator revokes delegated administration between consent and redemption.
+	delegated.Scopes = model.StringArray{"openid"}
+
+	input := validCodeTokenInput(code)
+	input.ClientID = testConfidentialClientID
+	input.ClientSecret = testClientSecret
+	_, err := h.service.Token(context.Background(), input)
+
+	requireOAuthError(t, err, ErrorInvalidScope)
+	if h.tokens.createdAccess != nil {
+		t.Fatalf("an access token was issued despite the revoked scope: %#v", h.tokens.createdAccess)
+	}
+	// The code is still burned: this function consumes before it validates bindings, so
+	// a rejection here must not leave a replayable code behind.
+	if _, err := h.service.Token(context.Background(), input); err == nil {
+		t.Fatal("the code survived a rejected redemption and was redeemable again")
+	}
 }

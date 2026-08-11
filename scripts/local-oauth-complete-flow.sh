@@ -197,17 +197,23 @@ get_query_param() {
   [[ -z "$value" ]] && value=$(printf '%s' "$url" | sed -n "s/^${key}=\([^&]*\).*/\1/p")
   printf '%s' "$value"
 }
+# authorize builds the first-leg URL. The scope is a parameter rather than a
+# constant so a caller can drive the delegated-administration client, whose grant is
+# "openid admin:read admin:write" and which would be rejected with the default set.
 authorize() {
   local client_id="$1"
-  local redirect_uri
+  local scope="${2:-openid profile email}"
+  local redirect_uri encoded_scope
   redirect_uri=$(printf '%s' "$FIRST_REDIRECT_URI" | jq -sRr @uri)
-  echo "http://localhost:${API_PORT}/oauth/authorize?client_id=${client_id}&redirect_uri=${redirect_uri}&response_type=code&scope=openid%20profile%20email&state=xyz&code_challenge=${PKCE_CHALLENGE}&code_challenge_method=S256&nonce=abc123"
+  encoded_scope=$(printf '%s' "$scope" | jq -sRr @uri)
+  echo "http://localhost:${API_PORT}/oauth/authorize?client_id=${client_id}&redirect_uri=${redirect_uri}&response_type=code&scope=${encoded_scope}&state=xyz&code_challenge=${PKCE_CHALLENGE}&code_challenge_method=S256&nonce=abc123"
 }
 
 run_provider_flow() {
   local client_id="$1"; local client_secret="${2:-}"; local label="$3"
+  local scope="${4:-openid profile email}"
   info "${label} authorize"
-  AUTH_LOC=$(curl -s -D - "$(authorize "$client_id")" | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
+  AUTH_LOC=$(curl -s -D - "$(authorize "$client_id" "$scope")" | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
   REQ_ID=$(echo "$AUTH_LOC" | sed 's/.*request_id=\([^&]*\).*/\1/')
   ok "request_id=$REQ_ID"
 

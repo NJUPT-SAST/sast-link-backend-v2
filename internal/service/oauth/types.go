@@ -249,6 +249,9 @@ type UserInfoResult struct {
 	Picture           string `json:"picture,omitempty"`
 	PreferredUsername string `json:"preferred_username,omitempty"`
 	UpdatedAt         int64  `json:"updated_at,omitempty"`
-	Email             string `json:"email,omitempty"`
-	EmailVerified     *bool  `json:"email_verified,omitempty"`
+	// Role is this service's own claim rather than an OIDC one, gated by the profile
+	// scope and mirroring auth.IDTokenClaims.Role so the two endpoints cannot disagree.
+	Role          string `json:"role,omitempty"`
+	Email         string `json:"email,omitempty"`
+	EmailVerified *bool  `json:"email_verified,omitempty"`
 }

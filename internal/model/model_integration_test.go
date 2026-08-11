@@ -386,7 +386,7 @@ func assertOAuthModelMappings(t *testing.T, database *gorm.DB, userID int64, cli
 		t.Fatalf("read audit log: %v", err)
 	}
 	if gotAuditLog.UserID != nil || gotAuditLog.ResourceID != nil || gotAuditLog.ClientIP != nil ||
-		gotAuditLog.UserAgent != nil || gotAuditLog.ErrCode != nil {
+		gotAuditLog.UserAgent != nil || gotAuditLog.ErrCode != nil || gotAuditLog.ActorClientID != nil {
 		t.Fatalf("nullable audit-log fields = %#v, want nil", gotAuditLog)
 	}
 	if auditLog.Success == nil || !*auditLog.Success || gotAuditLog.Success == nil || !*gotAuditLog.Success {

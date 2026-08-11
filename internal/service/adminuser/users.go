@@ -312,8 +312,17 @@ func (s Service) auditUpdate(
 	if len(changed) > 0 {
 		detail["changed_fields"] = changed
 	}
-	s.audit(ctx, input.AdminUserID, actionUpdateUser, input.UserID,
-		success, errCode, input.ClientIP, input.UserAgent, detail)
+	s.audit(ctx, auditParams{
+		AdminUserID:   input.AdminUserID,
+		ActorClientID: input.ActorClientID,
+		Action:        actionUpdateUser,
+		TargetUserID:  input.UserID,
+		Success:       success,
+		ErrCode:       errCode,
+		ClientIP:      input.ClientIP,
+		UserAgent:     input.UserAgent,
+		Detail:        detail,
+	})
 }
 
 func (s Service) auditTarget(
@@ -323,8 +332,16 @@ func (s Service) auditTarget(
 	success bool,
 	errCode int,
 ) {
-	s.audit(ctx, input.AdminUserID, action, input.UserID,
-		success, errCode, input.ClientIP, input.UserAgent, nil)
+	s.audit(ctx, auditParams{
+		AdminUserID:   input.AdminUserID,
+		ActorClientID: input.ActorClientID,
+		Action:        action,
+		TargetUserID:  input.UserID,
+		Success:       success,
+		ErrCode:       errCode,
+		ClientIP:      input.ClientIP,
+		UserAgent:     input.UserAgent,
+	})
 }
 
 // errorCode extracts the business code of a typed service error for the audit

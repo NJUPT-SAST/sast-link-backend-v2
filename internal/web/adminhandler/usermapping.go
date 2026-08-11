@@ -102,7 +102,11 @@ type auditLogDTO struct {
 	UserAgent  *string     `json:"user_agent"`
 	Success    bool        `json:"success"`
 	ErrCode    *int        `json:"err_code"`
-	CreatedAt  time.Time   `json:"created_at"`
+	// ActorClientID is the OAuth client whose credential authorized the action. null
+	// means none did — an unauthenticated flow, a background worker, or a row written
+	// before the column existed.
+	ActorClientID *string   `json:"actor_client_id"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type auditLogListResponse struct {
@@ -176,18 +180,19 @@ func mapUserDetail(detail adminuser.UserDetail) userDetailDTO {
 
 func mapAuditLog(entry adminuser.AuditLogItem) auditLogDTO {
 	return auditLogDTO{
-		ID:         entry.ID,
-		UserID:     entry.UserID,
-		UserName:   entry.UserName,
-		Action:     entry.Action,
-		Resource:   entry.Resource,
-		ResourceID: entry.ResourceID,
-		Detail:     entry.Detail,
-		ClientIP:   entry.ClientIP,
-		UserAgent:  entry.UserAgent,
-		Success:    entry.Success,
-		ErrCode:    entry.ErrCode,
-		CreatedAt:  entry.CreatedAt,
+		ID:            entry.ID,
+		UserID:        entry.UserID,
+		UserName:      entry.UserName,
+		Action:        entry.Action,
+		Resource:      entry.Resource,
+		ResourceID:    entry.ResourceID,
+		Detail:        entry.Detail,
+		ClientIP:      entry.ClientIP,
+		UserAgent:     entry.UserAgent,
+		Success:       entry.Success,
+		ErrCode:       entry.ErrCode,
+		ActorClientID: entry.ActorClientID,
+		CreatedAt:     entry.CreatedAt,
 	}
 }
 

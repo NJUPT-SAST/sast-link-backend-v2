@@ -213,6 +213,12 @@ func assertTokenRevokedBetween(t *testing.T, database *gorm.DB, tokenID string, 
 	if err := database.Where("token_hash = ?", tokenHash).First(&refresh).Error; err != nil {
 		t.Fatalf("read refresh token %q: %v", tokenHash, err)
 	}
+	// The DB stores timestamps at microsecond precision and truncates on write,
+	// while earliest is a nanosecond-precision time.Now(). A revocation written in
+	// the same clock tick can therefore read back up to 1µs earlier than earliest;
+	// widen the lower bound by that truncation window. The upper bound keeps its
+	// existing one-second slack for scheduling jitter.
+	earliest = earliest.Add(-time.Microsecond)
 	latest = latest.Add(time.Second)
 	if access.RevokedAt == nil || access.RevokedAt.Before(earliest) || access.RevokedAt.After(latest) ||
 		refresh.RevokedAt == nil || refresh.RevokedAt.Before(earliest) || refresh.RevokedAt.After(latest) {

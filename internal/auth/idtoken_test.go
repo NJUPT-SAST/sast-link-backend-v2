@@ -47,6 +47,40 @@ func fullSubjectClaims() IDTokenSubjectClaims {
 		PreferredUsername: "zhangsan",
 		UpdatedAt:         time.Date(2026, 7, 1, 8, 30, 0, 0, time.UTC),
 		Email:             "b24040101@njupt.edu.cn",
+		Role:              "on_sast",
+	}
+}
+
+// role is this service's own claim and rides the profile scope, so it must be absent
+// from a token that was not granted profile — including one carrying an admin scope,
+// which contributes no claim of its own.
+func TestSignIDTokenGatesRoleByProfileScope(t *testing.T) {
+	clock := fixedClock{value: time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)}
+	manager := newIDTokenManager(t, clock)
+	subject := fullSubjectClaims()
+
+	for _, test := range []struct {
+		name     string
+		scopes   []string
+		wantRole string
+	}{
+		{name: "openid only", scopes: []string{"openid"}},
+		{name: "openid email", scopes: []string{"openid", "email"}},
+		{name: "openid admin:write", scopes: []string{"openid", "admin:write"}},
+		{name: "openid profile", scopes: []string{"openid", "profile"}, wantRole: "on_sast"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			token, err := manager.SignIDToken(IDTokenInput{
+				Subject: "1", ClientID: "app", Scopes: test.scopes,
+				AuthTime: clock.value, TTL: time.Hour, Claims: subject,
+			})
+			if err != nil {
+				t.Fatalf("SignIDToken returned error: %v", err)
+			}
+			if claims := parseIDToken(t, manager, token); claims.Role != test.wantRole {
+				t.Fatalf("role = %q, want %q", claims.Role, test.wantRole)
+			}
+		})
 	}
 }
 

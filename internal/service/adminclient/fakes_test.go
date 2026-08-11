@@ -9,6 +9,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 type fakeClients struct {
@@ -170,6 +171,28 @@ func activeClient(id int64) *model.OAuthClient {
 		IsActive:     &active,
 	}
 }
+
+// delegatedClient holds delegated administration. It is identified by its scopes, not
+// by its client_id: that is the invariant this package now enforces, so a fixture keyed
+// on a known name would be testing a rule the code no longer has.
+func delegatedClient(id int64) *model.OAuthClient {
+	client := activeClient(id)
+	client.ClientID = "some-ops-tool"
+	client.Scopes = model.StringArray{"openid", scope.AdminRead, scope.AdminWrite}
+	return client
+}
+
+// firstPartyClient is a public registration that is not the built-in one, so the
+// first-party admin-scope refusal can be exercised without the protected-client guard
+// answering first.
+func firstPartyClient(id int64) *model.OAuthClient {
+	client := activeClient(id)
+	client.ClientID = "some-first-party-app"
+	client.ClientType = model.ClientTypeFirstParty
+	return client
+}
+
+func boolPointer(value bool) *bool { return &value }
 
 // assertKind fails unless err is a typed error of the wanted kind.
 func assertKind(t *testing.T, err error, want Kind) {

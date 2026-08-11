@@ -18,6 +18,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 // testInternalClientID is the built-in first-party client these tests issue for.
@@ -389,5 +390,186 @@ func TestAuthenticateAnyClientAcceptsThirdPartyToken(t *testing.T) {
 	}
 	if _, err := authenticator.Authenticate(context.Background(), "Bearer "+token); err == nil {
 		t.Fatal("Authenticate() accepted a third-party token")
+	}
+}
+
+// testDelegatedClientID is an arbitrary third-party client_id. Nothing in the
+// middleware knows this value — delegation is proven by the token's admin scope, not
+// by its azp — so the tests below use it only to show that an azp is present.
+const testDelegatedClientID = "ops-tool-delegate"
+
+// performAdminAuthRequest drives RequireAdminAuth followed by RequireDelegatedScope,
+// mirroring how the /admin group is wired, so the two gates are exercised in the
+// order production uses them.
+func performAdminAuthRequest(
+	manager *auth.JWTManager, states *fakeAccessStates, now time.Time,
+	internalClientID string, allowedScopes []string, header string,
+) (*httptest.ResponseRecorder, envelope, bool) {
+	router := gin.New()
+	authenticator := Authenticator{
+		JWT: manager, Tokens: states, Clock: testClock{value: now},
+		InternalClientID: internalClientID,
+	}
+	reached := false
+	router.GET("/admin/probe",
+		authenticator.RequireAdminAuth(),
+		authenticator.RequireDelegatedScope(allowedScopes...),
+		func(c *gin.Context) {
+			reached = true
+			c.JSON(http.StatusOK, envelope{Code: 0, Message: "ok"})
+		})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/admin/probe", nil)
+	if header != "" {
+		request.Header.Set("Authorization", header)
+	}
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	var body envelope
+	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+	return recorder, body, reached
+}
+
+func signAdminToken(t *testing.T, manager *auth.JWTManager, azp string, scopes []string) string {
+	t.Helper()
+	return signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "admin", State: "on_sast", TokenVersion: 7,
+		Scopes: scopes, TTL: time.Hour, AuthorizedParty: azp,
+	})
+}
+
+// A third-party token reaches /admin only with an admin scope, and only the scope the
+// route asks for. Everything else about the token is identical across rows, so the
+// scope set and the azp are the only variables.
+func TestRequireAdminAuthAndDelegatedScope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+
+	tests := []struct {
+		name        string
+		azp         string
+		tokenScopes []string
+		allowed     []string
+		wantStatus  int
+		wantCode    int
+		wantHandler bool
+	}{
+		{
+			name: "delegated client with admin:read reaches a read route",
+			azp:  testDelegatedClientID, tokenScopes: []string{"openid", scope.AdminRead},
+			allowed: []string{scope.AdminRead, scope.AdminWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+		{
+			// write implies read: a write-scoped token must not be locked out of reads.
+			name: "delegated client with admin:write reaches a read route",
+			azp:  testDelegatedClientID, tokenScopes: []string{"openid", scope.AdminWrite},
+			allowed: []string{scope.AdminRead, scope.AdminWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+		{
+			name: "delegated client with admin:read cannot reach a write route",
+			azp:  testDelegatedClientID, tokenScopes: []string{"openid", scope.AdminRead},
+			allowed: []string{scope.AdminWrite}, wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
+		},
+		{
+			// Rejected by RequireAdminAuth, before any scope check.
+			name: "delegated client without an admin scope is refused entry",
+			azp:  testDelegatedClientID, tokenScopes: []string{"openid"},
+			allowed: []string{scope.AdminRead, scope.AdminWrite}, wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
+		},
+		{
+			// The delegate is not named anywhere: any third-party client holding an admin
+			// scope is admitted, because only a registration an operator granted that scope
+			// can produce such a token. This is what lets a second ops tool be onboarded
+			// through the console instead of through a migration.
+			name: "any third-party client holding admin:write is admitted",
+			azp:  "some-other-app", tokenScopes: []string{"openid", scope.AdminWrite},
+			allowed: []string{scope.AdminWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+		{
+			// The companion to the row above: without an admin scope an arbitrary
+			// third-party token is still refused outright, so widening the delegate set did
+			// not widen what an ordinary third-party token may reach.
+			name: "an arbitrary third-party client without an admin scope is refused",
+			azp:  "some-other-app", tokenScopes: []string{"openid", "profile", "email"},
+			allowed:    []string{scope.AdminRead, scope.AdminWrite},
+			wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
+		},
+		{
+			// The console holds only session scopes and must stay exempt from the scope gate.
+			name: "internal console token passes both gates",
+			azp:  testInternalClientID, tokenScopes: []string{"openid", "profile", "email"},
+			allowed: []string{scope.AdminWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+		{
+			// An azp-less token predates the claim and is only ever the built-in client's.
+			name: "legacy token without azp passes both gates",
+			azp:  "", tokenScopes: []string{"openid"},
+			allowed: []string{scope.AdminWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			token := signAdminToken(t, manager, test.azp, test.tokenScopes)
+			recorder, body, reached := performAdminAuthRequest(manager, validStates(now), now,
+				testInternalClientID, test.allowed, "Bearer "+token)
+			if recorder.Code != test.wantStatus || reached != test.wantHandler {
+				t.Fatalf("status = %d (handler reached %v), want %d (%v): %#v",
+					recorder.Code, reached, test.wantStatus, test.wantHandler, body)
+			}
+			if test.wantCode != 0 && body.Code != test.wantCode {
+				t.Fatalf("body.Code = %d, want %d", body.Code, test.wantCode)
+			}
+		})
+	}
+}
+
+// An unset InternalClientID must fail closed on the admin path too. Were the
+// delegated branch evaluated first, a deployment missing this value would admit
+// every admin-scoped third-party token instead of refusing all of them.
+func TestRequireAdminAuthFailsClosedWithoutInternalClientID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signAdminToken(t, manager, testDelegatedClientID, []string{"openid", scope.AdminWrite})
+
+	recorder, _, reached := performAdminAuthRequest(manager, validStates(now), now,
+		"", []string{scope.AdminWrite}, "Bearer "+token)
+	if recorder.Code != http.StatusInternalServerError || reached {
+		t.Fatalf("status = %d (handler reached %v), want 500 and no handler", recorder.Code, reached)
+	}
+}
+
+// An empty allowed set must deny, mirroring RequireRole: a route wired without a
+// scope must be a visible 403, not an endpoint that accepts anything.
+func TestRequireDelegatedScopeFailsClosedOnEmptyAllowedSet(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signAdminToken(t, manager, testDelegatedClientID, []string{"openid", scope.AdminWrite})
+
+	recorder, body, reached := performAdminAuthRequest(manager, validStates(now), now,
+		testInternalClientID, nil, "Bearer "+token)
+	if recorder.Code != http.StatusForbidden || body.Code != errcode.CodeForbidden || reached {
+		t.Fatalf("status = %d %#v (handler reached %v), want 403 and no handler", recorder.Code, body, reached)
+	}
+}
+
+// RequireDelegatedScope reads the Principal that RequireAdminAuth sets; without it
+// the two are chained in the wrong order, which is a wiring bug rather than a
+// permission denial.
+func TestRequireDelegatedScopeWithoutPrincipalIsInternalError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	authenticator := Authenticator{InternalClientID: testInternalClientID}
+	reached := false
+	router.GET("/admin/probe", authenticator.RequireDelegatedScope(scope.AdminRead), func(c *gin.Context) {
+		reached = true
+		c.Status(http.StatusNoContent)
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(
+		context.Background(), http.MethodGet, "/admin/probe", nil))
+	if recorder.Code != http.StatusInternalServerError || reached {
+		t.Fatalf("status = %d (handler reached %v), want 500 and no handler", recorder.Code, reached)
 	}
 }

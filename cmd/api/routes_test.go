@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -26,7 +27,10 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{}, passthrough)
 	oauthhandler.RegisterRoutes(router, oauthhandler.Handler{}, passthrough)
 	oauthloginhandler.RegisterRoutes(router, oauthloginhandler.Handler{}, passthrough)
-	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, passthrough, passthrough, passthrough)
+	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, adminhandler.Gates{
+		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
+		RequireAdmin: passthrough, RequireReader: passthrough,
+	})
 
 	registered := make(map[string]bool)
 	for _, route := range router.Routes() {
@@ -109,40 +113,51 @@ func TestSetPrincipalRoundTrips(t *testing.T) {
 	}
 }
 
-// Every admin route must be mounted behind authentication and exactly one role
-// gate. Mounting one with only authentication would let any logged-in freshman
-// reach it, which is a wiring mistake no unit test inside adminhandler can catch —
-// it stubs its own middleware. This asserts the composition root passes all three
-// in order, and that each route picks the gate its contract calls for: the two
-// read-only user endpoints admit a lecturer, everything else is admin-only.
-func TestAdminRoutesAreGatedByAuthAndRole(t *testing.T) {
+// Every admin route must be mounted behind authentication, exactly one scope gate
+// and exactly one role gate. Mounting one with only authentication would let any
+// logged-in freshman reach it, and mounting one without a scope gate would let the
+// delegated ops client do anything an administrator can — both are wiring mistakes
+// no unit test inside adminhandler can catch, since it stubs its own middleware.
+//
+// This asserts the composition root passes all five in order, and that each route
+// picks the gates its contract calls for: the two read-only user endpoints admit a
+// lecturer, everything else is admin-only; reads accept a read-or-write delegated
+// scope, writes demand write.
+func TestAdminRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	var order []string
-	authStep := func(c *gin.Context) { order = append(order, "auth"); c.Next() }
-	adminStep := func(c *gin.Context) {
-		order = append(order, "admin")
-		c.AbortWithStatus(http.StatusForbidden)
+	step := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) { order = append(order, name); c.Next() }
 	}
-	readerStep := func(c *gin.Context) {
-		order = append(order, "reader")
-		c.AbortWithStatus(http.StatusForbidden)
+	// The role gate aborts, so reaching it proves the whole chain ran in order.
+	rejectingStep := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			order = append(order, name)
+			c.AbortWithStatus(http.StatusForbidden)
+		}
 	}
-	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, authStep, adminStep, readerStep)
+	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, adminhandler.Gates{
+		RequireAuth:       step("auth"),
+		RequireReadScope:  step("read-scope"),
+		RequireWriteScope: step("write-scope"),
+		RequireAdmin:      rejectingStep("admin"),
+		RequireReader:     rejectingStep("reader"),
+	})
 
 	for _, route := range []struct {
-		method, path, gate string
+		method, path, scopeGate, roleGate string
 	}{
-		{http.MethodGet, "/admin/oauth-clients", "admin"},
-		{http.MethodPost, "/admin/oauth-clients", "admin"},
-		{http.MethodPut, "/admin/oauth-clients/5", "admin"},
+		{http.MethodGet, "/admin/oauth-clients", "read-scope", "admin"},
+		{http.MethodPost, "/admin/oauth-clients", "write-scope", "admin"},
+		{http.MethodPut, "/admin/oauth-clients/5", "write-scope", "admin"},
 		// PRD §4.12: reading the directory is open to lecturers, writing is not.
-		{http.MethodGet, "/admin/users", "reader"},
-		{http.MethodGet, "/admin/users/5", "reader"},
-		{http.MethodPut, "/admin/users/5", "admin"},
-		{http.MethodDelete, "/admin/users/5", "admin"},
-		{http.MethodPut, "/admin/users/5/restore", "admin"},
-		{http.MethodGet, "/admin/audit-logs", "admin"},
+		{http.MethodGet, "/admin/users", "read-scope", "reader"},
+		{http.MethodGet, "/admin/users/5", "read-scope", "reader"},
+		{http.MethodPut, "/admin/users/5", "write-scope", "admin"},
+		{http.MethodDelete, "/admin/users/5", "write-scope", "admin"},
+		{http.MethodPut, "/admin/users/5/restore", "write-scope", "admin"},
+		{http.MethodGet, "/admin/audit-logs", "read-scope", "admin"},
 	} {
 		order = nil
 		recorder := httptest.NewRecorder()
@@ -152,11 +167,42 @@ func TestAdminRoutesAreGatedByAuthAndRole(t *testing.T) {
 			t.Fatalf("%s %s: status = %d, want the role gate to reject",
 				route.method, route.path, recorder.Code)
 		}
-		// Authentication must run first: the role check reads the principal it sets.
-		if len(order) != 2 || order[0] != "auth" || order[1] != route.gate {
-			t.Fatalf("%s %s: middleware order = %v, want [auth %s]",
-				route.method, route.path, order, route.gate)
+		// Authentication must run first: every later gate reads the principal it sets.
+		want := []string{"auth", route.scopeGate, route.roleGate}
+		if !slices.Equal(order, want) {
+			t.Fatalf("%s %s: middleware order = %v, want %v",
+				route.method, route.path, order, want)
 		}
+	}
+}
+
+// A nil gate must not be mountable. gin accepts a nil HandlerFunc and panics on the
+// first request instead, which turns a wiring slip into a runtime failure on a live
+// admin endpoint rather than a failure to boot.
+func TestRegisterAdminRoutesRejectsIncompleteGates(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	passthrough := func(c *gin.Context) { c.Next() }
+	full := adminhandler.Gates{
+		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
+		RequireAdmin: passthrough, RequireReader: passthrough,
+	}
+	for name, mutate := range map[string]func(*adminhandler.Gates){
+		"auth":        func(g *adminhandler.Gates) { g.RequireAuth = nil },
+		"read scope":  func(g *adminhandler.Gates) { g.RequireReadScope = nil },
+		"write scope": func(g *adminhandler.Gates) { g.RequireWriteScope = nil },
+		"admin role":  func(g *adminhandler.Gates) { g.RequireAdmin = nil },
+		"reader role": func(g *adminhandler.Gates) { g.RequireReader = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			gates := full
+			mutate(&gates)
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("RegisterRoutes() with a nil %s gate did not panic", name)
+				}
+			}()
+			adminhandler.RegisterRoutes(gin.New(), adminhandler.Handler{}, gates)
+		})
 	}
 }
 

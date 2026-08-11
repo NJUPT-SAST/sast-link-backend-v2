@@ -127,8 +127,11 @@ type UpdateUserInput struct {
 	// AdminUserID is the authenticated administrator, for the audit trail and for
 	// the self-demotion guard.
 	AdminUserID int64
-	ClientIP    string
-	UserAgent   string
+	// ActorClientID is the azp of the token that authorized this call. Empty means a
+	// console session, which the audit records as ConsoleClientID.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 // UpdateUserResult reports what the update did.
@@ -145,20 +148,25 @@ type UpdateUserResult struct {
 type TargetUserInput struct {
 	UserID      int64
 	AdminUserID int64
-	ClientIP    string
-	UserAgent   string
+	// ActorClientID is the azp of the token that authorized this call. Empty means a
+	// console session, which the audit records as ConsoleClientID.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 // ListAuditLogsInput is a filtered, paged audit query.
 type ListAuditLogsInput struct {
-	Page      int
-	PageSize  int
-	UserID    *int64
-	Action    string
-	Resource  string
-	Success   *bool
-	StartTime *time.Time
-	EndTime   *time.Time
+	Page     int
+	PageSize int
+	UserID   *int64
+	Action   string
+	Resource string
+	Success  *bool
+	// ActorClientID narrows the page to one acting OAuth client.
+	ActorClientID string
+	StartTime     *time.Time
+	EndTime       *time.Time
 }
 
 // ListAuditLogsResult is one page of the audit log.
@@ -182,7 +190,11 @@ type AuditLogItem struct {
 	UserAgent  *string
 	Success    bool
 	ErrCode    *int
-	CreatedAt  time.Time
+	// ActorClientID is the OAuth client whose credential authorized the action. Null
+	// means none did: an unauthenticated flow, a background worker, or a row predating
+	// the column.
+	ActorClientID *string
+	CreatedAt     time.Time
 }
 
 // UserDetail is a full user record for the console. Written out field by field

@@ -76,9 +76,19 @@ func newRouter(t *testing.T, service ClientService) *gin.Engine {
 		middleware.SetPrincipal(c, middleware.Principal{UserID: 99, Role: "admin", JTI: "jti-99"})
 		c.Next()
 	}
-	allow := func(c *gin.Context) { c.Next() }
-	RegisterRoutes(r, Handler{Clients: service}, injectPrincipal, allow, allow)
+	RegisterRoutes(r, Handler{Clients: service}, testGates(injectPrincipal))
 	return r
+}
+
+// testGates mounts the routes with the given authentication step and passthrough
+// scope and role gates. Those gates are covered in middleware and cmd/api; here the
+// caller is simply present and permitted, so the handlers are what is under test.
+func testGates(requireAuth gin.HandlerFunc) Gates {
+	allow := func(c *gin.Context) { c.Next() }
+	return Gates{
+		RequireAuth: requireAuth, RequireReadScope: allow, RequireWriteScope: allow,
+		RequireAdmin: allow, RequireReader: allow,
+	}
 }
 
 func doRequest(t *testing.T, router *gin.Engine, method, path, contentType, body string) *httptest.ResponseRecorder {
@@ -384,7 +394,7 @@ func TestCreateClientWithoutPrincipalIsAnInternalError(t *testing.T) {
 	service := &fakeClients{createResult: &adminclient.CreateClientResult{Client: sampleClient()}}
 	r := gin.New()
 	allow := func(c *gin.Context) { c.Next() }
-	RegisterRoutes(r, Handler{Clients: service}, allow, allow, allow)
+	RegisterRoutes(r, Handler{Clients: service}, testGates(allow))
 
 	recorder := doRequest(t, r, http.MethodPost, "/admin/oauth-clients", "application/json",
 		`{"client_name":"X","client_type":"third_party","redirect_uris":["https://x.test/cb"],"grant_types":["authorization_code"],"scopes":["openid"]}`)

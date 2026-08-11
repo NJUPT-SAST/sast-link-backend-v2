@@ -145,21 +145,25 @@ func setupAdminE2E(t *testing.T) *adminE2EHarness {
 		middleware.SetPrincipal(c, middleware.Principal{UserID: user.ID, JTI: "admin-e2e-consent"})
 		c.Next()
 	})
-	// The role gate itself is covered in middleware and cmd/api; here the admin is
-	// simply present, so the registry behavior is what is under test.
+	// The scope and role gates are covered in middleware and cmd/api; here the admin
+	// is simply present and permitted, so the registry behavior is what is under test.
+	allow := func(c *gin.Context) { c.Next() }
 	adminhandler.RegisterRoutes(router, adminhandler.Handler{
 		Clients:   adminService,
 		Users:     adminUserService,
 		AuditLogs: adminUserService,
-	},
-		func(c *gin.Context) {
+	}, adminhandler.Gates{
+		RequireAuth: func(c *gin.Context) {
 			middleware.SetPrincipal(c, middleware.Principal{
 				UserID: admin.ID, Role: string(model.UserRoleAdmin), JTI: "admin-e2e",
 			})
 			c.Next()
 		},
-		func(c *gin.Context) { c.Next() },
-		func(c *gin.Context) { c.Next() })
+		RequireReadScope:  allow,
+		RequireWriteScope: allow,
+		RequireAdmin:      allow,
+		RequireReader:     allow,
+	})
 
 	return &adminE2EHarness{router: router, database: database, user: user, admin: admin}
 }

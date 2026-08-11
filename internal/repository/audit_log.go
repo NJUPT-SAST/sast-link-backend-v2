@@ -35,6 +35,11 @@ type AuditLogFilter struct {
 	Action   string
 	Resource string
 	Success  *bool
+	// ActorClientID filters on the acting OAuth client, answering "everything this
+	// client did". Empty means unfiltered; there is deliberately no way to ask for
+	// actor_client_id IS NULL, which would be a different question ("what happened
+	// without a credential") and is served by filtering on the action instead.
+	ActorClientID string
 	// StartTime and EndTime bound created_at inclusively at the start and
 	// exclusively at the end, so adjacent windows neither overlap nor skip an entry
 	// written exactly on the boundary.
@@ -101,6 +106,9 @@ func (r *AuditLogRepository) auditLogQuery(ctx context.Context, filter AuditLogF
 	}
 	if filter.Success != nil {
 		query = query.Where("success = ?", *filter.Success)
+	}
+	if filter.ActorClientID != "" {
+		query = query.Where("actor_client_id = ?", filter.ActorClientID)
 	}
 	if filter.StartTime != nil {
 		query = query.Where("created_at >= ?", *filter.StartTime)

@@ -95,20 +95,21 @@ func (h Handler) UpdateUser(c *gin.Context) {
 		return
 	}
 	result, err := h.Users.UpdateUser(c.Request.Context(), adminuser.UpdateUserInput{
-		UserID:      userID,
-		Name:        req.Name,
-		PhoneNumber: req.PhoneNumber,
-		QQNumber:    req.QQNumber,
-		StudentID:   req.StudentID,
-		Major:       req.Major,
-		College:     req.College,
-		LoginEmail:  req.LoginEmail,
-		Role:        req.Role,
-		State:       req.State,
-		EmailType:   req.EmailType,
-		AdminUserID: principal.UserID,
-		ClientIP:    c.ClientIP(),
-		UserAgent:   c.Request.UserAgent(),
+		UserID:        userID,
+		Name:          req.Name,
+		PhoneNumber:   req.PhoneNumber,
+		QQNumber:      req.QQNumber,
+		StudentID:     req.StudentID,
+		Major:         req.Major,
+		College:       req.College,
+		LoginEmail:    req.LoginEmail,
+		Role:          req.Role,
+		State:         req.State,
+		EmailType:     req.EmailType,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	})
 	if err != nil {
 		response.Error(c, mapUserServiceError(err))
@@ -136,10 +137,11 @@ func (h Handler) DeleteUser(c *gin.Context) {
 		return
 	}
 	err := h.Users.DeleteUser(c.Request.Context(), adminuser.TargetUserInput{
-		UserID:      userID,
-		AdminUserID: principal.UserID,
-		ClientIP:    c.ClientIP(),
-		UserAgent:   c.Request.UserAgent(),
+		UserID:        userID,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	})
 	if err != nil {
 		response.Error(c, mapUserServiceError(err))
@@ -161,10 +163,11 @@ func (h Handler) RestoreUser(c *gin.Context) {
 		return
 	}
 	err := h.Users.RestoreUser(c.Request.Context(), adminuser.TargetUserInput{
-		UserID:      userID,
-		AdminUserID: principal.UserID,
-		ClientIP:    c.ClientIP(),
-		UserAgent:   c.Request.UserAgent(),
+		UserID:        userID,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	})
 	if err != nil {
 		response.Error(c, mapUserServiceError(err))

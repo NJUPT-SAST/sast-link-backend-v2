@@ -221,10 +221,19 @@ func (s Service) revokeFamilyErr(ctx context.Context, familyID string) error {
 // failure there fails the operation.
 // buildAuditEntry materialises the shared oauth audit fields, so the synchronous
 // s.audit path and the same-transaction token-rotation audit cannot drift.
+// buildAuditEntry assembles an audit row.
+//
+// actorClientID is passed separately from resourceID rather than aliased onto it.
+// On the client-addressed endpoints (authorize / token / revoke) the two are the
+// same OAuth client_id, but they answer different questions — resourceID is what
+// the action was about, actorClientID is whose credential authorized it — and
+// RevokeGrant is the case that separates them: the subject is the client being
+// revoked, while the actor is the console client the signed-in user is holding.
 func (s Service) buildAuditEntry(
 	userID *int64,
 	action string,
 	resourceID *string,
+	actorClientID *string,
 	success bool,
 	errCode int,
 	clientIP, userAgent string,
@@ -252,19 +261,22 @@ func (s Service) buildAuditEntry(
 	}
 	successPtr := success
 	return &model.AuditLog{
-		UserID:     userID,
-		Action:     action,
-		Resource:   "oauth",
-		ResourceID: resourceID,
-		Detail:     detailValue,
-		ClientIP:   clientIPPtr,
-		UserAgent:  userAgentPtr,
-		Success:    &successPtr,
-		ErrCode:    errCodePtr,
-		CreatedAt:  s.now(),
+		UserID:        userID,
+		Action:        action,
+		Resource:      "oauth",
+		ResourceID:    resourceID,
+		ActorClientID: actorClientID,
+		Detail:        detailValue,
+		ClientIP:      clientIPPtr,
+		UserAgent:     userAgentPtr,
+		Success:       &successPtr,
+		ErrCode:       errCodePtr,
+		CreatedAt:     s.now(),
 	}, nil
 }
 
+// audit records an OAuth event whose subject and actor are the same client, which
+// is every client-addressed endpoint. Use auditAs when they differ.
 func (s Service) audit(
 	ctx context.Context,
 	userID *int64,
@@ -275,10 +287,26 @@ func (s Service) audit(
 	clientIP, userAgent string,
 	detail map[string]any,
 ) {
+	s.auditAs(ctx, userID, action, resourceID, resourceID, success, errCode, clientIP, userAgent, detail)
+}
+
+// auditAs records an OAuth event with an explicit actor, for the paths where the
+// client acted upon is not the client that authorized the action.
+func (s Service) auditAs(
+	ctx context.Context,
+	userID *int64,
+	action string,
+	resourceID *string,
+	actorClientID *string,
+	success bool,
+	errCode int,
+	clientIP, userAgent string,
+	detail map[string]any,
+) {
 	if s.Audit == nil {
 		return
 	}
-	entry, err := s.buildAuditEntry(userID, action, resourceID, success, errCode, clientIP, userAgent, detail)
+	entry, err := s.buildAuditEntry(userID, action, resourceID, actorClientID, success, errCode, clientIP, userAgent, detail)
 	if err != nil {
 		slog.ErrorContext(ctx, "marshal oauth audit detail", "action", action, "error", err)
 		return

@@ -36,7 +36,7 @@ func (h Handler) RevokeGrant(c *gin.Context) {
 		response.Error(c, badRequest())
 		return
 	}
-	if err := h.Service.RevokeGrant(c.Request.Context(), principal.UserID, clientID); err != nil {
+	if err := h.Service.RevokeGrant(c.Request.Context(), principal.UserID, clientID, principal.ClientID); err != nil {
 		response.Error(c, internalError())
 		return
 	}
