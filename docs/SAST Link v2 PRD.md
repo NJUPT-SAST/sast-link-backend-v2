@@ -312,7 +312,7 @@ POST /oauth/authorize/consent  → Bearer 认证 → GetDel 消费暂存 → 建
 - `client_type` 只承载两件事：客户端认证方式（`first_party` 不生成 secret，即公开客户端；`third_party` 为机密客户端）与 admin scope 的可授予性。它不表达任何信任级别，代码中也没有据此放宽的检查
 - **scope 一律受注册值约束**：任何客户端（含 `first_party`）请求的 scope 必须落在其注册 `scopes` 列内，超出返回 `invalid_scope`（`scope.ContainsAll`）。第一方曾被豁免此检查，已移除：该豁免使 `scopes` 列对第一方形同记录，且是追溯性的——新增任何 scope 都会被所有现存第一方注册立即获得，不产生任何授予动作或审计行
 - `admin:read` / `admin:write`（管理能力，见 §4.12）与 `user:read` / `user:write`（用户自助，见 §4.13）统称**能力 scope**，在上述约束之上按家族再加类型约束：`admin:*` **仅 `third_party`（机密客户端）可持有**，`first_party` 请求任一 admin scope 返回 `invalid_scope`，即使其注册值中含有——理由是凭证能力：`first_party` 是公开客户端，token 端点仅凭 PKCE 认证它（`authenticateClient`），从授权码被签出到管理 token 存在之间只有 `redirect_uri` 精确匹配一道屏障，而机密客户端有两道独立屏障。`user:*` **无客户端类型约束**，任何客户端皆可持有——`/user/*` 每个端点都只操作 token 主体本人的记录（读/改资料、绑/解绑身份、改密码、登出设备），持有 user scope 的应用永远不会成为「查任意人」凭据，主体由 token 钉死，与签发客户端无关。该判定在四处一致成立：authorize 首段、consent 复检、授权码兑换复检，以及控制台授予侧（`checkCapabilityScopeGrant`）。四个能力 scope 均不产生任何 OIDC claim（`scope.ClaimScopes` 过滤全部非 OIDC scope），仅用于 `/user/*` 与 `/admin/*` 的 scope 门禁。
-- 四个能力 scope **均允许 refresh_token**：`/admin` 的角色门从数据库行读取 token 主体的角色（`RequireRole`）——刷新一个 admin-scoped token 只延长「该主体本就有资格使用」的使用，不会拓宽谁能用它。普通用户即使拿到 admin-scoped token，角色门照样拒绝；admin 角色用户持同一客户端的 token 才能让 admin scope 生效。能力由角色区分，而非客户端数量。
+- 四个能力 scope **均允许 refresh_token**：`/admin` 的角色门从数据库行读取 token 主体的角色（`RequireRole`）——刷新一个 admin-scoped token 只延长「该主体本就有资格使用」的使用，不会拓宽谁能用它。普通用户即使拿到 admin-scoped token，角色门照样拒绝；admin 角色用户持同一客户端的 token 才能让 admin scope 生效。能力由角色区分，而非客户端数量。**但能力 family 的 refresh 受生命周期封顶**（`JWT_REFRESH_CAPABILITY_MAX_LIFETIME`，默认 168h，0 关闭）：从 family 首次授权起算、到点即撤销并须重新授权，堵住「滑动 30 天窗口无限续期」的委托洞；普通 OIDC family 与内部会话 family 不封顶。
 - 内置控制台持有完整管理权的方式与其他能力客户端不同：它靠 `RequireAdminAuth` 无条件放行、`RequireDelegatedScope` 豁免，以及一整套针对该注册的加固（`redirect_uris` / `scopes` 不可通过 API 修改、不可停用、启动时校验 scope 集合、`client_id` 由 `INTERNAL_OAUTH_CLIENT_ID` 固定）成立。通过 API 注册的能力客户端（`admin:*` 必为 `third_party`）不享受这些加固，其 admin-scoped token 仍需过 `/admin` 的角色门。
 
 - 公开客户端携带 `client_secret` 会被拒绝而非忽略——这说明客户端搞错了自己的类型
@@ -423,7 +423,7 @@ Payload: {
 
 能力身份**只由注册表的 `scopes` 决定**：任何 `third_party` 客户端的注册持有 admin scope，其 token 即可到达 `/admin/*`。代码中不存在被硬编码的客户端名单——`scope.ContainsAll` 把可请求 scope 钉死在注册值内，而 `first_party` 无论注册值如何都拿不到 admin scope（§4.10），所以「token 携带 admin scope」本身就证明了「控制台为该注册授予过它」。授予是一次控制台操作（`POST`/`PUT /admin/oauth-clients`），不需要改代码或写迁移。
 
-授予由 `adminclient.checkCapabilityScopeGrant` 在注册与更新两扇门上把守：目标若是 `admin:*` 必须 `third_party`（公开客户端不得持有通往 `/admin` 的 scope）；发起请求的凭证必须是内置控制台客户端（能力客户端不能授予或维护其他能力客户端，否则能力集合会脱离运维批准自行增长）；不得与改写 `redirect_uris` 同请求完成。均基于**合并后的状态**判定而非本次提交的字段，否则「先授 scope、再单独改某个兄弟字段」的拆包写法即可绕过。refresh 允许——`/admin` 的角色门从数据库行读取主体角色，刷新一个 admin-scoped token 不会拓宽谁能用它。
+授予由 `adminclient.checkCapabilityScopeGrant` 在注册与更新两扇门上把守：目标若是 `admin:*` 必须 `third_party`（公开客户端不得持有通往 `/admin` 的 scope）；发起请求的凭证必须是内置控制台客户端（能力客户端不能授予或维护其他能力客户端，否则能力集合会脱离运维批准自行增长）；不得与改写 `redirect_uris` 同请求完成。均基于**合并后的状态**判定而非本次提交的字段，否则「先授 scope、再单独改某个兄弟字段」的拆包写法即可绕过。refresh 允许——`/admin` 的角色门从数据库行读取主体角色，刷新一个 admin-scoped token 不会拓宽谁能用它（能力 family 受 `JWT_REFRESH_CAPABILITY_MAX_LIFETIME` 生命周期封顶，见 §4.10）。
 
 能力 token 的 `sub` 是用户本人，故权限上限始终是该用户角色——普通成员持 admin scope 被角色门拒绝，admin 角色用户才能让 admin scope 生效，降权下一请求即失效。收回是即时的：收窄 scope 或新授予能力 scope 都在同一事务内撤销该客户端存量 token，且 consent 与授权码兑换两处都会对活注册重新校验 scope，因此不留「已签发未兑换」的时间窗口。停用（`is_active = false`）仍是 kill switch，同一操作撤销其全部存活 token。
 

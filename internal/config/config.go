@@ -58,15 +58,22 @@ type Config struct {
 	RedisDB        int    `env:"REDIS_DB" envDefault:"0"`
 	RedisKeyPrefix string `env:"REDIS_KEY_PREFIX" envDefault:"sastlink"`
 
-	JWTSecretKey           string        `env:"JWT_SECRET_KEY"`
-	JWTSecretKeyPrev       string        `env:"JWT_SECRET_KEY_PREV"`
-	JWTActiveKID           string        `env:"JWT_ACTIVE_KID"`
-	JWTPreviousKID         string        `env:"JWT_PREVIOUS_KID"`
-	JWTIssuer              string        `env:"JWT_ISSUER" envDefault:"https://link.sast.fun/v2"`
-	JWTAudience            string        `env:"JWT_AUDIENCE" envDefault:"sast-link-v2"`
-	JWTAccessTokenExpiry   time.Duration `env:"JWT_ACCESS_TOKEN_EXPIRY" envDefault:"1h"`
-	JWTRefreshTokenExpiry  time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
-	RefreshTokenHMACSecret string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
+	JWTSecretKey          string        `env:"JWT_SECRET_KEY"`
+	JWTSecretKeyPrev      string        `env:"JWT_SECRET_KEY_PREV"`
+	JWTActiveKID          string        `env:"JWT_ACTIVE_KID"`
+	JWTPreviousKID        string        `env:"JWT_PREVIOUS_KID"`
+	JWTIssuer             string        `env:"JWT_ISSUER" envDefault:"https://link.sast.fun/v2"`
+	JWTAudience           string        `env:"JWT_AUDIENCE" envDefault:"sast-link-v2"`
+	JWTAccessTokenExpiry  time.Duration `env:"JWT_ACCESS_TOKEN_EXPIRY" envDefault:"1h"`
+	JWTRefreshTokenExpiry time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
+	// JWTRefreshCapabilityMaxLifetime caps the total life of a refresh family that
+	// carries a capability scope (admin/user), measured from the family's creation
+	// (its first authorization). A family reaching it is revoked so the client must
+	// re-authorize, closing the "sliding 30-day window renews forever" hole on
+	// administrative and self-service delegations. Plain OIDC families and internal
+	// session families are never capped. Zero disables the cap entirely.
+	JWTRefreshCapabilityMaxLifetime time.Duration `env:"JWT_REFRESH_CAPABILITY_MAX_LIFETIME" envDefault:"168h"`
+	RefreshTokenHMACSecret          string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
 
 	// OAuthConsentURL is the front-end page that collects the user's authorization
 	// decision. GET /oauth/authorize validates the request and redirects here; the
@@ -427,6 +434,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("JWT_ACCESS_TOKEN_EXPIRY must be positive")
 	case c.JWTRefreshTokenExpiry <= 0:
 		return fmt.Errorf("JWT_REFRESH_TOKEN_EXPIRY must be positive")
+	case c.JWTRefreshCapabilityMaxLifetime < 0:
+		return fmt.Errorf("JWT_REFRESH_CAPABILITY_MAX_LIFETIME must not be negative")
 	case strings.TrimSpace(c.InternalOAuthClientID) == "":
 		return fmt.Errorf("INTERNAL_OAUTH_CLIENT_ID is required")
 	case c.HSTSMaxAge < minimumHSTSMaxAge:

@@ -2360,7 +2360,9 @@ paths:
         内置控制台客户端发起（否则 403 —— 委派 token 不能授予委派，否则委派集合会
         脱离运维批准自行增长）。授予与改写 `redirect_uris` 不可同请求完成（400）。
         refresh_token 对能力 scope 一律允许——`/admin` 的角色门从数据库行读取主体
-        角色，刷新一个 admin-scoped token 不会拓宽谁能用它。
+        角色，刷新一个 admin-scoped token 不会拓宽谁能用它；携带能力 scope 的 refresh
+        family 受 `JWT_REFRESH_CAPABILITY_MAX_LIFETIME`（默认 168h）生命周期封顶，
+        到点即撤销并须重新授权（见 /oauth/token 的 refresh 说明）。
       operationId: adminCreateOAuthClient
       tags:
         - Admin
@@ -2459,9 +2461,10 @@ paths:
         需 admin 角色。委派调用需 `admin:write` scope。
 
         `scopes` 的能力授予条件与注册接口一致，且判定基于**合并后的状态**。
-        admin scope 允许 `refresh_token`；已持有能力 scope 的客户端不可改写
-        `redirect_uris`，且只能由控制台维护（均 403）；停用仍允许，那是
-        委派管理的 kill switch。
+        admin scope 允许 `refresh_token`（携带能力 scope 的 refresh family 受
+        `JWT_REFRESH_CAPABILITY_MAX_LIFETIME` 生命周期封顶）；已持有能力 scope
+        的客户端不可改写 `redirect_uris`，且只能由控制台维护（均 403）；停用仍
+        允许，那是委派管理的 kill switch。
 
         能力变化会连带撤销该客户端存量 token：收窄 `scopes` 或新授予能力 scope
         都在同一事务内撤销其全部 Access / Refresh Token；扩大 `scopes` 不撤销。

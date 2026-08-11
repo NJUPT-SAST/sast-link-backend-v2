@@ -141,6 +141,13 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if authorization.FamilyID != nil {
 		familyID = *authorization.FamilyID
 	}
+	// A capability family's first refresh token is born at this moment, so its
+	// expiry is its lifetime cap: the rotation leg later clamps every refresh to
+	// origin+cap, and clamping here keeps the very first token inside it too.
+	refreshTTL := s.refreshTTL()
+	if lifetime := s.capabilityRefreshLifetime(scopes); lifetime > 0 && lifetime < refreshTTL {
+		refreshTTL = lifetime
+	}
 	pair, err := s.issuer().Issue(tokenissue.Request{
 		User:       user,
 		Client:     client,
@@ -148,7 +155,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		FamilyID:   familyID,
 		Scopes:     scopes,
 		AccessTTL:  s.accessTTL(),
-		RefreshTTL: s.refreshTTL(),
+		RefreshTTL: refreshTTL,
 	})
 	if err != nil {
 		return nil, newError(ErrInternal, "签发 Token Pair 失败", err)
@@ -307,7 +314,10 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 			refreshAudit = nil
 		}
 	}
-	authTime, rotateErr := s.Tokens.RotateRefreshTokenWithAudit(ctx, current.FamilyID, tokenHash, pair.Access, pair.Refresh, refreshAudit)
+	authTime, rotateErr := s.Tokens.RotateRefreshTokenWithAuditCapped(
+		ctx, current.FamilyID, tokenHash, pair.Access, pair.Refresh, refreshAudit,
+		s.capabilityRefreshLifetime(scopes),
+	)
 	if rotateErr != nil {
 		if errors.Is(rotateErr, repository.ErrTokenReplayWithinGrace) ||
 			errors.Is(rotateErr, repository.ErrTokenReplay) ||
@@ -319,6 +329,14 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 			// the winning request, so just report invalid.
 			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
 			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
+		}
+		if errors.Is(rotateErr, repository.ErrTokenFamilyExpired) {
+			// The family reached its capability lifetime cap and the rotation
+			// transaction revoked it; the client must re-authorize. Reported in the
+			// standard invalid_grant envelope so the client starts a new
+			// authorization, audited distinctly from a replay.
+			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_family_expired")
+			return nil, newError(ErrInvalidGrant, "refresh_token 已超过最长有效期，请重新授权", rotateErr)
 		}
 		return nil, newError(ErrInternal, "轮换 refresh_token 失败", rotateErr)
 	}

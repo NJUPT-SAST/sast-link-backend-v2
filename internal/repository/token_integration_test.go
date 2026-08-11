@@ -210,6 +210,73 @@ func TestTokenRepositoryRotateRefreshToken(t *testing.T) {
 	assertTokenUnrevoked(t, database, "rotate-new-access", "rotate-new-refresh")
 }
 
+// A capability family's total life is capped from its origin: a rotation with a
+// maxLifetime clamps the rotated expiry to origin+maxLifetime instead of sliding
+// it forward, and a family whose origin predates the cap is revoked so the
+// client must re-authorize.
+func TestTokenRepositoryRotateRefreshTokenCapOnFamilyLifetime(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "rotate-cap@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	tokenRepository := repository.NewToken(database)
+	familyID := "rotate-cap-family"
+
+	t.Run("clamps the rotated expiry to origin+cap", func(t *testing.T) {
+		createTokenPair(t, tokenRepository, "rotate-cap-in", familyID, 0, client.ID, user.ID)
+
+		var origin model.OAuthRefreshToken
+		if err := database.Where("family_id = ?", familyID).Order("sequence ASC").First(&origin).Error; err != nil {
+			t.Fatalf("load family origin: %v", err)
+		}
+
+		newAccess := accessToken("rotate-cap-in-new-access", client.ID, user.ID, &familyID)
+		newRefresh := refreshToken("rotate-cap-in-new-refresh", familyID, 1, client.ID, user.ID)
+		// The sliding window would push the expiry well past the cap; the rotation
+		// must clamp it back to the family's boundary.
+		newRefresh.ExpiresAt = origin.CreatedAt.Add(30 * 24 * time.Hour)
+		if _, err := tokenRepository.RotateRefreshTokenWithAuditCapped(
+			context.Background(), familyID, "rotate-cap-in-refresh", newAccess, newRefresh, nil, 7*24*time.Hour,
+		); err != nil {
+			t.Fatalf("RotateRefreshTokenWithAuditCapped() error = %v", err)
+		}
+
+		var rotated model.OAuthRefreshToken
+		if err := database.Where("token_hash = ?", "rotate-cap-in-new-refresh").First(&rotated).Error; err != nil {
+			t.Fatalf("load rotated refresh: %v", err)
+		}
+		want := origin.CreatedAt.Add(7 * 24 * time.Hour)
+		if !rotated.ExpiresAt.Equal(want) {
+			t.Fatalf("rotated expiry = %v, want origin+7d %v", rotated.ExpiresAt, want)
+		}
+	})
+
+	t.Run("revokes a family whose origin predates the cap", func(t *testing.T) {
+		pastFamily := familyID + "-past"
+		createTokenPair(t, tokenRepository, "rotate-cap-past", pastFamily, 0, client.ID, user.ID)
+
+		// Rewind the origin to before the cap shipped while the presented token
+		// stays valid: the migration shape of a pre-cap family with a longer expiry.
+		if err := database.Model(&model.OAuthRefreshToken{}).
+			Where("family_id = ?", pastFamily).
+			Where("sequence = 0").
+			Update("created_at", time.Now().Add(-8*24*time.Hour)).Error; err != nil {
+			t.Fatalf("rewind family origin: %v", err)
+		}
+
+		newAccess := accessToken("rotate-cap-past-new-access", client.ID, user.ID, &pastFamily)
+		newRefresh := refreshToken("rotate-cap-past-new-refresh", pastFamily, 1, client.ID, user.ID)
+		_, err := tokenRepository.RotateRefreshTokenWithAuditCapped(
+			context.Background(), pastFamily, "rotate-cap-past-refresh", newAccess, newRefresh, nil, 7*24*time.Hour,
+		)
+		if !errors.Is(err, repository.ErrTokenFamilyExpired) {
+			t.Fatalf("RotateRefreshTokenWithAuditCapped() error = %v, want ErrTokenFamilyExpired", err)
+		}
+		// The family was revoked in the committed transaction, so the rotated pair
+		// never landed.
+		assertTokenPairAbsent(t, database, "rotate-cap-past-new-access", "rotate-cap-past-new-refresh")
+	})
+}
+
 func TestTokenRepositoryRotateRefreshTokenRejectsInvalidInputs(t *testing.T) {
 	database := setupDatabase(t)
 	user := createUserWithProfile(t, repository.NewUser(database), "rotate-invalid@njupt.edu.cn")

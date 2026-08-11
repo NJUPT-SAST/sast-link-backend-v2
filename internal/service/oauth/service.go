@@ -13,6 +13,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
 )
 
@@ -60,8 +61,13 @@ type Service struct {
 	Clock         Clock
 	AccessTTL     time.Duration
 	RefreshTTL    time.Duration
-	CodeTTL       time.Duration
-	RequestTTL    time.Duration
+	// CapabilityRefreshMaxLifetime caps the total life of a refresh family that
+	// carries a capability scope (admin/user), measured from the family's origin.
+	// A family past the cap is revoked so the client must re-authorize; without it
+	// the sliding refresh window renews a delegation forever. Zero disables the cap.
+	CapabilityRefreshMaxLifetime time.Duration
+	CodeTTL                      time.Duration
+	RequestTTL                   time.Duration
 	// Issuer is the OIDC issuer identifier and the base for discovery endpoints.
 	Issuer string
 }
@@ -86,6 +92,21 @@ func (s Service) refreshTTL() time.Duration {
 		return s.RefreshTTL
 	}
 	return defaultRefreshTTL
+}
+
+// capabilityRefreshLifetime returns the total-life cap for a refresh family whose
+// scopes carry a capability scope (admin/user), or 0 when it does not (plain OIDC
+// families and internal session families keep the uncapped sliding window). The
+// cap is measured from the family's origin — its first authorization — so it
+// forces a periodic re-authorization instead of a delegation that renews forever.
+func (s Service) capabilityRefreshLifetime(scopes []string) time.Duration {
+	if s.CapabilityRefreshMaxLifetime <= 0 {
+		return 0
+	}
+	if scope.ContainsAdmin(scopes) || scope.ContainsUser(scopes) {
+		return s.CapabilityRefreshMaxLifetime
+	}
+	return 0
 }
 
 func (s Service) codeTTL() time.Duration {

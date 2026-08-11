@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -147,6 +148,10 @@ type fakeTokens struct {
 	rotateErr       error
 	revokeErr       error
 	originErr       error
+	// now is the wall clock for family-lifetime decisions, mirroring the
+	// repository's rotationTime := time.Now(). Tests that drive a fixed service
+	// clock set it to that clock so origin+cap comparisons stay deterministic.
+	now func() time.Time
 }
 
 func newFakeTokens() *fakeTokens {
@@ -154,6 +159,13 @@ func newFakeTokens() *fakeTokens {
 		accessByJTI:   map[string]*model.OAuthAccessToken{},
 		refreshByHash: map[string]*model.OAuthRefreshToken{},
 	}
+}
+
+func (f *fakeTokens) nowUTC() time.Time {
+	if f.now != nil {
+		return f.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (f *fakeTokens) CreatePair(_ context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error {
@@ -186,6 +198,33 @@ func (f *fakeTokens) RotateRefreshTokenWithAudit(
 		f.auditEntries = append(f.auditEntries, audit)
 	}
 	return f.RotateRefreshToken(ctx, familyID, currentHash, access, refresh)
+}
+
+func (f *fakeTokens) RotateRefreshTokenWithAuditCapped(
+	ctx context.Context,
+	familyID string,
+	currentHash string,
+	access *model.OAuthAccessToken,
+	refresh *model.OAuthRefreshToken,
+	audit *model.AuditLog,
+	maxLifetime time.Duration,
+) (time.Time, error) {
+	origin, err := f.RotateRefreshTokenWithAudit(ctx, familyID, currentHash, access, refresh, audit)
+	if err != nil {
+		return origin, err
+	}
+	// Mirror the repository contract so service-level tests can exercise the cap
+	// without a database: clamp the rotated expiry to origin+maxLifetime and
+	// report a family-past-cap as ErrTokenFamilyExpired.
+	if maxLifetime > 0 {
+		now := f.nowUTC()
+		if deadline := origin.Add(maxLifetime); !deadline.After(now) {
+			return origin, repository.ErrTokenFamilyExpired
+		} else if refresh.ExpiresAt.After(deadline) {
+			refresh.ExpiresAt = deadline
+		}
+	}
+	return origin, nil
 }
 
 func (f *fakeTokens) RotateRefreshToken(
@@ -300,6 +339,24 @@ func (f *fakeAudit) actions() []string {
 		actions = append(actions, entry.Action)
 	}
 	return actions
+}
+
+// outcomes collects the "outcome" detail value from every audit row, which is
+// how the token endpoints distinguish a replay from a family-lifetime expiry.
+func (f *fakeAudit) outcomes() []string {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	outcomes := make([]string, 0, len(f.entries))
+	for _, entry := range f.entries {
+		var detail map[string]any
+		if err := json.Unmarshal(entry.Detail, &detail); err != nil {
+			continue
+		}
+		if outcome, ok := detail["outcome"].(string); ok {
+			outcomes = append(outcomes, outcome)
+		}
+	}
+	return outcomes
 }
 
 type fakeProfiles struct {
@@ -562,6 +619,9 @@ func newHarness(t *testing.T) *harness {
 		h.clients.byClientID[client.ClientID] = client
 		h.clients.byID[client.ID] = client
 	}
+	// The fake's family-lifetime decisions follow the same clock as the service,
+	// so origin+cap comparisons are deterministic rather than tied to real time.
+	h.tokens.now = func() time.Time { return clock.value }
 	h.service = Service{
 		Users:            h.users,
 		Clients:          h.clients,

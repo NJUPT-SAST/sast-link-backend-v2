@@ -205,6 +205,9 @@ func TestLoadValidConfig(t *testing.T) {
 	if cfg.JWTRefreshTokenExpiry != 720*time.Hour {
 		t.Errorf("JWTRefreshTokenExpiry = %s, want 720h", cfg.JWTRefreshTokenExpiry)
 	}
+	if cfg.JWTRefreshCapabilityMaxLifetime != 168*time.Hour {
+		t.Errorf("JWTRefreshCapabilityMaxLifetime = %s, want the 168h default", cfg.JWTRefreshCapabilityMaxLifetime)
+	}
 	if cfg.RefreshTokenHMACSecret != "0123456789abcdef0123456789abcdef" {
 		t.Errorf("RefreshTokenHMACSecret = %q, want 0123456789abcdef0123456789abcdef", cfg.RefreshTokenHMACSecret)
 	}
@@ -303,6 +306,20 @@ func TestValidateAPIAuthRejectsNonPositiveRefreshTokenExpiry(t *testing.T) {
 	err = cfg.ValidateAPIAuth()
 	if err == nil || !strings.Contains(err.Error(), "JWT_REFRESH_TOKEN_EXPIRY must be positive") {
 		t.Fatalf("ValidateAPIAuth() error = %v, want JWT_REFRESH_TOKEN_EXPIRY positive validation", err)
+	}
+}
+
+func TestValidateAPIAuthRejectsNegativeCapabilityLifetime(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("JWT_REFRESH_CAPABILITY_MAX_LIFETIME", "-1h")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	err = cfg.ValidateAPIAuth()
+	if err == nil || !strings.Contains(err.Error(), "JWT_REFRESH_CAPABILITY_MAX_LIFETIME must not be negative") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want JWT_REFRESH_CAPABILITY_MAX_LIFETIME non-negative validation", err)
 	}
 }
 

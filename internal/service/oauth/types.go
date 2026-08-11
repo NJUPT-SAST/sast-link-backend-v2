@@ -118,6 +118,13 @@ type TokenRepository interface {
 	// audit row written into audit_logs in the same transaction (nil audit
 	// disables it), so the rotation and its audit commit atomically on one fsync.
 	RotateRefreshTokenWithAudit(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) (time.Time, error)
+	// RotateRefreshTokenWithAuditCapped is RotateRefreshTokenWithAudit with a cap
+	// on the family's total life (measured from its origin, the moment of first
+	// authorization). A rotated refresh expiry is clamped to origin+maxLifetime,
+	// and a family past the cap is revoked so the client must re-authorize. Zero
+	// disables the cap. Only capability-scoped (admin/user) families pass a
+	// nonzero value.
+	RotateRefreshTokenWithAuditCapped(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog, maxLifetime time.Duration) (time.Time, error)
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)

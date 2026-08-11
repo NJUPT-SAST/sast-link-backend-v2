@@ -1406,6 +1406,7 @@ grant_type=refresh_token&refresh_token=rt_abc123...&client_id=9f3a1c7d2e5b40a8c6
 - 重放已轮换的 refresh token 触发整条 family 级联撤销。轮换后 30s 内（`refreshGracePeriod`）的并发刷新视为良性，不触发级联撤销；超出窗口的重放才撤销整条 family
 - **不支持 scope 收窄**。RFC 6749 §6 允许 refresh 时请求更小的 scope，但当前仓储层要求轮换后的 token pair 携带与当前完全一致的 scope，因此轮换后 scope 原样继承。客户端如需更小的 scope，须重新走一次授权流程。这是已知偏差
 - 轮换不是重新认证，因此 ID Token 的 `auth_time` 保持该 family 首个 refresh token 的创建时刻
+- **能力 family 生命周期封顶**：携带 `admin:*` / `user:*` 能力 scope 的 refresh family 受 `JWT_REFRESH_CAPABILITY_MAX_LIFETIME`（默认 `168h`，`0` 关闭）约束——从 family 首次授权起算，首个 refresh token 与每次轮换都按 `origin+cap` 夹紧到期时间，family 到点即撤销并返回 `invalid_grant`（审计 `refresh_family_expired`），客户端必须重新走授权。普通 OIDC family 与内部会话 family 不受此约束
 
 ---
 
@@ -1541,9 +1542,9 @@ DELETE /oauth/grants/:client_id
 
 判定依据只有注册表的 `scopes` 一列，不存在被硬编码的客户端名单：任何客户端的可请求 scope 都被钉死在其注册值内，而 `first_party` 无论注册值如何都拿不到 admin scope（见 §5.1），因此「token 携带 admin scope」本身就证明了「该注册被授予过它」。授予由 `POST` / `PUT /admin/oauth-clients` 把守，条件见 §6.7。
 
-委派 token 的 `sub` 仍是那位管理员本人，权限上限始终是该用户的角色——普通成员持 admin scope 被角色门拒绝，admin 角色用户才能让 admin scope 生效，降权下一请求即失效。admin scope 允许 `refresh_token`：`/admin` 的角色门从数据库行读取主体角色，刷新一个 admin-scoped token 不会拓宽谁能用它。停用方式是把该客户端置为 `is_active = false`，同一操作会撤销它的全部存活 token。
+委派 token 的 `sub` 仍是那位管理员本人，权限上限始终是该用户的角色——普通成员持 admin scope 被角色门拒绝，admin 角色用户才能让 admin scope 生效，降权下一请求即失效。admin scope 允许 `refresh_token`：`/admin` 的角色门从数据库行读取主体角色，刷新一个 admin-scoped token 不会拓宽谁能用它；但携带能力 scope 的 refresh family 受 `JWT_REFRESH_CAPABILITY_MAX_LIFETIME`（默认 `168h`）**生命周期封顶**，从首次授权起算、到点即撤销并需重新授权（§5.4）。停用方式是把该客户端置为 `is_active = false`，同一操作会撤销它的全部存活 token。
 
-**一个接入方用一个客户端即可**：一个 `third_party` 机密客户端可同时持有 `admin:*`（管理）与 `user:*`（自助），refresh 允许。普通用户经它自助读/改自己的资料，admin 角色用户经它查人/改角色/封禁——能力由 `/admin` 的角色门按 token 主体区分，无需拆客户端。第三方应用读当前登录用户只能经 `/userinfo`（§8.3）。
+**一个接入方用一个客户端即可**：一个 `third_party` 机密客户端可同时持有 `admin:*`（管理）与 `user:*`（自助），refresh 允许（受同一生命周期封顶约束）。普通用户经它自助读/改自己的资料，admin 角色用户经它查人/改角色/封禁——能力由 `/admin` 的角色门按 token 主体区分，无需拆客户端。第三方应用读当前登录用户只能经 `/userinfo`（§8.3）。
 
 **`/user/*` 自助面**：token 必须携带 `user:read` / `user:write` 才能访问，`user` scope 对任何客户端类型开放（§5.1、§6.7）——`/user/*` 每个端点都只操作 token 主体本人的记录，所以应用持有 `user:*` 只是代表用户本人自助，不是查他人。被授予对应 user scope 的客户端（经控制台 `POST` / `PUT /admin/oauth-clients`），其 token 即可访问相应 `/user/*` 端点——读端点接受 `user:read` 或 `user:write`，写端点要求 `user:write`，内置控制台 token 豁免 scope 门。没有 user scope 的 token 一律 `403 40300`。要读当前登录用户的 OIDC 视图，用 `GET /userinfo`（见 §8.3）——它是全服务唯一不要求能力 scope 就服务第三方 token 的端点。字段对应关系：`login_email` → `email`，`nickname` → `preferred_username`（无昵称时回落为真名），`avatar` → `picture`，用户 ID 为字符串形式的 `sub`，角色为 `role`（`profile` scope，取自签发时的数据库行）。`/userinfo` **不返回** `state`、`student_id`、`college`、`major`、`phone_number`、`qq_number`；需要这些字段的第一方应用直接读 `/user/profile`（返回全部报名字段），第三方则需 admin token 走 `GET /admin/users/:id`。
 
@@ -1818,7 +1819,7 @@ POST /admin/oauth-clients
 - `scopes` 必须包含 `openid`，且仅含受支持的值，与 `/oauth/authorize` 使用同一套校验。
 - **`scopes` 可包含 `admin:read` / `admin:write`，即「委派管理」**：持有 admin scope 的注册，其 token 可代授权管理员访问 `/admin/*`。委派身份**只由注册表的 scopes 决定**，不存在被硬编码的客户端名单——因此接入一个新的运维工具是一次控制台操作，不需要改代码或写迁移。授予须同时满足以下四条，任一不满足即拒：
   - 目标必须是 `third_party`（`400`）。`first_party` 是公开客户端，token 端点仅凭 PKCE 认证它，从授权码被签出到管理 token 存在之间只剩 `redirect_uri` 精确匹配一道屏障；机密客户端有两道。`/oauth/authorize` 同样拒绝第一方的 admin scope，所以这里挡住的是一条永远无法行使的授予
-  - `grant_types` 两种取值（`authorization_code`、`refresh_token`）均允许，即使客户端持有 admin scope——`/admin` 的角色门从数据库行读取主体角色，刷新一个 admin-scoped token 不会拓宽谁能用它。`authorization_code` 必须包含。
+  - `grant_types` 两种取值（`authorization_code`、`refresh_token`）均允许，即使客户端持有 admin scope——`/admin` 的角色门从数据库行读取主体角色，刷新一个 admin-scoped token 不会拓宽谁能用它；携带能力 scope 的 refresh family 受 `JWT_REFRESH_CAPABILITY_MAX_LIFETIME`（默认 `168h`）生命周期封顶，到点需重新授权（§5.4）。`authorization_code` 必须包含。
   - 发起该请求的凭证必须是内置控制台客户端（`403`）。委派 token 不能授予或维护委派——否则委派客户端可互相注册、互相复活，管理能力的集合将脱离运维人员的批准而自行增长
   - 授予 admin scope 与改写 `redirect_uris` 不可在同一请求内完成（`400`）。这两件事各自都值得单独审计
 - 注意 `/oauth/authorize` 的校验器同样接受 admin scope（它是共享的「scope 集是否合法」判定），因此上述能力规则由本接口把守，而非由授权端点把守。
@@ -1867,7 +1868,7 @@ PUT /admin/oauth-clients/:id
 
 - 五个字段可改，均为可选；未出现的字段保持不变：`client_name`、`redirect_uris`、`grant_types`、`scopes`、`is_active`。
 - `client_id`、`client_secret`、`client_type`、`id` **不可修改**，请求中出现这些字段返回 `400`（strict decoder 拒未知字段，而非静默忽略）——标识符只能由服务端生成，管理员不能把自己的客户端注册成既有标识符。`client_type` 同样不可就地翻转：它决定客户端的凭据模型（有无 `client_secret`）与 scope 授予规则，翻转而不重发 secret 会产生无凭据的第三方客户端；换类型请重新注册一个客户端。
-- `scopes` 中出现 `admin:read` / `admin:write` 即授予委派管理，前置条件与注册接口完全一致（见 §6.7）。判定基于**合并后的状态**而非本次提交的字段：给已持有 admin scope 的客户端单独追加 `refresh_token` 是允许的——`/admin` 角色门从数据库行读取主体角色，刷新不拓宽谁能用它；但向已持有能力 scope 的客户端改写 `redirect_uris`（`403`）、或在授予能力 scope 的同一次请求中改写 `redirect_uris`（`400`）都会被拒，拆包请求无法绕过。
+- `scopes` 中出现 `admin:read` / `admin:write` 即授予委派管理，前置条件与注册接口完全一致（见 §6.7）。判定基于**合并后的状态**而非本次提交的字段：给已持有 admin scope 的客户端单独追加 `refresh_token` 是允许的——`/admin` 角色门从数据库行读取主体角色，刷新不拓宽谁能用它（携带能力 scope 的 refresh family 受 `JWT_REFRESH_CAPABILITY_MAX_LIFETIME` 生命周期封顶，见 §5.4）；但向已持有能力 scope 的客户端改写 `redirect_uris`（`403`）、或在授予能力 scope 的同一次请求中改写 `redirect_uris`（`400`）都会被拒，拆包请求无法绕过。
 - **已持有能力 scope 的客户端受额外保护**（均返回 `403`）：不可改写 `redirect_uris`（能力级授权码被投递到运维人员自选的主机，等于把整个授权交出去）；只能由控制台维护，委派 token 对其任何字段的修改都会被拒。停用它仍然允许，那是委派管理的 kill switch。
 - **能力变化会连带撤销 token**，这是与其他字段的关键区别：
   - **收窄 `scopes`**（旧集合中有值不在新集合里）：在同一事务内撤销该客户端全部存量 Access / Refresh Token。access token 携带的是签发时的 scope，若不撤销，注册表已收窄而凭证仍在断言被收回的能力
