@@ -54,7 +54,7 @@ func TestUploadAvatarHandlerSuccess(t *testing.T) {
 		AvatarURL: "https://cdn.example.com/avatar/42/abc.png",
 	}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: time.Now()}}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: time.Now()}}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)})))
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, avatarMultipartRequest(t, testPNGBytes(t)))
 
@@ -85,7 +85,7 @@ func TestUploadAvatarHandlerMissingFile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: time.Now()}}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: time.Now()}}, scopedGates(allowAuth()))
 
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/user/avatar",
 		strings.NewReader("--boundary-no-file"))
@@ -109,7 +109,7 @@ func TestUploadAvatarHandlerRejectsOversizedBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{uploadAvatarResult: &session.UploadAvatarResult{AvatarURL: "https://cdn.example.com/a.png"}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: time.Now()}}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: time.Now()}}, scopedGates(allowAuth()))
 
 	// The file part itself exceeds the 2MB ceiling, so multipart parsing fails.
 	content := bytes.Repeat([]byte{0xFF}, maxAvatarRequestBodySize+1024)
@@ -130,7 +130,7 @@ func TestUploadAvatarHandlerMapsServiceError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{uploadAvatarErr: &session.Error{Kind: session.KindObjectUploadFailed, Code: errcode.CodeObjectUploadFailed, Message: "头像上传失败"}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: time.Now()}}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: time.Now()}}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, avatarMultipartRequest(t, testPNGBytes(t)))
 

@@ -92,11 +92,19 @@ func run() error {
 		"db":    func() error { return pingDB(database) },
 		"redis": func() error { return pingRedis(rdb) },
 	}).Register(router)
-	sessionhandler.RegisterRoutes(router, runtime.Handler, runtime.Auth.RequireAuth())
+	// The /user group authenticates through RequireUserAuth, not RequireAuth: it is
+	// the surface a registered client may reach on a user's own behalf,
+	// within the user scopes that token holds. The strict internal-client pin stays
+	// on every group that does not opt in.
+	sessionhandler.RegisterRoutes(router, runtime.Handler, sessionhandler.Gates{
+		RequireAuth:       runtime.Auth.RequireUserAuth(),
+		RequireReadScope:  runtime.Auth.RequireDelegatedScope(sessionhandler.ReadScopes...),
+		RequireWriteScope: runtime.Auth.RequireDelegatedScope(sessionhandler.WriteScopes...),
+	})
 	oauthhandler.RegisterRoutes(router, runtime.OAuth, runtime.Auth.RequireAuth())
 	oauthloginhandler.RegisterRoutes(router, runtime.OAuthLogin, runtime.Auth.RequireAuth())
 	// The admin group authenticates through RequireAdminAuth, not RequireAuth: it is
-	// the one surface a delegated third-party token may reach, and only within the
+	// the one surface a admin-scoped token may reach, and only within the
 	// scopes that token holds. Every other group keeps the strict internal-client pin.
 	adminhandler.RegisterRoutes(router, runtime.Admin, adminhandler.Gates{
 		RequireAuth:       runtime.Auth.RequireAdminAuth(),

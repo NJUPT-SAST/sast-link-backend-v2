@@ -10,6 +10,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
@@ -200,7 +201,44 @@ type identityDTO struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
-func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
+// Gates are the middleware the protected /user routes are mounted behind. They
+// are passed in rather than built here so the composition root stays the only
+// place that decides how authentication works.
+//
+// A struct rather than positional parameters: three adjacent gin.HandlerFuncs,
+// and a transposed pair would compile into a route gated by the wrong
+// permission.
+type Gates struct {
+	// RequireAuth authenticates the group. On the /user surface this is the
+	// scoped gate (RequireUserAuth), not the strict internal-client one.
+	RequireAuth gin.HandlerFunc
+	// RequireReadScope and RequireWriteScope bound what a scoped token
+	// may do. They are no-ops for an internal console token, whose ceiling is
+	// unchanged.
+	RequireReadScope  gin.HandlerFunc
+	RequireWriteScope gin.HandlerFunc
+}
+
+// ReadScopes and WriteScopes are the scoped access each class of
+// /user route accepts, exported for the same reason adminhandler exports its
+// counterparts: the set of scopes that may read or write a user's own record is
+// a contract decision, not a wiring detail.
+//
+// user:write appears in ReadScopes because write implies read, mirroring the
+// admin routes: a delegate trusted to modify a user's own record is not
+// meaningfully restrained by being refused a read of it.
+var (
+	ReadScopes  = []string{scope.UserRead, scope.UserWrite}
+	WriteScopes = []string{scope.UserWrite}
+)
+
+func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
+	// Fail at boot rather than serve an ungated /user route. gin would happily
+	// mount a nil handler and panic on the first request instead.
+	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil {
+		panic("sessionhandler: every gate in Gates must be set")
+	}
+
 	r.POST("/user/login", h.Login)
 	r.POST("/auth/refresh", h.Refresh)
 	r.POST("/auth/register/send-code", h.SendRegisterCode)
@@ -215,19 +253,25 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	// in place pending that redesign, and the OIDC profile claim has been removed
 	// so no client can read the card projection through it either.
 	// r.GET("/card/:id", h.Card)
+
+	// Every protected route names a scope gate explicitly. A new route that names
+	// none has no scoped-client permission rather than inheriting one. The
+	// internal console token is exempt from every scope gate (its ceiling is
+	// being an authenticated session), so the console keeps its current access to
+	// all of these endpoints.
 	protected := r.Group("")
-	protected.Use(authMiddleware)
-	protected.POST("/auth/logout", h.Logout)
-	protected.POST("/auth/change-password", h.ChangePassword)
-	protected.GET("/user/profile", h.Profile)
-	protected.PUT("/user/profile", h.UpdateProfile)
-	protected.PUT("/user/avatar", h.UploadAvatar)
-	protected.GET("/user/identities", h.ListIdentities)
-	protected.POST("/user/identities/email", h.BindEmailSendCode)
-	protected.POST("/user/identities/email/verify", h.BindEmailVerify)
-	protected.DELETE("/user/identities/:id", h.UnbindIdentity)
-	protected.GET("/user/devices", h.ListDevices)
-	protected.DELETE("/user/devices/:id", h.LogoutDevice)
+	protected.Use(g.RequireAuth)
+	protected.GET("/user/profile", g.RequireReadScope, h.Profile)
+	protected.PUT("/user/profile", g.RequireWriteScope, h.UpdateProfile)
+	protected.PUT("/user/avatar", g.RequireWriteScope, h.UploadAvatar)
+	protected.GET("/user/identities", g.RequireReadScope, h.ListIdentities)
+	protected.POST("/user/identities/email", g.RequireWriteScope, h.BindEmailSendCode)
+	protected.POST("/user/identities/email/verify", g.RequireWriteScope, h.BindEmailVerify)
+	protected.DELETE("/user/identities/:id", g.RequireWriteScope, h.UnbindIdentity)
+	protected.GET("/user/devices", g.RequireReadScope, h.ListDevices)
+	protected.DELETE("/user/devices/:id", g.RequireWriteScope, h.LogoutDevice)
+	protected.POST("/auth/logout", g.RequireWriteScope, h.Logout)
+	protected.POST("/auth/change-password", g.RequireWriteScope, h.ChangePassword)
 }
 
 func (h Handler) Login(c *gin.Context) {

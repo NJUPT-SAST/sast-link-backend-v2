@@ -573,3 +573,146 @@ func TestRequireDelegatedScopeWithoutPrincipalIsInternalError(t *testing.T) {
 		t.Fatalf("status = %d (handler reached %v), want 500 and no handler", recorder.Code, reached)
 	}
 }
+
+// testUserClientID is an arbitrary first-party client_id. Nothing in the
+// middleware knows this value — self-service access is proven by the token's user
+// scope, which only a first-party registration an operator granted that scope can
+// produce — so the tests below use it only to show that a non-console azp is
+// present.
+const testUserClientID = "sast-people"
+
+// performUserAuthRequest drives RequireUserAuth followed by RequireDelegatedScope,
+// mirroring how the /user group is wired, so the two gates are exercised in the
+// order production uses them.
+func performUserAuthRequest(
+	manager *auth.JWTManager, states *fakeAccessStates, now time.Time,
+	internalClientID string, allowedScopes []string, header string,
+) (*httptest.ResponseRecorder, envelope, bool) {
+	router := gin.New()
+	authenticator := Authenticator{
+		JWT: manager, Tokens: states, Clock: testClock{value: now},
+		InternalClientID: internalClientID,
+	}
+	reached := false
+	router.GET("/user/probe",
+		authenticator.RequireUserAuth(),
+		authenticator.RequireDelegatedScope(allowedScopes...),
+		func(c *gin.Context) {
+			reached = true
+			c.JSON(http.StatusOK, envelope{Code: 0, Message: "ok"})
+		})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/user/probe", nil)
+	if header != "" {
+		request.Header.Set("Authorization", header)
+	}
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	var body envelope
+	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+	return recorder, body, reached
+}
+
+func signUserToken(t *testing.T, manager *auth.JWTManager, azp string, scopes []string) string {
+	t.Helper()
+	return signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "on_sast", State: "on_sast", TokenVersion: 7,
+		Scopes: scopes, TTL: time.Hour, AuthorizedParty: azp,
+	})
+}
+
+// A self-service token reaches /user only with a user scope, and only the scope
+// the route asks for. A third-party token is refused at RequireUserAuth even if it
+// carries an admin scope — the user surface is gated by user scopes alone.
+func TestRequireUserAuthAndDelegatedScope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+
+	tests := []struct {
+		name        string
+		azp         string
+		tokenScopes []string
+		allowed     []string
+		wantStatus  int
+		wantCode    int
+		wantHandler bool
+	}{
+		{
+			name: "first-party client with user:read reaches a read route",
+			azp:  testUserClientID, tokenScopes: []string{"openid", scope.UserRead},
+			allowed: []string{scope.UserRead, scope.UserWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+		{
+			// write implies read: a write-scoped token must not be locked out of reads.
+			name: "first-party client with user:write reaches a read route",
+			azp:  testUserClientID, tokenScopes: []string{"openid", scope.UserWrite},
+			allowed: []string{scope.UserRead, scope.UserWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+		{
+			name: "first-party client with user:read cannot reach a write route",
+			azp:  testUserClientID, tokenScopes: []string{"openid", scope.UserRead},
+			allowed: []string{scope.UserWrite}, wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
+		},
+		{
+			// Rejected by RequireUserAuth, before any scope check.
+			name: "first-party client without a user scope is refused entry",
+			azp:  testUserClientID, tokenScopes: []string{"openid", "profile", "email"},
+			allowed: []string{scope.UserRead, scope.UserWrite}, wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
+		},
+		{
+			// An admin-scoped token is a third-party delegation credential and must not
+			// reach the user surface: the two scope families gate disjoint routes.
+			name: "admin-scoped token cannot reach the user surface",
+			azp:  testDelegatedClientID, tokenScopes: []string{"openid", scope.AdminWrite},
+			allowed: []string{scope.UserRead, scope.UserWrite}, wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
+		},
+		{
+			name: "an arbitrary third-party token without a user scope is refused",
+			azp:  "some-other-app", tokenScopes: []string{"openid", "profile", "email"},
+			allowed:    []string{scope.UserRead, scope.UserWrite},
+			wantStatus: http.StatusForbidden, wantCode: errcode.CodeForbidden,
+		},
+		{
+			// The console holds only session scopes and must stay exempt from the scope gate.
+			name: "internal console token passes both gates",
+			azp:  testInternalClientID, tokenScopes: []string{"openid", "profile", "email"},
+			allowed: []string{scope.UserWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+		{
+			// An azp-less token predates the claim and is only ever the built-in client's.
+			name: "legacy token without azp passes both gates",
+			azp:  "", tokenScopes: []string{"openid"},
+			allowed: []string{scope.UserWrite}, wantStatus: http.StatusOK, wantHandler: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			token := signUserToken(t, manager, test.azp, test.tokenScopes)
+			recorder, body, reached := performUserAuthRequest(manager, validStates(now), now,
+				testInternalClientID, test.allowed, "Bearer "+token)
+			if recorder.Code != test.wantStatus || reached != test.wantHandler {
+				t.Fatalf("status = %d (handler reached %v), want %d (%v): %#v",
+					recorder.Code, reached, test.wantStatus, test.wantHandler, body)
+			}
+			if test.wantCode != 0 && body.Code != test.wantCode {
+				t.Fatalf("body.Code = %d, want %d", body.Code, test.wantCode)
+			}
+		})
+	}
+}
+
+// An unset InternalClientID must fail closed on the /user path too, mirroring the
+// admin path: without it, a deployment could not distinguish the console from a
+// scoped client and would admit none of them safely.
+func TestRequireUserAuthFailsClosedWithoutInternalClientID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	manager := newTestJWTManager(t, now)
+	token := signUserToken(t, manager, testUserClientID, []string{"openid", scope.UserRead})
+
+	recorder, _, reached := performUserAuthRequest(manager, validStates(now), now,
+		"", []string{scope.UserRead}, "Bearer "+token)
+	if recorder.Code != http.StatusInternalServerError || reached {
+		t.Fatalf("status = %d (handler reached %v), want 500 and no handler", recorder.Code, reached)
+	}
+}

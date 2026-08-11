@@ -19,9 +19,9 @@ func stringPtr(value string) *string { return &value }
 
 func authedRouter(service Service) *gin.Engine {
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{
 		UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour),
-	}))
+	})))
 	return router
 }
 
