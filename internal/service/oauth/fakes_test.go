@@ -447,8 +447,12 @@ type harness struct {
 const (
 	testPublicClientID       = "sast-link-web"
 	testConfidentialClientID = "third-party-app"
-	testClientSecret         = "third-party-secret-value"
-	testRedirectURI          = "https://app.example.test/callback"
+	// testFirstPartyAppClientID is an organization-owned registration that is not
+	// the built-in client, so capability-scope (admin/user) tests can use a
+	// first-party client without touching the protected built-in one.
+	testFirstPartyAppClientID = "first-party-app"
+	testClientSecret          = "third-party-secret-value"
+	testRedirectURI           = "https://app.example.test/callback"
 	// testVerifier and testChallenge are a valid RFC 7636 S256 pair.
 	testVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 )
@@ -506,6 +510,20 @@ func confidentialClient() *model.OAuthClient {
 	}
 }
 
+func firstPartyAppClient() *model.OAuthClient {
+	active := true
+	return &model.OAuthClient{
+		ID:           30,
+		ClientID:     testFirstPartyAppClientID,
+		ClientName:   "First Party App",
+		ClientType:   model.ClientTypeFirstParty,
+		RedirectURIs: model.StringArray{testRedirectURI},
+		GrantTypes:   model.StringArray{grantTypeAuthorizationCode, grantTypeRefreshToken},
+		Scopes:       model.StringArray{"openid", "profile", "email"},
+		IsActive:     &active,
+	}
+}
+
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
@@ -527,6 +545,7 @@ func newHarness(t *testing.T) *harness {
 	user := activeUser()
 	public := publicClient()
 	confidential := confidentialClient()
+	firstPartyApp := firstPartyAppClient()
 	h := &harness{
 		users:          &fakeUsers{byID: map[int64]*model.User{user.ID: user}},
 		clients:        &fakeClients{byClientID: map[string]*model.OAuthClient{}, byID: map[int64]*model.OAuthClient{}},
@@ -539,7 +558,7 @@ func newHarness(t *testing.T) *harness {
 		limiter:        &fakeLimiter{},
 		clock:          clock,
 	}
-	for _, client := range []*model.OAuthClient{public, confidential} {
+	for _, client := range []*model.OAuthClient{public, confidential, firstPartyApp} {
 		h.clients.byClientID[client.ClientID] = client
 		h.clients.byID[client.ID] = client
 	}

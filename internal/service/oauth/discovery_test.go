@@ -61,7 +61,7 @@ func TestDiscoveryAdvertisesOnlySupportedCapabilities(t *testing.T) {
 			t.Fatalf("%s = %v, want %v", key, got, want)
 		}
 	}
-	assertStrings("scopes_supported", []string{"openid", "profile", "email"})
+	assertStrings("scopes_supported", []string{"openid", "profile", "email", "admin:read", "admin:write", "user:read", "user:write"})
 	assertStrings("response_types_supported", []string{"code"})
 	assertStrings("grant_types_supported", []string{"authorization_code", "refresh_token"})
 	assertStrings("id_token_signing_alg_values_supported", []string{"EdDSA"})

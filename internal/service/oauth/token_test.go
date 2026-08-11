@@ -533,6 +533,42 @@ func TestTokenRefreshGrantRotates(t *testing.T) {
 	}
 }
 
+// A capability client may hold refresh_token: the refresh leg re-checks scopes
+// against the live registration but never widens them. A confidential client
+// holding admin:write refreshes and the new pair keeps the family's exact scope
+// set — the grant door's relaxation (adminclient.checkCapabilityScopeGrant) must
+// not let a refresh mint anything the family was not issued.
+func TestTokenRefreshCapabilityClientKeepsFamilyScopes(t *testing.T) {
+	h := newHarness(t)
+	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{scope.OpenID, scope.AdminWrite}
+
+	code := issueCode(t, h, testConfidentialClientID, "openid admin:write")
+	first, err := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeAuthorizationCode,
+		Code:         code,
+		RedirectURI:  testRedirectURI,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+		CodeVerifier: testVerifier,
+	})
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+
+	rotated, err := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: first.RefreshToken,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+	})
+	if err != nil {
+		t.Fatalf("refresh grant error = %v", err)
+	}
+	if rotated.Scope != "openid admin:write" {
+		t.Fatalf("rotated scope = %q, want the family's scopes unchanged", rotated.Scope)
+	}
+}
+
 // A family's scopes were checked against the registration when its first pair was
 // minted. If a change narrows the registration without going through the revoking
 // update (a direct database edit, a future path), the refresh leg must stop

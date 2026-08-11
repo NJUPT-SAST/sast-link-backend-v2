@@ -359,21 +359,26 @@ func authorizeScopeForClient(client *model.OAuthClient, requested []string) erro
 // between legs, and this check is what makes a revoked grant take effect on the codes
 // already in flight instead of one TTL later.
 //
-// The admin scopes are refused for a first-party client regardless of what its
-// registration says. A first-party client is a public client — it holds no
-// client_secret, so the token endpoint authenticates it by PKCE alone (see
-// authenticateClient). Between an authorization code being signed out and an
-// administrative token existing there is then exactly one barrier, the exact-match
-// redirect_uri, where a confidential client has two independent ones. Delegated
-// administration is the last capability that should run on the thinner of the two,
-// so it is confined to third-party clients.
+// The admin scopes are refused for a public (first_party) client, regardless of
+// what the registration says. They gate the /admin surface — the whole directory —
+// and a public client authenticates its token request by PKCE alone at the token
+// endpoint (no client_secret), so an intercepted authorization code is one barrier
+// short of a credential that reaches it, where a confidential client has two
+// independent barriers (client_secret + PKCE). adminclient.checkCapabilityScopeGrant
+// enforces the same confinement at the grant door, so no public registration ever
+// holds one to begin with.
+//
+// The user scopes carry no type constraint: they gate the self-service /user
+// surface, whose every endpoint operates on the token subject's own record, so an
+// application holding them is never a look-up-anyone credential — the subject is
+// pinned by the token, whatever client it was issued to.
 //
 // Note this is no longer derived from the registration being unenforced for
 // first-party clients — ContainsAll below now pins every client type. Removing that
 // exemption does not make this check redundant.
 func checkScopeForClient(client *model.OAuthClient, requested []string) *Error {
-	if scope.ContainsAdmin(requested) && client.ClientType == model.ClientTypeFirstParty {
-		return newError(ErrInvalidScope, "admin scope 不可授予第一方客户端", nil)
+	if scope.ContainsAdmin(requested) && client.ClientType != model.ClientTypeThirdParty {
+		return newError(ErrInvalidScope, "admin scope 不可授予公开（first_party）客户端", nil)
 	}
 	granted, err := scope.ContainsAll([]string(client.Scopes), requested)
 	if err != nil {
