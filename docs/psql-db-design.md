@@ -38,10 +38,10 @@ CREATE TYPE email_enum AS ENUM (
     'njupt_email'   -- @njupt.edu.cn（在校生邮箱）
 );
 
--- 客户端类型
+-- 客户端类型（凭证能力，非信任级别）
 CREATE TYPE client_enum AS ENUM (
-    'first_party', -- sast 内部应用，受信任的
-    'third_party' -- 外部接入应用，需走 OAuth 流程
+    'first_party', -- 公开客户端：不生成 client_secret，token 端点仅凭 PKCE 认证
+    'third_party' -- 机密客户端：持有 client_secret，token 端点双重认证（client_secret + PKCE）
 );
 
 -- 学院
@@ -245,7 +245,7 @@ CREATE TABLE audit_logs (
 |---|---|
 |`id`||
 |`user_id`|删除用户后保留日志|
-|`action`|操作类型：register / login / logout / change_password / reset_password / oauth_bind / oauth_unbind / update_profile / upload_avatar / admin_user_update / admin_user_delete / admin_user_restore / admin_oauth_client_create / admin_oauth_client_update / oauth_authorize / oauth_token / oauth_revoke|
+|`action`|操作类型：register / login / logout / change_password / reset_password / oauth_bind / oauth_unbind / update_profile / upload_avatar / admin_user_update / admin_user_delete / admin_user_restore / admin_oauth_client_create / admin_oauth_client_update / admin_oauth_client_rotate_secret / oauth_authorize / oauth_token / oauth_revoke|
 |`resource`|操作对象类型|
 |`resource_id`|操作对象 ID|
 |`detail`|JSONB 详情，各 action 结构见下文|
@@ -278,8 +278,8 @@ NULL 是有意义的取值：**没有任何 OAuth 凭证授权该操作** ——
 | `update_profile` | `{"changed_fields": ["field1", "field2", ...]}` |
 | `upload_avatar` | `{"avatar_url": "string"}` |
 | 用户管理（`admin_user_update` / `admin_user_delete` / `admin_user_restore`） | `{"target_user_id": 123, ...}` |
-| 客户端注册（`admin_oauth_client_create`） | `{"client_name": "string", "client_type": "third_party", "admin_scope": true}`（`admin_scope` 仅在提交含 admin scope 时出现） |
-| 客户端更新（`admin_oauth_client_update`） | `{"changed_fields": [...], "is_active": bool, "revoked_tokens": 3, "admin_scope_granted": ["admin:write"], "admin_scope_revoked": true, "scopes_removed": [...]}`（后四项按发生情况出现） |
+| 客户端注册（`admin_oauth_client_create`） | `{"client_name": "string", "client_type": "third_party", "admin_scope": true}`（`admin_scope` / `user_scope` 仅在提交含对应能力 scope 时出现） |
+| 客户端更新（`admin_oauth_client_update`） | `{"changed_fields": [...], "is_active": bool, "revoked_tokens": 3, "admin_scope_granted": ["admin:write"], "admin_scope_revoked": true, "user_scope_granted": ["user:read"], "user_scope_revoked": true, "scopes_removed": [...]}`（能力字段按发生情况出现） |
 
 > **历史兼容**：dump 中现有 `audit_logs` 数据为 V1 people_link 迁移产物，detail 格式为
 > `{"source": "people_link_merge", "action_type": "migration", "migrated_at": "...", "needs_password_reset": false}`。
@@ -341,9 +341,11 @@ CREATE TABLE oauth_clients (
 
 **为什么接入方客户端不走迁移**：`client_secret` 是需要轮换的凭证，而 seed 迁移必须带漂移检测（既有行属性不符则中止，否则重复 apply 会覆盖一个存活客户端的 scope 或回调地址）。两者不相容——凭证一经轮换，库里的哈希就不再等于迁移里写死的那个，任何需要重跑该迁移的路径（`down` 后再 `up`、灾备重建、从生产 dump 恢复后跑迁移）都会中止且无法绕过。把 secret 从漂移检测中排除也不成立：那样 `down`/`up` 会把轮换后的行删掉并重建成迁移里的旧 secret，等于让一个已作废的凭证重新生效。
 
-一个既要读当前登录用户、又要调用 `/admin/*` 的接入方，宜注册两个客户端而非一个：一个持 `openid admin:read admin:write` 且不带 refresh，一个持 `openid profile email` 且带 refresh 承载普通登录会话。两类凭证的生命周期与影响面不同：会话需要长期保活，管理能力应尽快过期。两者职责不重叠且互相打不到对方的接口——会话客户端不持有 admin scope，管理客户端不持有 `profile`/`email`，其 `/userinfo` 只能得到 `sub`。二者可共用同一组 `redirect_uris`：`authorize` 校验的是「该 URI 在**这个** client 的注册列表内」，不要求全局唯一，因此一个接入方用一个回调端点承载两条腿即可。
+一个接入方（如 SAST People，注册为 `third_party` 机密客户端）用一个客户端即可承载全部能力：`{openid profile email user:* admin:*}` + refresh。普通用户经它自助读/改自己的资料，admin 角色用户经它查人/改角色/封禁——能力由 `/admin` 的角色门按 token 主体区分，无需拆客户端。二者共用同一组 `redirect_uris`：`authorize` 校验的是「该 URI 在**这个** client 的注册列表内」，不要求全局唯一。
 
-管理那半必须是 `third_party` 才能持有 admin scope，因为 `first_party` 是公开客户端、token 端点仅凭 PKCE 认证它。scope 本身对两类客户端一律受 `ContainsAll` 约束。控制台授予 admin scope 受四道守卫约束（必须 `third_party`、不得含 `refresh_token`、只能由内置控制台客户端发起、不得与改写 `redirect_uris` 同请求），且判定基于合并后状态以防拆包绕过；收窄 scope 或新授予 admin scope 都会连带撤销该客户端存量 token。`client_secret` 只以 `sha256-v1$...` 哈希入库，明文仅在注册响应中出现一次。
+若接入方需要让用户自助读/改资料（SAST People 即此例），客户端再加 `user:read` / `user:write`（**无客户端类型约束**，任何客户端可持有，允许 refresh，见 PRD §4.13 用户自助面）即可访问 `/user/*` 读/改当前用户完整资料——无需经 `/admin/*`，`/userinfo` 的 OIDC 视图也不再是唯一选项。
+
+管理能力（`admin:*`）必须由 `third_party` 机密客户端持有，因为 `first_party` 是公开客户端、token 端点仅凭 PKCE 认证它。scope 本身对两类客户端一律受 `ContainsAll` 约束。控制台授予 admin scope 受三道守卫约束（必须 `third_party`、只能由内置控制台客户端发起、不得与改写 `redirect_uris` 同请求），且判定基于合并后状态以防拆包绕过；admin scope 允许 `refresh_token`——`/admin` 的角色门从数据库行读取主体角色，刷新不会拓宽谁能用它。收窄 scope 或新授予能力 scope 都会连带撤销该客户端存量 token。`client_secret` 只以 `sha256-v1$...` 哈希入库，明文仅在注册响应与 secret 轮换响应中出现一次。
 
 V003 是幂等的：重复 apply 为 no-op，带漂移检测（既有行属性不符则 `RAISE EXCEPTION` 中止而非覆盖），并把自己创建的行记入 ownership 表，使 `down` 只删自己建的且未被任何授权码/token 引用过的行。它的 `client_secret` 为 NULL，因此不受上述凭证轮换问题影响。
 
