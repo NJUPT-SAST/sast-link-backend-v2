@@ -20,20 +20,29 @@ const (
 	// AdminWrite permits mutating through the administrative console endpoints on
 	// behalf of an administrator. It grants no OIDC claim.
 	AdminWrite = "admin:write"
+	// UserRead permits reading the caller's own user record through the /user
+	// endpoints — profile, identities, devices. It grants no OIDC claim.
+	UserRead = "user:read"
+	// UserWrite permits mutating the caller's own user record through the /user
+	// endpoints — profile, avatar, identity binding, password, logout, devices.
+	// It grants no OIDC claim.
+	UserWrite = "user:write"
 )
 
 // oidcScopes are the scopes that map to ID Token / UserInfo claims. adminScopes
 // are the delegated-administration scopes, which map to no claim at all and only
-// gate the /admin routes.
+// gate the /admin routes. userScopes are the self-service scopes, which map to no
+// claim either and only gate the /user routes.
 //
 // The split matters because Normalize is the single "is this set well-formed"
 // predicate for every path — JWT verification, client registration, UserInfo and
-// ID Token issuance alike. Keeping the two families named separately is what lets
-// the claim-emitting paths filter deliberately (see ClaimScopes) instead of
+// ID Token issuance alike. Keeping the three families named separately is what
+// lets the claim-emitting paths filter deliberately (see ClaimScopes) instead of
 // relying on their switch statements happening to ignore a name they don't know.
 var (
 	oidcScopes  = []string{OpenID, Profile, Email}
 	adminScopes = []string{AdminRead, AdminWrite}
+	userScopes  = []string{UserRead, UserWrite}
 )
 
 // InternalSessionScopes is the canonical scope set issued by the internal
@@ -51,7 +60,7 @@ var (
 	ErrInvalid = errors.New("scope: invalid scope set")
 )
 
-var canonicalOrder = [...]string{OpenID, Profile, Email, AdminRead, AdminWrite}
+var canonicalOrder = [...]string{OpenID, Profile, Email, AdminRead, AdminWrite, UserRead, UserWrite}
 
 // Normalize validates scopes and returns them in the canonical protocol order.
 // OAuth requests for this service must always include openid.
@@ -165,18 +174,31 @@ func ContainsAdmin(scopes []string) bool {
 	return slices.ContainsFunc(scopes, IsAdmin)
 }
 
-// ClaimScopes drops the admin scopes, keeping the remainder in its original
+// IsUser reports whether one scope name is a self-service /user scope.
+func IsUser(value string) bool {
+	return slices.Contains(userScopes, value)
+}
+
+// ContainsUser reports whether a scope set carries any user scope. Like
+// ContainsAdmin, it does not validate the set: callers branch on intent (an
+// authorize request asking for self-service access, a token presented to /user)
+// before or independently of Normalize.
+func ContainsUser(scopes []string) bool {
+	return slices.ContainsFunc(scopes, IsUser)
+}
+
+// ClaimScopes drops every non-OIDC scope, keeping the OIDC ones in their original
 // order. It is what the ID Token signer and UserInfo apply before mapping scopes
 // to claims.
 //
-// An admin scope grants no claim, so filtering here rather than rejecting is the
-// correct behavior: a token holding "openid admin:read" was legitimately issued,
-// and refusing to answer UserInfo for it would break OIDC for a valid token. It
-// simply receives sub alone.
+// Neither an admin nor a user scope grants a claim, so filtering here rather than
+// rejecting is the correct behavior: a token holding "openid user:read" was
+// legitimately issued, and refusing to answer UserInfo for it would break OIDC
+// for a valid token. It simply receives sub alone.
 func ClaimScopes(granted []string) []string {
 	filtered := make([]string, 0, len(granted))
 	for _, item := range granted {
-		if !IsAdmin(item) {
+		if slices.Contains(oidcScopes, item) {
 			filtered = append(filtered, item)
 		}
 	}
@@ -184,5 +206,5 @@ func ClaimScopes(granted []string) []string {
 }
 
 func isSupported(value string) bool {
-	return slices.Contains(oidcScopes, value) || slices.Contains(adminScopes, value)
+	return slices.Contains(oidcScopes, value) || slices.Contains(adminScopes, value) || slices.Contains(userScopes, value)
 }
