@@ -137,6 +137,35 @@ func (h Handler) UpdateClient(c *gin.Context) {
 	response.Ok(c, messageResponse{Message: message})
 }
 
+// RotateClientSecret reissues a confidential client's secret. The plaintext is
+// returned once and never retrievable again, so the response carries
+// Cache-Control: no-store for the same reason CreateClient does.
+func (h Handler) RotateClientSecret(c *gin.Context) {
+	principal, ok := middleware.PrincipalFrom(c)
+	if !ok {
+		response.Error(c, internalError())
+		return
+	}
+	clientPK, ok := parsePositiveID(c.Param("id"))
+	if !ok {
+		response.Error(c, notFound())
+		return
+	}
+	result, err := h.Clients.RotateClientSecret(c.Request.Context(), adminclient.RotateClientSecretInput{
+		ClientPK:      clientPK,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
+	})
+	if err != nil {
+		response.Error(c, mapServiceError(err))
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	response.Ok(c, rotatedClientSecretDTO{ClientID: clientPK, ClientSecret: result.ClientSecret})
+}
+
 // parsePositiveID parses a path segment as a positive primary key.
 func parsePositiveID(raw string) (int64, bool) {
 	trimmed := strings.TrimSpace(raw)

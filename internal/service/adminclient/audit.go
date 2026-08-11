@@ -9,7 +9,23 @@ import (
 const (
 	actionCreateClient = "admin_oauth_client_create"
 	actionUpdateClient = "admin_oauth_client_update"
+	//nolint:gosec // G101 trips on the "Secret" in the name; this is an audit action string, not a credential.
+	actionRotateClientSecret = "admin_oauth_client_rotate_secret"
 )
+
+// auditRotateSecret records a secret rotation. The new plaintext never appears
+// here — like auditCreate, only the fact that a rotation happened is durable.
+func (s Service) auditRotateSecret(ctx context.Context, input RotateClientSecretInput, clientID string) {
+	s.audit(ctx, auditParams{
+		AdminUserID:   input.AdminUserID,
+		ActorClientID: input.ActorClientID,
+		Action:        actionRotateClientSecret,
+		ResourceID:    &clientID,
+		Success:       true,
+		ClientIP:      input.ClientIP,
+		UserAgent:     input.UserAgent,
+	})
+}
 
 // auditCreate records a registration attempt.
 //

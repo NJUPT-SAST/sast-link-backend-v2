@@ -112,3 +112,24 @@ type UpdateClientResult struct {
 	// RevokedTokens counts the access tokens revoked because the client was disabled.
 	RevokedTokens int
 }
+
+// RotateClientSecretInput identifies a client whose secret should be reissued.
+// A secret is stored only as a hash and can never be read back or edited, so
+// rotation is the one supported response to a leaked credential short of
+// disabling the client.
+type RotateClientSecretInput struct {
+	ClientPK int64
+	// AdminUserID is the authenticated administrator, for the audit trail.
+	AdminUserID int64
+	// ActorClientID is the azp of the token that authorized this call. Empty means a
+	// console session.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
+}
+
+// RotateClientSecretResult carries the one and only plaintext copy of the new
+// secret, matching CreateClientResult: only its hash is stored.
+type RotateClientSecretResult struct {
+	ClientSecret string
+}

@@ -19,15 +19,32 @@ import (
 )
 
 type fakeClients struct {
-	listResult   []adminclient.Client
-	listErr      error
-	createResult *adminclient.CreateClientResult
-	createErr    error
-	createInput  adminclient.CreateClientInput
-	updateResult *adminclient.UpdateClientResult
-	updateErr    error
-	updateInput  adminclient.UpdateClientInput
-	updateCalls  int
+	listResult         []adminclient.Client
+	listErr            error
+	createResult       *adminclient.CreateClientResult
+	createErr          error
+	createInput        adminclient.CreateClientInput
+	updateResult       *adminclient.UpdateClientResult
+	updateErr          error
+	updateInput        adminclient.UpdateClientInput
+	updateCalls        int
+	rotateSecretResult *adminclient.RotateClientSecretResult
+	rotateSecretErr    error
+	rotateSecretInput  adminclient.RotateClientSecretInput
+}
+
+func (f *fakeClients) RotateClientSecret(
+	_ context.Context,
+	input adminclient.RotateClientSecretInput,
+) (*adminclient.RotateClientSecretResult, error) {
+	f.rotateSecretInput = input
+	if f.rotateSecretErr != nil {
+		return nil, f.rotateSecretErr
+	}
+	if f.rotateSecretResult == nil {
+		return &adminclient.RotateClientSecretResult{ClientSecret: "rotated-secret"}, nil
+	}
+	return f.rotateSecretResult, nil
 }
 
 func (f *fakeClients) ListClients(_ context.Context) ([]adminclient.Client, error) {
@@ -429,4 +446,33 @@ func TestRejectsWrongContentTypeAndOversizedBody(t *testing.T) {
 			t.Fatal("an oversized body reached the service")
 		}
 	})
+}
+
+// The rotate-secret response carries the new plaintext exactly once and is
+// no-store, mirroring the registration response. The path id and the
+// authenticated principal are what reach the service.
+func TestRotateClientSecretReturnsSecretOnce(t *testing.T) {
+	service := &fakeClients{rotateSecretResult: &adminclient.RotateClientSecretResult{ClientSecret: "rotated-secret-value"}}
+	router := newRouter(t, service)
+
+	recorder := doRequest(t, router, http.MethodPost, "/admin/oauth-clients/1/rotate-secret", "", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		ID           int64  `json:"id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	if err := json.Unmarshal(decodeEnvelope(t, recorder).Data, &payload); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if payload.ClientSecret != "rotated-secret-value" {
+		t.Fatalf("client_secret = %q, want the rotated secret", payload.ClientSecret)
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store on a response carrying a secret", got)
+	}
+	if service.rotateSecretInput.ClientPK != 1 || service.rotateSecretInput.AdminUserID != 99 {
+		t.Fatalf("rotate input = %+v, want the path id and authenticated principal", service.rotateSecretInput)
+	}
 }

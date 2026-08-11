@@ -118,9 +118,69 @@ func TestCreateClientAcceptsCapabilityScopeFromConsole(t *testing.T) {
 	}
 }
 
-// A first_party client is public and authenticates with PKCE, matching the built-in
-// client seeded by V003. Issuing it a secret would imply a credential that no
-// first-party flow presents.
+// A leaked client_secret is a credential incident: the client can rotate it
+// without logging its users out (tokens never depended on the secret), and the
+// new plaintext is returned exactly once. Rotation is console-only and refused
+// for public clients, which have no secret.
+func TestRotateClientSecret(t *testing.T) {
+	t.Run("rotates a confidential client's secret", func(t *testing.T) {
+		h := newHarness(t)
+		secret := "sha256-v1$old"
+		client := activeClient(5)
+		client.ClientSecretHash = &secret
+		h.clients.findResult = client
+
+		result, err := h.service.RotateClientSecret(context.Background(), RotateClientSecretInput{
+			ClientPK: 5, AdminUserID: 99,
+		})
+		if err != nil {
+			t.Fatalf("RotateClientSecret() error = %v", err)
+		}
+		if result.ClientSecret == "" {
+			t.Fatal("rotated client returned no plaintext secret")
+		}
+		stored, ok := h.clients.updateFields["client_secret"]
+		if !ok || stored == result.ClientSecret {
+			t.Fatalf("updateFields = %v, want a stored hash different from the plaintext", h.clients.updateFields)
+		}
+		if h.clients.updateRevoked {
+			t.Fatal("rotation revoked tokens; the secret never affected token validity")
+		}
+		if len(h.audit.entries) != 1 || h.audit.entries[0].Action != "admin_oauth_client_rotate_secret" {
+			t.Fatalf("audit entries = %+v, want one rotate-secret row", h.audit.entries)
+		}
+	})
+
+	t.Run("refuses a public client", func(t *testing.T) {
+		h := newHarness(t)
+		h.clients.findResult = firstPartyClient(5)
+
+		_, err := h.service.RotateClientSecret(context.Background(), RotateClientSecretInput{ClientPK: 5, AdminUserID: 99})
+		assertKind(t, err, KindInvalidInput)
+	})
+
+	t.Run("refuses a non-console actor", func(t *testing.T) {
+		h := newHarness(t)
+		secret := "sha256-v1$old"
+		client := activeClient(5)
+		client.ClientSecretHash = &secret
+		h.clients.findResult = client
+
+		_, err := h.service.RotateClientSecret(context.Background(), RotateClientSecretInput{
+			ClientPK: 5, AdminUserID: 99, ActorClientID: "ops-tool-delegate",
+		})
+		assertKind(t, err, KindProtected)
+	})
+
+	t.Run("returns not-found for an unknown client", func(t *testing.T) {
+		h := newHarness(t)
+		h.clients.findErr = repository.ErrNotFound
+
+		_, err := h.service.RotateClientSecret(context.Background(), RotateClientSecretInput{ClientPK: 5, AdminUserID: 99})
+		assertKind(t, err, KindNotFound)
+	})
+}
+
 func TestCreateClientWithholdsSecretForFirstParty(t *testing.T) {
 	h := newHarness(t)
 	input := validCreateInput()

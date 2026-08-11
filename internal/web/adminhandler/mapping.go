@@ -52,6 +52,13 @@ type createdClientDTO struct {
 	ClientSecret string `json:"client_secret,omitempty"`
 }
 
+// rotatedClientSecretDTO is the secret-rotation response. Like createdClientDTO,
+// the plaintext exists on exactly this one response shape.
+type rotatedClientSecretDTO struct {
+	ClientID     int64  `json:"id"`
+	ClientSecret string `json:"client_secret"`
+}
+
 type clientListResponse struct {
 	Clients []clientDTO `json:"clients"`
 }

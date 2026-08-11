@@ -276,6 +276,46 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	return &UpdateClientResult{RevokedTokens: len(entries)}, nil
 }
 
+// RotateClientSecret reissues a confidential client's secret. The new plaintext is
+// returned exactly once, only its hash is stored. Existing access and refresh
+// tokens are untouched — they never depended on the secret — so rotation cuts a
+// leaked credential without logging anyone out. Refused for a public (first_party)
+// client, which has no secret to rotate, and for any non-console actor, mirroring
+// checkProtected's console-actor rule for every other sensitive edit.
+func (s Service) RotateClientSecret(ctx context.Context, input RotateClientSecretInput) (*RotateClientSecretResult, error) {
+	if s.Clients == nil {
+		return nil, newError(ErrInternal, "客户端仓储未配置", nil)
+	}
+	current, err := s.Clients.FindByID(ctx, input.ClientPK)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+	if current.ClientSecretHash == nil {
+		return nil, newError(ErrInvalidInput, "该客户端是公开客户端，没有 client_secret 可轮换", nil)
+	}
+	// Only the console may rotate a capability client's secret, mirroring
+	// checkProtected's console-actor rule for every other sensitive edit.
+	if !s.actorIsConsole(input.ActorClientID) {
+		return nil, newError(ErrProtectedClient, "client_secret 只能由控制台轮换", nil)
+	}
+	secret, hash, err := s.Secrets.NewClientSecret()
+	if err != nil {
+		return nil, newError(ErrInternal, "生成 client_secret 失败", err)
+	}
+	now := s.now()
+	if _, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, map[string]any{"client_secret": hash}, false, now); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+		}
+		return nil, newError(ErrInternal, "更新 client_secret 失败", err)
+	}
+	s.auditRotateSecret(ctx, input, current.ClientID)
+	return &RotateClientSecretResult{ClientSecret: secret}, nil
+}
+
 // mergedRegistration resolves what the registration's scopes and grant types would
 // be after this update: the submitted value where present, the stored one otherwise.
 //
