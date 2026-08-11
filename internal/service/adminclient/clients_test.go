@@ -73,7 +73,7 @@ func TestCreateClientAdminScopeGuards(t *testing.T) {
 			// reaching /admin would grow without an operator approving it.
 			name: "a delegated actor is refused", clientType: "third_party",
 			scopes: []string{"openid", scope.AdminWrite}, grantTypes: []string{"authorization_code"},
-			actor: "sast-people-admin", wantKind: KindProtected,
+			actor: "ops-tool-delegate", wantKind: KindProtected,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -322,7 +322,7 @@ func TestUpdateClientGuardIsScopedToTheBuiltinClient(t *testing.T) {
 // Registry changes are audited with the acting credential too, so a client created
 // by the ops tool is distinguishable from one an administrator registered by hand.
 func TestClientAuditRecordsTheActingClient(t *testing.T) {
-	const delegated = "sast-people-admin"
+	const delegated = "ops-tool-delegate"
 	for _, test := range []struct {
 		name  string
 		actor string
@@ -393,13 +393,13 @@ func TestUpdateClientAdminScopeGuards(t *testing.T) {
 		{
 			name:     "a delegated actor may not grant admin scope",
 			current:  activeClient(5),
-			input:    UpdateClientInput{ClientPK: 5, Scope: &adminScopes, AdminUserID: 99, ActorClientID: "sast-people-admin"},
+			input:    UpdateClientInput{ClientPK: 5, Scope: &adminScopes, AdminUserID: 99, ActorClientID: "ops-tool-delegate"},
 			wantKind: KindProtected,
 		},
 		{
 			name:     "a delegated actor may not edit a delegated client at all",
 			current:  delegatedClient(5),
-			input:    UpdateClientInput{ClientPK: 5, IsActive: boolPointer(true), AdminUserID: 99, ActorClientID: "sast-people-admin"},
+			input:    UpdateClientInput{ClientPK: 5, IsActive: boolPointer(true), AdminUserID: 99, ActorClientID: "ops-tool-delegate"},
 			wantKind: KindProtected,
 		},
 		{

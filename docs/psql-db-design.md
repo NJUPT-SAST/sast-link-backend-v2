@@ -333,19 +333,19 @@ CREATE TABLE oauth_clients (
 
 ### 迁移种入的客户端
 
-三个客户端由迁移种入。`sast-link-web` 必须如此——服务本身依赖它存在。另两个是历史原因：种入时控制台一律拒绝 admin scope，如今等价的注册可以经控制台完成（见 API 文档 §6.7），它们因此是该规则下的普通注册，而非特例。下表描述这些行的现状，其中的 `client_id` 是既有数据，不是代码识别的名字。
+只有 `sast-link-web` 由迁移种入，因为服务本身依赖它存在（内部 API 的 `azp` 门钉死在这个 `client_id` 上）。其余客户端——包括持有 admin scope 的委派管理客户端——一律经控制台注册（见 API 文档 §6.5 / §6.7），迁移不再种入任何接入方客户端。
 
 |`client_id`|迁移|类型|scopes|grant_types|用途|
 |---|---|---|---|---|---|
 |`sast-link-web`|V003|`first_party`（无 secret）|`openid` `profile` `email`|`authorization_code` `refresh_token`|内置控制台。内部 API 通过 `azp` 钉死在此客户端上；停用它是不可自行恢复的锁死（登录/刷新/注册均经由它解析，且同一操作会撤销全部内部会话 token），故控制台接口拒绝停用、改写其 `redirect_uris`、修改其 `scopes` 与 `grant_types`（`grant_types` 由 V003 种子值钉死，控制台自身的 OAuth 会话经 refresh grant 续期）|
-|`sast-people-admin`|V008|`third_party`（有 secret）|`openid` `admin:read` `admin:write`|`authorization_code`|委派管理客户端。它没有任何特殊地位：委派身份完全由 `scopes` 含 admin scope 决定，代码里不存在客户端名单，控制台可另行授予其他 `third_party` 客户端。**不注册 `refresh_token`**：refresh 继承 scope 且不收窄，注册了就等于 `admin:write` 可无限续期；限于 `authorization_code` 后，管理凭证的生命周期是一个 Access Token TTL，且该约束现由 adminclient 强制而非仅靠这行 SQL 恰好如此。可停用（`is_active = false`，同一操作撤销其全部存活 token），但拒绝改写 `redirect_uris`——其授权码携带 admin scope|
-|`sast-people-session`|V008|`third_party`（有 secret）|`openid` `profile` `email`|`authorization_code` `refresh_token`|与上一行同属一个接入方的普通登录会话。经 `/userinfo`（唯一服务第三方 token 的端点）读取当前登录者，并**可长期续期**——它不持有任何管理能力，故 refresh 无扩权风险。不持有 admin scope，打 `/admin/*` 一律 403|
 
-拆成两个客户端而非一个，是因为两类凭证的生命周期与影响面不同：会话需要长期保活，管理能力应尽快过期。两者职责不重叠且互相打不到对方的接口——会话客户端不持有 admin scope，管理客户端不持有 `profile`/`email`，其 `/userinfo` 只能得到 `sub`。二者共用同一组 `redirect_uris`：`authorize` 校验的是「该 URI 在**这个** client 的注册列表内」，不要求全局唯一，因此一个接入方用一个回调端点承载两条腿即可。
+**为什么接入方客户端不走迁移**：`client_secret` 是需要轮换的凭证，而 seed 迁移必须带漂移检测（既有行属性不符则中止，否则重复 apply 会覆盖一个存活客户端的 scope 或回调地址）。两者不相容——凭证一经轮换，库里的哈希就不再等于迁移里写死的那个，任何需要重跑该迁移的路径（`down` 后再 `up`、灾备重建、从生产 dump 恢复后跑迁移）都会中止且无法绕过。把 secret 从漂移检测中排除也不成立：那样 `down`/`up` 会把轮换后的行删掉并重建成迁移里的旧 secret，等于让一个已作废的凭证重新生效。
 
-后两个都是 `third_party`，这是载荷性的而非偶然：管理那半必须是 `third_party` 才能持有 admin scope，因为 `first_party` 是公开客户端、token 端点仅凭 PKCE 认证它。scope 本身对两类客户端一律受 `ContainsAll` 约束。控制台可授予 admin scope，但受四道守卫约束（必须 `third_party`、不得含 `refresh_token`、只能由内置控制台客户端发起、不得与改写 `redirect_uris` 同请求），且判定基于合并后状态以防拆包绕过；收窄 scope 或新授予 admin scope 都会连带撤销该客户端存量 token。`client_secret` 只以 `sha256-v1$...` 哈希入库，两个明文各自在迁移之外一次性生成、仅存于接入方自身配置。
+一个既要读当前登录用户、又要调用 `/admin/*` 的接入方，宜注册两个客户端而非一个：一个持 `openid admin:read admin:write` 且不带 refresh，一个持 `openid profile email` 且带 refresh 承载普通登录会话。两类凭证的生命周期与影响面不同：会话需要长期保活，管理能力应尽快过期。两者职责不重叠且互相打不到对方的接口——会话客户端不持有 admin scope，管理客户端不持有 `profile`/`email`，其 `/userinfo` 只能得到 `sub`。二者可共用同一组 `redirect_uris`：`authorize` 校验的是「该 URI 在**这个** client 的注册列表内」，不要求全局唯一，因此一个接入方用一个回调端点承载两条腿即可。
 
-两个 seed 迁移形状相同：幂等（重复 apply 为 no-op）、带漂移检测（既有行属性不符则 `RAISE EXCEPTION` 中止而非覆盖——覆盖可能扩大 scope 或改写一个存活管理客户端的回调地址）、并把自己创建的行记入 ownership 表，使 `down` 只删自己建的且未被任何授权码/token 引用过的行。
+管理那半必须是 `third_party` 才能持有 admin scope，因为 `first_party` 是公开客户端、token 端点仅凭 PKCE 认证它。scope 本身对两类客户端一律受 `ContainsAll` 约束。控制台授予 admin scope 受四道守卫约束（必须 `third_party`、不得含 `refresh_token`、只能由内置控制台客户端发起、不得与改写 `redirect_uris` 同请求），且判定基于合并后状态以防拆包绕过；收窄 scope 或新授予 admin scope 都会连带撤销该客户端存量 token。`client_secret` 只以 `sha256-v1$...` 哈希入库，明文仅在注册响应中出现一次。
+
+V003 是幂等的：重复 apply 为 no-op，带漂移检测（既有行属性不符则 `RAISE EXCEPTION` 中止而非覆盖），并把自己创建的行记入 ownership 表，使 `down` 只删自己建的且未被任何授权码/token 引用过的行。它的 `client_secret` 为 NULL，因此不受上述凭证轮换问题影响。
 
 ## oauth_authorizations 授权码
 

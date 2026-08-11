@@ -396,7 +396,7 @@ func TestAuthenticateAnyClientAcceptsThirdPartyToken(t *testing.T) {
 // testDelegatedClientID is an arbitrary third-party client_id. Nothing in the
 // middleware knows this value — delegation is proven by the token's admin scope, not
 // by its azp — so the tests below use it only to show that an azp is present.
-const testDelegatedClientID = "sast-people-admin"
+const testDelegatedClientID = "ops-tool-delegate"
 
 // performAdminAuthRequest drives RequireAdminAuth followed by RequireDelegatedScope,
 // mirroring how the /admin group is wired, so the two gates are exercised in the

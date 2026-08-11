@@ -47,12 +47,12 @@ import (
 
 const (
 	delegatedE2EInternalClientID = "sast-link-web"
-	delegatedE2ESessionClientID  = "sast-people-session"
-	// delegatedE2EDelegatedClientID is the V008-seeded client that holds the admin
-	// scopes. Nothing in the middleware knows this name — a token reaches /admin by
-	// carrying an admin scope, which only a registration granted one can produce — so
-	// this constant names a fixture, not a rule.
-	delegatedE2EDelegatedClientID = "sast-people-admin"
+	delegatedE2ESessionClientID  = "delegated-e2e-session"
+	// delegatedE2EDelegatedClientID is a fixture client this test registers itself,
+	// holding the admin scopes. Nothing in the middleware knows this name — a token
+	// reaches /admin by carrying an admin scope, which only a registration granted one
+	// can produce — so this constant names a fixture, not a rule.
+	delegatedE2EDelegatedClientID = "delegated-e2e-admin"
 )
 
 type delegatedHarness struct {
@@ -110,12 +110,25 @@ func setupDelegated(t *testing.T) *delegatedHarness {
 	auditLog := repository.NewAuditLog(database)
 	blacklist := oauthredis.BlacklistStore{Store: store}
 
-	// V008 seeded the delegated client; its primary key is what the access-token rows
-	// have to reference.
-	var delegatedClient model.OAuthClient
-	if err := database.Where("client_id = ?", delegatedE2EDelegatedClientID).
-		First(&delegatedClient).Error; err != nil {
-		t.Fatalf("read seeded %s client: %v", delegatedE2EDelegatedClientID, err)
+	// The delegated client is registered by this fixture rather than seeded by a
+	// migration: delegation is a console grant, so there is no schema-level delegate to
+	// read back. Its primary key is what the access-token rows have to reference.
+	delegatedSecret := auth.HashClientSecret("delegated-e2e-secret")
+	delegatedActive := true
+	delegatedClient := &model.OAuthClient{
+		ClientID:   delegatedE2EDelegatedClientID,
+		ClientName: "Delegated E2E Admin",
+		ClientType: model.ClientTypeThirdParty,
+		// Confidential and without the refresh grant, the shape checkAdminScopeGrant
+		// requires of anything holding an admin scope.
+		ClientSecretHash: &delegatedSecret,
+		RedirectURIs:     model.StringArray{"https://delegated-e2e.test/cb"},
+		GrantTypes:       model.StringArray{"authorization_code"},
+		Scopes:           model.StringArray{scope.OpenID, scope.AdminRead, scope.AdminWrite},
+		IsActive:         &delegatedActive,
+	}
+	if err := database.Create(delegatedClient).Error; err != nil {
+		t.Fatalf("register delegated client: %v", err)
 	}
 
 	// No delegated client is named here. The authenticator admits a third-party token

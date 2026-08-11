@@ -453,7 +453,7 @@ func TestUpdateUserAuditRecordsFieldNamesNotValues(t *testing.T) {
 // delegated client's token and a console session name the same person, so without
 // actor_client_id the two are indistinguishable after the fact.
 func TestAuditRecordsTheActingClient(t *testing.T) {
-	const delegated = "sast-people-admin"
+	const delegated = "ops-tool-delegate"
 	tests := []struct {
 		name  string
 		actor string

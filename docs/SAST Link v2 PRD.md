@@ -311,7 +311,7 @@ POST /oauth/authorize/consent  → Bearer 认证 → GetDel 消费暂存 → 建
 - `client_type` 只承载两件事：客户端认证方式（`first_party` 不生成 secret，即公开客户端；`third_party` 为机密客户端）与 admin scope 的可授予性。它不表达任何信任级别，代码中也没有据此放宽的检查
 - **scope 一律受注册值约束**：任何客户端（含 `first_party`）请求的 scope 必须落在其注册 `scopes` 列内，超出返回 `invalid_scope`（`scope.ContainsAll`）。第一方曾被豁免此检查，已移除：该豁免使 `scopes` 列对第一方形同记录，且是追溯性的——新增任何 scope 都会被所有现存第一方注册立即获得，不产生任何授予动作或审计行
 - `admin:read` / `admin:write`（委派管理，见 §4.12）在上述约束之上再加一条：**仅 `third_party` 可持有**，`first_party` 请求任一 admin scope 返回 `invalid_scope`，即使其注册值中含有。理由是凭证能力而非信任级别——`first_party` 是公开客户端，token 端点仅凭 PKCE 认证它（`authenticateClient`），因此从「授权码被签出」到「存在管理 token」之间只有 `redirect_uri` 精确匹配这一道屏障，而机密客户端有两道独立屏障。该判定在四处一致成立：authorize 首段、consent 复检、授权码兑换复检，以及控制台授予侧（`checkAdminScopeGrant`）。两个 admin scope 不产生任何 OIDC claim，仅用于 `/admin/*` 的 scope 门禁
-  - **如果未来放开此限制**（允许公开客户端持有 admin scope），必须同时加固授予路径：`checkAdminScopeGrant` 对公开客户端授予 admin scope 时，要求请求体携带 `redirect_uris` 且与库中现值逐字节相同（不是「允许同请求改写」，而是「强制审批人显式确认正在批准的回调地址」）。否则存在攻击路径：先注册一个普通 `first_party` 客户端并将 `redirect_uris` 指向攻击者控制的地址（仅需 `admin:write`，是日常操作），再申请授予 admin scope——`checkAdminScopeGrant` 的四条守卫基于合并后状态，但没有一条检查 `redirect_uris` 本身的值，审批人看到的只是「给某客户端加 admin scope」，回调地址得主动翻，容易漏看。机密客户端在 token 端点有 secret 门槛故不受此影响；公开客户端下，控制回调地址即控制授权码，等同控制管理 token。当前所有能保管 secret 的场景都注册为 `third_party`（V008 seed 的 ops 客户端即此形状），内部 SPA 已能通过内置控制台客户端调 `/admin`，放开公开客户端持有 admin scope 暂无实际用例，故此加固未实现
+  - **如果未来放开此限制**（允许公开客户端持有 admin scope），必须同时加固授予路径：`checkAdminScopeGrant` 对公开客户端授予 admin scope 时，要求请求体携带 `redirect_uris` 且与库中现值逐字节相同（不是「允许同请求改写」，而是「强制审批人显式确认正在批准的回调地址」）。否则存在攻击路径：先注册一个普通 `first_party` 客户端并将 `redirect_uris` 指向攻击者控制的地址（仅需 `admin:write`，是日常操作），再申请授予 admin scope——`checkAdminScopeGrant` 的四条守卫基于合并后状态，但没有一条检查 `redirect_uris` 本身的值，审批人看到的只是「给某客户端加 admin scope」，回调地址得主动翻，容易漏看。机密客户端在 token 端点有 secret 门槛故不受此影响；公开客户端下，控制回调地址即控制授权码，等同控制管理 token。当前所有能保管 secret 的场景都注册为 `third_party`，内部 SPA 已能通过内置控制台客户端调 `/admin`，放开公开客户端持有 admin scope 暂无实际用例，故此加固未实现
 - 内置控制台是这条规则的既有例外：它本身是公开的 `first_party` 客户端且拥有完整管理权（`RequireAdminAuth` 无条件放行、`RequireDelegatedScope` 豁免）。它靠一整套针对该注册的加固成立——`redirect_uris` / `scopes` 不可通过 API 修改、不可停用、启动时校验 scope 集合、`client_id` 由 `INTERNAL_OAUTH_CLIENT_ID` 固定。这些加固对通过 API 注册的其他 `first_party` 客户端一条都不适用，因此不能据此推论「公开客户端可以持有管理权」
 - 公开客户端携带 `client_secret` 会被拒绝而非忽略——这说明客户端搞错了自己的类型
 - 授权码重放检测：`is_used=TRUE` 的同 code 再次出现 → 通过 `family_id` 级联撤销整条 token 链
@@ -424,7 +424,7 @@ Payload: {
 
 委派 token 的 `sub` 是管理员本人，故权限上限始终是该用户角色。收回是即时的：收窄 scope 或新授予 admin scope 都在同一事务内撤销该客户端存量 token，且 consent 与授权码兑换两处都会对活注册重新校验 scope，因此不留「已签发未兑换」的时间窗口。停用（`is_active = false`）仍是 kill switch，同一操作撤销其全部存活 token。
 
-一个既要读当前登录用户、又要调用 `/admin/*` 的接入方，宜注册两个客户端而非一个：一个持 `openid admin:read admin:write` 且不带 refresh，一个持 `openid profile email` 且带 refresh 承载普通登录会话（V008 种入的两行即此形状）。理由是两类凭证的生命周期与影响面不同：会话需长期保活，管理能力应尽快过期；合成一个即意味着一份可长期续期的凭证同时握有管理能力，而这正是「持有 admin scope 者不得注册 `refresh_token`」要排除的情形。拆开后会话客户端不持有 admin scope，打 `/admin/*` 一律 403；管理客户端不持有 `profile`/`email`，其 `/userinfo` 只返回 `sub`。第三方客户端读当前登录用户只能经 `/userinfo`（§4.11），`/user/*` 由 `azp` 门拒绝（§7.1）。
+一个既要读当前登录用户、又要调用 `/admin/*` 的接入方，宜注册两个客户端而非一个：一个持 `openid admin:read admin:write` 且不带 refresh，一个持 `openid profile email` 且带 refresh 承载普通登录会话。理由是两类凭证的生命周期与影响面不同：会话需长期保活，管理能力应尽快过期；合成一个即意味着一份可长期续期的凭证同时握有管理能力，而这正是「持有 admin scope 者不得注册 `refresh_token`」要排除的情形。拆开后会话客户端不持有 admin scope，打 `/admin/*` 一律 403；管理客户端不持有 `profile`/`email`，其 `/userinfo` 只返回 `sub`。第三方客户端读当前登录用户只能经 `/userinfo`（§4.11），`/user/*` 由 `azp` 门拒绝（§7.1）。
 
 `client_type` 不可通过更新接口修改：它同时决定客户端的凭据模型（是否持有 client_secret）与 scope 授予规则（仅 `third_party` 受注册 scope 约束，且 admin scope 只能授予 `third_party`）。就地翻转类型而不同步 secret 会产出无需凭据即可换 token 的 `third_party` 客户端，等于绕过 admin scope 的凭据前提；需要换类型时重新注册一个客户端。
 
@@ -726,7 +726,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 模块 | 状态 |
 | ------ | ------ |
 | Go 服务骨架 | 已完成 — 配置、PostgreSQL/Redis 连接、Gin router、结构化日志与健康检查 |
-| 数据基础层 | 已完成 — V001–V008 SQL migrations、固定内置 `sast-link-web` first-party Client、V008 种入一对委派管理 / 会话 Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
+| 数据基础层 | 已完成 — V001–V007 SQL migrations、固定内置 `sast-link-web` first-party Client、token blacklist Outbox、baseline guard、persistence entities、Auth repositories 与 PostgreSQL 16 integration tests |
 | 认证基础设施 | 已完成 — 单方案 argon2id 密码哈希（默认 m=19456KiB/t2，存量 pbkdf2-sha512-v1 只读验证 + 登录时重哈希迁移）、EdDSA（Ed25519）JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope（另有 `admin:read`/`admin:write` 委派 scope，仅第三方客户端可持有，不产生 OIDC claim）、token-family rotation/replay、Redis 一次性状态/auth-state 缓存/登录失败计数与 fixed-window limiter |
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流，以及登录 / 登出 / 刷新审计接入（刷新以 `outcome` 区分 `rotated` 与 `refresh_replayed`，后者即重放防御触发并级联撤销整个 token family） |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
@@ -738,7 +738,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 ## 11. 实现顺序
 
 - [x] Go 服务骨架（配置 / DB 与 Redis 连接 / Web 基础设施 / 健康检查）
-- [x] 数据基础层（V001–V008 migrations / 内置 first-party Client / V008 委派管理 + 会话 Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
+- [x] 数据基础层（V001–V007 migrations / 内置 first-party Client / token blacklist Outbox / baseline / entities / repositories / integration tests）
 - [x] 认证基础设施（单方案 argon2id 密码哈希（默认 m=19456KiB/t2，存量 pbkdf2-sha512-v1 只读验证 + 登录时重哈希）/ JWT + JWKS（EdDSA）/ Refresh Token / PKCE-S256 / scope / Redis auth-state 缓存 + limiter / token-family rotation）
 - [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
 - [x] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码 / 第三方邮箱绑定）
