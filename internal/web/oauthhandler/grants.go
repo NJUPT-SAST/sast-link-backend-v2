@@ -18,7 +18,7 @@ func (h Handler) Grants(c *gin.Context) {
 	}
 	grants, err := h.Service.Grants(c.Request.Context(), principal.UserID)
 	if err != nil {
-		response.Error(c, internalError())
+		response.Error(c, mapGrantsError(err))
 		return
 	}
 	response.Ok(c, gin.H{"grants": grants})
@@ -37,7 +37,7 @@ func (h Handler) RevokeGrant(c *gin.Context) {
 		return
 	}
 	if err := h.Service.RevokeGrant(c.Request.Context(), principal.UserID, clientID, principal.ClientID); err != nil {
-		response.Error(c, internalError())
+		response.Error(c, mapGrantsError(err))
 		return
 	}
 	response.Ok(c, gin.H{"message": "已撤销该应用的授权"})

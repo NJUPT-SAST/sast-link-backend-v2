@@ -111,11 +111,39 @@ func authorizeErrorParts(err error) (code, description string, redirectable bool
 // endpoint is this project's own API rather than an RFC-defined one, so it keeps
 // the envelope its front end already parses.
 func mapConsentError(err error) error {
+	// invalid_client on consent is 404, not 401: the caller is a logged-in human
+	// whose own credentials are fine; what went wrong is that the third-party
+	// client was disabled between the two legs. Answering 401 would tell the
+	// consent page the user was not authenticated and send them to re-login,
+	// which cannot help. 404 keeps the business code's {HTTP status}{sequence}
+	// convention (API 文档 §1) intact, since the code is 40402.
+	return mapEnvelopeError(err, http.StatusNotFound)
+}
+
+// mapGrantsError maps an authorized-apps failure onto the standard envelope. The
+// grants endpoints are authenticated and answer in the envelope like consent; the
+// only service failure they can raise is a rate limit (429 + Retry-After), which
+// this must not collapse into a 500 that reads as an outage.
+func mapGrantsError(err error) error {
+	// invalid_client cannot occur here (the caller's own token authenticated the
+	// request), so keep the RFC 6749 default 401 rather than consent's 404.
+	return mapEnvelopeError(err, http.StatusUnauthorized)
+}
+
+// mapEnvelopeError maps an OAuth service failure onto the standard envelope, for
+// the authenticated endpoints that keep the envelope instead of an RFC 6749 body.
+// invalidClientStatus supplies the status for KindInvalidClient, which differs
+// per endpoint (see mapConsentError). Every other kind uses the shared
+// statusForKind table, so a rate limit surfaces as 429 with Retry-After.
+func mapEnvelopeError(err error, invalidClientStatus int) error {
 	var oauthErr *oauth.Error
 	if !errors.As(err, &oauthErr) {
 		return internalError()
 	}
-	status := consentStatusForKind(oauthErr.Kind)
+	status := statusForKind(oauthErr.Kind)
+	if oauthErr.Kind == oauth.KindInvalidClient {
+		status = invalidClientStatus
+	}
 	code := businessCodeForKind(oauthErr.Kind)
 	message := oauthErr.Description
 	if oauthErr.Kind == oauth.KindInternal || message == "" {
@@ -129,33 +157,15 @@ func mapConsentError(err error) error {
 	}
 }
 
-// consentStatusForKind maps an OAuth failure to an HTTP status for the consent
-// endpoint, which uses the standard envelope rather than an RFC 6749 body.
-//
-// It diverges from statusForKind on exactly one kind. invalid_client is a 401 on
-// the token endpoint because RFC 6749 §5.2 says so — there the client itself is
-// the caller and failed to authenticate. On consent the caller is a logged-in
-// human whose own credentials are fine; what went wrong is that the third-party
-// client was disabled between the two legs. Answering 401 told the consent page the
-// user was not authenticated and sent them to re-login, which cannot help. 404
-// matches the documented behavior (openapi.yaml) and keeps the business code's
-// {HTTP status}{sequence} convention (API 文档 §1) intact, since the code is 40402.
-func consentStatusForKind(kind oauth.Kind) int {
-	if kind == oauth.KindInvalidClient {
-		return http.StatusNotFound
-	}
-	return statusForKind(kind)
-}
-
 // businessCodeForKind maps an OAuth failure to the project's business codes, for
-// the consent endpoint only.
+// the envelope-answering endpoints only.
 func businessCodeForKind(kind oauth.Kind) int {
 	switch kind {
 	case oauth.KindInvalidRequest, oauth.KindInvalidGrant:
 		return errcode.CodeBadRequest
 	case oauth.KindInvalidClient:
-		// Paired with 404 in consentStatusForKind, not the 401 that statusForKind gives
-		// this kind on the RFC endpoints. See there for why.
+		// Paired with 404 on consent (mapConsentError), not the 401 that statusForKind
+		// gives this kind on the RFC endpoints. See there for why.
 		return errcode.CodeClientNotFound
 	case oauth.KindInvalidToken:
 		return errcode.CodeAccessTokenInvalid

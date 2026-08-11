@@ -55,8 +55,8 @@ func TestRevokeGrantLeavesUnknownActorNull(t *testing.T) {
 	}
 }
 
-// The grants list and revoke are per-user budgeted; the revoke runs a family
-// revocation transaction plus a consent-history delete, so it is not free.
+// The grants list and revoke are per-user budgeted under separate keys, so
+// opening the list cannot exhaust the budget the destructive revoke needs.
 func TestGrantsThrottlesByUser(t *testing.T) {
 	h := newHarness(t)
 	h.limiter.result = LimitResult{Allowed: false, RetryAfter: 30 * time.Second}
@@ -67,7 +67,24 @@ func TestGrantsThrottlesByUser(t *testing.T) {
 		t.Fatalf("error = %+v, want a rate-limited error carrying Retry-After", oauthErr)
 	}
 	calls := h.limiter.callsSnapshot()
-	if len(calls) != 1 || calls[0] != "oauth_grants:user:1" {
-		t.Fatalf("limiter calls = %v, want one keyed by user", calls)
+	if len(calls) != 1 || calls[0] != "oauth_grants_list:user:1" {
+		t.Fatalf("limiter calls = %v, want one list keyed by user", calls)
+	}
+}
+
+// The revoke carries its own budget: a user who burned the list's budget reading
+// it can still revoke a misbehaving app.
+func TestGrantRevokeThrottlesByUserUnderOwnKey(t *testing.T) {
+	h := newHarness(t)
+	h.limiter.result = LimitResult{Allowed: false, RetryAfter: 30 * time.Second}
+
+	err := h.service.RevokeGrant(context.Background(), 1, 42, "sast-people")
+	oauthErr := oauthError(t, err, ErrorTemporarilyUnavail)
+	if oauthErr.Kind != KindRateLimited {
+		t.Fatalf("error = %+v, want a rate-limited error", oauthErr)
+	}
+	calls := h.limiter.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "oauth_grants_revoke:user:1" {
+		t.Fatalf("limiter calls = %v, want one revoke keyed by user", calls)
 	}
 }

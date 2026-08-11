@@ -23,7 +23,7 @@ func (s Service) Grants(ctx context.Context, userID int64) ([]repository.OAuthGr
 	if s.Authorizations == nil {
 		return nil, nil
 	}
-	if err := s.checkGrantsLimit(ctx, userID); err != nil {
+	if err := s.checkGrantsListLimit(ctx, userID); err != nil {
 		return nil, err
 	}
 	return s.Authorizations.ListGrantsByUser(ctx, userID)
@@ -40,8 +40,9 @@ func (s Service) RevokeGrant(ctx context.Context, userID, clientID int64, actorC
 		return nil
 	}
 	// The revoke runs a family-revocation transaction plus a consent-history
-	// delete, so it is budgeted per user like the grants list it serves.
-	if err := s.checkGrantsLimit(ctx, userID); err != nil {
+	// delete, so it is budgeted per user — under its own key, so the read path
+	// cannot starve it.
+	if err := s.checkGrantsRevokeLimit(ctx, userID); err != nil {
 		return err
 	}
 	now := s.now()

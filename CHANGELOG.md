@@ -39,6 +39,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **能力 scope refresh family 生命周期封顶的配套修正**（分支 `feat/user-scoped-access`）：consent 提交限流（`RATE_LIMIT_CONSENT_RPM`）**只对 approve 路径计费**——`approve: false` 的拒绝不铸码、不消耗配额，且被限流的 approve 在消费暂存之前返回 `42900`，可用同一 `request_id` 重试。grants 列表与撤销拆成**独立预算**（`oauth_grants_list` / `oauth_grants_revoke`），读列表耗尽不了撤销的配额；两者超限现在返回 `429` + `Retry-After`（此前被 handler 折叠成 500，与 consent 不一致）。`adminclient.mergedRegistration` 不再静默吞 `scope.Normalize` 失败，守卫不再可能基于错误的合并状态做授权决定。
+- **rotate-secret 拒绝路径补审计**（分支 `feat/user-scoped-access`）：`POST /admin/oauth-clients/:id/rotate-secret` 的公开客户端 `400`、非控制台 `403`、未知 id `404` 与写库失败现在都落审计（`admin_oauth_client_rotate_secret`，success=false + 错误码），兑现 API 文档 §6.9 的既有承诺——泄露后复盘要找的正是这些探针。审计 detail 不含新明文（与成功路径一致）。
 - **JWT 从 RS256 换 EdDSA（Ed25519）**（perf 分支）：JWKS 变 `kty=OKP/crv=Ed25519/alg=EdDSA`、discovery `id_token_signing_alg_values_supported=["EdDSA"]`、ID Token 同算法；密钥解析改 PKCS8，部署需换 Ed25519 密钥；验签 leeway 缩到 5s。
 - **auth-state 缓存取代 JTI 黑名单**（perf 分支）：中间件把 DB 权威的撤销 / 角色状态按 JTI 短 TTL 缓存（`AUTH_STATE_CACHE_TTL`，默认 15s），撤销路径写短 TTL tombstone（非 DEL）且缓存回填用 SET NX——关死撤销写竞态，撤销后旧角色无法通过竞态复活；缓存故障回落 DB（fail-open）。
 - **refresh grace period（30s）**（perf 分支）：并发刷新不再撤销整个 token family，双 tab 刷新不登出；超窗口的真 replay 才切族。

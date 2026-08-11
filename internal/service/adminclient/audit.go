@@ -13,15 +13,19 @@ const (
 	actionRotateClientSecret = "admin_oauth_client_rotate_secret"
 )
 
-// auditRotateSecret records a secret rotation. The new plaintext never appears
-// here — like auditCreate, only the fact that a rotation happened is durable.
-func (s Service) auditRotateSecret(ctx context.Context, input RotateClientSecretInput, clientID string) {
+// auditRotateSecret records a secret rotation attempt. The new plaintext never
+// appears here — like auditCreate, only the fact that a rotation was attempted is
+// durable. clientID is nil when the target could not be resolved (an unknown id);
+// the refusals that precede the write are recorded too, so a leaked-secret
+// incident review finds the probes, not just the successful rotations.
+func (s Service) auditRotateSecret(ctx context.Context, input RotateClientSecretInput, clientID *string, success bool, errCode int) {
 	s.audit(ctx, auditParams{
 		AdminUserID:   input.AdminUserID,
 		ActorClientID: input.ActorClientID,
 		Action:        actionRotateClientSecret,
-		ResourceID:    &clientID,
-		Success:       true,
+		ResourceID:    clientID,
+		Success:       success,
+		ErrCode:       errCode,
 		ClientIP:      input.ClientIP,
 		UserAgent:     input.UserAgent,
 	})

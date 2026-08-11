@@ -245,7 +245,11 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	}
 	// After checkProtected, so a refusal on a protected target names that reason rather
 	// than a scope rule the operator cannot act on. Both key on the stored row.
-	nextScopes := mergedRegistration(current, input)
+	nextScopes, mergeErr := mergedRegistration(current, input)
+	if mergeErr != nil {
+		s.auditUpdate(ctx, input, false, errorCode(mergeErr), 0, &current.ClientID, nil)
+		return nil, mergeErr
+	}
 	if grantErr := s.checkCapabilityScopeGrant(capabilityScopeGrant{
 		scopes:              nextScopes,
 		clientType:          current.ClientType,
@@ -288,49 +292,61 @@ func (s Service) RotateClientSecret(ctx context.Context, input RotateClientSecre
 	}
 	current, err := s.Clients.FindByID(ctx, input.ClientPK)
 	if errors.Is(err, repository.ErrNotFound) {
+		// An unknown id cannot name a resource, but the probe itself is worth
+		// finding in an incident review: a client_id sweep after a leaked secret
+		// looks exactly like this. ResourceID stays nil like every other failure
+		// on a target that could not be resolved.
+		s.auditRotateSecret(ctx, input, nil, false, ErrNotFound.Code)
 		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
 	}
 	if err != nil {
 		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
 	}
 	if current.ClientSecretHash == nil {
+		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrInvalidInput.Code)
 		return nil, newError(ErrInvalidInput, "该客户端是公开客户端，没有 client_secret 可轮换", nil)
 	}
 	// Only the console may rotate a capability client's secret, mirroring
 	// checkProtected's console-actor rule for every other sensitive edit.
 	if !s.actorIsConsole(input.ActorClientID) {
+		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrProtectedClient.Code)
 		return nil, newError(ErrProtectedClient, "client_secret 只能由控制台轮换", nil)
 	}
 	secret, hash, err := s.Secrets.NewClientSecret()
 	if err != nil {
+		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrInternal.Code)
 		return nil, newError(ErrInternal, "生成 client_secret 失败", err)
 	}
 	now := s.now()
 	if _, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, map[string]any{"client_secret": hash}, false, now); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
+			s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrNotFound.Code)
 			return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
 		}
+		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrInternal.Code)
 		return nil, newError(ErrInternal, "更新 client_secret 失败", err)
 	}
-	s.auditRotateSecret(ctx, input, current.ClientID)
+	s.auditRotateSecret(ctx, input, &current.ClientID, true, 0)
 	return &RotateClientSecretResult{ClientSecret: secret}, nil
 }
 
-// mergedRegistration resolves what the registration's scopes and grant types would
-// be after this update: the submitted value where present, the stored one otherwise.
+// mergedRegistration resolves what the registration's scopes would be after this
+// update: the submitted value where present, the stored one otherwise.
 //
 // Both are already normalized by the time they reach here — the stored values by the
-// write that persisted them, the submitted ones by updateFields.
-func mergedRegistration(current *model.OAuthClient, input UpdateClientInput) []string {
+// write that persisted them, the submitted ones by updateFields. The re-normalization
+// is defensive, and a failure must abort the guard rather than silently fall back to
+// the stored set: the post-merge check would then run on the wrong state.
+func mergedRegistration(current *model.OAuthClient, input UpdateClientInput) ([]string, error) {
 	scopes := []string(current.Scopes)
 	if input.Scope != nil {
-		// updateFields already normalized this value into the column map; normalizing
-		// again here is cheap and keeps the guard independent of that ordering.
-		if normalized, err := scope.Normalize(*input.Scope); err == nil {
-			scopes = normalized
+		normalized, err := scope.Normalize(*input.Scope)
+		if err != nil {
+			return nil, newError(ErrInvalidInput, "scopes 非法，必须包含 openid 且仅含受支持的值", err)
 		}
+		scopes = normalized
 	}
-	return scopes
+	return scopes, nil
 }
 
 // revocation describes what an update does to a client's granted capability, which is

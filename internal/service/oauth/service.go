@@ -165,10 +165,18 @@ func (s Service) checkConsentLimit(ctx context.Context, userID int64) error {
 	return s.checkLimit(ctx, s.ConsentLimiter, "oauth_consent", "user:"+strconv.FormatInt(userID, 10))
 }
 
-// checkGrantsLimit throttles the authorized-apps list and its revoke per user,
-// for the same NAT reason as the consent endpoints: campus egress shares one IP.
-func (s Service) checkGrantsLimit(ctx context.Context, userID int64) error {
-	return s.checkLimit(ctx, s.GrantsLimiter, "oauth_grants", "user:"+strconv.FormatInt(userID, 10))
+// checkGrantsListLimit throttles the authorized-apps list per user, for the same
+// NAT reason as the consent endpoints: campus egress shares one IP.
+func (s Service) checkGrantsListLimit(ctx context.Context, userID int64) error {
+	return s.checkLimit(ctx, s.GrantsLimiter, "oauth_grants_list", "user:"+strconv.FormatInt(userID, 10))
+}
+
+// checkGrantsRevokeLimit throttles the authorized-apps revoke per user. It gets a
+// budget of its own rather than sharing the list's, so opening the list a few
+// dozen times cannot exhaust the budget the destructive revoke needs: the one
+// action a user may want to take in a hurry is cutting a misbehaving app's access.
+func (s Service) checkGrantsRevokeLimit(ctx context.Context, userID int64) error {
+	return s.checkLimit(ctx, s.GrantsLimiter, "oauth_grants_revoke", "user:"+strconv.FormatInt(userID, 10))
 }
 
 func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, subject string) error {

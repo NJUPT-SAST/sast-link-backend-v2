@@ -242,6 +242,37 @@ func TestConsentThrottlesByUser(t *testing.T) {
 	}
 }
 
+// A deny mints no code, so it must not consume the approving path's budget: a
+// user can refuse several pending consents in a row without throttling the one
+// they actually approve.
+func TestConsentDenyDoesNotConsumeBudget(t *testing.T) {
+	h := newHarness(t)
+
+	// Seed a valid pending request first (the authorize leg shares the limiter,
+	// so it runs while the limiter still allows).
+	authorized, err := h.service.Authorize(context.Background(), validAuthorizeInput(t))
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	// Now arm the limiter to refuse: a deny must not even consult it.
+	h.limiter.result = LimitResult{Allowed: false, RetryAfter: 30 * time.Second}
+
+	result, err := h.service.Consent(context.Background(), ConsentInput{
+		RequestID: authorized.RequestID, Approve: false, UserID: 1,
+	})
+	if err != nil {
+		t.Fatalf("Consent(deny) error = %v, want the denial answered without a rate limit", err)
+	}
+	if result.RedirectURI == "" {
+		t.Fatal("denial returned no redirect URI")
+	}
+	for _, call := range h.limiter.callsSnapshot() {
+		if strings.HasPrefix(call, "oauth_consent") {
+			t.Fatalf("denial consulted the consent limiter: %s", call)
+		}
+	}
+}
+
 func TestAuthorizeFailsOpenWhenLimiterErrors(t *testing.T) {
 	h := newHarness(t)
 	h.limiter.err = errors.New("redis down")

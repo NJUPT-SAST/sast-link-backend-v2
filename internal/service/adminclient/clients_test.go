@@ -157,6 +157,7 @@ func TestRotateClientSecret(t *testing.T) {
 
 		_, err := h.service.RotateClientSecret(context.Background(), RotateClientSecretInput{ClientPK: 5, AdminUserID: 99})
 		assertKind(t, err, KindInvalidInput)
+		assertOneFailedRotateAudit(t, h.audit.entries, ErrInvalidInput.Code)
 	})
 
 	t.Run("refuses a non-console actor", func(t *testing.T) {
@@ -170,6 +171,7 @@ func TestRotateClientSecret(t *testing.T) {
 			ClientPK: 5, AdminUserID: 99, ActorClientID: "ops-tool-delegate",
 		})
 		assertKind(t, err, KindProtected)
+		assertOneFailedRotateAudit(t, h.audit.entries, ErrProtectedClient.Code)
 	})
 
 	t.Run("returns not-found for an unknown client", func(t *testing.T) {
@@ -178,7 +180,30 @@ func TestRotateClientSecret(t *testing.T) {
 
 		_, err := h.service.RotateClientSecret(context.Background(), RotateClientSecretInput{ClientPK: 5, AdminUserID: 99})
 		assertKind(t, err, KindNotFound)
+		// The probe is audited even though the target cannot be named.
+		if len(h.audit.entries) != 1 || h.audit.entries[0].Action != "admin_oauth_client_rotate_secret" {
+			t.Fatalf("audit entries = %+v, want one rotate-secret row for the probe", h.audit.entries)
+		}
 	})
+}
+
+// assertOneFailedRotateAudit checks that a refused rotation still lands an audit
+// row naming the action and the refusal reason.
+func assertOneFailedRotateAudit(t *testing.T, entries []*model.AuditLog, wantCode int) {
+	t.Helper()
+	if len(entries) != 1 {
+		t.Fatalf("audit entries = %d, want one failed rotate-secret row", len(entries))
+	}
+	entry := entries[0]
+	if entry.Action != "admin_oauth_client_rotate_secret" {
+		t.Fatalf("audit action = %q, want admin_oauth_client_rotate_secret", entry.Action)
+	}
+	if entry.Success == nil || *entry.Success {
+		t.Fatalf("audit success = %v, want a recorded refusal", entry.Success)
+	}
+	if entry.ErrCode == nil || *entry.ErrCode != wantCode {
+		t.Fatalf("audit err_code = %v, want %d", entry.ErrCode, wantCode)
+	}
 }
 
 func TestCreateClientWithholdsSecretForFirstParty(t *testing.T) {

@@ -45,6 +45,8 @@ type fakeService struct {
 	revokeGrantUserID   int64
 	revokeGrantClientID int64
 	revokeGrantActor    string
+	grantsErr           error
+	revokeGrantErr      error
 }
 
 func (s *fakeService) Authorize(_ context.Context, input oauth.AuthorizeInput) (*oauth.AuthorizeResult, error) {
@@ -87,14 +89,14 @@ func (s *fakeService) JWKS() map[string]any {
 }
 
 func (s *fakeService) Grants(_ context.Context, _ int64) ([]repository.OAuthGrant, error) {
-	return nil, nil
+	return nil, s.grantsErr
 }
 
 func (s *fakeService) RevokeGrant(_ context.Context, userID, clientID int64, actorClientID string) error {
 	s.revokeGrantUserID = userID
 	s.revokeGrantClientID = clientID
 	s.revokeGrantActor = actorClientID
-	return nil
+	return s.revokeGrantErr
 }
 
 type fakeAuthenticator struct {
@@ -157,6 +159,43 @@ func TestRevokeGrantRecordsCallerClientAsActor(t *testing.T) {
 	if service.revokeGrantActor != "sast-link-web" {
 		t.Errorf("actor = %q, want the caller's azp sast-link-web", service.revokeGrantActor)
 	}
+}
+
+// A rate-limited authorized-apps list or revoke must surface as 429 with
+// Retry-After, not a 500 that reads as an outage — same mapping the consent
+// submission uses.
+func TestGrantsRateLimitedIs429WithRetryAfter(t *testing.T) {
+	rateErr := &oauth.Error{Kind: oauth.KindRateLimited, Code: oauth.ErrorTemporarilyUnavail, RetryAfter: 1500 * time.Millisecond}
+
+	t.Run("list", func(t *testing.T) {
+		service := &fakeService{grantsErr: rateErr}
+		router := gin.New()
+		RegisterRoutes(router, Handler{Service: service, ConsentURL: testConsentURL},
+			allowAuthWith(middleware.Principal{UserID: 7, JTI: "jti", Scopes: []string{"openid"}}))
+
+		recorder := doRequest(t, router, http.MethodGet, "/oauth/grants", "", "")
+		if recorder.Code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want 429: %s", recorder.Code, recorder.Body.String())
+		}
+		if got := recorder.Header().Get("Retry-After"); got != "2" {
+			t.Fatalf("Retry-After = %q, want 2", got)
+		}
+	})
+
+	t.Run("revoke", func(t *testing.T) {
+		service := &fakeService{revokeGrantErr: rateErr}
+		router := gin.New()
+		RegisterRoutes(router, Handler{Service: service, ConsentURL: testConsentURL},
+			allowAuthWith(middleware.Principal{UserID: 7, JTI: "jti", Scopes: []string{"openid"}}))
+
+		recorder := doRequest(t, router, http.MethodDelete, "/oauth/grants/42", "", "")
+		if recorder.Code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want 429: %s", recorder.Code, recorder.Body.String())
+		}
+		if got := recorder.Header().Get("Retry-After"); got != "2" {
+			t.Fatalf("Retry-After = %q, want 2", got)
+		}
+	})
 }
 
 func doRequest(t *testing.T, router *gin.Engine, method, target, contentType, body string) *httptest.ResponseRecorder {

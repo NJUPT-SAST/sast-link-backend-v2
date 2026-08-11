@@ -167,12 +167,19 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
-	if err := s.checkConsentLimit(ctx, input.UserID); err != nil {
-		return nil, err
-	}
 	requestID := strings.TrimSpace(input.RequestID)
 	if requestID == "" {
 		return nil, newError(ErrInvalidRequest, "request_id 不能为空", nil)
+	}
+
+	// Only the approving path mints an authorization code, so only it is budgeted:
+	// a deny mints nothing and must not consume the budget, and a rate-limited
+	// approve is refused before the stash is spent, so the user can retry once the
+	// window resets without re-starting the authorization.
+	if input.Approve {
+		if err := s.checkConsentLimit(ctx, input.UserID); err != nil {
+			return nil, err
+		}
 	}
 
 	payload, found, err := s.Requests.ConsumeAuthorizeRequest(ctx, requestID)

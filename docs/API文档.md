@@ -1257,8 +1257,9 @@ POST /oauth/authorize/consent
 - `approve: false` 同样返回 `200` 与一个 `redirect_uri`，其中携带 `error=access_denied` 与原始 `state`（RFC 6749 §4.1.2.1 要求把拒绝告知客户端，而非静默丢弃）
 - 授权码有效期 5min，一次性使用，`family_id` 在此刻生成并由授权码传递给后续 token pair
 - 客户端状态、`redirect_uri` 与 `scopes` 在本段**重新校验**：两段之间客户端被停用返回 `40402`，暂存的 `redirect_uri` 或 `scopes` 已不在客户端当前注册值中则返回 `40000`。管理员摘掉一个被攻陷的回调地址、或收回一个客户端的 admin scope 之后，不应该还有授权码继续按旧注册签发
+- 按**用户**限流（`RATE_LIMIT_CONSENT_RPM`，默认 60/min），且只对 approve 路径计费——`approve: false` 的拒绝不铸码、不消耗配额；被限流的 approve 在消费暂存**之前**即返回 `42900`，窗口恢复后可用同一 `request_id` 重试，无需重新发起授权
 
-**错误码**: `40000`（`request_id` / `approve` 缺失、未知字段、Content-Type 非 JSON、暂存已过期或已消费、`redirect_uri` 已不在客户端注册值中、暂存的 `scopes` 已超出客户端当前注册范围）、`40100`/`40101`/`40102`（未登录、token 已过期或 token 无效）、`40402`（两段之间客户端被停用，HTTP 状态为 `404`）、`40301`（账号已注销——本端点在 JWT 中间件之后，注销账号在中间件即被拦下，返回 `40301` 而非 service 层的 `40300`）、`50300`（Redis 暂存不可读，fail-closed）、`50000`（服务器内部错误）
+**错误码**: `40000`（`request_id` / `approve` 缺失、未知字段、Content-Type 非 JSON、暂存已过期或已消费、`redirect_uri` 已不在客户端注册值中、暂存的 `scopes` 已超出客户端当前注册范围）、`40100`/`40101`/`40102`（未登录、token 已过期或 token 无效）、`40402`（两段之间客户端被停用，HTTP 状态为 `404`）、`40301`（账号已注销——本端点在 JWT 中间件之后，注销账号在中间件即被拦下，返回 `40301` 而非 service 层的 `40300`）、`42900`（请求过于频繁，按用户限流，仅 approve 路径计费，带 Retry-After）、`50300`（Redis 暂存不可读，fail-closed）、`50000`（服务器内部错误）
 
 > `40402` 在本端点对应 HTTP `404` 而非 `401`。调用方是已登录的用户，其自身凭证没有问题，出问题的是第三方客户端；返回 `401` 会让授权页把用户推去重新登录，而重新登录无法解决客户端被停用。这也让业务码与 `{HTTP 状态}{序号}` 的编号规则保持一致。
 
@@ -1485,6 +1486,8 @@ GET /oauth/grants
 - 返回该用户授权过的**不同应用**，每个客户端一行，取最近一次授权记录：`last_authorized_at` 是该用户对该客户端最近一次点击同意的时间，`scopes` 为那次授权的 scope
 - 客户端被停用（`is_active: false`）仍会列出——用户需要看到「我授权过但已失效」的应用，而不是凭空消失；此时该客户端的 token 已被停用事务撤销
 - `client_id` 是客户端**主键**（与客户端列表的 `id` 一致，即 `DELETE /oauth/grants/:client_id` 要用的值）；`client_key` 才是客户端对外标识（授权端点与 token 交换里的 `client_id`）
+
+> **限流**：列表与撤销按**用户**分别计费（`RATE_LIMIT_GRANTS_RPM`，默认各 60/min），fail-open（PRD §6.0）。两者共用键值会把「读列表」的配额与「切掉可疑应用」的配额混在一起——一个轮询列表的页面会耗尽用户用于撤销的预算，而撤销恰是用户想赶在攻击窗口内完成的动作；故拆成独立预算。超限返回 `42900` 并带 `Retry-After`，与 consent 提交一致。
 
 ```
 DELETE /oauth/grants/:client_id
