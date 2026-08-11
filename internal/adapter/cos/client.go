@@ -19,7 +19,7 @@ import (
 )
 
 // cosIOTimeout bounds a single COS round trip. Wider than provider.httpIOTimeout
-// (10s for small token exchanges): an avatar upload carries a 5MB PUT plus the
+// (10s for small token exchanges): an avatar upload carries a 1MB PUT plus the
 // synchronous CI review, both over the public network. The bound still prevents
 // a hung COS side from pinning a request goroutine forever when the caller
 // never cancels the context.

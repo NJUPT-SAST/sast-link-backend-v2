@@ -266,11 +266,12 @@ Body: { "password": "current_password" }
 | `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin） |
 | `user` | login_email, role, state, email_type | 仅 `PUT /admin/users/:id`（admin） |
 | `profile` | nickname, department, intro, email, blog_url, github_url | `PUT /user/profile`（本人，department 仅 software/media 有值可设） |
-| `profile` | avatar | `PUT /user/avatar`（multipart/form-data，≤5MB，jpg/png/webp） |
+| `profile` | avatar | `PUT /user/avatar`（multipart/form-data，≤1MB 且任一维 ≤4096，jpg/png/webp；前端压缩后上传） |
 
 #### 头像上传
 
 - 上传至腾讯云 COS（`STORAGE_*` 配置；未配置时端点返回 `50002`），返回 URL 写入 `profile.avatar`
+- 压缩由前端完成（canvas 缩放至 ≤512px，webp/jpeg 输出）；后端只判不救——超 1MB、非 jpg/png/webp、或任一维超 4096 直接拒绝，不做服务端重编码。这样服务端从不解码像素数据，内存平坦，COS 存储与流量都被 1MB 上限兜住
 - COS 内容审核（不良信息识别）已接入：`STORAGE_AUDIT_ENABLED` 默认开启，fail-closed——审核服务不可用时返回 `50300` 拒绝上传，敏感内容删除对象并返回 `42203`；旧头像对象在写库成功后删除
 
 ### 4.10 OAuth 2.1 授权服务
@@ -743,7 +744,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [x] 内部会话闭环（密码登录 / JWT middleware / Refresh rotation / 登出 / 当前用户资料 / 登录限流与审计）
 - [x] 用户注册与密码管理（验证码 / 注册 / 改密 / 重置密码 / 第三方邮箱绑定）
 - [x] 用户资料自助管理（资料编辑 / 绑定列表 / 解绑；公开个人卡片已下线，隐私重设计中）
-- [x] 头像上传（腾讯云 COS + `STORAGE_*` 配置，≤5MB jpg/png/webp 魔数与解码校验，旧头像清理，按用户限流，审计 `upload_avatar`；未配置时端点返回 50002）
+- [x] 头像上传（腾讯云 COS + `STORAGE_*` 配置，≤1MB 且任一维 ≤4096，jpg/png/webp 魔数与解码校验，前端压缩后端只判不救，旧头像清理，按用户限流，审计 `upload_avatar`；未配置时端点返回 50002）
 - [x] OAuth 登录（GitHub / 飞书 回调 + login_code 交换）
 - [x] OAuth 绑定 / 解绑 + 注册补全（registration_state + oauth_state 双重校验流程）
 - [x] 限流与防刷扩展（登录、验证码发信（邮箱 + IP 双键）、解绑、`/oauth/authorize`、`/oauth/token` + `/oauth/revoke`、`POST /auth/refresh`、`GET /oauth/{github,lark}`、`/oauth/exchange-code`、`POST /auth/register`、`GET /card/:id` 均已接入。全部按具名端点在 service 内生效，没有全局中间件——新增路由不会自动继承任何配额，必须显式声明。键的选择按端点实际承压对象而非一律按 IP：注册按 Register-Ticket（计量密码哈希成本的单位），解绑按 user，其余无认证端点只有 IP 可用。校园网 NAT 是这一取舍的主因——整栋楼共享一个出口 IP，按 IP 给注册设小额度等于全校每窗口只能注册数次。默认值按端点形状推定，尚未据真实流量校准）

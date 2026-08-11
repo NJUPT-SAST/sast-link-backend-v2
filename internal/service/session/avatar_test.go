@@ -244,6 +244,27 @@ func TestUploadAvatarRejectsCorruptImage(t *testing.T) {
 	}
 }
 
+// A valid image whose header declares a dimension beyond maxAvatarDimension must
+// be rejected before the content review sees it. DecodeConfig reads only the
+// header, so this also proves the guard needs no pixel data.
+func TestUploadAvatarRejectsOversizedDimensions(t *testing.T) {
+	service, _, store, _, _ := avatarService(t)
+	big := image.NewRGBA(image.Rect(0, 0, maxAvatarDimension+1, 10))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, big); err != nil {
+		t.Fatalf("encode oversized png: %v", err)
+	}
+	_, err := service.UploadAvatar(context.Background(), UploadAvatarInput{
+		UserID: 42, Content: bytes.NewReader(buf.Bytes()), Size: int64(buf.Len()),
+	})
+	if !isKind(err, KindInvalidInput) {
+		t.Fatalf("error = %v, want invalid input", err)
+	}
+	if len(store.uploads) != 0 {
+		t.Fatalf("store has %d uploads, want 0", len(store.uploads))
+	}
+}
+
 func TestUploadAvatarRejectsEmptyContent(t *testing.T) {
 	service, _, store, _, _ := avatarService(t)
 	_, err := service.UploadAvatar(context.Background(), UploadAvatarInput{

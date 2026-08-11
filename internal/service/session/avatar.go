@@ -21,10 +21,18 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
-// maxAvatarSize is the PUT /user/avatar upload ceiling from PRD §4.9 (5MB). The
-// reader is capped at maxAvatarSize+1 so an oversized body is detected by length
-// rather than by trusting the multipart part's declared size.
-const maxAvatarSize = 5 << 20
+// maxAvatarSize is the PUT /user/avatar upload ceiling (1MB). Compression
+// happens on the frontend; the backend only bounds the worst case, so an
+// uncompressed upload is rejected rather than resized. The reader is capped at
+// maxAvatarSize+1 so an oversized body is detected by length rather than by
+// trusting the multipart part's declared size.
+const maxAvatarSize = 1 << 20
+
+// maxAvatarDimension bounds the decoded width and height. Checked from the image
+// header (DecodeConfig) without reading pixel data: the guard keeps a
+// pathological image out of the content review and client rendering, not this
+// service, which never decodes.
+const maxAvatarDimension = 4096
 
 // avatarMIME maps the three accepted image formats to their canonical content
 // type, used both for the acceptance check and the COS upload header.
@@ -155,20 +163,20 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 }
 
 // readAvatar validates the uploaded bytes against the PRD §4.9 rules: at most
-// 5MB, decodable jpg/png/webp. It returns the raw bytes and the detected MIME
-// type. The declared size only enables an early rejection; the actual read is
-// what the limit is enforced on, so a lying part header cannot smuggle a larger
-// body into storage.
+// 1MB, decodable jpg/png/webp within maxAvatarDimension. It returns the raw
+// bytes and the detected MIME type. The declared size only enables an early
+// rejection; the actual read is what the limit is enforced on, so a lying part
+// header cannot smuggle a larger body into storage.
 func readAvatar(content io.Reader, declaredSize int64) ([]byte, string, error) {
 	if declaredSize > maxAvatarSize {
-		return nil, "", newError(ErrInvalidInput, "头像大小不能超过 5MB", nil)
+		return nil, "", newError(ErrInvalidInput, "头像大小不能超过 1MB", nil)
 	}
 	data, err := io.ReadAll(io.LimitReader(content, maxAvatarSize+1))
 	if err != nil {
 		return nil, "", newError(ErrInvalidInput, "读取头像内容失败", err)
 	}
 	if len(data) > maxAvatarSize {
-		return nil, "", newError(ErrInvalidInput, "头像大小不能超过 5MB", nil)
+		return nil, "", newError(ErrInvalidInput, "头像大小不能超过 1MB", nil)
 	}
 	if len(data) == 0 {
 		return nil, "", newError(ErrInvalidInput, "头像内容为空", nil)
@@ -184,13 +192,20 @@ func readAvatar(content io.Reader, declaredSize int64) ([]byte, string, error) {
 	// DecodeConfig call covers all three accepted formats.
 	//
 	// DecodeConfig deliberately reads only the header, not the pixel data: a full
-	// Decode of a 5MB image can expand to hundreds of megabytes of pixels, which
-	// any logged-in user could weaponize as a memory bomb. A file with a valid
-	// header but corrupt payload can therefore slip through here; the COS content
-	// review (or a broken render on the client) is what catches those, and
-	// paying the full decode cost on every upload is not worth preempting them.
-	if _, _, err := image.DecodeConfig(bytes.NewReader(data)); err != nil {
+	// Decode of a 1MB image can expand to hundreds of megabytes of pixels, which
+	// any logged-in user could weaponize as a memory bomb. The header's width and
+	// height are checked against maxAvatarDimension for the same reason — a
+	// pathological pixel count must not reach the content review or client
+	// rendering. A file with a valid header but corrupt payload can still slip
+	// through here; the COS content review (or a broken render on the client) is
+	// what catches those, and paying the full decode cost on every upload is not
+	// worth preempting them.
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
 		return nil, "", newError(ErrInvalidInput, "头像文件已损坏或不是有效图片", nil)
+	}
+	if cfg.Width > maxAvatarDimension || cfg.Height > maxAvatarDimension {
+		return nil, "", newError(ErrInvalidInput, "头像分辨率不能超过 4096×4096", nil)
 	}
 	return data, detected.String(), nil
 }

@@ -20,9 +20,9 @@ type avatarUploadResponse struct {
 // maxAvatarRequestBodySize bounds the multipart body before parsing. c.FormFile
 // reads the entire stream (spilling to a temp file past Gin's in-memory cap), so
 // without this an oversized body would be fully received before the service's
-// 5MB check runs. The ceiling leaves room for multipart framing on top of a
-// legitimate 5MB file; a body past it fails multipart parsing and answers 40000.
-const maxAvatarRequestBodySize = 5<<20 + 1<<20
+// 1MB check runs. The ceiling leaves room for multipart framing on top of a
+// legitimate 1MB file; a body past it fails multipart parsing and answers 40000.
+const maxAvatarRequestBodySize = 1<<20 + 1<<20
 
 // UploadAvatar handles PUT /user/avatar. The multipart body is parsed here —
 // the file part is passed to the service as a stream, so every size and format
