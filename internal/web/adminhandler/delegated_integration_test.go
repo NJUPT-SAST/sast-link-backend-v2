@@ -119,8 +119,8 @@ func setupDelegated(t *testing.T) *delegatedHarness {
 		ClientID:   delegatedE2EDelegatedClientID,
 		ClientName: "Delegated E2E Admin",
 		ClientType: model.ClientTypeThirdParty,
-		// Confidential and without the refresh grant, the shape checkAdminScopeGrant
-		// requires of anything holding an admin scope.
+		// Confidential, the shape checkCapabilityScopeGrant requires of anything
+		// holding an admin scope.
 		ClientSecretHash: &delegatedSecret,
 		RedirectURIs:     model.StringArray{"https://delegated-e2e.test/cb"},
 		GrantTypes:       model.StringArray{"authorization_code"},
@@ -131,9 +131,9 @@ func setupDelegated(t *testing.T) *delegatedHarness {
 		t.Fatalf("register delegated client: %v", err)
 	}
 
-	// No delegated client is named here. The authenticator admits a third-party token
-	// on the strength of its admin scope alone, so this wiring is what production uses
-	// for every delegate rather than for one blessed client_id.
+	// No client is named here. The authenticator admits a token on the strength of
+	// its admin scope alone, so this wiring is what production uses for every
+	// capability client rather than for one blessed client_id.
 	authenticator := middleware.Authenticator{
 		JWT:              jwtManager,
 		Tokens:           tokens,

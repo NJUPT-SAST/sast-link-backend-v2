@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -78,7 +77,7 @@ func (s Service) newClientID() (string, error) {
 }
 
 // checkProtected refuses an update that would break the built-in client or weaken a
-// client that currently holds delegated administration.
+// client that currently holds a capability scope.
 //
 // It keys on the stored row, never on the submitted fields, which is what makes it
 // unbypassable by splitting a change across two requests.
@@ -119,45 +118,35 @@ func (s Service) checkProtected(current *model.OAuthClient, input UpdateClientIn
 		}
 		return nil
 	}
-	// Delegated administration is held by whichever registration carries an admin
-	// scope, so the guard is a predicate over the stored scopes rather than a match
-	// against a known client_id. That is what lets a second ops tool be onboarded
-	// through the console without a code change, while keeping every restriction the
-	// named client used to get for free.
-	if !scope.ContainsAdmin([]string(current.Scopes)) {
+	// A capability client is whichever registration carries an admin or user scope,
+	// so the guard is a predicate over the stored scopes rather than a match against
+	// a known client_id.
+	if !scope.ContainsAdmin([]string(current.Scopes)) && !scope.ContainsUser([]string(current.Scopes)) {
 		return nil
 	}
 	if input.RedirectURIs != nil {
-		// This client's authorization codes carry admin scopes, so its redirect_uris are
-		// as sensitive as the built-in client's: rewriting them points an administrative
-		// code at a host of the operator's choosing.
-		return newError(ErrProtectedClient, "委派管理客户端的 redirect_uris 不可通过本接口修改", nil)
+		// This client's authorization codes carry capability scopes, so its
+		// redirect_uris are as sensitive as the built-in client's: rewriting them
+		// points an authorization code at a host of the operator's choosing.
+		return newError(ErrProtectedClient, "持有能力 scope 的客户端 redirect_uris 不可通过本接口修改", nil)
 	}
-	if input.GrantTypes != nil && slices.Contains(*input.GrantTypes, grantRefreshToken) {
-		// The refresh grant inherits a family's scopes without narrowing, so a
-		// refreshable admin token renews itself indefinitely until its family is
-		// revoked. Refused on the stored row rather than only when scopes and grants
-		// arrive together, because tokenissue mints a refresh half for every pair: a
-		// client granted admin scope already has dormant refresh families, and adding
-		// the grant type in a second request would activate them.
-		return newError(ErrProtectedClient, "持有 admin scope 的客户端不可注册 refresh_token", nil)
-	}
-	// Only the console may administer a client that holds administrative capability.
-	// Without this, one delegated client can re-enable another that an operator
-	// disabled — the documented kill switch — or edit it back into usefulness, which
-	// makes the set of delegates self-sustaining rather than console-controlled.
+	// Only the console may administer a client that holds a capability scope.
+	// Without this, one scoped client could re-enable another that an operator
+	// disabled — the documented kill switch — or edit it back into usefulness,
+	// making the set of capability clients self-sustaining rather than
+	// console-controlled.
 	//
 	// Disabling such a client from the console remains permitted: is_active=false
 	// already revokes its live tokens, and unlike the console there is no lockout
-	// risk, because nothing about administering this service depends on an ops tool.
+	// risk, because nothing about administering this service depends on that client.
 	if !s.actorIsConsole(input.ActorClientID) {
-		return newError(ErrProtectedClient, "委派管理客户端只能由控制台维护", nil)
+		return newError(ErrProtectedClient, "持有能力 scope 的客户端只能由控制台维护", nil)
 	}
 	return nil
 }
 
 // actorIsConsole reports whether this call was authorized by the built-in console
-// client rather than by a delegated third-party token.
+// client rather than by an admin-scoped token.
 //
 // An empty azp counts as the console: nothing can mint an azp-less token today, so
 // the only tokens without one are built-in sessions predating the claim — the same

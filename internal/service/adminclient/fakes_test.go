@@ -172,9 +172,9 @@ func activeClient(id int64) *model.OAuthClient {
 	}
 }
 
-// delegatedClient holds delegated administration. It is identified by its scopes, not
-// by its client_id: that is the invariant this package now enforces, so a fixture keyed
-// on a known name would be testing a rule the code no longer has.
+// delegatedClient holds administrative capability. It is identified by its scopes,
+// not by its client_id: that is the invariant this package now enforces, so a
+// fixture keyed on a known name would be testing a rule the code no longer has.
 func delegatedClient(id int64) *model.OAuthClient {
 	client := activeClient(id)
 	client.ClientID = "some-ops-tool"

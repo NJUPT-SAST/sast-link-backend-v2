@@ -28,11 +28,14 @@ func (s Service) auditCreate(
 		"client_name": input.ClientName,
 		"client_type": input.ClientType,
 	}
-	// A registration that arrives holding delegated administration is worth finding in
-	// the audit log without cross-referencing the row it created. Recorded from the
+	// A registration that arrives holding a capability scope is worth finding in the
+	// audit log without cross-referencing the row it created. Recorded from the
 	// submitted scopes, so a rejected attempt is flagged too.
 	if scope.ContainsAdmin(input.Scopes) {
 		detail["admin_scope"] = true
+	}
+	if scope.ContainsUser(input.Scopes) {
+		detail["user_scope"] = true
 	}
 	if revokedTokens > 0 {
 		detail["revoked_tokens"] = revokedTokens
@@ -100,14 +103,21 @@ func (s Service) auditUpdate(
 		// The added admin scopes are named by value, not reported as a bare boolean:
 		// promoting a client from admin:read to admin:write grants a real capability
 		// and the audit must say which one. 0->admin records the full list too, so the
-		// field is always a list when present.
+		// field is always a list when present. The user scopes get the same treatment
+		// for the same reason.
 		if len(reason.AdminScopesAdded) > 0 {
 			detail["admin_scope_granted"] = reason.AdminScopesAdded
+		}
+		if len(reason.UserScopesAdded) > 0 {
+			detail["user_scope_granted"] = reason.UserScopesAdded
 		}
 		if len(reason.ScopesRemoved) > 0 {
 			detail["scopes_removed"] = reason.ScopesRemoved
 			if scope.ContainsAdmin(reason.ScopesRemoved) {
 				detail["admin_scope_revoked"] = true
+			}
+			if scope.ContainsUser(reason.ScopesRemoved) {
+				detail["user_scope_revoked"] = true
 			}
 		}
 	}
