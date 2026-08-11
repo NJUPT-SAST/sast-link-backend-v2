@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // A grant revocation is the one OAuth audit event whose subject and actor are
@@ -51,5 +52,22 @@ func TestRevokeGrantLeavesUnknownActorNull(t *testing.T) {
 	}
 	if actor := h.audit.entries[0].ActorClientID; actor != nil {
 		t.Errorf("actor = %q, want nil", *actor)
+	}
+}
+
+// The grants list and revoke are per-user budgeted; the revoke runs a family
+// revocation transaction plus a consent-history delete, so it is not free.
+func TestGrantsThrottlesByUser(t *testing.T) {
+	h := newHarness(t)
+	h.limiter.result = LimitResult{Allowed: false, RetryAfter: 30 * time.Second}
+
+	_, err := h.service.Grants(context.Background(), 1)
+	oauthErr := oauthError(t, err, ErrorTemporarilyUnavail)
+	if oauthErr.Kind != KindRateLimited || oauthErr.RetryAfter != 30*time.Second {
+		t.Fatalf("error = %+v, want a rate-limited error carrying Retry-After", oauthErr)
+	}
+	calls := h.limiter.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "oauth_grants:user:1" {
+		t.Fatalf("limiter calls = %v, want one keyed by user", calls)
 	}
 }

@@ -45,7 +45,16 @@ type Service struct {
 	// TokenLimiter throttles the token and revocation endpoints per IP. Both accept
 	// client credentials and refresh tokens, so an unlimited rate is an unlimited
 	// number of credential attempts and DB round trips.
-	TokenLimiter  EndpointLimiter
+	TokenLimiter EndpointLimiter
+	// ConsentLimiter throttles the authenticated consent submission per user. The
+	// peek already has its own budget; the submission mints codes, so it gets a
+	// budget of its own rather than sharing the peek's.
+	ConsentLimiter EndpointLimiter
+	// GrantsLimiter throttles the authorized-apps list and its revoke per user.
+	// Both are authenticated and touch only the caller's own grants, but the revoke
+	// runs a family-revocation transaction plus a consent-history delete, so it is
+	// not free.
+	GrantsLimiter EndpointLimiter
 	JWT           *auth.JWTManager
 	RefreshTokens *auth.RefreshTokenManager
 	Clock         Clock
@@ -128,6 +137,17 @@ func (s Service) checkTokenLimit(ctx context.Context, clientIP string) error {
 // the consent page down.
 func (s Service) checkConsentInfoLimit(ctx context.Context, userID int64) error {
 	return s.checkLimit(ctx, s.ConsentInfoLimiter, "consent_info", "user:"+strconv.FormatInt(userID, 10))
+}
+
+// checkConsentLimit throttles the consent submission per user, keyed like the peek.
+func (s Service) checkConsentLimit(ctx context.Context, userID int64) error {
+	return s.checkLimit(ctx, s.ConsentLimiter, "oauth_consent", "user:"+strconv.FormatInt(userID, 10))
+}
+
+// checkGrantsLimit throttles the authorized-apps list and its revoke per user,
+// for the same NAT reason as the consent endpoints: campus egress shares one IP.
+func (s Service) checkGrantsLimit(ctx context.Context, userID int64) error {
+	return s.checkLimit(ctx, s.GrantsLimiter, "oauth_grants", "user:"+strconv.FormatInt(userID, 10))
 }
 
 func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, subject string) error {

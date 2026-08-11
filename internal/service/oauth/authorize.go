@@ -167,6 +167,9 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
+	if err := s.checkConsentLimit(ctx, input.UserID); err != nil {
+		return nil, err
+	}
 	requestID := strings.TrimSpace(input.RequestID)
 	if requestID == "" {
 		return nil, newError(ErrInvalidRequest, "request_id 不能为空", nil)

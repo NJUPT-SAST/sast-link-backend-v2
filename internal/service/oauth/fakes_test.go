@@ -575,6 +575,8 @@ func newHarness(t *testing.T) *harness {
 		// Same fake behind all three, so a test can throttle any endpoint; the recorded
 		// endpoint name in fakeLimiter.calls distinguishes them.
 		ConsentInfoLimiter: h.limiter,
+		ConsentLimiter:     h.limiter,
+		GrantsLimiter:      h.limiter,
 		TokenLimiter:       h.limiter,
 		JWT:                jwtManager,
 		RefreshTokens:      refreshManager,

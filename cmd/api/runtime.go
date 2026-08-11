@@ -274,6 +274,22 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Window: cfg.RateLimitConsentInfoWindow,
 		},
 	}
+	// The consent submission mints codes, so it gets its own per-user budget; the
+	// grants list/revoke run a family-revocation transaction. userinfo is
+	// deliberately not budgeted: it requires a valid token and is the surface every
+	// OIDC relying party hits, so a per-IP cap would throttle a campus-shared NAT.
+	consentLimiter := oauthredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb, Keys: keys,
+			Limit: cfg.RateLimitConsentRPM, Window: cfg.RateLimitConsentWindow,
+		},
+	}
+	grantsLimiter := oauthredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{
+			Client: rdb, Keys: keys,
+			Limit: cfg.RateLimitGrantsRPM, Window: cfg.RateLimitGrantsWindow,
+		},
+	}
 	oauthService := oauth.Service{
 		Users:              users,
 		Clients:            clients,
@@ -285,6 +301,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Blacklist:          oauthredis.BlacklistStore{Store: store},
 		AuthorizeLimiter:   authorizeLimiter,
 		ConsentInfoLimiter: consentInfoLimiter,
+		ConsentLimiter:     consentLimiter,
+		GrantsLimiter:      grantsLimiter,
 		TokenLimiter:       tokenLimiter,
 		JWT:                jwtManager,
 		RefreshTokens:      refreshManager,
