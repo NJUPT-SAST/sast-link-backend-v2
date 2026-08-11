@@ -2471,8 +2471,10 @@ paths:
         收回即时生效——存量 token 当场失效，未提交同意的暂存请求与未兑换的授权码
         分别在 consent 与 token 端点被重新校验并拒绝。
 
-        内置客户端（`INTERNAL_OAUTH_CLIENT_ID`）的 `scopes` 不可修改（403）：启动时
-        会断言其为规范值，改动会导致下次重启拒绝引导。
+        内置客户端（`INTERNAL_OAUTH_CLIENT_ID`）的 `scopes` 与 `grant_types` 不可修改
+        （403）：`scopes` 启动时会被断言为规范值，改动会导致下次重启拒绝引导；
+        `grant_types` 由 V003 种子值钉死（`authorization_code` + `refresh_token`），
+        控制台自身的 OAuth 会话经 refresh grant 续期，且 V003 drift 检测会中止非规范行。
       operationId: adminUpdateOAuthClient
       tags:
         - Admin

@@ -97,8 +97,12 @@ func (s Service) auditUpdate(
 	// this client stop holding" is the question a review of an administrative incident
 	// starts from, and it cannot be answered from a field name plus a later snapshot.
 	if reason != nil {
-		if reason.AdminScopeGranted {
-			detail["admin_scope_granted"] = true
+		// The added admin scopes are named by value, not reported as a bare boolean:
+		// promoting a client from admin:read to admin:write grants a real capability
+		// and the audit must say which one. 0->admin records the full list too, so the
+		// field is always a list when present.
+		if len(reason.AdminScopesAdded) > 0 {
+			detail["admin_scope_granted"] = reason.AdminScopesAdded
 		}
 		if len(reason.ScopesRemoved) > 0 {
 			detail["scopes_removed"] = reason.ScopesRemoved

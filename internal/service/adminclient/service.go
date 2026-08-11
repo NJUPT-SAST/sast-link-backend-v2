@@ -104,11 +104,18 @@ func (s Service) checkProtected(current *model.OAuthClient, input UpdateClientIn
 			// keeps working, and the next restart refuses to boot with no way back except
 			// direct database access. Narrowing them would additionally trip the
 			// scope-removal revocation below and cut every user's internal session at once.
-			//
-			// grant_types is deliberately not refused here: startup asserts only the type,
-			// secret and scopes, and the internal flows resolve this client for the
-			// authorization_code leg that validateGrantTypes already makes mandatory.
 			return newError(ErrProtectedClient, "内置客户端的 scopes 不可通过本接口修改", nil)
+		}
+		if input.GrantTypes != nil {
+			// Frozen like scopes. V003 seeds the canonical authorization_code +
+			// refresh_token pair, the console's own OAuth session renews through the
+			// refresh grant (the token endpoint live-checks grant_types, so narrowing it
+			// cuts renewal immediately), and V003's drift detection holds the row to the
+			// seeded value — editing it either breaks the console's token renewal or
+			// aborts the next migrate up. There is no legitimate value other than the
+			// seeded one, so the console is frozen alongside a delegate rather than
+			// privileged to shoot itself.
+			return newError(ErrProtectedClient, "内置客户端的 grant_types 不可通过本接口修改", nil)
 		}
 		return nil
 	}

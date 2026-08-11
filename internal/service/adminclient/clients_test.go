@@ -265,6 +265,39 @@ func TestUpdateClientRefusesToBreakTheBuiltinClient(t *testing.T) {
 // The guard keys on client_id, not the primary key, so ordinary clients are
 // untouched — and renaming the built-in one is still allowed, since client_name is
 // cosmetic.
+// The built-in client's grant_types is console-frozen too: V003 seeds
+// authorization_code + refresh_token, the console's own OAuth session renews
+// through the refresh grant, and a delegated admin:write token must not be able
+// to narrow it away. Refused on the actor-independent protected-client branch,
+// like disable and redirect_uris, so console and delegated callers are treated
+// alike.
+func TestUpdateClientRefusesGrantTypesChangeOnBuiltinClient(t *testing.T) {
+	grants := []string{"authorization_code"}
+	for _, test := range []struct {
+		name  string
+		actor string
+	}{
+		{name: "delegated token", actor: "some-ops-tool"},
+		{name: "console session", actor: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.clients.findResult = protectedClient(1)
+
+			_, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+				ClientPK:      1,
+				GrantTypes:    &grants,
+				AdminUserID:   99,
+				ActorClientID: test.actor,
+			})
+			assertKind(t, err, KindProtected)
+			if h.clients.updateCalls != 0 {
+				t.Fatalf("update reached the repository %d times, want 0", h.clients.updateCalls)
+			}
+		})
+	}
+}
+
 func TestUpdateClientGuardIsScopedToTheBuiltinClient(t *testing.T) {
 	h := newHarness(t)
 	h.clients.findResult = activeClient(5)

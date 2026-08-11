@@ -263,7 +263,11 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
 	}
 	if err != nil {
-		s.auditUpdate(ctx, input, false, ErrInternal.Code, 0, &current.ClientID, &reason)
+		// The update never persisted, so the computed capability change must not
+		// appear in the audit trail as if it had: a scopes_removed row would read as
+		// a revocation that did not happen. Recorded without the reason, like every
+		// other pre-write rejection on this path.
+		s.auditUpdate(ctx, input, false, ErrInternal.Code, 0, &current.ClientID, nil)
 		return nil, newError(ErrInternal, "更新 OAuth 客户端失败", err)
 	}
 	s.deliverBlacklist(ctx, entries, now)
@@ -298,8 +302,13 @@ type revocation struct {
 	// ScopesRemoved are the scopes the registration held and no longer will.
 	ScopesRemoved []string
 	// AdminScopeGranted reports a registration gaining administrative capability it
-	// did not have.
+	// did not have. It drives the revoke decision, not the audit trail.
 	AdminScopeGranted bool
+	// AdminScopesAdded names the admin scopes this update newly granted, for the
+	// audit trail. AdminScopeGranted alone misses a promotion from admin:read to
+	// admin:write: the client already held an admin scope, so the boolean is false
+	// while a write scope was genuinely added.
+	AdminScopesAdded []string
 }
 
 func (r revocation) scopesNarrowed() bool {
@@ -328,9 +337,16 @@ func revocationReason(current *model.OAuthClient, nextScopes []string) revocatio
 			removed = append(removed, name)
 		}
 	}
+	added := make([]string, 0, len(nextScopes))
+	for _, name := range nextScopes {
+		if scope.IsAdmin(name) && !slices.Contains(stored, name) {
+			added = append(added, name)
+		}
+	}
 	return revocation{
 		ScopesRemoved:     removed,
 		AdminScopeGranted: scope.ContainsAdmin(nextScopes) && !scope.ContainsAdmin(stored),
+		AdminScopesAdded:  added,
 	}
 }
 
