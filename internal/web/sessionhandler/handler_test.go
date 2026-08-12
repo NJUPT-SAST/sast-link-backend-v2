@@ -668,6 +668,99 @@ func TestSessionRequestsUseStrictBoundedJSON(t *testing.T) {
 	}
 }
 
+// Every protected /user write endpoint must thread the token's azp into the
+// service input so the audit row can name the acting client. A handler that
+// drops principal.ClientID silently regresses to actor_client_id = NULL for a
+// delegated user:* token.
+func TestUserEndpointsThreadActorClientID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	principal := middleware.Principal{UserID: 42, JTI: "jti", ClientID: "sast-people", ExpiresAt: time.Now().Add(time.Hour)}
+
+	jsonRequest := func(method, path, body string) *http.Request {
+		req := httptest.NewRequestWithContext(context.Background(), method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		return req
+	}
+
+	cases := []struct {
+		name    string
+		request func() *http.Request
+		service *fakeService
+		actor   func(*fakeService) string
+	}{
+		{
+			name:    "logout",
+			request: func() *http.Request { return jsonRequest(http.MethodPost, "/auth/logout", `{"refresh_token":"rt_x"}`) },
+			service: &fakeService{logoutResult: &session.LogoutResult{BlacklistedJTI: "jti", FamilyID: "fam"}},
+			actor:   func(s *fakeService) string { return s.logoutInput.ActorClientID },
+		},
+		{
+			name: "change-password",
+			request: func() *http.Request {
+				return jsonRequest(http.MethodPost, "/auth/change-password", `{"old_password":"oldpassword","new_password":"newpassword"}`)
+			},
+			service: &fakeService{changePasswordResult: &session.ChangePasswordResult{UserID: 42}},
+			actor:   func(s *fakeService) string { return s.changePasswordInput.ActorClientID },
+		},
+		{
+			name:    "update-profile",
+			request: func() *http.Request { return jsonRequest(http.MethodPut, "/user/profile", `{"nickname":"新昵称"}`) },
+			service: &fakeService{updateProfileResult: &session.UpdateProfileResult{Profile: session.UserProfileDTO{ID: 42}}},
+			actor:   func(s *fakeService) string { return s.updateProfileInput.ActorClientID },
+		},
+		{
+			name:    "upload-avatar",
+			request: func() *http.Request { return avatarMultipartRequest(t, testPNGBytes(t)) },
+			service: &fakeService{uploadAvatarResult: &session.UploadAvatarResult{AvatarURL: "https://cdn.example.com/a.png"}},
+			actor:   func(s *fakeService) string { return s.uploadAvatarInput.ActorClientID },
+		},
+		{
+			name: "unbind-identity",
+			request: func() *http.Request {
+				return jsonRequest(http.MethodDelete, "/user/identities/5", `{"password":"secret"}`)
+			},
+			service: &fakeService{unbindIdentityResult: &session.UnbindIdentityResult{Provider: "other_mail", ProviderID: "x@qq.com"}},
+			actor:   func(s *fakeService) string { return s.unbindIdentityInput.ActorClientID },
+		},
+		{
+			name: "bind-email-send-code",
+			request: func() *http.Request {
+				return jsonRequest(http.MethodPost, "/user/identities/email", `{"email":"extra@qq.com"}`)
+			},
+			service: &fakeService{bindEmailSendCodeResult: &session.BindEmailSendCodeResult{BindTicket: "be_t", ExpiresIn: 300}},
+			actor:   func(s *fakeService) string { return s.bindEmailSendCodeInput.ActorClientID },
+		},
+		{
+			name: "bind-email-verify",
+			request: func() *http.Request {
+				return jsonRequest(http.MethodPost, "/user/identities/email/verify", `{"bind_ticket":"be_t","code":"123456"}`)
+			},
+			service: &fakeService{bindEmailVerifyResult: &session.BindEmailVerifyResult{Email: "extra@qq.com", Identity: session.IdentityDTO{}}},
+			actor:   func(s *fakeService) string { return s.bindEmailVerifyInput.ActorClientID },
+		},
+		{
+			name:    "logout-device",
+			request: func() *http.Request { return jsonRequest(http.MethodDelete, "/user/devices/fam", ``) },
+			service: &fakeService{logoutDeviceResult: &session.LogoutDeviceResult{DeviceID: "fam"}},
+			actor:   func(s *fakeService) string { return s.logoutDeviceInput.ActorClientID },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			router := gin.New()
+			RegisterRoutes(router, Handler{Service: tc.service}, scopedGates(allowAuthWith(principal)))
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, tc.request())
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("response = %d, want 200", recorder.Code)
+			}
+			if got := tc.actor(tc.service); got != "sast-people" {
+				t.Fatalf("ActorClientID = %q, want sast-people (azp must reach the service input)", got)
+			}
+		})
+	}
+}
+
 func TestSessionRequestsRejectNonJSONContentType(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, contentType := range []string{"", "text/plain", "application/x-www-form-urlencoded"} {

@@ -21,6 +21,9 @@ type LogoutDeviceInput struct {
 	DeviceID  string
 	ClientIP  string
 	UserAgent string
+	// ActorClientID is the azp of the token that authorized the logout; empty
+	// means a legacy console token, resolved to InternalClientID at audit time.
+	ActorClientID string
 }
 
 type LogoutDeviceResult struct {
@@ -58,7 +61,7 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, true, 0, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
+	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, nil, true, 0, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
 		slog.Error("audit evict device", "user_id", userID, "device_id", evicted, "error", auditErr)
 	}
 }
@@ -117,7 +120,7 @@ func (s Service) LogoutDevice(ctx context.Context, input LogoutDeviceInput) (*Lo
 	if err := s.Devices.RemoveDevice(ctx, input.UserID, deviceID); err != nil {
 		slog.WarnContext(ctx, "remove device after logout failed", "user_id", input.UserID, "device_id", deviceID, "error", err)
 	}
-	if auditErr := s.audit(ctx, &input.UserID, "logout_device", "session", &deviceID, true, 0, input.ClientIP, input.UserAgent, map[string]any{"device_id": deviceID}); auditErr != nil {
+	if auditErr := s.audit(ctx, &input.UserID, "logout_device", "session", &deviceID, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{"device_id": deviceID}); auditErr != nil {
 		slog.Error("audit logout device", "user_id", input.UserID, "device_id", deviceID, "error", auditErr)
 	}
 	return &LogoutDeviceResult{DeviceID: deviceID}, nil

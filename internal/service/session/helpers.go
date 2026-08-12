@@ -254,11 +254,11 @@ func identityDTO(identity model.Identity) IdentityDTO {
 	}
 }
 
-func (s Service) audit(ctx context.Context, userID *int64, action, resource string, resourceID *string, success bool, errCode int, clientIP, userAgent string, detail map[string]any) error {
+func (s Service) audit(ctx context.Context, userID *int64, action, resource string, resourceID *string, actorClientID *string, success bool, errCode int, clientIP, userAgent string, detail map[string]any) error {
 	if s.Audit == nil {
 		return nil
 	}
-	entry, err := buildAuditLog(s.now(), userID, action, resource, resourceID, success, errCode, clientIP, userAgent, detail)
+	entry, err := buildAuditLog(s.now(), userID, action, resource, resourceID, actorClientID, success, errCode, clientIP, userAgent, detail)
 	if err != nil {
 		return err
 	}
@@ -277,6 +277,7 @@ func buildAuditLog(
 	userID *int64,
 	action, resource string,
 	resourceID *string,
+	actorClientID *string,
 	success bool,
 	errCode int,
 	clientIP, userAgent string,
@@ -304,16 +305,17 @@ func buildAuditLog(
 	}
 	successPtr := success
 	return &model.AuditLog{
-		UserID:     userID,
-		Action:     action,
-		Resource:   resource,
-		ResourceID: resourceID,
-		Detail:     detailValue,
-		ClientIP:   clientIPPtr,
-		UserAgent:  userAgentPtr,
-		Success:    &successPtr,
-		ErrCode:    errCodePtr,
-		CreatedAt:  now,
+		UserID:        userID,
+		Action:        action,
+		Resource:      resource,
+		ResourceID:    resourceID,
+		ActorClientID: actorClientID,
+		Detail:        detailValue,
+		ClientIP:      clientIPPtr,
+		UserAgent:     userAgentPtr,
+		Success:       &successPtr,
+		ErrCode:       errCodePtr,
+		CreatedAt:     now,
 	}, nil
 }
 
@@ -325,10 +327,31 @@ func (s Service) buildAuditEntry(
 	userID *int64,
 	action, resource string,
 	resourceID *string,
+	actorClientID *string,
 	success bool,
 	errCode int,
 	clientIP, userAgent string,
 	detail map[string]any,
 ) (*model.AuditLog, error) {
-	return buildAuditLog(s.now(), userID, action, resource, resourceID, success, errCode, clientIP, userAgent, detail)
+	return buildAuditLog(s.now(), userID, action, resource, resourceID, actorClientID, success, errCode, clientIP, userAgent, detail)
+}
+
+// actorClientID resolves what to record as the acting client on the /user
+// surface: the token's azp when present, otherwise the console. This mirrors
+// adminclient.actorClientID so the console session and a delegated user:*
+// token produce the same attribution shape, and a legacy azp-less console
+// token (which only ever predates the claim) still names the built-in client
+// rather than NULL.
+func (s Service) actorClientID(tokenClientID string) string {
+	if strings.TrimSpace(tokenClientID) != "" {
+		return strings.TrimSpace(tokenClientID)
+	}
+	return strings.TrimSpace(s.InternalClientID)
+}
+
+func nullableString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }

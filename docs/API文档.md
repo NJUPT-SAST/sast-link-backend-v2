@@ -1973,7 +1973,7 @@ GET /admin/audit-logs
 
 `actor_client_id` 记录**执行**该操作的 OAuth 客户端（行为主体，而非被操作对象——后者在 `resource_id`）。控制台操作记录内置客户端 id，委派调用记录该第三方客户端的 `client_id`，两者据此可区分「管理员亲自操作」与「工具代其操作」。
 
-目前写入该字段的是管理端五个 action 与 OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
+目前写入该字段的是管理端五个 action、OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`，以及 `/user` 自助面的 `logout` / `change_password` / `update_profile` / `upload_avatar` / `oauth_bind` / `oauth_unbind` / `bind_email_send_code` / `logout_device`（`user:*` 第三方 token 执行时记其 `azp`，控制台会话显式记内置客户端 id）。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
 
 **错误码**：`40000`（参数格式非法 / 时间窗口倒置）、`40100`、`40300`。
 

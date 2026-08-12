@@ -49,21 +49,22 @@ func (h Handler) UpdateProfile(c *gin.Context) {
 		return
 	}
 	result, err := h.Service.UpdateProfile(c.Request.Context(), session.UpdateProfileInput{
-		UserID:      principal.UserID,
-		Name:        req.Name,
-		PhoneNumber: req.PhoneNumber,
-		QQNumber:    req.QQNumber,
-		StudentID:   req.StudentID,
-		College:     req.College,
-		Major:       req.Major,
-		Nickname:    req.Nickname,
-		Department:  req.Department,
-		Intro:       req.Intro,
-		Email:       req.Email,
-		BlogURL:     req.BlogURL,
-		GitHubURL:   req.GitHubURL,
-		ClientIP:    c.ClientIP(),
-		UserAgent:   c.Request.UserAgent(),
+		UserID:        principal.UserID,
+		ActorClientID: principal.ClientID,
+		Name:          req.Name,
+		PhoneNumber:   req.PhoneNumber,
+		QQNumber:      req.QQNumber,
+		StudentID:     req.StudentID,
+		College:       req.College,
+		Major:         req.Major,
+		Nickname:      req.Nickname,
+		Department:    req.Department,
+		Intro:         req.Intro,
+		Email:         req.Email,
+		BlogURL:       req.BlogURL,
+		GitHubURL:     req.GitHubURL,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))

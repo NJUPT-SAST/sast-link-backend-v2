@@ -118,7 +118,7 @@ func (s Service) auditUnbind(ctx context.Context, input UnbindIdentityInput, ide
 		"provider_id": identity.ProviderID,
 	}
 	id := strconv.FormatInt(identity.ID, 10)
-	if err := s.audit(ctx, &input.UserID, "oauth_unbind", "identity", &id, success, errCode,
+	if err := s.audit(ctx, &input.UserID, "oauth_unbind", "identity", &id, nullableString(s.actorClientID(input.ActorClientID)), success, errCode,
 		input.ClientIP, input.UserAgent, detail); err != nil {
 		slog.Error("audit oauth unbind", "user_id", input.UserID, "identity_id", identity.ID, "error", err)
 	}

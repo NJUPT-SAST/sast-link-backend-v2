@@ -302,8 +302,11 @@ type LogoutInput struct {
 	PrincipalJTI    string
 	PrincipalUserID int64
 	RefreshToken    string
-	ClientIP        string
-	UserAgent       string
+	// ActorClientID is the azp of the token that authorized the logout; empty
+	// means a legacy console token, resolved to InternalClientID at audit time.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 type LogoutResult struct {
@@ -399,8 +402,11 @@ type ChangePasswordInput struct {
 	UserID      int64
 	OldPassword string
 	NewPassword string
-	ClientIP    string
-	UserAgent   string
+	// ActorClientID is the azp of the token that authorized the change; empty
+	// means a legacy console token, resolved to InternalClientID at audit time.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 type ChangePasswordResult struct {
@@ -408,10 +414,13 @@ type ChangePasswordResult struct {
 }
 
 type BindEmailSendCodeInput struct {
-	UserID    int64
-	Email     string
-	ClientIP  string
-	UserAgent string
+	UserID int64
+	Email  string
+	// ActorClientID is the azp of the token that authorized the bind; empty
+	// means a legacy console token, resolved to InternalClientID at audit time.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 type BindEmailSendCodeResult struct {
@@ -423,8 +432,11 @@ type BindEmailVerifyInput struct {
 	UserID     int64
 	BindTicket string
 	Code       string
-	ClientIP   string
-	UserAgent  string
+	// ActorClientID is the azp of the token that authorized the bind; empty
+	// means a legacy console token, resolved to InternalClientID at audit time.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 type BindEmailVerifyResult struct {
@@ -438,6 +450,9 @@ type BindEmailVerifyResult struct {
 // clears a nullable display field.
 type UpdateProfileInput struct {
 	UserID int64
+	// ActorClientID is the azp of the token that authorized the edit; empty
+	// means a legacy console token, resolved to InternalClientID at audit time.
+	ActorClientID string
 
 	Name        *string
 	PhoneNumber *string
@@ -469,8 +484,11 @@ type UnbindIdentityInput struct {
 	UserID     int64
 	IdentityID int64
 	Password   string
-	ClientIP   string
-	UserAgent  string
+	// ActorClientID is the azp of the token that authorized the unbind; empty
+	// means a legacy console token, resolved to InternalClientID at audit time.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 type UnbindIdentityResult struct {
@@ -517,12 +535,15 @@ type UpdateProfileResult struct {
 // nothing beyond an early rejection, because the actual stream is what gets
 // stored.
 type UploadAvatarInput struct {
-	UserID    int64
-	Filename  string
-	Content   io.Reader
-	Size      int64
-	ClientIP  string
-	UserAgent string
+	UserID   int64
+	Filename string
+	Content  io.Reader
+	Size     int64
+	// ActorClientID is the azp of the token that authorized the upload; empty
+	// means a legacy console token, resolved to InternalClientID at audit time.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 type UploadAvatarResult struct {

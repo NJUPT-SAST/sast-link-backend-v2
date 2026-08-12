@@ -52,12 +52,13 @@ func (h Handler) UploadAvatar(c *gin.Context) {
 	defer func() { _ = file.Close() }()
 
 	result, err := h.Service.UploadAvatar(c.Request.Context(), session.UploadAvatarInput{
-		UserID:    principal.UserID,
-		Filename:  fileHeader.Filename,
-		Content:   file,
-		Size:      fileHeader.Size,
-		ClientIP:  c.ClientIP(),
-		UserAgent: c.Request.UserAgent(),
+		UserID:        principal.UserID,
+		Filename:      fileHeader.Filename,
+		Content:       file,
+		Size:          fileHeader.Size,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))
