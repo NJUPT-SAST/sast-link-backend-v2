@@ -126,7 +126,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		return nil, lockErr
 	}
 	if user.State == model.UserStateDeleted {
-		if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, false, errcode.CodeAccountDeleted, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)}); auditErr != nil {
+		if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, nil, false, errcode.CodeAccountDeleted, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)}); auditErr != nil {
 			slog.Error("audit deleted login failure", "user_id", user.ID, "error", auditErr)
 		}
 		return nil, newError(ErrUserDeleted, "用户已注销", nil)
@@ -175,7 +175,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	// compensate-on-audit branch is needed.
 	var audit *model.AuditLog
 	if s.Audit != nil {
-		audit, err = s.buildAuditEntry(&user.ID, "login", "session", nil, true, 0,
+		audit, err = s.buildAuditEntry(&user.ID, "login", "session", nil, nil, true, 0,
 			input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)})
 		if err != nil {
 			return nil, newError(ErrInternal, "构造审计记录失败", err)
@@ -341,7 +341,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	// synchronous fallback.
 	var audit *model.AuditLog
 	if s.Audit != nil {
-		audit, err = s.buildAuditEntry(&current.UserID, "refresh", "session", &current.FamilyID, true, 0,
+		audit, err = s.buildAuditEntry(&current.UserID, "refresh", "session", &current.FamilyID, nil, true, 0,
 			input.ClientIP, input.UserAgent, map[string]any{"outcome": refreshOutcomeRotated})
 		if err != nil {
 			slog.WarnContext(ctx, "build refresh audit entry", "error", err)
@@ -436,7 +436,7 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 			slog.WarnContext(ctx, "remove device on logout failed", "user_id", input.PrincipalUserID, "device_id", familyID, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &input.PrincipalUserID, "logout", "session", &familyID, true, 0, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
+	if auditErr := s.audit(ctx, &input.PrincipalUserID, "logout", "session", &familyID, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
 		slog.Error("audit logout", "family_id", familyID, "error", auditErr)
 	}
 	return &LogoutResult{BlacklistedJTI: principalJTI, FamilyID: familyID}, nil
@@ -486,7 +486,7 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 		slog.Error("send register verification email", "email", email, "error", err)
 		return nil, newError(ErrEmailFailed, "邮件发送失败，请稍后重试", err)
 	}
-	if auditErr := s.audit(ctx, nil, "register_send_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+	if auditErr := s.audit(ctx, nil, "register_send_code", "verification_code", nil, nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit register send code", "email", email, "error", auditErr)
 	}
 	return &SendRegisterCodeResult{Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
@@ -517,7 +517,7 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 		s.discardCode(ctx, purpose, email)
 		return nil, newError(ErrDependencyUnavailable, "保存 Register-Ticket 失败", err)
 	}
-	if auditErr := s.audit(ctx, nil, "register_verify_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+	if auditErr := s.audit(ctx, nil, "register_verify_code", "verification_code", nil, nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit register verify code", "email", email, "error", auditErr)
 	}
 	return &VerifyRegisterCodeResult{RegisterTicket: ticket, Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
@@ -743,7 +743,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		slog.WarnContext(ctx, "consume register ticket after account creation", "user_id", user.ID, "error", consumeErr)
 	}
 
-	if auditErr := s.audit(ctx, &user.ID, "register", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+	if auditErr := s.audit(ctx, &user.ID, "register", "session", nil, nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit register", "user_id", user.ID, "error", auditErr)
 	}
 	// Registration is the user's first login, so the initial session registers
@@ -852,7 +852,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 			slog.WarnContext(ctx, "remove all devices on password reset failed", "user_id", user.ID, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &user.ID, "reset_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+	if auditErr := s.audit(ctx, &user.ID, "reset_password", "session", nil, nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit reset password", "user_id", user.ID, "error", auditErr)
 	}
 	return &ResetPasswordResult{Email: email}, nil
@@ -887,7 +887,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 		if ctx.Err() != nil {
 			return nil, newError(ErrDependencyUnavailable, "密码校验被中断", verifyErr)
 		}
-		if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, nil); auditErr != nil {
+		if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, nullableString(s.actorClientID(input.ActorClientID)), false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, nil); auditErr != nil {
 			slog.Error("audit change password failure", "user_id", user.ID, "error", auditErr)
 		}
 		return nil, newError(ErrPasswordInvalid, "旧密码错误", verifyErr)
@@ -911,7 +911,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 			slog.WarnContext(ctx, "remove all devices on password change failed", "user_id", user.ID, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, true, 0, input.ClientIP, input.UserAgent, nil); auditErr != nil {
+	if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, nil); auditErr != nil {
 		slog.Error("audit change password", "user_id", user.ID, "error", auditErr)
 	}
 	return &ChangePasswordResult{UserID: user.ID}, nil
@@ -970,7 +970,7 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 		slog.Error("send bind email verification", "email", email, "error", err)
 		return nil, newError(ErrEmailFailed, "邮件发送失败，请稍后重试", err)
 	}
-	if auditErr := s.audit(ctx, &input.UserID, "bind_email_send_code", "verification_code", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"email": email}); auditErr != nil {
+	if auditErr := s.audit(ctx, &input.UserID, "bind_email_send_code", "verification_code", nil, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{"email": email}); auditErr != nil {
 		slog.Error("audit bind email send code", "email", email, "error", auditErr)
 	}
 	return &BindEmailSendCodeResult{BindTicket: ticket, ExpiresIn: int(verificationTTL.Seconds())}, nil
@@ -1040,7 +1040,7 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 		}
 		return nil, newError(ErrInternal, "创建第三方绑定记录失败", err)
 	}
-	if auditErr := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"provider": string(model.LoginMethodOtherMail), "provider_id": payload.Email}); auditErr != nil {
+	if auditErr := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{"provider": string(model.LoginMethodOtherMail), "provider_id": payload.Email}); auditErr != nil {
 		slog.Error("audit bind email", "user_id", input.UserID, "error", auditErr)
 	}
 	return &BindEmailVerifyResult{
@@ -1211,7 +1211,7 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 			lockTTL = result.TTL
 		}
 	}
-	if err := s.audit(ctx, loginUserID(user), "login", "session", nil, false, sentinel.Code, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, input.Identifier)}); err != nil {
+	if err := s.audit(ctx, loginUserID(user), "login", "session", nil, nil, false, sentinel.Code, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, input.Identifier)}); err != nil {
 		slog.Error("audit login failure", "error", err)
 	}
 	if locked {
@@ -1263,7 +1263,7 @@ func (s Service) auditRefresh(
 		errCode = errcode.CodeAccessTokenInvalid
 	}
 	detail := map[string]any{"outcome": outcome}
-	if auditErr := s.audit(ctx, &userID, "refresh", "session", familyID, success, errCode, input.ClientIP, input.UserAgent, detail); auditErr != nil {
+	if auditErr := s.audit(ctx, &userID, "refresh", "session", familyID, nil, success, errCode, input.ClientIP, input.UserAgent, detail); auditErr != nil {
 		slog.Error("audit refresh", "family_id", familyID, "outcome", outcome, "error", auditErr)
 	}
 }

@@ -494,7 +494,7 @@ Payload: {
 
 日志字段：`user_id`、`action`、`resource`、`resource_id`、`detail`(JSONB)、`client_ip`(INET)、`user_agent`、`success`、`err_code`、`actor_client_id`。用户删除后 `user_id` SET NULL 保留日志。
 
-`actor_client_id`（V007）记录**执行**该操作的 OAuth 客户端，即行为主体，区别于被操作对象（后者在 `resource_id`）。控制台操作记录内置客户端 id，委派调用记录该第三方客户端的 `client_id`，两者据此可区分「管理员亲自操作」与「工具代其操作」。目前写入该字段的是上表五个 admin action 与 `oauth_authorize` / `oauth_token` / `oauth_revoke`；其余为 NULL，且 NULL 是有意义的取值——**没有任何 OAuth 凭证授权该操作**（未认证流程、后台任务，以及 V007 之前的历史行，后者的歧义随 90 天保留期自行消失）。可空且无外键，使审计行比它命名的注册活得更久。
+`actor_client_id`（V007）记录**执行**该操作的 OAuth 客户端，即行为主体，区别于被操作对象（后者在 `resource_id`）。控制台操作记录内置客户端 id，委派调用记录该第三方客户端的 `client_id`，两者据此可区分「管理员亲自操作」与「工具代其操作」。目前写入该字段的是上表五个 admin action、`oauth_authorize` / `oauth_token` / `oauth_revoke`，以及 `/user` 自助面的 `logout` / `change_password` / `update_profile` / `upload_avatar` / `oauth_bind` / `oauth_unbind` / `bind_email_send_code` / `logout_device`（`user:*` 第三方 token 执行时记其 `azp`，控制台会话显式记内置客户端 id）；其余为 NULL，且 NULL 是有意义的取值——**没有任何 OAuth 凭证授权该操作**（未认证流程、后台任务，以及 V007 之前的历史行，后者的歧义随 90 天保留期自行消失）。可空且无外键，使审计行比它命名的注册活得更久。
 
 **detail JSONB 结构**（按 action 类型）：
 

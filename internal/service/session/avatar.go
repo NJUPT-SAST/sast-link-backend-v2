@@ -119,7 +119,7 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 			return nil, cleanup(newError(ErrDependencyUnavailable, "头像审核服务暂不可用，请稍后重试", auditErr))
 		}
 		if verdict.Sensitive {
-			if err := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), false, errcode.CodeAvatarRejected,
+			if err := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), nullableString(s.actorClientID(input.ActorClientID)), false, errcode.CodeAvatarRejected,
 				input.ClientIP, input.UserAgent, map[string]any{"label": verdict.Label}); err != nil {
 				slog.Error("audit avatar rejection", "user_id", input.UserID, "error", err)
 			}
@@ -155,7 +155,7 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 		}
 	}
 
-	if auditErr := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), true, 0,
+	if auditErr := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), nullableString(s.actorClientID(input.ActorClientID)), true, 0,
 		input.ClientIP, input.UserAgent, map[string]any{"avatar_url": avatarURL}); auditErr != nil {
 		slog.Error("audit avatar upload", "user_id", input.UserID, "error", auditErr)
 	}

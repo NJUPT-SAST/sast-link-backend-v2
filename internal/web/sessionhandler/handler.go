@@ -339,6 +339,7 @@ func (h Handler) Logout(c *gin.Context) {
 		PrincipalJTI:    principal.JTI,
 		PrincipalUserID: principal.UserID,
 		RefreshToken:    req.RefreshToken,
+		ActorClientID:   principal.ClientID,
 		ClientIP:        c.ClientIP(),
 		UserAgent:       c.Request.UserAgent(),
 	}); err != nil {
@@ -483,11 +484,12 @@ func (h Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 	if _, err := h.Service.ChangePassword(c.Request.Context(), session.ChangePasswordInput{
-		UserID:      principal.UserID,
-		OldPassword: req.OldPassword,
-		NewPassword: req.NewPassword,
-		ClientIP:    c.ClientIP(),
-		UserAgent:   c.Request.UserAgent(),
+		UserID:        principal.UserID,
+		OldPassword:   req.OldPassword,
+		NewPassword:   req.NewPassword,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	}); err != nil {
 		response.Error(c, mapServiceError(err))
 		return
@@ -507,10 +509,11 @@ func (h Handler) BindEmailSendCode(c *gin.Context) {
 		return
 	}
 	result, err := h.Service.BindEmailSendCode(c.Request.Context(), session.BindEmailSendCodeInput{
-		UserID:    principal.UserID,
-		Email:     req.Email,
-		ClientIP:  c.ClientIP(),
-		UserAgent: c.Request.UserAgent(),
+		UserID:        principal.UserID,
+		Email:         req.Email,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))
@@ -531,11 +534,12 @@ func (h Handler) BindEmailVerify(c *gin.Context) {
 		return
 	}
 	result, err := h.Service.BindEmailVerify(c.Request.Context(), session.BindEmailVerifyInput{
-		UserID:     principal.UserID,
-		BindTicket: req.BindTicket,
-		Code:       req.Code,
-		ClientIP:   c.ClientIP(),
-		UserAgent:  c.Request.UserAgent(),
+		UserID:        principal.UserID,
+		BindTicket:    req.BindTicket,
+		Code:          req.Code,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))

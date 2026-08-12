@@ -57,11 +57,12 @@ func (h Handler) UnbindIdentity(c *gin.Context) {
 		return
 	}
 	if _, err := h.Service.UnbindIdentity(c.Request.Context(), session.UnbindIdentityInput{
-		UserID:     principal.UserID,
-		IdentityID: identityID,
-		Password:   req.Password,
-		ClientIP:   c.ClientIP(),
-		UserAgent:  c.Request.UserAgent(),
+		UserID:        principal.UserID,
+		IdentityID:    identityID,
+		Password:      req.Password,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	}); err != nil {
 		response.Error(c, mapServiceError(err))
 		return

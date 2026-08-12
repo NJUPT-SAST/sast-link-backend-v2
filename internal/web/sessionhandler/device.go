@@ -76,10 +76,11 @@ func (h Handler) LogoutDevice(c *gin.Context) {
 		return
 	}
 	if _, err := h.Service.LogoutDevice(c.Request.Context(), session.LogoutDeviceInput{
-		UserID:    principal.UserID,
-		DeviceID:  deviceID,
-		ClientIP:  c.ClientIP(),
-		UserAgent: c.Request.UserAgent(),
+		UserID:        principal.UserID,
+		DeviceID:      deviceID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
 	}); err != nil {
 		response.Error(c, mapServiceError(err))
 		return
