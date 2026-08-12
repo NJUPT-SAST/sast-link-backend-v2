@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -278,6 +279,74 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	s.deliverBlacklist(ctx, entries, now)
 	s.auditUpdate(ctx, input, true, 0, len(entries), &current.ClientID, &reason)
 	return &UpdateClientResult{RevokedTokens: len(entries)}, nil
+}
+
+// DeleteClient permanently removes a registration. Deleting is one step past
+// disabling: the row and — through ON DELETE CASCADE — the client's authorization
+// codes and access/refresh token metadata are gone, so every token it ever issued
+// is cut immediately and there is no row left to re-enable. The still-live access
+// JTIs are enqueued for blacklist delivery before the row disappears, so the
+// Redis auth-state cache is invalidated along with the authoritative rows.
+//
+// Capability clients are not console-gated here. Unlike granting a capability,
+// which creates a delegate the console must approve, deleting one removes the
+// credential and the scope it carried — the refusal chain exists to stop
+// delegation from growing, not to stop it from shrinking. Any administrator,
+// console or delegated, may deregister any non-built-in client.
+func (s Service) DeleteClient(ctx context.Context, input DeleteClientInput) (*DeleteClientResult, error) {
+	if s.Clients == nil {
+		return nil, newError(ErrInternal, "客户端仓储未配置", nil)
+	}
+	if input.ClientPK <= 0 {
+		// The HTTP layer's parsePositiveID normally intercepts this, but a direct
+		// service caller can still reach it, and the refusal is audited like every
+		// other rejection here so the path stays uniform.
+		s.auditDelete(ctx, input, nil, false, ErrNotFound.Code, 0)
+		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+	}
+	current, err := s.Clients.FindByID(ctx, input.ClientPK)
+	if errors.Is(err, repository.ErrNotFound) {
+		// Audited like every other rejection on this path: walking primary keys to see
+		// which ones exist leaves no trace.
+		s.auditDelete(ctx, input, nil, false, ErrNotFound.Code, 0)
+		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+	}
+	if err != nil {
+		s.auditDelete(ctx, input, nil, false, ErrInternal.Code, 0)
+		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+	// The one client this service cannot afford to lose. Deleting it is an
+	// unrecoverable lockout — session.findInternalClient resolves it by client_id,
+	// so login/refresh/registration stop for everyone including the administrator
+	// who did it, with no console path back. This refusal is a self-destruct guard,
+	// not a permission narrowing, and it applies to the console itself exactly as
+	// to a delegate.
+	if protected := strings.TrimSpace(s.ProtectedClientID); protected != "" && current.ClientID == protected {
+		s.auditDelete(ctx, input, current, false, ErrProtectedClient.Code, 0)
+		return nil, newError(ErrProtectedClient, "内置客户端不可删除", nil)
+	}
+	now := s.now()
+	entries, revokedRefresh, err := s.Clients.DeleteAndRevoke(ctx, input.ClientPK, now)
+	if errors.Is(err, repository.ErrNotFound) {
+		// The row vanished between FindByID and here (a concurrent delete) — the
+		// resolved name is still worth an audit row, like every other rejection.
+		s.auditDelete(ctx, input, current, false, ErrNotFound.Code, 0)
+		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+	}
+	if err != nil {
+		// The delete never committed, so the client still exists: an audit row reading
+		// "deleted" would be a lie. Recorded as a failed attempt.
+		s.auditDelete(ctx, input, current, false, ErrInternal.Code, 0)
+		return nil, newError(ErrInternal, "删除 OAuth 客户端失败", err)
+	}
+	// Both sides of the revocation are reported: the still-live access tokens that
+	// needed blacklist delivery plus the unrevoked refresh tokens (one per family).
+	// A client whose access tokens have all expired but still holds a live refresh
+	// session is cut just the same — that session dies — so the count must say so.
+	total := len(entries) + int(revokedRefresh)
+	s.deliverBlacklist(ctx, entries, now)
+	s.auditDelete(ctx, input, current, true, 0, total)
+	return &DeleteClientResult{RevokedTokens: total}, nil
 }
 
 // RotateClientSecret reissues a confidential client's secret. The new plaintext is

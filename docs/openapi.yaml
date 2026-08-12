@@ -2593,6 +2593,61 @@ paths:
           description: 资源不存在（404xx）
       security:
         - bearerAuth: []
+    delete:
+      summary: 删除 OAuth 客户端
+      deprecated: false
+      description: |
+        需 admin 角色。委派调用需 `admin:write` scope。
+
+        物理删除：`oauth_clients` 行及其全部授权码 / Access / Refresh Token 元数据
+        通过 `ON DELETE CASCADE` 一并清除，已签发的 token 随即全部失效——删前在同一
+        事务内撤销活跃 token 并失效 auth-state 缓存，删除即刻生效。不可恢复。
+
+        内置客户端（`INTERNAL_OAUTH_CLIENT_ID`）不可删除（403）：内部会话流程按
+        client_id 解析它，删除会使全站登录 / 刷新 / 注册中断且控制台无法恢复。
+        带能力 scope 的客户端无额外限制——删除移除了凭据与其携带的 scope，任何
+        管理员（含委派）均可执行。
+      operationId: adminDeleteOAuthClient
+      tags:
+        - Admin
+      parameters:
+        - name: id
+          in: path
+          description: 客户端内部 ID
+          required: true
+          example: 0
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: |
+            删除成功。删除前活跃的 Access / Refresh Token 在同一个事务内被撤销，其
+            元数据随行删除级联清除；活跃 Access Token 的 auth-state 缓存同时失效，
+            已签发 token 即刻全部失效。message 在发生撤销时提示已撤销该客户端的全部
+            Token。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+          headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          description: |
+            无权限（403xx）。内置客户端（`INTERNAL_OAUTH_CLIENT_ID`，默认 `sast-link-web`）
+            不可删除：删除它是不可恢复的全站锁死——`findInternalClient` 按 client_id
+            解析它，登录 / 刷新 / 注册会立即中断且管理员自己也无法登录回来恢复。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "404":
+          $ref: "#/components/responses/NotFound"
+          description: 资源不存在（404xx）
+      security:
+        - bearerAuth: []
   /admin/oauth-clients/{id}/rotate-secret:
     post:
       summary: 轮换 OAuth 客户端的 client_secret

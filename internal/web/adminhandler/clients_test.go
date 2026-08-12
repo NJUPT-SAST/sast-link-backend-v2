@@ -31,6 +31,10 @@ type fakeClients struct {
 	rotateSecretResult *adminclient.RotateClientSecretResult
 	rotateSecretErr    error
 	rotateSecretInput  adminclient.RotateClientSecretInput
+	deleteResult       *adminclient.DeleteClientResult
+	deleteErr          error
+	deleteInput        adminclient.DeleteClientInput
+	deleteCalls        int
 }
 
 func (f *fakeClients) RotateClientSecret(
@@ -75,6 +79,21 @@ func (f *fakeClients) UpdateClient(
 		return &adminclient.UpdateClientResult{}, nil
 	}
 	return f.updateResult, nil
+}
+
+func (f *fakeClients) DeleteClient(
+	_ context.Context,
+	input adminclient.DeleteClientInput,
+) (*adminclient.DeleteClientResult, error) {
+	f.deleteCalls++
+	f.deleteInput = input
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	if f.deleteResult == nil {
+		return &adminclient.DeleteClientResult{}, nil
+	}
+	return f.deleteResult, nil
 }
 
 type envelope struct {
@@ -474,5 +493,73 @@ func TestRotateClientSecretReturnsSecretOnce(t *testing.T) {
 	}
 	if service.rotateSecretInput.ClientPK != 1 || service.rotateSecretInput.AdminUserID != 99 {
 		t.Fatalf("rotate input = %+v, want the path id and authenticated principal", service.rotateSecretInput)
+	}
+}
+
+// Deleting a registration reaches the service with the path id and the
+// authenticated principal, and returns an ok envelope rather than a body the
+// frontend has to read.
+func TestDeleteClientRemovesRegistration(t *testing.T) {
+	service := &fakeClients{}
+	router := newRouter(t, service)
+
+	recorder := doRequest(t, router, http.MethodDelete, "/admin/oauth-clients/5", "", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	payload := decodeEnvelope(t, recorder)
+	if payload.Code != 0 {
+		t.Fatalf("envelope code = %d, want 0", payload.Code)
+	}
+	var body struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(payload.Data, &body); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if body.Message != "客户端已删除" {
+		t.Fatalf("message = %q, want %q (no revocation happened)", body.Message, "客户端已删除")
+	}
+	if service.deleteCalls != 1 {
+		t.Fatalf("DeleteClient called %d times, want 1", service.deleteCalls)
+	}
+	if service.deleteInput.ClientPK != 5 || service.deleteInput.AdminUserID != 99 {
+		t.Fatalf("delete input = %+v, want the path id and authenticated principal", service.deleteInput)
+	}
+}
+
+// A deletion that cut live sessions is worth calling out in the message, the same
+// way the update handler does when disabling a client revokes tokens.
+func TestDeleteClientReportsRevokedTokens(t *testing.T) {
+	service := &fakeClients{deleteResult: &adminclient.DeleteClientResult{RevokedTokens: 3}}
+	router := newRouter(t, service)
+
+	recorder := doRequest(t, router, http.MethodDelete, "/admin/oauth-clients/5", "", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(decodeEnvelope(t, recorder).Data, &payload); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if !strings.Contains(payload.Message, "已撤销") {
+		t.Fatalf("message = %q, want it to mention the revoked tokens", payload.Message)
+	}
+}
+
+// A non-numeric or non-positive path segment names no client and gets the same
+// 404 as a missing one, without reaching the service.
+func TestDeleteClientRejectsBadPathID(t *testing.T) {
+	service := &fakeClients{}
+	router := newRouter(t, service)
+
+	recorder := doRequest(t, router, http.MethodDelete, "/admin/oauth-clients/not-a-number", "", "")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+	if service.deleteCalls != 0 {
+		t.Fatalf("DeleteClient called %d times on a bad path id, want 0", service.deleteCalls)
 	}
 }

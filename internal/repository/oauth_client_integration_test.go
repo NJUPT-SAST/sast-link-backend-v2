@@ -212,3 +212,158 @@ func TestOAuthClientRepositoryUpdateWithoutRevokeLeavesTokensAlone(t *testing.T)
 		t.Fatalf("client name = %q, want Renamed", renamed.ClientName)
 	}
 }
+
+// Deleting a registration is one step past disabling: the row and — through the
+// ON DELETE CASCADE foreign keys — the client's authorization codes and
+// access/refresh token metadata are gone, so no row is left to re-enable. The
+// revocation leg must still run first, so the still-live access JTIs are
+// enqueued for blacklist delivery before the cascade empties the token tables.
+func TestOAuthClientRepositoryDeleteAndRevokeCascadesAndEnqueues(t *testing.T) {
+	database := setupDatabase(t)
+	clients := repository.NewOAuthClient(database)
+	tokens := repository.NewToken(database)
+	users := repository.NewUser(database)
+	user := createUserWithProfile(t, users, "delete-client@njupt.edu.cn")
+
+	target := createOAuthClient(t, database)
+	other := &model.OAuthClient{
+		ClientID:     "bystander-client",
+		ClientName:   "Bystander",
+		ClientType:   model.ClientTypeThirdParty,
+		RedirectURIs: model.StringArray{"https://bystander.test/cb"},
+		GrantTypes:   model.StringArray{"authorization_code"},
+		Scopes:       model.StringArray{"openid"},
+	}
+	if err := clients.Create(context.Background(), other); err != nil {
+		t.Fatalf("create bystander client: %v", err)
+	}
+
+	createTokenPair(t, tokens, "del-a", "family-del-a", 0, target.ID, user.ID)
+	createTokenPair(t, tokens, "del-b", "family-del-b", 0, target.ID, user.ID)
+	createTokenPair(t, tokens, "bystander", "family-bystander", 0, other.ID, user.ID)
+
+	// An unconsumed authorization code belongs to the target and must die with it.
+	redirectURI := "https://example.test/callback"
+	nonce := "nonce"
+	authorization := &model.OAuthAuthorization{
+		Code:                "authorization-code-delete-test",
+		ClientID:            target.ID,
+		UserID:              user.ID,
+		RedirectURI:         &redirectURI,
+		Scopes:              model.StringArray{"openid"},
+		CodeChallenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+		CodeChallengeMethod: "S256",
+		Nonce:               &nonce,
+		ExpiresAt:           time.Now().Add(time.Minute),
+	}
+	if err := database.Create(authorization).Error; err != nil {
+		t.Fatalf("create authorization: %v", err)
+	}
+
+	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
+	entries, revokedRefresh, err := clients.DeleteAndRevoke(context.Background(), target.ID, revokedAt)
+	if err != nil {
+		t.Fatalf("DeleteAndRevoke error = %v", err)
+	}
+	// Both of the target's live access tokens need blacklist delivery, and both
+	// families' unrevoked refresh tokens were revoked too.
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want the target's two live access tokens", len(entries))
+	}
+	if revokedRefresh != 2 {
+		t.Fatalf("revokedRefresh = %d, want 2 (del-a and del-b families)", revokedRefresh)
+	}
+
+	// The registration itself is gone, so re-enabling is impossible.
+	if _, findErr := clients.FindByID(context.Background(), target.ID); !errors.Is(findErr, repository.ErrNotFound) {
+		t.Fatalf("FindByID(deleted) error = %v, want ErrNotFound", findErr)
+	}
+
+	// The cascade wiped every trace of the client's OAuth state.
+	for table, modelValue := range map[string]any{
+		"oauth_access_tokens":  &model.OAuthAccessToken{},
+		"oauth_refresh_tokens": &model.OAuthRefreshToken{},
+		"oauth_authorizations": &model.OAuthAuthorization{},
+	} {
+		var count int64
+		if err := database.Model(modelValue).Where("client_id = ?", target.ID).Count(&count).Error; err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows for deleted client = %d, want 0 (cascade)", table, count)
+		}
+	}
+
+	// The other client's session for the same user must survive.
+	assertTokenUnrevoked(t, database, "bystander-access", "bystander-refresh")
+
+	// The durable outbox rows survive the row deletion: the Redis blacklist is not
+	// authoritative, so the auth-state cache must still be invalidated.
+	var queued int64
+	if err := database.Model(&model.TokenBlacklistOutbox{}).
+		Where("token_id IN ?", []string{"del-a-access", "del-b-access"}).
+		Count(&queued).Error; err != nil {
+		t.Fatalf("count outbox rows: %v", err)
+	}
+	if queued != 2 {
+		t.Fatalf("outbox rows = %d, want 2", queued)
+	}
+
+	// Deleting an id that is already gone is a no-op reported as not-found.
+	if _, _, err := clients.DeleteAndRevoke(context.Background(), 999999, revokedAt); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("DeleteAndRevoke(missing) error = %v, want ErrNotFound", err)
+	}
+}
+
+// A client whose access token has already expired but whose refresh token is
+// still live is cut just the same — the refresh session dies — so the revocation
+// count must report it. Otherwise the console would read "0 tokens revoked" for a
+// deletion that killed a live session.
+func TestOAuthClientRepositoryDeleteAndRevokeReportsRefreshOnlySession(t *testing.T) {
+	database := setupDatabase(t)
+	clients := repository.NewOAuthClient(database)
+	users := repository.NewUser(database)
+	user := createUserWithProfile(t, users, "refresh-only-delete@njupt.edu.cn")
+
+	client := createOAuthClient(t, database)
+	family := "refresh-only-family"
+	expiredAccess := &model.OAuthAccessToken{
+		TokenID:   "refresh-only-access",
+		ClientID:  client.ID,
+		UserID:    user.ID,
+		FamilyID:  &family,
+		Scopes:    model.StringArray{"openid"},
+		ExpiresAt: time.Now().Add(-time.Hour),
+	}
+	//nolint:gosec // G101 trips on the TokenHash field name; this is a fake refresh
+	// token hash for a test fixture, not a credential.
+	liveRefresh := &model.OAuthRefreshToken{
+		TokenHash: "refresh-only-refresh",
+		FamilyID:  family,
+		Sequence:  0,
+		ClientID:  client.ID,
+		UserID:    user.ID,
+		Scopes:    model.StringArray{"openid"},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	if err := database.Create(expiredAccess).Error; err != nil {
+		t.Fatalf("create expired access token: %v", err)
+	}
+	if err := database.Create(liveRefresh).Error; err != nil {
+		t.Fatalf("create live refresh token: %v", err)
+	}
+
+	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
+	entries, revokedRefresh, err := clients.DeleteAndRevoke(context.Background(), client.ID, revokedAt)
+	if err != nil {
+		t.Fatalf("DeleteAndRevoke error = %v", err)
+	}
+	// The expired access token needs no blacklist delivery, but the live refresh
+	// session was revoked and must be reported.
+	if len(entries) != 0 {
+		t.Fatalf("entries = %d, want 0 for an expired access token", len(entries))
+	}
+	if revokedRefresh != 1 {
+		t.Fatalf("revokedRefresh = %d, want 1 (the live refresh session)", revokedRefresh)
+	}
+}

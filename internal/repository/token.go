@@ -610,25 +610,34 @@ func revokeAllByClientInTransaction(
 	transaction *gorm.DB,
 	clientPK int64,
 	revokedAt time.Time,
-) ([]model.BlacklistEntry, error) {
+) ([]model.BlacklistEntry, int64, error) {
 	var entries []model.BlacklistEntry
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Select("token_id", "expires_at").
 		Where("client_id = ? AND expires_at > ? AND revoked_at IS NULL", clientPK, revokedAt).
 		Find(&entries).Error; err != nil {
-		return nil, fmt.Errorf("select live access tokens by client: %w", err)
+		return nil, 0, fmt.Errorf("select live access tokens by client: %w", err)
 	}
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Where("client_id = ? AND revoked_at IS NULL", clientPK).
 		Update("revoked_at", revokedAt).Error; err != nil {
-		return nil, fmt.Errorf("revoke access tokens by client: %w", err)
+		return nil, 0, fmt.Errorf("revoke access tokens by client: %w", err)
 	}
-	if err := transaction.Model(&model.OAuthRefreshToken{}).
+	// The refresh-token UPDATE count is reported, not inferred: every family holds
+	// exactly one unrevoked refresh token at a time (rotation revokes the previous
+	// one), so RowsAffected is accurate, while the access side must keep len(entries)
+	// — rotation never revokes old access tokens, so counting its RowsAffected would
+	// inflate a long-lived family's impact by hundreds.
+	refreshResult := transaction.Model(&model.OAuthRefreshToken{}).
 		Where("client_id = ? AND revoked_at IS NULL", clientPK).
-		Update("revoked_at", revokedAt).Error; err != nil {
-		return nil, fmt.Errorf("revoke refresh tokens by client: %w", err)
+		Update("revoked_at", revokedAt)
+	if refreshResult.Error != nil {
+		return nil, 0, fmt.Errorf("revoke refresh tokens by client: %w", refreshResult.Error)
 	}
-	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
+	if err := enqueueBlacklistInTransaction(transaction, entries, revokedAt); err != nil {
+		return nil, 0, err
+	}
+	return entries, refreshResult.RowsAffected, nil
 }
 
 // RevokeAllByUser revokes every non-revoked access and refresh token owned by

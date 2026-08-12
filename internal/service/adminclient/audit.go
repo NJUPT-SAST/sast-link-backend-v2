@@ -3,6 +3,7 @@ package adminclient
 import (
 	"context"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
@@ -11,6 +12,7 @@ const (
 	actionUpdateClient = "admin_oauth_client_update"
 	//nolint:gosec // G101 trips on the "Secret" in the name; this is an audit action string, not a credential.
 	actionRotateClientSecret = "admin_oauth_client_rotate_secret"
+	actionDeleteClient       = "admin_oauth_client_delete"
 )
 
 // auditRotateSecret records a secret rotation attempt. The new plaintext never
@@ -145,6 +147,52 @@ func (s Service) auditUpdate(
 		AdminUserID:   input.AdminUserID,
 		ActorClientID: input.ActorClientID,
 		Action:        actionUpdateClient,
+		ResourceID:    clientID,
+		Success:       success,
+		ErrCode:       errCode,
+		ClientIP:      input.ClientIP,
+		UserAgent:     input.UserAgent,
+		Detail:        detail,
+	})
+}
+
+// auditDelete records a deregistration attempt. current is the resolved row, nil
+// when the target could not be resolved (an unknown id) and the attempt therefore
+// names nothing. The client_name and capability flags come from that row — the
+// client_id (ResourceID) survives the row's deletion, so an audit reader tracing a
+// deregistration can still see which identifier it was known by. Refusals (the
+// built-in client, an unknown id) are recorded too, like every other rejection on
+// this service's paths.
+func (s Service) auditDelete(
+	ctx context.Context,
+	input DeleteClientInput,
+	current *model.OAuthClient,
+	success bool,
+	errCode int,
+	revokedTokens int,
+) {
+	detail := map[string]any{}
+	if current != nil {
+		detail["client_name"] = current.ClientName
+		detail["client_type"] = string(current.ClientType)
+		if scope.ContainsAdmin([]string(current.Scopes)) {
+			detail["admin_scope"] = true
+		}
+		if scope.ContainsUser([]string(current.Scopes)) {
+			detail["user_scope"] = true
+		}
+	}
+	if revokedTokens > 0 {
+		detail["revoked_tokens"] = revokedTokens
+	}
+	var clientID *string
+	if current != nil {
+		clientID = &current.ClientID
+	}
+	s.audit(ctx, auditParams{
+		AdminUserID:   input.AdminUserID,
+		ActorClientID: input.ActorClientID,
+		Action:        actionDeleteClient,
 		ResourceID:    clientID,
 		Success:       success,
 		ErrCode:       errCode,

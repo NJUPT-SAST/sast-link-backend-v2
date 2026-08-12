@@ -153,7 +153,7 @@ func (r *OAuthClientRepository) UpdateAndRevoke(
 		if !revokeTokens {
 			return nil
 		}
-		revoked, revokeErr := revokeAllByClientInTransaction(transaction, id, revokedAt)
+		revoked, _, revokeErr := revokeAllByClientInTransaction(transaction, id, revokedAt)
 		if revokeErr != nil {
 			return revokeErr
 		}
@@ -164,4 +164,62 @@ func (r *OAuthClientRepository) UpdateAndRevoke(
 		return nil, err
 	}
 	return entries, nil
+}
+
+// DeleteAndRevoke permanently removes an OAuth client and, in the same
+// transaction, revokes every live token issued to it.
+//
+// Deleting a registration is a "cut access now" action one step past disabling:
+// the ON DELETE CASCADE foreign keys wipe the client's authorization codes and
+// access/refresh token metadata, and the revocation leg here guarantees the
+// still-live access JTIs are enqueued for blacklist delivery (and auth-state
+// cache invalidation) before the row disappears — the cache would otherwise keep
+// admitting a token whose authoritative DB row is gone. The returned entries are
+// the still-live access JTIs needing that delivery, and revokedRefresh is the
+// count of unrevoked refresh tokens that were revoked — accurate because every
+// family holds exactly one unrevoked refresh token at a time, so a client that
+// only holds a live refresh session still reports that its sessions were cut.
+//
+// The revocation runs before the delete on purpose: once the row is gone the
+// CASCADE would have emptied the access-token table, and the SELECT that feeds
+// the outbox would find nothing to enqueue. Returns ErrNotFound when the client
+// does not exist; the row is deleted only if the revocation leg succeeded, so a
+// partial failure cannot leave live tokens behind a client the console reports
+// as gone.
+//
+// A token minted by a concurrent redeem/refresh that commits between the
+// revocation leg and the delete escapes the outbox and is then CASCADE-removed.
+// It can only outlive the delete if it was already used (its auth-state blob
+// cached) before the delete committed and the tombstone landed — a sub-millisecond
+// double race, and its own blob TTL bounds it; accepted without a re-check.
+func (r *OAuthClientRepository) DeleteAndRevoke(
+	ctx context.Context,
+	id int64,
+	revokedAt time.Time,
+) ([]model.BlacklistEntry, int64, error) {
+	if id <= 0 {
+		return nil, 0, fmt.Errorf("%w: client ID must be positive", ErrInvalidArgument)
+	}
+	var entries []model.BlacklistEntry
+	var revokedRefresh int64
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		revoked, refreshed, revokeErr := revokeAllByClientInTransaction(transaction, id, revokedAt)
+		if revokeErr != nil {
+			return revokeErr
+		}
+		entries = revoked
+		revokedRefresh = refreshed
+		result := transaction.Delete(&model.OAuthClient{}, "id = ?", id)
+		if result.Error != nil {
+			return fmt.Errorf("delete OAuth client: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return entries, revokedRefresh, nil
 }

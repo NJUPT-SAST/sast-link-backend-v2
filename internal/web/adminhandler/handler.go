@@ -18,6 +18,7 @@ type ClientService interface {
 	ListClients(ctx context.Context) ([]adminclient.Client, error)
 	CreateClient(ctx context.Context, input adminclient.CreateClientInput) (*adminclient.CreateClientResult, error)
 	UpdateClient(ctx context.Context, input adminclient.UpdateClientInput) (*adminclient.UpdateClientResult, error)
+	DeleteClient(ctx context.Context, input adminclient.DeleteClientInput) (*adminclient.DeleteClientResult, error)
 	RotateClientSecret(ctx context.Context, input adminclient.RotateClientSecretInput) (*adminclient.RotateClientSecretResult, error)
 }
 
@@ -98,6 +99,7 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	admin.GET("/oauth-clients", g.RequireReadScope, g.RequireAdmin, h.ListClients)
 	admin.POST("/oauth-clients", g.RequireWriteScope, g.RequireAdmin, h.CreateClient)
 	admin.PUT("/oauth-clients/:id", g.RequireWriteScope, g.RequireAdmin, h.UpdateClient)
+	admin.DELETE("/oauth-clients/:id", g.RequireWriteScope, g.RequireAdmin, h.DeleteClient)
 	admin.POST("/oauth-clients/:id/rotate-secret", g.RequireWriteScope, g.RequireAdmin, h.RotateClientSecret)
 
 	admin.GET("/users", g.RequireReadScope, g.RequireReader, h.ListUsers)

@@ -27,6 +27,12 @@ type fakeClients struct {
 	updateEntries []model.BlacklistEntry
 	updateErr     error
 	updateCalls   int
+
+	deleteEntries []model.BlacklistEntry
+	deleteRefresh int64
+	deleteErr     error
+	deleteID      int64
+	deleteCalls   int
 }
 
 func (f *fakeClients) List(_ context.Context) ([]model.OAuthClient, error) {
@@ -75,6 +81,19 @@ func (f *fakeClients) UpdateAndRevoke(
 		return nil, nil
 	}
 	return f.updateEntries, nil
+}
+
+func (f *fakeClients) DeleteAndRevoke(
+	_ context.Context,
+	id int64,
+	_ time.Time,
+) ([]model.BlacklistEntry, int64, error) {
+	f.deleteCalls++
+	f.deleteID = id
+	if f.deleteErr != nil {
+		return nil, 0, f.deleteErr
+	}
+	return f.deleteEntries, f.deleteRefresh, nil
 }
 
 type fakeBlacklist struct {

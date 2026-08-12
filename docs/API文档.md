@@ -1914,7 +1914,36 @@ POST /admin/oauth-clients/:id/rotate-secret
 
 ---
 
-### 6.10 查询审计日志
+### 6.10 删除 OAuth 客户端
+
+```
+DELETE /admin/oauth-clients/:id
+```
+
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
+
+**Response** `200`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "message": "客户端已删除，已撤销该客户端的全部 Token"
+  }
+}
+```
+
+**说明**:
+
+- **物理删除，不可恢复**：删除 `oauth_clients` 行，其全部授权码 / Access / Refresh Token 元数据经 `ON DELETE CASCADE` 级联清除；删前在同一事务内撤销活跃 token 并失效 auth-state 缓存，故已签发的 token **即刻全部失效**（不再能通过 `/userinfo` 或任何受保护端点）。`data.message` 在删除触发 token 撤销时提示已撤销该客户端的全部 Token；未撤销任何 token 时消息为「客户端已删除」。撤销计数（审计 `revoked_tokens`）含活跃 Access Token 与未撤销的 Refresh Token（每家族一条）——客户端 Access 已全部过期、仅剩活跃 Refresh 会话时同样计入。
+- 内置客户端（`INTERNAL_OAUTH_CLIENT_ID`，默认 `sast-link-web`）**不可删除**（`403`）：内部会话流程按 client_id 解析它，删除会使全站登录 / 刷新 / 注册立即中断，且控制台没有路径恢复（只能直连数据库）。
+- 带能力 scope（`admin:*` / `user:*`）的客户端**无额外限制**：删除移除了凭据与其携带的 scope，控制台或委派管理员均可执行——与授予时"仅控制台"（防委派蔓延）不同，删减委派不需要那道收紧。
+- `:id` 为客户端主键（列表接口返回的 `id`，非 `client_id`）。非数字或非正整数返回 `404`。被拒的删除（内置客户端、未知 id）同样写入审计日志（`admin_oauth_client_delete`，success=false）。
+
+---
+
+### 6.11 查询审计日志
 
 ```
 GET /admin/audit-logs
@@ -1977,7 +2006,7 @@ GET /admin/audit-logs
 
 ---
 
-### 6.11 统计概览
+### 6.12 统计概览
 
 ```
 GET /admin/stats
@@ -2018,7 +2047,7 @@ GET /admin/stats
   - `by_role` / `by_state` 按 `user` 表分组统计（`by_state` 含 `is_deleted`，其余两个维度不含）
   - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
 - `clients` 含全部注册（停用的也在内）：`total` 为注册总数，`active` 为 `is_active = true` 的数量
-- `audit.recent` 为最近 5 条审计日志（与 §6.10 同一排序 `created_at DESC`），条目结构同 §6.10；该路读取失败时记 WARN 日志并返回空列表（best-effort），不影响其余两路
+- `audit.recent` 为最近 5 条审计日志（与 §6.11 同一排序 `created_at DESC`），条目结构同 §6.11；该路读取失败时记 WARN 日志并返回空列表（best-effort），不影响其余两路
 - `users` 或 `clients` 聚合失败返回 `500`，不复用缓存——概览数据即时性优先
 
 **错误码**：`40100`、`40300`、`50000`。

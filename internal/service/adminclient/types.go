@@ -27,6 +27,16 @@ type ClientRepository interface {
 		revokeTokens bool,
 		revokedAt time.Time,
 	) ([]model.BlacklistEntry, error)
+	// DeleteAndRevoke permanently removes a client and revokes its live tokens in
+	// the same transaction, returning the access-token entries that still need
+	// revocation delivery plus the count of unrevoked refresh tokens that were
+	// revoked. The revocation runs before the delete so the still-live JTIs can be
+	// enqueued before the ON DELETE CASCADE empties the token tables.
+	DeleteAndRevoke(
+		ctx context.Context,
+		id int64,
+		revokedAt time.Time,
+	) ([]model.BlacklistEntry, int64, error)
 }
 
 // TokenBlacklist invalidates the auth-state cache entries for revoked access
@@ -132,4 +142,28 @@ type RotateClientSecretInput struct {
 // secret, matching CreateClientResult: only its hash is stored.
 type RotateClientSecretResult struct {
 	ClientSecret string
+}
+
+// DeleteClientInput identifies a registration to remove. The only built-in
+// client (ProtectedClientID) is refused inside the service; everything else —
+// capability clients included — is deletable by any administrator, console or
+// delegated, because deleting removes the credential and the scope it carried.
+type DeleteClientInput struct {
+	ClientPK int64
+	// AdminUserID is the authenticated administrator, for the audit trail.
+	AdminUserID int64
+	// ActorClientID is the azp of the token that authorized this call. Empty means a
+	// console session.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
+}
+
+// DeleteClientResult reports what the deletion removed.
+type DeleteClientResult struct {
+	// RevokedTokens counts every token revoked because the client was deleted:
+	// the still-live access tokens plus the unrevoked refresh tokens (one per
+	// family). A client holding only a live refresh session — its access token
+	// already expired — still reports that its sessions were cut.
+	RevokedTokens int
 }
