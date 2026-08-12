@@ -54,6 +54,11 @@ var ErrTokenReplayWithinGrace = errors.New("repository: token replay within grac
 // ErrTokenExpired indicates that token metadata is already expired.
 var ErrTokenExpired = errors.New("repository: token expired")
 
+// ErrTokenFamilyExpired indicates that a capability-scoped refresh family has
+// reached its configured max lifetime (JWT_REFRESH_CAPABILITY_MAX_LIFETIME) and
+// was revoked: the client must re-authorize rather than keep refreshing.
+var ErrTokenFamilyExpired = errors.New("repository: token family past its max lifetime")
+
 // TokenRepository persists and revokes OAuth token metadata.
 type TokenRepository struct {
 	database *gorm.DB
@@ -165,7 +170,7 @@ func (r *TokenRepository) RotateRefreshToken(
 	newAccess *model.OAuthAccessToken,
 	newRefresh *model.OAuthRefreshToken,
 ) (time.Time, error) {
-	return r.rotateRefreshToken(ctx, familyID, currentRefreshTokenHash, newAccess, newRefresh, nil)
+	return r.rotateRefreshToken(ctx, familyID, currentRefreshTokenHash, newAccess, newRefresh, nil, 0)
 }
 
 // RotateRefreshTokenWithAudit is RotateRefreshToken with the refresh's audit row
@@ -179,7 +184,27 @@ func (r *TokenRepository) RotateRefreshTokenWithAudit(
 	newRefresh *model.OAuthRefreshToken,
 	audit *model.AuditLog,
 ) (time.Time, error) {
-	return r.rotateRefreshToken(ctx, familyID, currentRefreshTokenHash, newAccess, newRefresh, audit)
+	return r.rotateRefreshToken(ctx, familyID, currentRefreshTokenHash, newAccess, newRefresh, audit, 0)
+}
+
+// RotateRefreshTokenWithAuditCapped is RotateRefreshTokenWithAudit with a cap on
+// the family's total life. maxLifetime is measured from the family's origin (the
+// moment of first authorization), not from this rotation: a rotated refresh
+// token's expiry is clamped to origin+maxLifetime, and a family whose cap has
+// already passed is revoked so the client must re-authorize. Zero disables the
+// cap. Only capability-scoped families call this with a nonzero value; plain
+// OIDC and internal session families keep the sliding window via the uncapped
+// methods.
+func (r *TokenRepository) RotateRefreshTokenWithAuditCapped(
+	ctx context.Context,
+	familyID string,
+	currentRefreshTokenHash string,
+	newAccess *model.OAuthAccessToken,
+	newRefresh *model.OAuthRefreshToken,
+	audit *model.AuditLog,
+	maxLifetime time.Duration,
+) (time.Time, error) {
+	return r.rotateRefreshToken(ctx, familyID, currentRefreshTokenHash, newAccess, newRefresh, audit, maxLifetime)
 }
 
 func (r *TokenRepository) rotateRefreshToken(
@@ -189,6 +214,7 @@ func (r *TokenRepository) rotateRefreshToken(
 	newAccess *model.OAuthAccessToken,
 	newRefresh *model.OAuthRefreshToken,
 	audit *model.AuditLog,
+	maxLifetime time.Duration,
 ) (time.Time, error) {
 	if strings.TrimSpace(familyID) == "" {
 		return time.Time{}, fmt.Errorf("%w: token family id is empty", ErrInvalidArgument)
@@ -202,6 +228,7 @@ func (r *TokenRepository) rotateRefreshToken(
 
 	var originCreatedAt time.Time
 	replayDetected := false
+	familyExpired := false
 	transactionErr := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		if lockErr := lockTokenFamily(transaction, familyID); lockErr != nil {
 			return fmt.Errorf("lock token family: %w", lockErr)
@@ -264,6 +291,29 @@ func (r *TokenRepository) rotateRefreshToken(
 		}
 		originCreatedAt = origin.CreatedAt
 
+		// A capability family whose max lifetime has already elapsed is cut, exactly
+		// like a true replay cuts a family: the client must re-authorize rather than
+		// keep refreshing a delegation that should have expired. Only reachable when
+		// the presented token is still valid (the ExpiresAt check above) yet older
+		// than the family cap — a family minted before the cap shipped, or any future
+		// path that mints past it. In-window families never trigger it, because the
+		// clamp below keeps every rotated expiry inside the cap.
+		if maxLifetime > 0 && !originCreatedAt.Add(maxLifetime).After(rotationTime) {
+			if _, revokeErr := revokeFamilyInTransaction(transaction, familyID, rotationTime); revokeErr != nil {
+				return revokeErr
+			}
+			familyExpired = true
+			return nil
+		}
+		// The rotated refresh token must not outlive the family's cap either: the
+		// issuer computes a sliding expiry from now, which would otherwise extend a
+		// delegation past its boundary on every refresh.
+		if maxLifetime > 0 {
+			if capDeadline := originCreatedAt.Add(maxLifetime); newRefresh.ExpiresAt.After(capDeadline) {
+				newRefresh.ExpiresAt = capDeadline
+			}
+		}
+
 		result := transaction.Model(&model.OAuthRefreshToken{}).
 			Where("id = ? AND revoked_at IS NULL", current.ID).
 			Update("revoked_at", rotationTime)
@@ -291,6 +341,9 @@ func (r *TokenRepository) rotateRefreshToken(
 	}
 	if replayDetected {
 		return time.Time{}, ErrTokenReplay
+	}
+	if familyExpired {
+		return time.Time{}, ErrTokenFamilyExpired
 	}
 	return originCreatedAt, nil
 }
@@ -557,25 +610,34 @@ func revokeAllByClientInTransaction(
 	transaction *gorm.DB,
 	clientPK int64,
 	revokedAt time.Time,
-) ([]model.BlacklistEntry, error) {
+) ([]model.BlacklistEntry, int64, error) {
 	var entries []model.BlacklistEntry
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Select("token_id", "expires_at").
 		Where("client_id = ? AND expires_at > ? AND revoked_at IS NULL", clientPK, revokedAt).
 		Find(&entries).Error; err != nil {
-		return nil, fmt.Errorf("select live access tokens by client: %w", err)
+		return nil, 0, fmt.Errorf("select live access tokens by client: %w", err)
 	}
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Where("client_id = ? AND revoked_at IS NULL", clientPK).
 		Update("revoked_at", revokedAt).Error; err != nil {
-		return nil, fmt.Errorf("revoke access tokens by client: %w", err)
+		return nil, 0, fmt.Errorf("revoke access tokens by client: %w", err)
 	}
-	if err := transaction.Model(&model.OAuthRefreshToken{}).
+	// The refresh-token UPDATE count is reported, not inferred: every family holds
+	// exactly one unrevoked refresh token at a time (rotation revokes the previous
+	// one), so RowsAffected is accurate, while the access side must keep len(entries)
+	// — rotation never revokes old access tokens, so counting its RowsAffected would
+	// inflate a long-lived family's impact by hundreds.
+	refreshResult := transaction.Model(&model.OAuthRefreshToken{}).
 		Where("client_id = ? AND revoked_at IS NULL", clientPK).
-		Update("revoked_at", revokedAt).Error; err != nil {
-		return nil, fmt.Errorf("revoke refresh tokens by client: %w", err)
+		Update("revoked_at", revokedAt)
+	if refreshResult.Error != nil {
+		return nil, 0, fmt.Errorf("revoke refresh tokens by client: %w", refreshResult.Error)
 	}
-	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
+	if err := enqueueBlacklistInTransaction(transaction, entries, revokedAt); err != nil {
+		return nil, 0, err
+	}
+	return entries, refreshResult.RowsAffected, nil
 }
 
 // RevokeAllByUser revokes every non-revoked access and refresh token owned by

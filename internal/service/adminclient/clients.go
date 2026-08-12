@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -95,17 +96,14 @@ func (s Service) buildClient(input CreateClientInput) (*model.OAuthClient, strin
 	if err != nil {
 		return nil, "", newError(ErrInvalidInput, "scopes 非法，必须包含 openid 且仅含受支持的值", err)
 	}
-	// Granting delegated administration at registration time is permitted, but only
-	// under the same conditions an update must satisfy. scope.Normalize deliberately
-	// accepts the admin scopes — it is the shared "is this set well-formed" predicate
+	// Granting a capability scope at registration time is permitted, but only under
+	// the same conditions an update must satisfy. scope.Normalize deliberately accepts
+	// the capability scopes — it is the shared "is this set well-formed" predicate
 	// that /oauth/authorize also uses — so the capability rules live here, not there.
-	if grantErr := s.checkAdminScopeGrant(adminScopeGrant{
-		scopes:        scopes,
-		grantTypes:    []string(grantTypes),
-		clientType:    clientType,
-		actorClientID: input.ActorClientID,
-		// A registration chooses its own redirect_uris by definition, so there is no
-		// "granting and repointing in one request" ambiguity to refuse here.
+	if grantErr := s.checkCapabilityScopeGrant(capabilityScopeGrant{
+		scopes:              scopes,
+		clientType:          clientType,
+		actorClientID:       input.ActorClientID,
 		redirectURIsChanged: false,
 	}); grantErr != nil {
 		return nil, "", grantErr
@@ -135,18 +133,17 @@ func (s Service) buildClient(input CreateClientInput) (*model.OAuthClient, strin
 	return client, secret, nil
 }
 
-// adminScopeGrant is the merged state a delegated-administration guard decides on:
-// what the registration would look like after this request, not what the request
-// happens to mention.
+// capabilityScopeGrant is the merged state a capability-scope guard decides on: what the
+// registration would look like after this request, not what the request happens to
+// mention.
 //
 // A struct because the guard is reached from both create and update, whose inputs
 // carry these values in different shapes, and because a positional call with three
 // adjacent string slices invites a transposition the compiler cannot catch.
-type adminScopeGrant struct {
-	// scopes and grantTypes are post-merge: for an update, the submitted value when
-	// present and the stored one otherwise.
-	scopes     []string
-	grantTypes []string
+type capabilityScopeGrant struct {
+	// scopes is post-merge: for an update, the submitted value when present and
+	// the stored one otherwise.
+	scopes []string
 	// clientType is the stored type on update. client_type is absent from
 	// UpdateClientInput by design, so it can only come from the row.
 	clientType    model.ClientType
@@ -156,47 +153,56 @@ type adminScopeGrant struct {
 	redirectURIsChanged bool
 }
 
-// checkAdminScopeGrant is the gate on delegated administration: it decides whether a
-// registration is allowed to end up holding an admin scope.
+// checkCapabilityScopeGrant is the gate on the capability scopes: it decides whether a
+// registration is allowed to end up holding an admin scope or a user scope.
 //
 // Every check keys on the merged state rather than on the submitted fields. A guard
 // that only inspected the request would be bypassable by splitting a change in two —
-// grant the scope while the grant types look innocent, then add refresh_token in a
-// second request that mentions no scope at all.
+// grant the scope in one request, then change a sibling field in the next.
+//
+// The admin scopes are confined to confidential (third_party) clients, mirroring
+// oauth.checkScopeForClient at the grant door so the registry never holds a grant
+// the authorize endpoint would reject. A public (first_party) client cannot hold
+// one, because it authenticates its token request by PKCE alone at the token
+// endpoint (no client_secret), so an intercepted authorization code is one barrier
+// short of a credential that reaches /admin, where a confidential client has two
+// independent barriers (client_secret + PKCE). Whether an organization-owned
+// application is the one granted an admin scope is a console decision, not a type
+// attribute: the grant goes through this gate (console actor only) and is audited.
+//
+// The user scopes carry no type constraint: they gate the self-service /user
+// surface, whose every endpoint operates on the token subject's own record, so an
+// application holding them is never a look-up-anyone credential.
+//
+// Both families permit the refresh grant: the /admin role gate reads the token's
+// subject role from the database on every request, so refreshing an admin-scoped
+// token never widens who may use it — an ordinary member holding an admin-scoped
+// refresh still gets refused at /admin.
 //
 // This is the barrier that replaces the old blanket refusal, and with the delegated
 // client no longer pinned by name it is the only thing standing between the console
-// and an administrative credential. It must therefore be applied on both doors,
-// create and update, and stay covered by tests on both.
-func (s Service) checkAdminScopeGrant(grant adminScopeGrant) error {
-	if !scope.ContainsAdmin(grant.scopes) {
+// and a capability credential. It must therefore be applied on both doors, create and
+// update, and stay covered by tests on both.
+func (s Service) checkCapabilityScopeGrant(grant capabilityScopeGrant) error {
+	hasAdmin := scope.ContainsAdmin(grant.scopes)
+	hasUser := scope.ContainsUser(grant.scopes)
+	if !hasAdmin && !hasUser {
 		return nil
 	}
-	// Mirrors checkScopeForClient: a first-party client is public, so the token
-	// endpoint authenticates it by PKCE alone and an intercepted authorization code is
-	// one barrier short of an administrative token. Refused at the grant door too, not
-	// only at authorize, so the registry never holds a grant that can never be used.
-	if grant.clientType != model.ClientTypeThirdParty {
+	if hasAdmin && grant.clientType != model.ClientTypeThirdParty {
 		return newError(ErrInvalidInput, "admin scope 仅可授予 third_party 客户端", nil)
 	}
-	// The refresh grant inherits scopes without narrowing, so a refreshable admin
-	// token renews itself indefinitely until its family is revoked. Delegated
-	// administration is bounded to a single access-token TTL instead.
-	if slices.Contains(grant.grantTypes, grantRefreshToken) {
-		return newError(ErrInvalidInput, "持有 admin scope 的客户端不可注册 refresh_token", nil)
-	}
-	// Only the console may create administrative capability. Without this, a delegated
-	// client holding admin:write could register or promote another delegate, and the
-	// set of clients that can reach /admin would grow without an operator ever
-	// approving it.
+	// Only the console may create capability. Without this, a scoped client holding
+	// admin:write could register or promote another delegate, and the set of clients
+	// that can reach /admin would grow without an operator ever approving it.
 	if !s.actorIsConsole(grant.actorClientID) {
-		return newError(ErrProtectedClient, "admin scope 只能由控制台授予", nil)
+		return newError(ErrProtectedClient, "capability scope 只能由控制台授予", nil)
 	}
 	// Granting the capability and repointing the callbacks in one request would let a
 	// single audit row describe both, which is exactly the pair worth reading
 	// separately. Two requests, two rows.
 	if grant.redirectURIsChanged {
-		return newError(ErrInvalidInput, "授予 admin scope 与修改 redirect_uris 不可在同一请求中完成", nil)
+		return newError(ErrInvalidInput, "授予 capability scope 与修改 redirect_uris 不可在同一请求中完成", nil)
 	}
 	return nil
 }
@@ -240,15 +246,15 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	}
 	// After checkProtected, so a refusal on a protected target names that reason rather
 	// than a scope rule the operator cannot act on. Both key on the stored row.
-	nextScopes, nextGrants := mergedRegistration(current, input)
-	if grantErr := s.checkAdminScopeGrant(adminScopeGrant{
-		scopes:        nextScopes,
-		grantTypes:    nextGrants,
-		clientType:    current.ClientType,
-		actorClientID: input.ActorClientID,
-		// A grant arriving together with a callback rewrite is refused; on this path
-		// checkProtected has already refused a rewrite on an *already* delegated client,
-		// so what remains is the promotion-plus-repoint request.
+	nextScopes, mergeErr := mergedRegistration(current, input)
+	if mergeErr != nil {
+		s.auditUpdate(ctx, input, false, errorCode(mergeErr), 0, &current.ClientID, nil)
+		return nil, mergeErr
+	}
+	if grantErr := s.checkCapabilityScopeGrant(capabilityScopeGrant{
+		scopes:              nextScopes,
+		clientType:          current.ClientType,
+		actorClientID:       input.ActorClientID,
 		redirectURIsChanged: input.RedirectURIs != nil,
 	}); grantErr != nil {
 		s.auditUpdate(ctx, input, false, errorCode(grantErr), 0, &current.ClientID, nil)
@@ -256,9 +262,9 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	}
 	reason := revocationReason(current, nextScopes)
 	revoke := (input.IsActive != nil && !*input.IsActive && current.IsActive != nil && *current.IsActive) ||
-		reason.scopesNarrowed() || reason.AdminScopeGranted
+		reason.scopesNarrowed() || reason.AdminScopeGranted || reason.UserScopeGranted
 	now := s.now()
-	entries, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, fields, revoke, now)
+	entries, revokedRefresh, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, fields, revoke, now)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
 	}
@@ -270,30 +276,150 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 		s.auditUpdate(ctx, input, false, ErrInternal.Code, 0, &current.ClientID, nil)
 		return nil, newError(ErrInternal, "更新 OAuth 客户端失败", err)
 	}
+	// Both sides of the revocation are reported, matching DeleteClient's contract: a
+	// client whose access tokens have all expired but still holds a live refresh
+	// session is cut just the same, so the count must say so.
+	total := len(entries) + int(revokedRefresh)
 	s.deliverBlacklist(ctx, entries, now)
-	s.auditUpdate(ctx, input, true, 0, len(entries), &current.ClientID, &reason)
-	return &UpdateClientResult{RevokedTokens: len(entries)}, nil
+	s.auditUpdate(ctx, input, true, 0, total, &current.ClientID, &reason)
+	return &UpdateClientResult{RevokedTokens: total}, nil
 }
 
-// mergedRegistration resolves what the registration's scopes and grant types would
-// be after this update: the submitted value where present, the stored one otherwise.
+// DeleteClient permanently removes a registration. Deleting is one step past
+// disabling: the row and — through ON DELETE CASCADE — the client's authorization
+// codes and access/refresh token metadata are gone, so every token it ever issued
+// is cut immediately and there is no row left to re-enable. The still-live access
+// JTIs are enqueued for blacklist delivery before the row disappears, so the
+// Redis auth-state cache is invalidated along with the authoritative rows.
+//
+// Capability clients are not console-gated here. Unlike granting a capability,
+// which creates a delegate the console must approve, deleting one removes the
+// credential and the scope it carried — the refusal chain exists to stop
+// delegation from growing, not to stop it from shrinking. Any administrator,
+// console or delegated, may deregister any non-built-in client.
+func (s Service) DeleteClient(ctx context.Context, input DeleteClientInput) (*DeleteClientResult, error) {
+	if s.Clients == nil {
+		return nil, newError(ErrInternal, "客户端仓储未配置", nil)
+	}
+	if input.ClientPK <= 0 {
+		// The HTTP layer's parsePositiveID normally intercepts this, but a direct
+		// service caller can still reach it, and the refusal is audited like every
+		// other rejection here so the path stays uniform.
+		s.auditDelete(ctx, input, nil, false, ErrNotFound.Code, 0)
+		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+	}
+	current, err := s.Clients.FindByID(ctx, input.ClientPK)
+	if errors.Is(err, repository.ErrNotFound) {
+		// Audited like every other rejection on this path: walking primary keys to see
+		// which ones exist leaves no trace.
+		s.auditDelete(ctx, input, nil, false, ErrNotFound.Code, 0)
+		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+	}
+	if err != nil {
+		s.auditDelete(ctx, input, nil, false, ErrInternal.Code, 0)
+		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+	// The one client this service cannot afford to lose. Deleting it is an
+	// unrecoverable lockout — session.findInternalClient resolves it by client_id,
+	// so login/refresh/registration stop for everyone including the administrator
+	// who did it, with no console path back. This refusal is a self-destruct guard,
+	// not a permission narrowing, and it applies to the console itself exactly as
+	// to a delegate.
+	if protected := strings.TrimSpace(s.ProtectedClientID); protected != "" && current.ClientID == protected {
+		s.auditDelete(ctx, input, current, false, ErrProtectedClient.Code, 0)
+		return nil, newError(ErrProtectedClient, "内置客户端不可删除", nil)
+	}
+	now := s.now()
+	entries, revokedRefresh, err := s.Clients.DeleteAndRevoke(ctx, input.ClientPK, now)
+	if errors.Is(err, repository.ErrNotFound) {
+		// The row vanished between FindByID and here (a concurrent delete) — the
+		// resolved name is still worth an audit row, like every other rejection.
+		s.auditDelete(ctx, input, current, false, ErrNotFound.Code, 0)
+		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+	}
+	if err != nil {
+		// The delete never committed, so the client still exists: an audit row reading
+		// "deleted" would be a lie. Recorded as a failed attempt.
+		s.auditDelete(ctx, input, current, false, ErrInternal.Code, 0)
+		return nil, newError(ErrInternal, "删除 OAuth 客户端失败", err)
+	}
+	// Both sides of the revocation are reported: the still-live access tokens that
+	// needed blacklist delivery plus the unrevoked refresh tokens (one per family).
+	// A client whose access tokens have all expired but still holds a live refresh
+	// session is cut just the same — that session dies — so the count must say so.
+	total := len(entries) + int(revokedRefresh)
+	s.deliverBlacklist(ctx, entries, now)
+	s.auditDelete(ctx, input, current, true, 0, total)
+	return &DeleteClientResult{RevokedTokens: total}, nil
+}
+
+// RotateClientSecret reissues a confidential client's secret. The new plaintext is
+// returned exactly once, only its hash is stored. Existing access and refresh
+// tokens are untouched — they never depended on the secret — so rotation cuts a
+// leaked credential without logging anyone out. Refused for a public (first_party)
+// client, which has no secret to rotate, and for any non-console actor, mirroring
+// checkProtected's console-actor rule for every other sensitive edit.
+func (s Service) RotateClientSecret(ctx context.Context, input RotateClientSecretInput) (*RotateClientSecretResult, error) {
+	if s.Clients == nil {
+		return nil, newError(ErrInternal, "客户端仓储未配置", nil)
+	}
+	current, err := s.Clients.FindByID(ctx, input.ClientPK)
+	if errors.Is(err, repository.ErrNotFound) {
+		// An unknown id cannot name a resource, but the probe itself is worth
+		// finding in an incident review: a client_id sweep after a leaked secret
+		// looks exactly like this. ResourceID stays nil like every other failure
+		// on a target that could not be resolved.
+		s.auditRotateSecret(ctx, input, nil, false, ErrNotFound.Code)
+		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+	if current.ClientSecretHash == nil {
+		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrInvalidInput.Code)
+		return nil, newError(ErrInvalidInput, "该客户端是公开客户端，没有 client_secret 可轮换", nil)
+	}
+	// Only the console may rotate a capability client's secret, mirroring
+	// checkProtected's console-actor rule for every other sensitive edit.
+	if !s.actorIsConsole(input.ActorClientID) {
+		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrProtectedClient.Code)
+		return nil, newError(ErrProtectedClient, "client_secret 只能由控制台轮换", nil)
+	}
+	secret, hash, err := s.Secrets.NewClientSecret()
+	if err != nil {
+		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrInternal.Code)
+		return nil, newError(ErrInternal, "生成 client_secret 失败", err)
+	}
+	now := s.now()
+	if _, _, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, map[string]any{"client_secret": hash}, false, now); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrNotFound.Code)
+			return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+		}
+		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrInternal.Code)
+		return nil, newError(ErrInternal, "更新 client_secret 失败", err)
+	}
+	s.auditRotateSecret(ctx, input, &current.ClientID, true, 0)
+	return &RotateClientSecretResult{ClientSecret: secret}, nil
+}
+
+// mergedRegistration resolves what the registration's scopes would be after this
+// update: the submitted value where present, the stored one otherwise.
 //
 // Both are already normalized by the time they reach here — the stored values by the
-// write that persisted them, the submitted ones by updateFields.
-func mergedRegistration(current *model.OAuthClient, input UpdateClientInput) (scopes, grantTypes []string) {
-	scopes = []string(current.Scopes)
+// write that persisted them, the submitted ones by updateFields. The re-normalization
+// is defensive, and a failure must abort the guard rather than silently fall back to
+// the stored set: the post-merge check would then run on the wrong state.
+func mergedRegistration(current *model.OAuthClient, input UpdateClientInput) ([]string, error) {
+	scopes := []string(current.Scopes)
 	if input.Scope != nil {
-		// updateFields already normalized this value into the column map; normalizing
-		// again here is cheap and keeps the guard independent of that ordering.
-		if normalized, err := scope.Normalize(*input.Scope); err == nil {
-			scopes = normalized
+		normalized, err := scope.Normalize(*input.Scope)
+		if err != nil {
+			return nil, newError(ErrInvalidInput, "scopes 非法，必须包含 openid 且仅含受支持的值", err)
 		}
+		scopes = normalized
 	}
-	grantTypes = []string(current.GrantTypes)
-	if input.GrantTypes != nil {
-		grantTypes = *input.GrantTypes
-	}
-	return scopes, grantTypes
+	return scopes, nil
 }
 
 // revocation describes what an update does to a client's granted capability, which is
@@ -309,6 +435,14 @@ type revocation struct {
 	// admin:write: the client already held an admin scope, so the boolean is false
 	// while a write scope was genuinely added.
 	AdminScopesAdded []string
+	// UserScopeGranted reports a registration gaining self-service capability it did
+	// not have. It drives the revoke decision for the same reason AdminScopeGranted
+	// does: the client already has dormant refresh families that must not activate
+	// under the new scope set.
+	UserScopeGranted bool
+	// UserScopesAdded names the user scopes this update newly granted, for the audit
+	// trail, mirroring AdminScopesAdded.
+	UserScopesAdded []string
 }
 
 func (r revocation) scopesNarrowed() bool {
@@ -324,11 +458,11 @@ func (r revocation) scopesNarrowed() bool {
 // tokens do not gain the new scope, and revoking would log the client's users out for
 // a change that widens nothing they hold.
 //
-// Granting an admin scope is the one addition that does revoke. tokenissue mints a
-// refresh half for every pair, so a client promoted to delegate already has refresh
-// families sitting in the database; cutting them forces a fresh authorization under
-// the new scope set instead of leaving a family that a later grant_types change could
-// bring back to life.
+// Newly granting a capability scope — admin or user — is the one addition that
+// does revoke. tokenissue mints a refresh half for every pair, so a client promoted
+// to a capability already has refresh families sitting in the database; cutting
+// them forces a fresh authorization under the new scope set instead of leaving a
+// family that could otherwise bring the new capability back to life.
 func revocationReason(current *model.OAuthClient, nextScopes []string) revocation {
 	stored := []string(current.Scopes)
 	removed := make([]string, 0, len(stored))
@@ -338,15 +472,23 @@ func revocationReason(current *model.OAuthClient, nextScopes []string) revocatio
 		}
 	}
 	added := make([]string, 0, len(nextScopes))
+	userAdded := make([]string, 0, len(nextScopes))
 	for _, name := range nextScopes {
-		if scope.IsAdmin(name) && !slices.Contains(stored, name) {
-			added = append(added, name)
+		if !slices.Contains(stored, name) {
+			switch {
+			case scope.IsAdmin(name):
+				added = append(added, name)
+			case scope.IsUser(name):
+				userAdded = append(userAdded, name)
+			}
 		}
 	}
 	return revocation{
 		ScopesRemoved:     removed,
 		AdminScopeGranted: scope.ContainsAdmin(nextScopes) && !scope.ContainsAdmin(stored),
 		AdminScopesAdded:  added,
+		UserScopeGranted:  scope.ContainsUser(nextScopes) && !scope.ContainsUser(stored),
+		UserScopesAdded:   userAdded,
 	}
 }
 
@@ -382,10 +524,10 @@ func (s Service) updateFields(input UpdateClientInput) (map[string]any, error) {
 		if err != nil {
 			return nil, newError(ErrInvalidInput, "scopes 非法，必须包含 openid 且仅含受支持的值", err)
 		}
-		// Whether this set may include an admin scope is decided by checkAdminScopeGrant,
-		// which runs after the stored row is loaded. It cannot be decided here: the
-		// capability rules depend on the client's type and on grant types this request
-		// may not mention.
+		// Whether this set may include a capability scope is decided by
+		// checkCapabilityScopeGrant, which runs after the stored row is loaded. It cannot be
+		// decided here: the capability rules depend on the client's type and on grant
+		// types this request may not mention.
 		fields["scopes"] = model.StringArray(scopes)
 	}
 	if len(fields) == 0 {

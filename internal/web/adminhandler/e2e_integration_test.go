@@ -138,8 +138,18 @@ func setupAdminE2E(t *testing.T) *adminE2EHarness {
 
 	router := gin.New()
 	oauthhandler.RegisterRoutes(router, oauthhandler.Handler{
-		Service:    oauthService,
-		Auth:       middleware.Authenticator{JWT: jwtManager, Tokens: tokens},
+		Service: oauthService,
+		// The auth-state cache is deliberately enabled, not nil: the deletion test's
+		// post-delete 401 must come from the tombstone invalidation path (revoked in
+		// the delete transaction, cached as a miss, DB row gone), not merely from the
+		// CASCADE having removed the authoritative row. Leaving the cache off would
+		// make that assertion true for the wrong reason.
+		Auth: middleware.Authenticator{
+			JWT:            jwtManager,
+			Tokens:         tokens,
+			AuthStateCache: store,
+			AuthStateTTL:   5 * time.Second,
+		},
 		ConsentURL: adminE2EConsentURL,
 	}, func(c *gin.Context) {
 		middleware.SetPrincipal(c, middleware.Principal{UserID: user.ID, JTI: "admin-e2e-consent"})
@@ -645,4 +655,61 @@ func (h *adminE2EHarness) userInfo(t *testing.T, accessToken string) *httptest.R
 	recorder := httptest.NewRecorder()
 	h.router.ServeHTTP(recorder, request)
 	return recorder
+}
+
+// Deleting a client must cut what it already holds, not just what it asks for
+// next. The cascade removes the access-token row the DB-authoritative check
+// reads, and the revocation leg invalidates the auth-state cache in the same
+// breath, so the token that worked a moment ago is refused on the next request.
+func TestAdminE2EDeletingClientCutsRedeemedTokens(t *testing.T) {
+	testutil.RequireProvider(t)
+	h := setupAdminE2E(t)
+
+	clientID, secret, primaryKey := h.registerClient(t)
+	code := h.authorizeAndConsent(t, clientID)
+	redeemed := h.redeem(t, clientID, secret, code)
+	if redeemed.Code != http.StatusOK {
+		t.Fatalf("token status = %d: %s", redeemed.Code, redeemed.Body.String())
+	}
+	var token struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(redeemed.Body.Bytes(), &token); err != nil {
+		t.Fatalf("decode token body: %v", err)
+	}
+	// The token authenticates before the deletion.
+	if recorder := h.userInfo(t, token.AccessToken); recorder.Code != http.StatusOK {
+		t.Fatalf("userinfo before delete status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+
+	del := h.do(t, http.MethodDelete, "/admin/oauth-clients/"+strconv.FormatInt(primaryKey, 10), "", "")
+	if del.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200: %s", del.Code, del.Body.String())
+	}
+	if !strings.Contains(del.Body.String(), "撤销") {
+		t.Fatalf("delete response does not report revocation: %s", del.Body.String())
+	}
+
+	// The registration and its token metadata are gone.
+	var clientCount int64
+	if err := h.database.Model(&model.OAuthClient{}).Where("id = ?", primaryKey).Count(&clientCount).Error; err != nil {
+		t.Fatalf("count client: %v", err)
+	}
+	if clientCount != 0 {
+		t.Fatalf("oauth_clients rows after delete = %d, want 0", clientCount)
+	}
+	var tokenCount int64
+	if err := h.database.Model(&model.OAuthAccessToken{}).Where("client_id = ?", primaryKey).Count(&tokenCount).Error; err != nil {
+		t.Fatalf("count access tokens: %v", err)
+	}
+	if tokenCount != 0 {
+		t.Fatalf("oauth_access_tokens rows after delete = %d, want 0", tokenCount)
+	}
+
+	// The redeemed token is refused on the very next request: the DB-authoritative
+	// check finds no row, and the auth-state cache was invalidated with it.
+	if recorder := h.userInfo(t, token.AccessToken); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("userinfo after delete status = %d, want 401: %s", recorder.Code, recorder.Body.String())
+	}
 }

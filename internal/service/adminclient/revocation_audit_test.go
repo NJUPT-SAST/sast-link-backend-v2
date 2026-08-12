@@ -44,9 +44,41 @@ func TestUpdateClientFailedWriteOmitsCapabilityChangeFromAudit(t *testing.T) {
 	}
 }
 
-// Promoting a client from admin:read to admin:write grants a real capability,
-// and the audit must name it: the old boolean alone missed the grant because the
-// client already held an admin scope.
+// Promoting a client from user:read to user:write mirrors the admin promotion: a
+// real capability is added, and the audit must name the added scope rather than
+// report a boolean the already-scoped client would have missed.
+func TestUpdateClientPromotionAuditNamesAddedUserScope(t *testing.T) {
+	h := newHarness(t)
+	current := activeClient(5)
+	current.Scopes = model.StringArray{"openid", scope.UserRead}
+	h.clients.findResult = current
+	promoted := []string{"openid", scope.UserRead, scope.UserWrite}
+
+	if _, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK:      5,
+		Scope:         &promoted,
+		AdminUserID:   99,
+		ActorClientID: "",
+	}); err != nil {
+		t.Fatalf("UpdateClient() error = %v", err)
+	}
+	if len(h.audit.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(h.audit.entries))
+	}
+	detail := decodeAuditDetail(t, h.audit.entries[0])
+	granted, ok := detail["user_scope_granted"]
+	if !ok {
+		t.Fatalf("audit detail missing user_scope_granted for the promotion: %v", detail)
+	}
+	got, ok := granted.([]any)
+	if !ok {
+		t.Fatalf("user_scope_granted = %#v (%T), want a list of scope names", granted, granted)
+	}
+	if len(got) != 1 || got[0] != scope.UserWrite {
+		t.Fatalf("user_scope_granted = %v, want [%s]", got, scope.UserWrite)
+	}
+}
+
 func TestUpdateClientPromotionAuditNamesAddedAdminScope(t *testing.T) {
 	h := newHarness(t)
 	current := activeClient(5)

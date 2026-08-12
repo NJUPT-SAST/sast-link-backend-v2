@@ -18,6 +18,8 @@ type ClientService interface {
 	ListClients(ctx context.Context) ([]adminclient.Client, error)
 	CreateClient(ctx context.Context, input adminclient.CreateClientInput) (*adminclient.CreateClientResult, error)
 	UpdateClient(ctx context.Context, input adminclient.UpdateClientInput) (*adminclient.UpdateClientResult, error)
+	DeleteClient(ctx context.Context, input adminclient.DeleteClientInput) (*adminclient.DeleteClientResult, error)
+	RotateClientSecret(ctx context.Context, input adminclient.RotateClientSecretInput) (*adminclient.RotateClientSecretResult, error)
 }
 
 // UserService is the user-management use cases this handler exposes.
@@ -52,9 +54,9 @@ type Handler struct {
 // into a route gated by the wrong permission.
 type Gates struct {
 	// RequireAuth authenticates the group. On the admin surface this is the
-	// delegated-aware gate, not the strict internal-client one.
+	// admin-scope-aware gate, not the strict internal-client one.
 	RequireAuth gin.HandlerFunc
-	// RequireReadScope and RequireWriteScope bound what a delegated third-party
+	// RequireReadScope and RequireWriteScope bound what a admin-scoped
 	// token may do. They are no-ops for an internal console token, whose ceiling is
 	// the role gates below.
 	RequireReadScope  gin.HandlerFunc
@@ -79,7 +81,7 @@ type Gates struct {
 // gate answers "is this user allowed to do this", reading the role from the
 // database row so a demotion lands on the next request. The scope gate answers
 // "was this credential granted the right to act", which only constrains a
-// delegated third-party token — any client holding an admin scope may reach these
+// admin-scoped token — any client holding an admin scope may reach these
 // routes on an administrator's behalf, but only within the scopes it registered
 // (that scope set is itself what marks it as a delegate). Neither
 // gate implies the other: an administrator's token issued to a read-only delegate
@@ -97,6 +99,8 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	admin.GET("/oauth-clients", g.RequireReadScope, g.RequireAdmin, h.ListClients)
 	admin.POST("/oauth-clients", g.RequireWriteScope, g.RequireAdmin, h.CreateClient)
 	admin.PUT("/oauth-clients/:id", g.RequireWriteScope, g.RequireAdmin, h.UpdateClient)
+	admin.DELETE("/oauth-clients/:id", g.RequireWriteScope, g.RequireAdmin, h.DeleteClient)
+	admin.POST("/oauth-clients/:id/rotate-secret", g.RequireWriteScope, g.RequireAdmin, h.RotateClientSecret)
 
 	admin.GET("/users", g.RequireReadScope, g.RequireReader, h.ListUsers)
 	admin.GET("/users/:id", g.RequireReadScope, g.RequireReader, h.GetUser)

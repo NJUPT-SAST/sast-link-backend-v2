@@ -25,8 +25,15 @@ type fakeClients struct {
 	updateFields  map[string]any
 	updateRevoked bool
 	updateEntries []model.BlacklistEntry
+	updateRefresh int64
 	updateErr     error
 	updateCalls   int
+
+	deleteEntries []model.BlacklistEntry
+	deleteRefresh int64
+	deleteErr     error
+	deleteID      int64
+	deleteCalls   int
 }
 
 func (f *fakeClients) List(_ context.Context) ([]model.OAuthClient, error) {
@@ -64,17 +71,30 @@ func (f *fakeClients) UpdateAndRevoke(
 	fields map[string]any,
 	revokeTokens bool,
 	_ time.Time,
-) ([]model.BlacklistEntry, error) {
+) ([]model.BlacklistEntry, int64, error) {
 	f.updateCalls++
 	f.updateFields = fields
 	f.updateRevoked = revokeTokens
 	if f.updateErr != nil {
-		return nil, f.updateErr
+		return nil, 0, f.updateErr
 	}
 	if !revokeTokens {
-		return nil, nil
+		return nil, 0, nil
 	}
-	return f.updateEntries, nil
+	return f.updateEntries, f.updateRefresh, nil
+}
+
+func (f *fakeClients) DeleteAndRevoke(
+	_ context.Context,
+	id int64,
+	_ time.Time,
+) ([]model.BlacklistEntry, int64, error) {
+	f.deleteCalls++
+	f.deleteID = id
+	if f.deleteErr != nil {
+		return nil, 0, f.deleteErr
+	}
+	return f.deleteEntries, f.deleteRefresh, nil
 }
 
 type fakeBlacklist struct {
@@ -172,9 +192,9 @@ func activeClient(id int64) *model.OAuthClient {
 	}
 }
 
-// delegatedClient holds delegated administration. It is identified by its scopes, not
-// by its client_id: that is the invariant this package now enforces, so a fixture keyed
-// on a known name would be testing a rule the code no longer has.
+// delegatedClient holds administrative capability. It is identified by its scopes,
+// not by its client_id: that is the invariant this package now enforces, so a
+// fixture keyed on a known name would be testing a rule the code no longer has.
 func delegatedClient(id int64) *model.OAuthClient {
 	client := activeClient(id)
 	client.ClientID = "some-ops-tool"

@@ -533,6 +533,152 @@ func TestTokenRefreshGrantRotates(t *testing.T) {
 	}
 }
 
+// A capability client may hold refresh_token: the refresh leg re-checks scopes
+// against the live registration but never widens them. A confidential client
+// holding admin:write refreshes and the new pair keeps the family's exact scope
+// set — the grant door's relaxation (adminclient.checkCapabilityScopeGrant) must
+// not let a refresh mint anything the family was not issued.
+func TestTokenRefreshCapabilityClientKeepsFamilyScopes(t *testing.T) {
+	h := newHarness(t)
+	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{scope.OpenID, scope.AdminWrite}
+
+	code := issueCode(t, h, testConfidentialClientID, "openid admin:write")
+	first, err := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeAuthorizationCode,
+		Code:         code,
+		RedirectURI:  testRedirectURI,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+		CodeVerifier: testVerifier,
+	})
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+
+	rotated, err := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: first.RefreshToken,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+	})
+	if err != nil {
+		t.Fatalf("refresh grant error = %v", err)
+	}
+	if rotated.Scope != "openid admin:write" {
+		t.Fatalf("rotated scope = %q, want the family's scopes unchanged", rotated.Scope)
+	}
+}
+
+// A capability family's life is capped from its origin: the first refresh token
+// is clamped to origin+cap at issuance, and every rotation clamps the rotated
+// expiry to the same deadline instead of sliding it forward. A plain OIDC family
+// is untouched.
+func TestTokenRefreshCapabilityFamilyCappedAtLifetime(t *testing.T) {
+	h := newHarness(t)
+	h.service.CapabilityRefreshMaxLifetime = 7 * 24 * time.Hour
+	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{scope.OpenID, scope.AdminWrite}
+
+	code := issueCode(t, h, testConfidentialClientID, "openid admin:write")
+	first, err := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeAuthorizationCode,
+		Code:         code,
+		RedirectURI:  testRedirectURI,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+		CodeVerifier: testVerifier,
+	})
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+	if h.tokens.createdRefresh == nil {
+		t.Fatal("no first refresh token was minted")
+	}
+	origin := h.tokens.createdRefresh.CreatedAt
+	if want := origin.Add(7 * 24 * time.Hour); !h.tokens.createdRefresh.ExpiresAt.Equal(want) {
+		t.Fatalf("first refresh expiry = %v, want origin+7d %v (capped, not origin+30d)", h.tokens.createdRefresh.ExpiresAt, want)
+	}
+
+	rotated, err := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: first.RefreshToken,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+	})
+	if err != nil {
+		t.Fatalf("refresh grant error = %v", err)
+	}
+	if h.tokens.rotatedRefresh == nil {
+		t.Fatal("no rotated refresh token was minted")
+	}
+	if want := origin.Add(7 * 24 * time.Hour); !h.tokens.rotatedRefresh.ExpiresAt.Equal(want) {
+		t.Fatalf("rotated refresh expiry = %v, want origin+7d %v (clamped, not slid to origin+30d)", h.tokens.rotatedRefresh.ExpiresAt, want)
+	}
+	if rotated.Scope != "openid admin:write" {
+		t.Fatalf("rotated scope = %q, want the family's scopes unchanged", rotated.Scope)
+	}
+
+	// The same cap must not reach a plain OIDC family: refresh its session scopes
+	// and the expiry stays the uncapped sliding value.
+	h.service.CapabilityRefreshMaxLifetime = 7 * 24 * time.Hour
+	h.clients.byClientID[testPublicClientID].Scopes = model.StringArray{scope.OpenID, scope.Profile}
+	code = issueCode(t, h, testPublicClientID, "openid profile")
+	publicFirst, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err != nil {
+		t.Fatalf("plain code grant error = %v", err)
+	}
+	if _, err := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: publicFirst.RefreshToken,
+		ClientID:     testPublicClientID,
+	}); err != nil {
+		t.Fatalf("plain refresh grant error = %v", err)
+	}
+	if want := h.tokens.createdRefresh.CreatedAt.Add(30 * 24 * time.Hour); h.tokens.rotatedRefresh.ExpiresAt.Before(want) {
+		t.Fatalf("plain rotated refresh expiry = %v, want uncapped %v", h.tokens.rotatedRefresh.ExpiresAt, want)
+	}
+}
+
+// A family whose origin predates the cap is revoked on the next refresh even
+// though the presented token is still valid: the delegation outlived its
+// lifetime and must be re-authorized, audited as refresh_family_expired rather
+// than a replay.
+func TestTokenRefreshCapabilityFamilyPastCapRevokes(t *testing.T) {
+	h := newHarness(t)
+	h.service.CapabilityRefreshMaxLifetime = 7 * 24 * time.Hour
+	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{scope.OpenID, scope.AdminWrite}
+
+	code := issueCode(t, h, testConfidentialClientID, "openid admin:write")
+	first, err := h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeAuthorizationCode,
+		Code:         code,
+		RedirectURI:  testRedirectURI,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+		CodeVerifier: testVerifier,
+	})
+	if err != nil {
+		t.Fatalf("code grant error = %v", err)
+	}
+	// Rewind the family's origin to before the cap shipped, leaving the presented
+	// token valid: exactly the migration shape of a pre-cap family.
+	h.tokens.createdRefresh.CreatedAt = h.tokens.createdRefresh.CreatedAt.Add(-8 * 24 * time.Hour)
+
+	_, err = h.service.Token(context.Background(), TokenInput{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: first.RefreshToken,
+		ClientID:     testConfidentialClientID,
+		ClientSecret: testClientSecret,
+	})
+	oauthErr := oauthError(t, err, ErrorInvalidGrant)
+	if oauthErr.Kind != KindInvalidGrant {
+		t.Fatalf("error = %+v, want invalid_grant so the client re-authorizes", oauthErr)
+	}
+	outcome := h.audit.outcomes()
+	if !slices.Contains(outcome, "refresh_family_expired") {
+		t.Fatalf("audit outcomes = %v, want a refresh_family_expired row", outcome)
+	}
+}
+
 // A family's scopes were checked against the registration when its first pair was
 // minted. If a change narrows the registration without going through the revoking
 // update (a direct database edit, a future path), the refresh leg must stop

@@ -3,13 +3,35 @@ package adminclient
 import (
 	"context"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 const (
 	actionCreateClient = "admin_oauth_client_create"
 	actionUpdateClient = "admin_oauth_client_update"
+	//nolint:gosec // G101 trips on the "Secret" in the name; this is an audit action string, not a credential.
+	actionRotateClientSecret = "admin_oauth_client_rotate_secret"
+	actionDeleteClient       = "admin_oauth_client_delete"
 )
+
+// auditRotateSecret records a secret rotation attempt. The new plaintext never
+// appears here — like auditCreate, only the fact that a rotation was attempted is
+// durable. clientID is nil when the target could not be resolved (an unknown id);
+// the refusals that precede the write are recorded too, so a leaked-secret
+// incident review finds the probes, not just the successful rotations.
+func (s Service) auditRotateSecret(ctx context.Context, input RotateClientSecretInput, clientID *string, success bool, errCode int) {
+	s.audit(ctx, auditParams{
+		AdminUserID:   input.AdminUserID,
+		ActorClientID: input.ActorClientID,
+		Action:        actionRotateClientSecret,
+		ResourceID:    clientID,
+		Success:       success,
+		ErrCode:       errCode,
+		ClientIP:      input.ClientIP,
+		UserAgent:     input.UserAgent,
+	})
+}
 
 // auditCreate records a registration attempt.
 //
@@ -28,11 +50,14 @@ func (s Service) auditCreate(
 		"client_name": input.ClientName,
 		"client_type": input.ClientType,
 	}
-	// A registration that arrives holding delegated administration is worth finding in
-	// the audit log without cross-referencing the row it created. Recorded from the
+	// A registration that arrives holding a capability scope is worth finding in the
+	// audit log without cross-referencing the row it created. Recorded from the
 	// submitted scopes, so a rejected attempt is flagged too.
 	if scope.ContainsAdmin(input.Scopes) {
 		detail["admin_scope"] = true
+	}
+	if scope.ContainsUser(input.Scopes) {
+		detail["user_scope"] = true
 	}
 	if revokedTokens > 0 {
 		detail["revoked_tokens"] = revokedTokens
@@ -100,14 +125,21 @@ func (s Service) auditUpdate(
 		// The added admin scopes are named by value, not reported as a bare boolean:
 		// promoting a client from admin:read to admin:write grants a real capability
 		// and the audit must say which one. 0->admin records the full list too, so the
-		// field is always a list when present.
+		// field is always a list when present. The user scopes get the same treatment
+		// for the same reason.
 		if len(reason.AdminScopesAdded) > 0 {
 			detail["admin_scope_granted"] = reason.AdminScopesAdded
+		}
+		if len(reason.UserScopesAdded) > 0 {
+			detail["user_scope_granted"] = reason.UserScopesAdded
 		}
 		if len(reason.ScopesRemoved) > 0 {
 			detail["scopes_removed"] = reason.ScopesRemoved
 			if scope.ContainsAdmin(reason.ScopesRemoved) {
 				detail["admin_scope_revoked"] = true
+			}
+			if scope.ContainsUser(reason.ScopesRemoved) {
+				detail["user_scope_revoked"] = true
 			}
 		}
 	}
@@ -115,6 +147,52 @@ func (s Service) auditUpdate(
 		AdminUserID:   input.AdminUserID,
 		ActorClientID: input.ActorClientID,
 		Action:        actionUpdateClient,
+		ResourceID:    clientID,
+		Success:       success,
+		ErrCode:       errCode,
+		ClientIP:      input.ClientIP,
+		UserAgent:     input.UserAgent,
+		Detail:        detail,
+	})
+}
+
+// auditDelete records a deregistration attempt. current is the resolved row, nil
+// when the target could not be resolved (an unknown id) and the attempt therefore
+// names nothing. The client_name and capability flags come from that row — the
+// client_id (ResourceID) survives the row's deletion, so an audit reader tracing a
+// deregistration can still see which identifier it was known by. Refusals (the
+// built-in client, an unknown id) are recorded too, like every other rejection on
+// this service's paths.
+func (s Service) auditDelete(
+	ctx context.Context,
+	input DeleteClientInput,
+	current *model.OAuthClient,
+	success bool,
+	errCode int,
+	revokedTokens int,
+) {
+	detail := map[string]any{}
+	if current != nil {
+		detail["client_name"] = current.ClientName
+		detail["client_type"] = string(current.ClientType)
+		if scope.ContainsAdmin([]string(current.Scopes)) {
+			detail["admin_scope"] = true
+		}
+		if scope.ContainsUser([]string(current.Scopes)) {
+			detail["user_scope"] = true
+		}
+	}
+	if revokedTokens > 0 {
+		detail["revoked_tokens"] = revokedTokens
+	}
+	var clientID *string
+	if current != nil {
+		clientID = &current.ClientID
+	}
+	s.audit(ctx, auditParams{
+		AdminUserID:   input.AdminUserID,
+		ActorClientID: input.ActorClientID,
+		Action:        actionDeleteClient,
 		ResourceID:    clientID,
 		Success:       success,
 		ErrCode:       errCode,

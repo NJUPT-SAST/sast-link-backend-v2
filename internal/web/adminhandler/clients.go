@@ -137,6 +137,72 @@ func (h Handler) UpdateClient(c *gin.Context) {
 	response.Ok(c, messageResponse{Message: message})
 }
 
+// DeleteClient permanently removes a registration. The built-in client is refused
+// (403) inside the service: deleting it would lock everyone out of the session
+// flow with no console path back. Any other client — capability clients included —
+// is removable by any administrator.
+func (h Handler) DeleteClient(c *gin.Context) {
+	principal, ok := middleware.PrincipalFrom(c)
+	if !ok {
+		response.Error(c, internalError())
+		return
+	}
+	clientPK, ok := parsePositiveID(c.Param("id"))
+	if !ok {
+		// A non-numeric or non-positive segment names no client, so it gets the same 404
+		// as a missing one rather than a 400 that distinguishes the two.
+		response.Error(c, notFound())
+		return
+	}
+	result, err := h.Clients.DeleteClient(c.Request.Context(), adminclient.DeleteClientInput{
+		ClientPK:      clientPK,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
+	})
+	if err != nil {
+		response.Error(c, mapServiceError(err))
+		return
+	}
+	message := "客户端已删除"
+	if result.RevokedTokens > 0 {
+		// Say so: the administrator deleted a client and every session it held was cut,
+		// which is a larger consequence than "deleted" conveys.
+		message = "客户端已删除，已撤销该客户端的全部 Token"
+	}
+	response.Ok(c, messageResponse{Message: message})
+}
+
+// RotateClientSecret reissues a confidential client's secret. The plaintext is
+// returned once and never retrievable again, so the response carries
+// Cache-Control: no-store for the same reason CreateClient does.
+func (h Handler) RotateClientSecret(c *gin.Context) {
+	principal, ok := middleware.PrincipalFrom(c)
+	if !ok {
+		response.Error(c, internalError())
+		return
+	}
+	clientPK, ok := parsePositiveID(c.Param("id"))
+	if !ok {
+		response.Error(c, notFound())
+		return
+	}
+	result, err := h.Clients.RotateClientSecret(c.Request.Context(), adminclient.RotateClientSecretInput{
+		ClientPK:      clientPK,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
+	})
+	if err != nil {
+		response.Error(c, mapServiceError(err))
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	response.Ok(c, rotatedClientSecretDTO{ClientID: clientPK, ClientSecret: result.ClientSecret})
+}
+
 // parsePositiveID parses a path segment as a positive primary key.
 func parsePositiveID(raw string) (int64, bool) {
 	trimmed := strings.TrimSpace(raw)

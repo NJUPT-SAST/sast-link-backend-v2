@@ -13,6 +13,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
 )
 
@@ -45,14 +46,28 @@ type Service struct {
 	// TokenLimiter throttles the token and revocation endpoints per IP. Both accept
 	// client credentials and refresh tokens, so an unlimited rate is an unlimited
 	// number of credential attempts and DB round trips.
-	TokenLimiter  EndpointLimiter
+	TokenLimiter EndpointLimiter
+	// ConsentLimiter throttles the authenticated consent submission per user. The
+	// peek already has its own budget; the submission mints codes, so it gets a
+	// budget of its own rather than sharing the peek's.
+	ConsentLimiter EndpointLimiter
+	// GrantsLimiter throttles the authorized-apps list and its revoke per user.
+	// Both are authenticated and touch only the caller's own grants, but the revoke
+	// runs a family-revocation transaction plus a consent-history delete, so it is
+	// not free.
+	GrantsLimiter EndpointLimiter
 	JWT           *auth.JWTManager
 	RefreshTokens *auth.RefreshTokenManager
 	Clock         Clock
 	AccessTTL     time.Duration
 	RefreshTTL    time.Duration
-	CodeTTL       time.Duration
-	RequestTTL    time.Duration
+	// CapabilityRefreshMaxLifetime caps the total life of a refresh family that
+	// carries a capability scope (admin/user), measured from the family's origin.
+	// A family past the cap is revoked so the client must re-authorize; without it
+	// the sliding refresh window renews a delegation forever. Zero disables the cap.
+	CapabilityRefreshMaxLifetime time.Duration
+	CodeTTL                      time.Duration
+	RequestTTL                   time.Duration
 	// Issuer is the OIDC issuer identifier and the base for discovery endpoints.
 	Issuer string
 }
@@ -77,6 +92,21 @@ func (s Service) refreshTTL() time.Duration {
 		return s.RefreshTTL
 	}
 	return defaultRefreshTTL
+}
+
+// capabilityRefreshLifetime returns the total-life cap for a refresh family whose
+// scopes carry a capability scope (admin/user), or 0 when it does not (plain OIDC
+// families and internal session families keep the uncapped sliding window). The
+// cap is measured from the family's origin — its first authorization — so it
+// forces a periodic re-authorization instead of a delegation that renews forever.
+func (s Service) capabilityRefreshLifetime(scopes []string) time.Duration {
+	if s.CapabilityRefreshMaxLifetime <= 0 {
+		return 0
+	}
+	if scope.ContainsAdmin(scopes) || scope.ContainsUser(scopes) {
+		return s.CapabilityRefreshMaxLifetime
+	}
+	return 0
 }
 
 func (s Service) codeTTL() time.Duration {
@@ -128,6 +158,25 @@ func (s Service) checkTokenLimit(ctx context.Context, clientIP string) error {
 // the consent page down.
 func (s Service) checkConsentInfoLimit(ctx context.Context, userID int64) error {
 	return s.checkLimit(ctx, s.ConsentInfoLimiter, "consent_info", "user:"+strconv.FormatInt(userID, 10))
+}
+
+// checkConsentLimit throttles the consent submission per user, keyed like the peek.
+func (s Service) checkConsentLimit(ctx context.Context, userID int64) error {
+	return s.checkLimit(ctx, s.ConsentLimiter, "oauth_consent", "user:"+strconv.FormatInt(userID, 10))
+}
+
+// checkGrantsListLimit throttles the authorized-apps list per user, for the same
+// NAT reason as the consent endpoints: campus egress shares one IP.
+func (s Service) checkGrantsListLimit(ctx context.Context, userID int64) error {
+	return s.checkLimit(ctx, s.GrantsLimiter, "oauth_grants_list", "user:"+strconv.FormatInt(userID, 10))
+}
+
+// checkGrantsRevokeLimit throttles the authorized-apps revoke per user. It gets a
+// budget of its own rather than sharing the list's, so opening the list a few
+// dozen times cannot exhaust the budget the destructive revoke needs: the one
+// action a user may want to take in a hurry is cutting a misbehaving app's access.
+func (s Service) checkGrantsRevokeLimit(ctx context.Context, userID int64) error {
+	return s.checkLimit(ctx, s.GrantsLimiter, "oauth_grants_revoke", "user:"+strconv.FormatInt(userID, 10))
 }
 
 func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, subject string) error {

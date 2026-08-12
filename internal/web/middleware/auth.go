@@ -124,17 +124,14 @@ func (a Authenticator) AuthenticateAnyClient(ctx context.Context, header string)
 	return a.authenticate(ctx, header)
 }
 
-// RequireAdminAuth authenticates the /admin endpoints, admitting an internal
-// console token or any third-party token that carries an admin scope.
-//
-// It exists as a separate gate rather than a relaxation of RequireAuth so the
-// default stays fail-closed: every other internal route keeps rejecting
-// third-party tokens outright, and widening this one cannot widen those by
-// accident. Pair it with RequireDelegatedScope — this method proves *which client*
-// may speak for an administrator, not *what* it may do.
-func (a Authenticator) RequireAdminAuth() gin.HandlerFunc {
+// requireScopedAuth is the middleware factory behind RequireAdminAuth and
+// RequireUserAuth: authenticate the header, put the principal in the context, or
+// answer in the standard envelope.
+func (a Authenticator) requireScopedAuth(
+	authenticate func(ctx context.Context, header string) (Principal, error),
+) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		principal, err := a.AuthenticateAdminDelegated(c.Request.Context(), c.GetHeader("Authorization"))
+		principal, err := authenticate(c.Request.Context(), c.GetHeader("Authorization"))
 		if err != nil {
 			response.Error(c, err)
 			c.Abort()
@@ -145,37 +142,86 @@ func (a Authenticator) RequireAdminAuth() gin.HandlerFunc {
 	}
 }
 
+// RequireAdminAuth authenticates the /admin endpoints, admitting an internal
+// console token or any token that carries an admin scope.
+//
+// It exists as a separate gate rather than a relaxation of RequireAuth so the
+// default stays fail-closed: every other internal route keeps rejecting
+// third-party tokens outright, and widening this one cannot widen those by
+// accident. Pair it with RequireDelegatedScope — this method proves *which client*
+// may speak for an administrator, not *what* it may do.
+func (a Authenticator) RequireAdminAuth() gin.HandlerFunc {
+	return a.requireScopedAuth(a.AuthenticateAdminDelegated)
+}
+
 // AuthenticateAdminDelegated validates an Authorization header for the admin API.
-// It accepts an internal-client token unconditionally, and a third-party token only
+// It accepts an internal-client token unconditionally, and any other token only
 // when it carries an admin scope; every other client is rejected exactly as
 // Authenticate would reject it.
 //
-// The admin scope in the token IS the delegation marker, and it is not self-asserted.
-// Any token can only carry one if scope.ContainsAll passed against that client's
-// registered scopes at authorize time, and oauth.authorizeScopeForClient additionally
-// refuses the admin scopes for first-party clients outright, since a public client
-// authenticates its token request by PKCE alone. So "this token has admin:read"
-// already proves "an operator granted this registration delegated administration".
+// The admin scope in the token IS the capability marker, and it is not
+// self-asserted. Any token can only carry one if scope.ContainsAll passed against
+// that client's registered scopes at authorize time, and the grant door refuses
+// the capability scopes for public (first_party) registrations outright
+// (adminclient.checkCapabilityScopeGrant, mirrored at authorize by
+// oauth.checkScopeForClient). So "this token has admin:read" already proves "the
+// console granted this confidential (third_party) registration administrative
+// capability". No client-type lookup is needed on the request path: the grant door
+// is what enforces confidential-only.
 //
-// That replaces an earlier design where one client_id was hardcoded here. Naming the
-// delegate meant onboarding a second ops tool took a migration and a release; it also
-// meant escalation needed to break two independent barriers, the registration's
-// scopes and this name check. With the name gone, the registration is the only
-// barrier: any write of an admin scope onto a third-party registration creates a
-// credential that reaches /admin. adminclient.checkAdminScopeGrant is what guards
-// that write, on both the create and the update door, and it must stay covered by
-// tests on both.
-//
-// The token's subject is still the administrator, so the ceiling stays whatever role
-// that user holds in the database — RequireRole reads it from the row on every
-// request, so a demotion cuts the tool off immediately. Pair this with
-// RequireDelegatedScope, which decides what the credential may do rather than whether
-// it may speak.
-//
-// The InternalClientID check comes first and fails closed. Ordering it after the
-// delegated branch would mean a deployment that forgot INTERNAL_OAUTH_CLIENT_ID
-// admits every admin-scoped third-party token instead of refusing all of them.
+// The token's subject is still the end user, and /admin's role gate reads that
+// user's role from the database row on every request — RequireRole is what answers
+// "is this user allowed". An ordinary member holding an admin-scoped token is
+// refused there, and a demotion cuts the capability off on the next request, so
+// this method proves *which client may speak*, never that the subject may act. Pair
+// it with RequireDelegatedScope for what the credential may do.
 func (a Authenticator) AuthenticateAdminDelegated(ctx context.Context, header string) (Principal, error) {
+	return a.authenticateScoped(ctx, header,
+		func(p Principal) bool { return scope.ContainsAdmin(p.Scopes) },
+		"该 Access Token 未携带管理接口所需的 scope")
+}
+
+// RequireUserAuth authenticates the /user endpoints, admitting an internal
+// console token or any other token that carries a self-service scope.
+//
+// It exists as a separate gate rather than a relaxation of RequireAuth so the
+// default stays fail-closed: every route that does not opt in keeps rejecting
+// non-console tokens outright, and widening this one cannot widen those by
+// accident. Pair it with RequireDelegatedScope — this method proves *which
+// client* may act on a user's own record, not *what* it may do.
+func (a Authenticator) RequireUserAuth() gin.HandlerFunc {
+	return a.requireScopedAuth(a.AuthenticateUserScoped)
+}
+
+// AuthenticateUserScoped validates an Authorization header for the /user endpoints.
+// It accepts an internal-client token unconditionally, and any other token only
+// when it carries a self-service scope; every other client is rejected exactly as
+// Authenticate would reject it.
+//
+// The user scope in the token IS the self-service marker, and it is not
+// self-asserted. Any token can only carry one if scope.ContainsAll passed against
+// that client's registered scopes at authorize time, so "this token has user:read"
+// already proves "the console granted this registration access to the /user
+// surface". No client-type lookup happens on the request path: the user scopes
+// carry no type constraint — the /user surface operates on the token subject's own
+// record, so an application holding them is never a look-up-anyone credential.
+func (a Authenticator) AuthenticateUserScoped(ctx context.Context, header string) (Principal, error) {
+	return a.authenticateScoped(ctx, header,
+		func(p Principal) bool { return scope.ContainsUser(p.Scopes) },
+		"该 Access Token 未携带访问用户接口所需的 scope")
+}
+
+// authenticateScoped is the shared core of the two scoped-surface authenticators:
+// validate the token, exempt the console session unconditionally, and otherwise
+// require the capability predicate to pass. A missing InternalClientID fails
+// closed before the scoped branch — a deployment that forgot it must refuse every
+// scoped token rather than admit all of them.
+func (a Authenticator) authenticateScoped(
+	ctx context.Context,
+	header string,
+	carriesCapability func(Principal) bool,
+	deniedMessage string,
+) (Principal, error) {
 	if strings.TrimSpace(a.InternalClientID) == "" {
 		return Principal{}, backendError()
 	}
@@ -188,26 +234,28 @@ func (a Authenticator) AuthenticateAdminDelegated(ctx context.Context, header st
 	if principal.ClientID == "" || principal.ClientID == a.InternalClientID {
 		return principal, nil
 	}
-	if !scope.ContainsAdmin(principal.Scopes) {
-		return Principal{}, authBusinessError(http.StatusForbidden, errcode.CodeForbidden,
-			"该 Access Token 由第三方客户端签发，不可用于内部接口")
+	if !carriesCapability(principal) {
+		return Principal{}, authBusinessError(http.StatusForbidden, errcode.CodeForbidden, deniedMessage)
 	}
 	return principal, nil
 }
 
-// RequireDelegatedScope admits a delegated token only when it holds one of the
-// allowed scopes. It must be chained after RequireAdminAuth, which puts the
-// Principal in the context.
+// RequireDelegatedScope admits a scoped token only when it holds one of the
+// allowed scopes. It must be chained after RequireAdminAuth or RequireUserAuth,
+// which put the Principal in the context.
 //
 // The internal console token is exempt. It carries exactly the three session
-// scopes and no admin scope will ever be minted for it, so gating it here would
-// break the console outright; its ceiling is RequireRole, which is unchanged. What
-// this gate bounds is the delegated client, whose registered scopes are the only
-// thing distinguishing "may read the directory" from "may delete accounts".
+// scopes and neither an admin nor a user scope will ever be minted for it, so
+// gating it here would break the console outright; on the /admin routes its
+// ceiling is the role gate, on /user routes there is no further ceiling beyond
+// being a valid session. What this gate bounds is the scoped client — admin or
+// user — whose registered scopes are the only thing distinguishing "may read the
+// directory" from "may delete accounts", or "may view my profile" from "may
+// change my password".
 //
 // An empty allowed set rejects every request, for the same reason RequireRole
-// fails closed: a wiring slip must surface as a visible 403, not as an admin
-// endpoint that quietly accepts any scope.
+// fails closed: a wiring slip must surface as a visible 403, not as an endpoint
+// that quietly accepts any scope.
 func (a Authenticator) RequireDelegatedScope(allowed ...string) gin.HandlerFunc {
 	permitted := make(map[string]struct{}, len(allowed))
 	for _, name := range allowed {

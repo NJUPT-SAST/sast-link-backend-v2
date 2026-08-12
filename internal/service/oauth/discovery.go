@@ -17,13 +17,19 @@ import (
 func (s Service) Discovery() map[string]any {
 	base := strings.TrimRight(strings.TrimSpace(s.Issuer), "/")
 	return map[string]any{
-		"issuer":                   base,
-		"authorization_endpoint":   base + "/oauth/authorize",
-		"token_endpoint":           base + "/oauth/token",
-		"userinfo_endpoint":        base + "/userinfo",
-		"jwks_uri":                 base + "/.well-known/jwks.json",
-		"revocation_endpoint":      base + "/oauth/revoke",
-		"scopes_supported":         []string{scope.OpenID, scope.Profile, scope.Email},
+		"issuer":                 base,
+		"authorization_endpoint": base + "/oauth/authorize",
+		"token_endpoint":         base + "/oauth/token",
+		"userinfo_endpoint":      base + "/userinfo",
+		"jwks_uri":               base + "/.well-known/jwks.json",
+		"revocation_endpoint":    base + "/oauth/revoke",
+		"scopes_supported": []string{
+			scope.OpenID, scope.Profile, scope.Email,
+			// The capability scopes are requestable by this provider (admin:* for
+			// confidential third_party clients, user:* for any client), so they are
+			// advertised for standard OIDC clients that validate against this list.
+			scope.AdminRead, scope.AdminWrite, scope.UserRead, scope.UserWrite,
+		},
 		"response_types_supported": []string{responseTypeCode},
 		"grant_types_supported": []string{
 			grantTypeAuthorizationCode,

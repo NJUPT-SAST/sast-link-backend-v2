@@ -191,7 +191,7 @@ func TestLoginReturnsEnvelopeDTOAndInput(t *testing.T) {
 		},
 	}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"pt@sast.fun","password":"secret"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -232,7 +232,7 @@ func TestRefreshReturnsTokenEnvelope(t *testing.T) {
 		AccessExpiresAt: now.Add(time.Minute),
 	}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{"refresh_token":"rt_x"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -252,7 +252,7 @@ func TestProtectedLogoutUsesPrincipalOnlyFields(t *testing.T) {
 	expires := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
 	service := &fakeService{logoutResult: &session.LogoutResult{BlacklistedJTI: "jti", FamilyID: "family"}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: expires}))
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: expires})))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", strings.NewReader(`{"refresh_token":"rt_x"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -277,7 +277,7 @@ func TestProtectedProfileUsesPrincipalUserID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{profileResult: &session.ProfileResult{Profile: session.UserProfileDTO{ID: 42, Name: "pt"}}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now()}))
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now()})))
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/user/profile", nil))
 	body := decodeBody(t, recorder)
@@ -291,7 +291,7 @@ func TestServiceErrorMappingDoesNotLeakCause(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{loginErr: &session.Error{Kind: session.KindInternal, Code: errcode.CodeInternal, Message: "db password leaked", Err: errors.New("secret DSN")}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"pt@sast.fun","password":"secret"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -337,7 +337,7 @@ func TestServiceErrorMappingStatusAndCode(t *testing.T) {
 func TestInvalidJSONRequestsReturnBadRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: &fakeService{}}, allowAuth())
+	RegisterRoutes(router, Handler{Service: &fakeService{}}, scopedGates(allowAuth()))
 	for _, route := range []string{"/user/login", "/auth/refresh", "/auth/logout"} {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, route, strings.NewReader(`{}`))
@@ -353,10 +353,10 @@ func TestInvalidJSONRequestsReturnBadRequest(t *testing.T) {
 func TestProtectedRoutesRequireMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: &fakeService{}}, func(c *gin.Context) {
+	RegisterRoutes(router, Handler{Service: &fakeService{}}, scopedGates(func(c *gin.Context) {
 		response.Error(c, &response.BusinessError{HTTPStatus: http.StatusUnauthorized, Code: errcode.CodeUnauthenticated, Message: "missing or invalid authorization header"})
 		c.Abort()
-	})
+	}))
 	for _, test := range []struct{ method, path string }{
 		{http.MethodPost, "/auth/logout"},
 		{http.MethodGet, "/user/profile"},
@@ -385,7 +385,7 @@ func TestLoginClientIPDoesNotTrustXForwardedFor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRouter() error = %v", err)
 	}
-	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"pt@sast.fun","password":"secret"}`))
 	request.RemoteAddr = "203.0.113.9:12345"
@@ -404,7 +404,7 @@ func TestSendRegisterCodeReturnsMessageAndExpiry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{sendRegisterCodeResult: &session.SendRegisterCodeResult{Email: "pt@sast.fun", ExpiresIn: 300}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/register/send-code", strings.NewReader(`{"login_email":"pt@sast.fun"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -426,7 +426,7 @@ func TestSendRegisterCodeMapsDomainError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{sendRegisterCodeErr: &session.Error{Kind: session.KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/register/send-code", strings.NewReader(`{"login_email":"pt@gmail.com"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -441,7 +441,7 @@ func TestVerifyRegisterCodeReturnsTicket(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{verifyRegisterCodeResult: &session.VerifyRegisterCodeResult{RegisterTicket: "reg_xxx", Email: "pt@sast.fun", ExpiresIn: 300}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/register/verify-code", strings.NewReader(`{"login_email":"pt@sast.fun","code":"123456"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -474,7 +474,7 @@ func TestRegisterReturnsTokensAndUser(t *testing.T) {
 		},
 	}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	body := `{"register_ticket":"reg_xxx","password":"password123","name":"pt","student_id":"B24040001","phone_number":"13800138000","qq_number":"10000","college":"其他","major":"CS"}`
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/register", strings.NewReader(body))
@@ -497,7 +497,7 @@ func TestChangePasswordReturnsMessage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{changePasswordResult: &session.ChangePasswordResult{UserID: 42}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)})))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/change-password", strings.NewReader(`{"old_password":"oldpassword","new_password":"newpassword"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -519,7 +519,7 @@ func TestResetPasswordReturnsMessage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{resetPasswordResult: &session.ResetPasswordResult{Email: "pt@sast.fun"}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/reset-password", strings.NewReader(`{"login_email":"pt@sast.fun","code":"123456","new_password":"newpassword"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -541,7 +541,7 @@ func TestBindEmailSendCodeReturnsTicketAndExpiry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{bindEmailSendCodeResult: &session.BindEmailSendCodeResult{BindTicket: "be_ticket", ExpiresIn: 300}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)})))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email", strings.NewReader(`{"email":"extra@qq.com"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -571,7 +571,7 @@ func TestBindEmailVerifyReturnsIdentity(t *testing.T) {
 		},
 	}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)})))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email/verify", strings.NewReader(`{"bind_ticket":"be_ticket","code":"123456"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -625,7 +625,7 @@ func TestShortPasswordReachesServiceForDocumentedCode(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			service := &fakeService{resetPasswordErr: tooShort, changePasswordErr: tooShort, registerErr: tooShort}
 			router := gin.New()
-			RegisterRoutes(router, Handler{Service: service}, allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}))
+			RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)})))
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, test.path, strings.NewReader(test.body))
 			request.Header.Set("Content-Type", "application/json")
@@ -655,7 +655,7 @@ func TestSessionRequestsUseStrictBoundedJSON(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			service := &fakeService{}
 			router := gin.New()
-			RegisterRoutes(router, Handler{Service: service}, allowAuth())
+			RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
 			request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, test.path, strings.NewReader(test.body))
 			request.Header.Set("Content-Type", "application/json")
 			recorder := httptest.NewRecorder()
@@ -674,7 +674,7 @@ func TestSessionRequestsRejectNonJSONContentType(t *testing.T) {
 		t.Run(contentType, func(t *testing.T) {
 			service := &fakeService{}
 			router := gin.New()
-			RegisterRoutes(router, Handler{Service: service}, allowAuth())
+			RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
 			request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"pt@sast.fun","password":"secret"}`))
 			if contentType != "" {
 				request.Header.Set("Content-Type", contentType)
@@ -694,7 +694,7 @@ func TestSessionRequestsAcceptJSONCharset(t *testing.T) {
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	service := &fakeService{loginResult: &session.LoginResult{AccessToken: "access", RefreshToken: "refresh", TokenType: "Bearer", AccessExpiresAt: now.Add(time.Minute)}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}}, scopedGates(allowAuth()))
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"pt@sast.fun","password":"secret"}`))
 	request.Header.Set("Content-Type", "application/json; charset=utf-8")
 	recorder := httptest.NewRecorder()
@@ -708,7 +708,7 @@ func TestSessionRequestsRejectOversizedJSON(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, allowAuth())
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
 	body := `{"login_email":"pt@sast.fun","password":"` + strings.Repeat("a", int(maxJSONRequestBodyBytes)) + `"}`
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -729,6 +729,15 @@ func allowAuthWith(principal middleware.Principal) gin.HandlerFunc {
 		c.Set("principal", principal)
 		c.Next()
 	}
+}
+
+// scopedGates wraps an auth middleware with passthrough scope gates. Tests that
+// exercise handler behavior rather than the scope gates themselves mount routes
+// through this helper; the scope gates themselves are covered by
+// middleware.TestRequireUserAuthAndDelegatedScope.
+func scopedGates(auth gin.HandlerFunc) Gates {
+	passthrough := func(c *gin.Context) { c.Next() }
+	return Gates{RequireAuth: auth, RequireReadScope: passthrough, RequireWriteScope: passthrough}
 }
 
 type responseBody struct {

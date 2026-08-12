@@ -205,14 +205,17 @@ func TestLoadValidConfig(t *testing.T) {
 	if cfg.JWTRefreshTokenExpiry != 720*time.Hour {
 		t.Errorf("JWTRefreshTokenExpiry = %s, want 720h", cfg.JWTRefreshTokenExpiry)
 	}
+	if cfg.JWTRefreshCapabilityMaxLifetime != 168*time.Hour {
+		t.Errorf("JWTRefreshCapabilityMaxLifetime = %s, want the 168h default", cfg.JWTRefreshCapabilityMaxLifetime)
+	}
 	if cfg.RefreshTokenHMACSecret != "0123456789abcdef0123456789abcdef" {
 		t.Errorf("RefreshTokenHMACSecret = %q, want 0123456789abcdef0123456789abcdef", cfg.RefreshTokenHMACSecret)
 	}
 	if cfg.InternalOAuthClientID != "sast-link-web" {
 		t.Errorf("InternalOAuthClientID = %q, want sast-link-web", cfg.InternalOAuthClientID)
 	}
-	if cfg.RateLimitLoginRPM != 300 {
-		t.Errorf("RateLimitLoginRPM = %d, want 300", cfg.RateLimitLoginRPM)
+	if cfg.RateLimitLoginRPM != 500 {
+		t.Errorf("RateLimitLoginRPM = %d, want 500", cfg.RateLimitLoginRPM)
 	}
 	if cfg.RateLimitLoginWindow != 15*time.Minute {
 		t.Errorf("RateLimitLoginWindow = %s, want 15m", cfg.RateLimitLoginWindow)
@@ -306,6 +309,20 @@ func TestValidateAPIAuthRejectsNonPositiveRefreshTokenExpiry(t *testing.T) {
 	}
 }
 
+func TestValidateAPIAuthRejectsNegativeCapabilityLifetime(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("JWT_REFRESH_CAPABILITY_MAX_LIFETIME", "-1h")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	err = cfg.ValidateAPIAuth()
+	if err == nil || !strings.Contains(err.Error(), "JWT_REFRESH_CAPABILITY_MAX_LIFETIME must not be negative") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want JWT_REFRESH_CAPABILITY_MAX_LIFETIME non-negative validation", err)
+	}
+}
+
 func TestValidateAPIAuthRejectsNonPositiveRateSettings(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -319,6 +336,10 @@ func TestValidateAPIAuthRejectsNonPositiveRateSettings(t *testing.T) {
 		{name: "failure window", envName: "LOGIN_FAILURE_WINDOW", value: "0", want: "LOGIN_FAILURE_WINDOW must be positive"},
 		{name: "unbind rpm", envName: "RATE_LIMIT_UNBIND_RPM", value: "0", want: "RATE_LIMIT_UNBIND_RPM must be positive"},
 		{name: "unbind window", envName: "RATE_LIMIT_UNBIND_WINDOW", value: "500ms", want: "RATE_LIMIT_UNBIND_WINDOW must be at least 1s"},
+		{name: "consent rpm", envName: "RATE_LIMIT_CONSENT_RPM", value: "0", want: "RATE_LIMIT_CONSENT_RPM must be positive"},
+		{name: "consent window", envName: "RATE_LIMIT_CONSENT_WINDOW", value: "500ms", want: "RATE_LIMIT_CONSENT_WINDOW must be at least 1s"},
+		{name: "grants rpm", envName: "RATE_LIMIT_GRANTS_RPM", value: "0", want: "RATE_LIMIT_GRANTS_RPM must be positive"},
+		{name: "grants window", envName: "RATE_LIMIT_GRANTS_WINDOW", value: "500ms", want: "RATE_LIMIT_GRANTS_WINDOW must be at least 1s"},
 	}
 
 	for _, tc := range cases {

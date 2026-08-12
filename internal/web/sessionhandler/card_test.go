@@ -46,12 +46,12 @@ func TestCardIsPublic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{cardResult: &session.CardResult{Card: session.CardDTO{ID: 7}}}
 	router := gin.New()
-	RegisterRoutes(router, Handler{Service: service}, func(c *gin.Context) {
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(func(c *gin.Context) {
 		response.Error(c, &response.BusinessError{
 			HTTPStatus: http.StatusUnauthorized, Code: errcode.CodeUnauthenticated, Message: "未登录",
 		})
 		c.Abort()
-	})
+	}))
 	recorder := doJSON(router, http.MethodGet, "/card/7", "")
 
 	if recorder.Code != http.StatusOK {

@@ -117,14 +117,56 @@ func TestIsAdminAndContainsAdmin(t *testing.T) {
 	}
 }
 
-// ClaimScopes is what keeps an admin grant from changing any OIDC answer.
-func TestClaimScopesDropsAdminScopes(t *testing.T) {
-	got := ClaimScopes([]string{OpenID, Profile, AdminRead, Email, AdminWrite})
+func TestIsUserAndContainsUser(t *testing.T) {
+	for _, name := range []string{UserRead, UserWrite} {
+		if !IsUser(name) {
+			t.Fatalf("IsUser(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{OpenID, Profile, Email, AdminRead, "user", "user:", ""} {
+		if IsUser(name) {
+			t.Fatalf("IsUser(%q) = true, want false", name)
+		}
+	}
+	if ContainsUser([]string{OpenID, Profile, Email}) {
+		t.Fatal("ContainsUser(session scopes) = true, want false")
+	}
+	if !ContainsUser([]string{OpenID, UserRead}) {
+		t.Fatal("ContainsUser(openid user:read) = false, want true")
+	}
+	// Deliberately unvalidated: callers branch on intent before Normalize runs.
+	if !ContainsUser([]string{UserWrite}) {
+		t.Fatal("ContainsUser(user:write alone) = false, want true")
+	}
+}
+
+// Normalize accepts the user scopes in the canonical order, because they carry no
+// client-type constraint and appear in JWT claims.
+func TestUserScopesNormalize(t *testing.T) {
+	got, err := Normalize([]string{UserRead, OpenID, Email, UserWrite})
+	if err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{OpenID, Email, UserRead, UserWrite}) {
+		t.Fatalf("Normalize() = %#v, want canonical order", got)
+	}
+	// openid stays mandatory: the self-service token still identifies a subject.
+	if _, err := Normalize([]string{UserRead}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Normalize(user:read alone) error = %v, want ErrInvalid", err)
+	}
+}
+
+// ClaimScopes is what keeps an admin or user grant from changing any OIDC answer.
+func TestClaimScopesDropsNonOIDCScopes(t *testing.T) {
+	got := ClaimScopes([]string{OpenID, Profile, AdminRead, Email, AdminWrite, UserRead})
 	if !reflect.DeepEqual(got, []string{OpenID, Profile, Email}) {
 		t.Fatalf("ClaimScopes() = %#v, want the OIDC scopes in order", got)
 	}
 	if got := ClaimScopes([]string{OpenID, AdminWrite}); !reflect.DeepEqual(got, []string{OpenID}) {
 		t.Fatalf("ClaimScopes(openid admin:write) = %#v, want [openid]", got)
+	}
+	if got := ClaimScopes([]string{OpenID, UserWrite}); !reflect.DeepEqual(got, []string{OpenID}) {
+		t.Fatalf("ClaimScopes(openid user:write) = %#v, want [openid]", got)
 	}
 }
 

@@ -105,11 +105,14 @@ func setupDeviceE2E(t *testing.T) *deviceE2EHarness {
 	}
 
 	router := gin.New()
-	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{Service: service},
-		func(c *gin.Context) {
+	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{Service: service}, sessionhandler.Gates{
+		RequireAuth: func(c *gin.Context) {
 			middleware.SetPrincipal(c, middleware.Principal{UserID: user.ID, JTI: "device-e2e", ExpiresAt: time.Now().Add(time.Hour)})
 			c.Next()
-		})
+		},
+		RequireReadScope:  func(c *gin.Context) { c.Next() },
+		RequireWriteScope: func(c *gin.Context) { c.Next() },
+	})
 	return &deviceE2EHarness{router: router, service: service, userID: user.ID}
 }
 

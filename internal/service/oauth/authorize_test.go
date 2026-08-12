@@ -224,6 +224,55 @@ func TestAuthorizeThrottlesByIP(t *testing.T) {
 
 // A limiter outage must not take third-party login down; the limiter exists to
 // bound stash writes, not to authenticate.
+
+// The consent submission mints codes, so it gets its own per-user budget rather
+// than riding the peek's. Keyed by user because campus egress shares one NAT IP.
+func TestConsentThrottlesByUser(t *testing.T) {
+	h := newHarness(t)
+	h.limiter.result = LimitResult{Allowed: false, RetryAfter: 30 * time.Second}
+
+	_, err := h.service.Consent(context.Background(), ConsentInput{RequestID: "ar_x", Approve: true, UserID: 1})
+	oauthErr := oauthError(t, err, ErrorTemporarilyUnavail)
+	if oauthErr.Kind != KindRateLimited || oauthErr.RetryAfter != 30*time.Second {
+		t.Fatalf("error = %+v, want a rate-limited error carrying Retry-After", oauthErr)
+	}
+	calls := h.limiter.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "oauth_consent:user:1" {
+		t.Fatalf("limiter calls = %v, want one keyed by user", calls)
+	}
+}
+
+// A deny mints no code, so it must not consume the approving path's budget: a
+// user can refuse several pending consents in a row without throttling the one
+// they actually approve.
+func TestConsentDenyDoesNotConsumeBudget(t *testing.T) {
+	h := newHarness(t)
+
+	// Seed a valid pending request first (the authorize leg shares the limiter,
+	// so it runs while the limiter still allows).
+	authorized, err := h.service.Authorize(context.Background(), validAuthorizeInput(t))
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	// Now arm the limiter to refuse: a deny must not even consult it.
+	h.limiter.result = LimitResult{Allowed: false, RetryAfter: 30 * time.Second}
+
+	result, err := h.service.Consent(context.Background(), ConsentInput{
+		RequestID: authorized.RequestID, Approve: false, UserID: 1,
+	})
+	if err != nil {
+		t.Fatalf("Consent(deny) error = %v, want the denial answered without a rate limit", err)
+	}
+	if result.RedirectURI == "" {
+		t.Fatal("denial returned no redirect URI")
+	}
+	for _, call := range h.limiter.callsSnapshot() {
+		if strings.HasPrefix(call, "oauth_consent") {
+			t.Fatalf("denial consulted the consent limiter: %s", call)
+		}
+	}
+}
+
 func TestAuthorizeFailsOpenWhenLimiterErrors(t *testing.T) {
 	h := newHarness(t)
 	h.limiter.err = errors.New("redis down")
@@ -599,13 +648,16 @@ func TestAuthorizeBoundsPersistedParameters(t *testing.T) {
 	}
 }
 
-// Delegated administration rests entirely on this function. Every client type is
-// pinned to its registration by ContainsAll, and the admin scopes additionally
-// require a third-party client: a first-party client is public, so its token
-// requests are authenticated by PKCE alone and an intercepted code is one barrier
-// away from an administrative token rather than two.
-func TestAuthorizeScopeForClientConfinesAdminScopesToRegisteredThirdParties(t *testing.T) {
+// Capability scoping rests entirely on this function. Every client type is pinned
+// to its registration by ContainsAll. The admin scopes additionally require a
+// confidential (third_party) client — a public (first_party) client authenticates
+// its token request by PKCE alone, so an intercepted authorization code is one
+// barrier short of a credential reaching /admin, where a confidential client has
+// two independent barriers. The user scopes carry no type constraint: /user
+// operates on the token subject's own record, so even a public client may hold them.
+func TestAuthorizeScopeForClientConfinesAdminScopesToConfidentialClientsAndPinsAllToRegistration(t *testing.T) {
 	adminGrant := model.StringArray{scope.OpenID, scope.AdminRead, scope.AdminWrite}
+	userGrant := model.StringArray{scope.OpenID, scope.UserRead, scope.UserWrite}
 	tests := []struct {
 		name       string
 		clientType model.ClientType
@@ -614,37 +666,52 @@ func TestAuthorizeScopeForClientConfinesAdminScopesToRegisteredThirdParties(t *t
 		wantErr    bool
 	}{
 		{
-			name:       "third party registered for admin",
+			name:       "confidential client registered for admin",
 			clientType: model.ClientTypeThirdParty,
 			registered: adminGrant,
 			requested:  []string{scope.OpenID, scope.AdminWrite},
 		},
 		{
-			name:       "third party not registered for admin",
+			name:       "confidential client registered for user",
 			clientType: model.ClientTypeThirdParty,
-			registered: model.StringArray{scope.OpenID, scope.Profile},
-			requested:  []string{scope.OpenID, scope.AdminRead},
-			wantErr:    true,
+			registered: userGrant,
+			requested:  []string{scope.OpenID, scope.UserRead},
 		},
 		{
-			name:       "third party registered for read only cannot request write",
+			name:       "confidential client registered for read only cannot request write",
 			clientType: model.ClientTypeThirdParty,
 			registered: model.StringArray{scope.OpenID, scope.AdminRead},
 			requested:  []string{scope.OpenID, scope.AdminWrite},
 			wantErr:    true,
 		},
 		{
-			// The whole reason the ops client is third-party rather than first-party.
-			// Refused even though the registration grants it, because a public client
-			// authenticates its token request by PKCE alone.
-			name:       "first party may never request admin",
+			name:       "confidential client not registered for capability scope",
+			clientType: model.ClientTypeThirdParty,
+			registered: model.StringArray{scope.OpenID, scope.Profile},
+			requested:  []string{scope.OpenID, scope.UserRead},
+			wantErr:    true,
+		},
+		{
+			// A public client is refused even when its registration grants the scope,
+			// because the grant door (adminclient.checkCapabilityScopeGrant) already keeps
+			// such a registration from existing — this is the backstop for a registry
+			// written around it.
+			name:       "public client may never request admin",
 			clientType: model.ClientTypeFirstParty,
 			registered: adminGrant,
 			requested:  []string{scope.OpenID, scope.AdminRead},
 			wantErr:    true,
 		},
 		{
-			name:       "first party within its registration",
+			// The user scopes carry no type constraint: /user operates on the token
+			// subject's own record, so even a public client may be granted them.
+			name:       "public client registered for user",
+			clientType: model.ClientTypeFirstParty,
+			registered: userGrant,
+			requested:  []string{scope.OpenID, scope.UserRead},
+		},
+		{
+			name:       "public client within its registration",
 			clientType: model.ClientTypeFirstParty,
 			registered: model.StringArray{scope.OpenID, scope.Profile, scope.Email},
 			requested:  []string{scope.OpenID, scope.Profile, scope.Email},
@@ -654,7 +721,7 @@ func TestAuthorizeScopeForClientConfinesAdminScopesToRegisteredThirdParties(t *t
 			// any supported non-admin scope regardless of its registration, which made
 			// the scopes column advisory and any future scope retroactively granted to
 			// every existing first-party client. Both client types are now pinned.
-			name:       "first party beyond its registration",
+			name:       "public client beyond its registration",
 			clientType: model.ClientTypeFirstParty,
 			registered: model.StringArray{scope.OpenID},
 			requested:  []string{scope.OpenID, scope.Profile, scope.Email},
@@ -675,11 +742,6 @@ func TestAuthorizeScopeForClientConfinesAdminScopesToRegisteredThirdParties(t *t
 	}
 }
 
-// The wire scope parameter is deliberately more forgiving about whitespace than
-// the signed claim: HTTP callers may separate values with runs of spaces, while
-// scope.ParseClaim rejects them in a claim this service produced itself. Both
-// still go through scope.Normalize, so the accepted scope *sets* cannot diverge —
-// openid stays mandatory and unknown values stay rejected on either side.
 func TestParseRequestedScopesToleratesWireWhitespace(t *testing.T) {
 	accepted := map[string][]string{
 		"openid":                     {"openid"},

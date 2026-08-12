@@ -110,11 +110,14 @@ func setupAvatarE2E(t *testing.T) *avatarE2EHarness {
 		AvatarAuditor: &e2eAvatarAuditor{result: objectstore.AuditResult{Sensitive: false, Label: "Normal"}},
 	}
 	router := gin.New()
-	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{Service: service},
-		func(c *gin.Context) {
+	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{Service: service}, sessionhandler.Gates{
+		RequireAuth: func(c *gin.Context) {
 			middleware.SetPrincipal(c, middleware.Principal{UserID: user.ID, JTI: "avatar-e2e", ExpiresAt: time.Now().Add(time.Hour)})
 			c.Next()
-		})
+		},
+		RequireReadScope:  func(c *gin.Context) { c.Next() },
+		RequireWriteScope: func(c *gin.Context) { c.Next() },
+	})
 	return &avatarE2EHarness{router: router, database: database, userID: user.ID, store: objects}
 }
 
@@ -232,10 +235,13 @@ func avatarE2ERouterWithAuditor(t *testing.T, harness *avatarE2EHarness, auditor
 		AvatarAuditor: auditor,
 	}
 	router := gin.New()
-	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{Service: service},
-		func(c *gin.Context) {
+	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{Service: service}, sessionhandler.Gates{
+		RequireAuth: func(c *gin.Context) {
 			middleware.SetPrincipal(c, middleware.Principal{UserID: harness.userID, JTI: "avatar-e2e", ExpiresAt: time.Now().Add(time.Hour)})
 			c.Next()
-		})
+		},
+		RequireReadScope:  func(c *gin.Context) { c.Next() },
+		RequireWriteScope: func(c *gin.Context) { c.Next() },
+	})
 	return router
 }

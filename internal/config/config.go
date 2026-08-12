@@ -58,15 +58,22 @@ type Config struct {
 	RedisDB        int    `env:"REDIS_DB" envDefault:"0"`
 	RedisKeyPrefix string `env:"REDIS_KEY_PREFIX" envDefault:"sastlink"`
 
-	JWTSecretKey           string        `env:"JWT_SECRET_KEY"`
-	JWTSecretKeyPrev       string        `env:"JWT_SECRET_KEY_PREV"`
-	JWTActiveKID           string        `env:"JWT_ACTIVE_KID"`
-	JWTPreviousKID         string        `env:"JWT_PREVIOUS_KID"`
-	JWTIssuer              string        `env:"JWT_ISSUER" envDefault:"https://link.sast.fun/v2"`
-	JWTAudience            string        `env:"JWT_AUDIENCE" envDefault:"sast-link-v2"`
-	JWTAccessTokenExpiry   time.Duration `env:"JWT_ACCESS_TOKEN_EXPIRY" envDefault:"1h"`
-	JWTRefreshTokenExpiry  time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
-	RefreshTokenHMACSecret string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
+	JWTSecretKey          string        `env:"JWT_SECRET_KEY"`
+	JWTSecretKeyPrev      string        `env:"JWT_SECRET_KEY_PREV"`
+	JWTActiveKID          string        `env:"JWT_ACTIVE_KID"`
+	JWTPreviousKID        string        `env:"JWT_PREVIOUS_KID"`
+	JWTIssuer             string        `env:"JWT_ISSUER" envDefault:"https://link.sast.fun/v2"`
+	JWTAudience           string        `env:"JWT_AUDIENCE" envDefault:"sast-link-v2"`
+	JWTAccessTokenExpiry  time.Duration `env:"JWT_ACCESS_TOKEN_EXPIRY" envDefault:"1h"`
+	JWTRefreshTokenExpiry time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
+	// JWTRefreshCapabilityMaxLifetime caps the total life of a refresh family that
+	// carries a capability scope (admin/user), measured from the family's creation
+	// (its first authorization). A family reaching it is revoked so the client must
+	// re-authorize, closing the "sliding 30-day window renews forever" hole on
+	// administrative and self-service delegations. Plain OIDC families and internal
+	// session families are never capped. Zero disables the cap entirely.
+	JWTRefreshCapabilityMaxLifetime time.Duration `env:"JWT_REFRESH_CAPABILITY_MAX_LIFETIME" envDefault:"168h"`
+	RefreshTokenHMACSecret          string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
 
 	// OAuthConsentURL is the front-end page that collects the user's authorization
 	// decision. GET /oauth/authorize validates the request and redirects here; the
@@ -122,10 +129,10 @@ type Config struct {
 	// generous (300/15min ≈ 20/min) so a campus NAT is not the bottleneck while a
 	// single source still cannot run an unbounded spray. Abuse visibility is
 	// planned as an admin login-IP statistics feature rather than a per-IP cap.
-	RateLimitLoginRPM        int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"300"`
+	RateLimitLoginRPM        int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"500"`
 	RateLimitLoginWindow     time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
 	RateLimitSendEmailRPM    int           `env:"RATE_LIMIT_SEND_EMAIL_RPM" envDefault:"3"`
-	RateLimitSendEmailIPRPM  int           `env:"RATE_LIMIT_SEND_EMAIL_IP_RPM" envDefault:"30"`
+	RateLimitSendEmailIPRPM  int           `env:"RATE_LIMIT_SEND_EMAIL_IP_RPM" envDefault:"100"`
 	RateLimitSendEmailWindow time.Duration `env:"RATE_LIMIT_SEND_EMAIL_WINDOW" envDefault:"60s"`
 	LoginFailureLimit        int           `env:"LOGIN_FAILURE_LIMIT" envDefault:"10"`
 	LoginFailureWindow       time.Duration `env:"LOGIN_FAILURE_WINDOW" envDefault:"15m"`
@@ -170,7 +177,7 @@ type Config struct {
 	// Throttles GET /oauth/authorize per caller IP. The endpoint is
 	// unauthenticated and writes a Redis stash per call, so without a limit anyone
 	// could fill the keyspace. Fail-open, per PRD §6.0.
-	RateLimitAuthorizeRPM    int           `env:"RATE_LIMIT_AUTHORIZE_RPM" envDefault:"100"`
+	RateLimitAuthorizeRPM    int           `env:"RATE_LIMIT_AUTHORIZE_RPM" envDefault:"300"`
 	RateLimitAuthorizeWindow time.Duration `env:"RATE_LIMIT_AUTHORIZE_WINDOW" envDefault:"60s"`
 	// Throttles GET /oauth/authorize/consent per user. The endpoint is
 	// authenticated, so it keys on the user rather than the caller IP — campus
@@ -179,12 +186,22 @@ type Config struct {
 	// repeated random request_id probes. Fail-open, per PRD §6.0.
 	RateLimitConsentInfoRPM    int           `env:"RATE_LIMIT_CONSENT_INFO_RPM" envDefault:"60"`
 	RateLimitConsentInfoWindow time.Duration `env:"RATE_LIMIT_CONSENT_INFO_WINDOW" envDefault:"60s"`
+	// Throttles POST /oauth/authorize/consent per user. The submission mints an
+	// authorization code, so it gets a budget of its own rather than sharing the
+	// peek's. Fail-open, per PRD §6.0.
+	RateLimitConsentRPM    int           `env:"RATE_LIMIT_CONSENT_RPM" envDefault:"60"`
+	RateLimitConsentWindow time.Duration `env:"RATE_LIMIT_CONSENT_WINDOW" envDefault:"60s"`
+	// Throttles GET/DELETE /oauth/grants per user. The revoke runs a family
+	// revocation transaction plus a consent-history delete, so it is not free.
+	// Fail-open, per PRD §6.0.
+	RateLimitGrantsRPM    int           `env:"RATE_LIMIT_GRANTS_RPM" envDefault:"60"`
+	RateLimitGrantsWindow time.Duration `env:"RATE_LIMIT_GRANTS_WINDOW" envDefault:"60s"`
 	// Throttles POST /oauth/token and POST /oauth/revoke per caller IP. Both check
 	// client credentials and presented tokens, so an unlimited rate means unlimited
 	// credential attempts. Set higher than the authorize limit: one authorization
 	// legitimately produces a token request plus periodic refreshes, and several
 	// clients can share an egress IP. Fail-open, per PRD §6.0.
-	RateLimitTokenRPM    int           `env:"RATE_LIMIT_TOKEN_RPM" envDefault:"100"`
+	RateLimitTokenRPM    int           `env:"RATE_LIMIT_TOKEN_RPM" envDefault:"300"`
 	RateLimitTokenWindow time.Duration `env:"RATE_LIMIT_TOKEN_WINDOW" envDefault:"60s"`
 	// Throttles POST /auth/refresh per caller IP. The endpoint is unauthenticated
 	// and each call runs several DB statements (refresh-token lookup, user fetch,
@@ -192,18 +209,18 @@ type Config struct {
 	// free. Same shape as the token endpoint: one refresh per access-token
 	// lifetime per device, multiplied by clients sharing an egress IP. Fail-open,
 	// per PRD §6.0.
-	RateLimitRefreshRPM    int           `env:"RATE_LIMIT_REFRESH_RPM" envDefault:"100"`
+	RateLimitRefreshRPM    int           `env:"RATE_LIMIT_REFRESH_RPM" envDefault:"300"`
 	RateLimitRefreshWindow time.Duration `env:"RATE_LIMIT_REFRESH_WINDOW" envDefault:"60s"`
 	// Throttles GET /oauth/github and GET /oauth/lark per caller IP. Same shape as
 	// the authorize endpoint above — unauthenticated, and every call writes one
 	// oauth_state key — so it carries the same cap. Fail-open, per PRD §6.0.
-	RateLimitOAuthLoginRPM    int           `env:"RATE_LIMIT_OAUTH_LOGIN_RPM" envDefault:"100"`
+	RateLimitOAuthLoginRPM    int           `env:"RATE_LIMIT_OAUTH_LOGIN_RPM" envDefault:"300"`
 	RateLimitOAuthLoginWindow time.Duration `env:"RATE_LIMIT_OAUTH_LOGIN_WINDOW" envDefault:"60s"`
 	// Throttles POST /oauth/exchange-code per caller IP. Unauthenticated by
 	// design — redeeming a login_code is how a session is obtained — so without a cap
 	// the code space can be probed for free. Higher than the login cap: one login
 	// legitimately redeems once, but a shared egress IP multiplies that.
-	RateLimitExchangeCodeRPM    int           `env:"RATE_LIMIT_EXCHANGE_CODE_RPM" envDefault:"100"`
+	RateLimitExchangeCodeRPM    int           `env:"RATE_LIMIT_EXCHANGE_CODE_RPM" envDefault:"300"`
 	RateLimitExchangeCodeWindow time.Duration `env:"RATE_LIMIT_EXCHANGE_CODE_WINDOW" envDefault:"60s"`
 	// Throttles POST /auth/register per Register-Ticket, not per IP. Each accepted
 	// call runs one argon2id derivation, so what needs
@@ -417,6 +434,8 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("JWT_ACCESS_TOKEN_EXPIRY must be positive")
 	case c.JWTRefreshTokenExpiry <= 0:
 		return fmt.Errorf("JWT_REFRESH_TOKEN_EXPIRY must be positive")
+	case c.JWTRefreshCapabilityMaxLifetime < 0:
+		return fmt.Errorf("JWT_REFRESH_CAPABILITY_MAX_LIFETIME must not be negative")
 	case strings.TrimSpace(c.InternalOAuthClientID) == "":
 		return fmt.Errorf("INTERNAL_OAUTH_CLIENT_ID is required")
 	case c.HSTSMaxAge < minimumHSTSMaxAge:
@@ -451,6 +470,14 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_CONSENT_INFO_RPM must be positive")
 	case c.RateLimitConsentInfoWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_CONSENT_INFO_WINDOW must be at least 1s")
+	case c.RateLimitConsentRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_CONSENT_RPM must be positive")
+	case c.RateLimitConsentWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_CONSENT_WINDOW must be at least 1s")
+	case c.RateLimitGrantsRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_GRANTS_RPM must be positive")
+	case c.RateLimitGrantsWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_GRANTS_WINDOW must be at least 1s")
 	case c.RateLimitTokenRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_TOKEN_RPM must be positive")
 	case c.RateLimitTokenWindow < time.Second:

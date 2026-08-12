@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -147,6 +148,10 @@ type fakeTokens struct {
 	rotateErr       error
 	revokeErr       error
 	originErr       error
+	// now is the wall clock for family-lifetime decisions, mirroring the
+	// repository's rotationTime := time.Now(). Tests that drive a fixed service
+	// clock set it to that clock so origin+cap comparisons stay deterministic.
+	now func() time.Time
 }
 
 func newFakeTokens() *fakeTokens {
@@ -154,6 +159,13 @@ func newFakeTokens() *fakeTokens {
 		accessByJTI:   map[string]*model.OAuthAccessToken{},
 		refreshByHash: map[string]*model.OAuthRefreshToken{},
 	}
+}
+
+func (f *fakeTokens) nowUTC() time.Time {
+	if f.now != nil {
+		return f.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (f *fakeTokens) CreatePair(_ context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error {
@@ -186,6 +198,33 @@ func (f *fakeTokens) RotateRefreshTokenWithAudit(
 		f.auditEntries = append(f.auditEntries, audit)
 	}
 	return f.RotateRefreshToken(ctx, familyID, currentHash, access, refresh)
+}
+
+func (f *fakeTokens) RotateRefreshTokenWithAuditCapped(
+	ctx context.Context,
+	familyID string,
+	currentHash string,
+	access *model.OAuthAccessToken,
+	refresh *model.OAuthRefreshToken,
+	audit *model.AuditLog,
+	maxLifetime time.Duration,
+) (time.Time, error) {
+	origin, err := f.RotateRefreshTokenWithAudit(ctx, familyID, currentHash, access, refresh, audit)
+	if err != nil {
+		return origin, err
+	}
+	// Mirror the repository contract so service-level tests can exercise the cap
+	// without a database: clamp the rotated expiry to origin+maxLifetime and
+	// report a family-past-cap as ErrTokenFamilyExpired.
+	if maxLifetime > 0 {
+		now := f.nowUTC()
+		if deadline := origin.Add(maxLifetime); !deadline.After(now) {
+			return origin, repository.ErrTokenFamilyExpired
+		} else if refresh.ExpiresAt.After(deadline) {
+			refresh.ExpiresAt = deadline
+		}
+	}
+	return origin, nil
 }
 
 func (f *fakeTokens) RotateRefreshToken(
@@ -300,6 +339,24 @@ func (f *fakeAudit) actions() []string {
 		actions = append(actions, entry.Action)
 	}
 	return actions
+}
+
+// outcomes collects the "outcome" detail value from every audit row, which is
+// how the token endpoints distinguish a replay from a family-lifetime expiry.
+func (f *fakeAudit) outcomes() []string {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	outcomes := make([]string, 0, len(f.entries))
+	for _, entry := range f.entries {
+		var detail map[string]any
+		if err := json.Unmarshal(entry.Detail, &detail); err != nil {
+			continue
+		}
+		if outcome, ok := detail["outcome"].(string); ok {
+			outcomes = append(outcomes, outcome)
+		}
+	}
+	return outcomes
 }
 
 type fakeProfiles struct {
@@ -447,8 +504,12 @@ type harness struct {
 const (
 	testPublicClientID       = "sast-link-web"
 	testConfidentialClientID = "third-party-app"
-	testClientSecret         = "third-party-secret-value"
-	testRedirectURI          = "https://app.example.test/callback"
+	// testFirstPartyAppClientID is an organization-owned registration that is not
+	// the built-in client, so capability-scope (admin/user) tests can use a
+	// first-party client without touching the protected built-in one.
+	testFirstPartyAppClientID = "first-party-app"
+	testClientSecret          = "third-party-secret-value"
+	testRedirectURI           = "https://app.example.test/callback"
 	// testVerifier and testChallenge are a valid RFC 7636 S256 pair.
 	testVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 )
@@ -506,6 +567,20 @@ func confidentialClient() *model.OAuthClient {
 	}
 }
 
+func firstPartyAppClient() *model.OAuthClient {
+	active := true
+	return &model.OAuthClient{
+		ID:           30,
+		ClientID:     testFirstPartyAppClientID,
+		ClientName:   "First Party App",
+		ClientType:   model.ClientTypeFirstParty,
+		RedirectURIs: model.StringArray{testRedirectURI},
+		GrantTypes:   model.StringArray{grantTypeAuthorizationCode, grantTypeRefreshToken},
+		Scopes:       model.StringArray{"openid", "profile", "email"},
+		IsActive:     &active,
+	}
+}
+
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
@@ -527,6 +602,7 @@ func newHarness(t *testing.T) *harness {
 	user := activeUser()
 	public := publicClient()
 	confidential := confidentialClient()
+	firstPartyApp := firstPartyAppClient()
 	h := &harness{
 		users:          &fakeUsers{byID: map[int64]*model.User{user.ID: user}},
 		clients:        &fakeClients{byClientID: map[string]*model.OAuthClient{}, byID: map[int64]*model.OAuthClient{}},
@@ -539,10 +615,13 @@ func newHarness(t *testing.T) *harness {
 		limiter:        &fakeLimiter{},
 		clock:          clock,
 	}
-	for _, client := range []*model.OAuthClient{public, confidential} {
+	for _, client := range []*model.OAuthClient{public, confidential, firstPartyApp} {
 		h.clients.byClientID[client.ClientID] = client
 		h.clients.byID[client.ID] = client
 	}
+	// The fake's family-lifetime decisions follow the same clock as the service,
+	// so origin+cap comparisons are deterministic rather than tied to real time.
+	h.tokens.now = func() time.Time { return clock.value }
 	h.service = Service{
 		Users:            h.users,
 		Clients:          h.clients,
@@ -556,6 +635,8 @@ func newHarness(t *testing.T) *harness {
 		// Same fake behind all three, so a test can throttle any endpoint; the recorded
 		// endpoint name in fakeLimiter.calls distinguishes them.
 		ConsentInfoLimiter: h.limiter,
+		ConsentLimiter:     h.limiter,
+		GrantsLimiter:      h.limiter,
 		TokenLimiter:       h.limiter,
 		JWT:                jwtManager,
 		RefreshTokens:      refreshManager,
