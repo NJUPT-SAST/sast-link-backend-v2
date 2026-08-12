@@ -73,13 +73,18 @@ func (e *Error) Is(target error) bool {
 
 // Sentinels for each business outcome.
 var (
-	ErrInvalidInput            = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
-	ErrRateLimited             = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
-	ErrLocked                  = &Error{Kind: KindLocked, Code: errcode.CodeRateLimited}
-	ErrUnknownIdentifier       = &Error{Kind: KindUnknownIdentifier, Code: errcode.CodeUnknownIdentifier}
-	ErrPasswordInvalid         = &Error{Kind: KindPasswordInvalid, Code: errcode.CodePasswordInvalid}
-	ErrUserDeleted             = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
-	ErrInvalidToken            = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}
+	ErrInvalidInput      = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
+	ErrRateLimited       = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
+	ErrLocked            = &Error{Kind: KindLocked, Code: errcode.CodeRateLimited}
+	ErrUnknownIdentifier = &Error{Kind: KindUnknownIdentifier, Code: errcode.CodeUnknownIdentifier}
+	ErrPasswordInvalid   = &Error{Kind: KindPasswordInvalid, Code: errcode.CodePasswordInvalid}
+	ErrUserDeleted       = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
+	ErrInvalidToken      = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}
+	// ErrConcurrentRefresh reports a benign concurrent refresh within the 30s
+	// grace window: a sibling rotation already cut this token but preserved the
+	// family. Still an invalid-token outcome for the client, but distinct so the
+	// session handler does not clear the cookie that now holds the winner's token.
+	ErrConcurrentRefresh       = &Error{Kind: KindInvalidToken, Code: errcode.CodeConcurrentRefresh}
 	ErrEmailFailed             = &Error{Kind: KindEmailFailed, Code: errcode.CodeEmailDeliveryFailed}
 	ErrVerificationCodeWrong   = &Error{Kind: KindInvalidInput, Code: errcode.CodeVerificationCodeWrong}
 	ErrVerificationCodeExpired = &Error{Kind: KindInvalidInput, Code: errcode.CodeVerificationCodeExpired}

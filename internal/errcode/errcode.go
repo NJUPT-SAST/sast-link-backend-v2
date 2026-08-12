@@ -25,6 +25,13 @@ const (
 	CodePasswordInvalid       = 40105 // 密码错误
 	CodeUnknownIdentifier     = 40106 // 登录邮箱不存在
 	CodeLoginCodeInvalid      = 40107 // login_code 无效或已过期
+	// CodeConcurrentRefresh reports a benign concurrent refresh: the presented
+	// refresh token was already rotated by a sibling request within the 30s grace
+	// window, and the family is preserved. Still HTTP 401 (the token is dead),
+	// but distinct so the session handler can tell "the cookie's family is truly
+	// gone" apart from "another tab just rotated it" — only the former should
+	// clear the session cookie.
+	CodeConcurrentRefresh = 40108 // 刷新请求冲突，请重试
 
 	CodeForbidden          = 40300 // 无权限
 	CodeAccountDeleted     = 40301 // 账号已注销

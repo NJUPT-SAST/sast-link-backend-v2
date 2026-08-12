@@ -258,9 +258,14 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 					slog.WarnContext(ctx, "remove device on replay revoke failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 				}
 			}
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
+			return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 		}
-		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
-		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
+		// Benign concurrent refresh within the grace window: the family (and the
+		// winning tab's session) is preserved. Return a distinct outcome so the
+		// handler does not clear the cookie, which now holds the winner's token.
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeConcurrent, input)
+		return nil, newError(ErrConcurrentRefresh, "刷新请求冲突，请重试", nil)
 	}
 	if !current.ExpiresAt.After(s.now()) {
 		// The session is over: the refresh anchor is dead, so the device record
@@ -355,8 +360,8 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			// is dead, but the device record belongs to the still-live family and
 			// must not be dropped — removing it would leave the winning session
 			// invisible in the device list and free its cap slot.
-			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
-			return nil, newError(ErrInvalidToken, "Refresh Token 无效", rotateErr)
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeConcurrent, input)
+			return nil, newError(ErrConcurrentRefresh, "刷新请求冲突，请重试", rotateErr)
 		}
 		if errors.Is(rotateErr, repository.ErrTokenReplay) || errors.Is(rotateErr, repository.ErrTokenExpired) || errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) {
 			// RotateRefreshToken already cut the family in its own transaction and
@@ -391,38 +396,34 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 
 func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, error) {
 	principalJTI := strings.TrimSpace(input.PrincipalJTI)
-	if principalJTI == "" || input.PrincipalUserID <= 0 || strings.TrimSpace(input.RefreshToken) == "" {
+	if principalJTI == "" || input.PrincipalUserID <= 0 {
 		return nil, newError(ErrInvalidInput, "登出参数无效", nil)
 	}
 	access, err := s.Tokens.FindAccessTokenByJTI(ctx, principalJTI)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrInvalidToken, "未找到 Access Token 元数据", nil)
+		// The access token is gone — the session being logged out is already
+		// dead. Idempotent: the handler clears the cookie and reports success so
+		// a user with a revoked session is never stuck unable to log out.
+		return nil, newError(ErrInvalidToken, "会话已不存在", nil)
 	}
 	if err != nil {
 		return nil, newError(ErrInternal, "查询 Access Token 失败", err)
 	}
-	tokenHash, err := s.RefreshTokens.HashRefreshToken(input.RefreshToken)
-	if err != nil {
-		return nil, newError(ErrInvalidToken, "Refresh Token 无效", err)
-	}
-	refresh, err := s.Tokens.FindRefreshToken(ctx, tokenHash)
-	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrInvalidToken, "未找到 Refresh Token 元数据", nil)
-	}
-	if err != nil {
-		return nil, newError(ErrInternal, "查询 Refresh Token 失败", err)
-	}
 	now := s.now()
-	if !access.ExpiresAt.After(now) || !refresh.ExpiresAt.After(now) {
-		return nil, newError(ErrInvalidToken, "Token 已过期", nil)
+	if access.RevokedAt != nil || !access.ExpiresAt.After(now) {
+		return nil, newError(ErrInvalidToken, "会话已失效", nil)
 	}
-	if access.RevokedAt != nil || refresh.RevokedAt != nil {
-		return nil, newError(ErrInvalidToken, "Token 已被撤销", nil)
+	// The family to revoke is the authenticated session's own — the access
+	// token's family. The body/cookie refresh token is deliberately not required
+	// to match: in the stale-tab case (the cookie carries a newer login's
+	// family) requiring a match made logout report "已登出" without revoking
+	// anything.
+	if access.FamilyID == nil {
+		// An internal session always carries a family; a missing one is a server
+		// anomaly, not a successful logout — surface it rather than lie.
+		return nil, newError(ErrInternal, "Access Token 无会话家族", nil)
 	}
-	if access.FamilyID == nil || *access.FamilyID != refresh.FamilyID || access.UserID != input.PrincipalUserID || refresh.UserID != input.PrincipalUserID || access.ClientID != refresh.ClientID {
-		return nil, newError(ErrInvalidToken, "Token 归属不匹配", nil)
-	}
-	familyID := refresh.FamilyID
+	familyID := *access.FamilyID
 	entries, revokeErr := s.Tokens.RevokeFamily(ctx, familyID, now)
 	if revokeErr != nil {
 		return nil, newError(ErrInternal, "撤销 Token 家族失败", revokeErr)
@@ -1230,6 +1231,12 @@ const (
 	// rotated. This is the replay defense firing, and it revoked the whole
 	// family — the one outcome here that needs to be searchable on its own.
 	refreshOutcomeReplayed = "refresh_replayed"
+	// refreshOutcomeConcurrent is a presented token already rotated by a sibling
+	// request within the 30s grace window. The family is preserved, so this is a
+	// benign multi-tab cold-start, not a replay — audited separately with the
+	// concurrent-refresh code so reviewers are not misled into treating routine
+	// tab races as replay attacks.
+	refreshOutcomeConcurrent = "concurrent_refresh"
 	// refreshOutcomeExpired is a token that aged out. Benign on its own, but it
 	// has to be in the log for refresh_replayed to be meaningful: without the
 	// mundane outcomes recorded, a replay row cannot be told apart from the
@@ -1248,8 +1255,9 @@ const (
 // The outcome is recorded because the action and error code alone do not say why
 // a rotation failed: every failed row carries the same invalid-token code, and
 // the name is what separates a replay — a leaked token, family cut in response —
-// from an ordinary rejection. It matches the oauth service's refresh_replayed
-// outcome so a reviewer can filter both token paths with one query.
+// from an ordinary rejection. True replays share the oauth service's
+// refresh_replayed name and the benign in-grace variant shares concurrent_refresh,
+// so a reviewer can filter both token paths with one query.
 func (s Service) auditRefresh(
 	ctx context.Context,
 	userID int64,
@@ -1261,6 +1269,11 @@ func (s Service) auditRefresh(
 	errCode := 0
 	if !success {
 		errCode = errcode.CodeAccessTokenInvalid
+		if outcome == refreshOutcomeConcurrent {
+			// A benign concurrent refresh keeps the family; the audit code should
+			// match the 40108 the client actually sees, not the replay code.
+			errCode = errcode.CodeConcurrentRefresh
+		}
 	}
 	detail := map[string]any{"outcome": outcome}
 	if auditErr := s.audit(ctx, &userID, "refresh", "session", familyID, nil, success, errCode, input.ClientIP, input.UserAgent, detail); auditErr != nil {

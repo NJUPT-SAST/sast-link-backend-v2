@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -413,8 +414,18 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		ProtectedClientID: cfg.InternalOAuthClientID,
 	}
 
+	// The httpOnly session cookie a fresh tab uses to rebuild a session. The
+	// value is the rotating refresh token; SameSite=Lax keeps it off cross-site
+	// POSTs (cookie-CSRF) while letting same-site navigations through.
+	sessionCookie := &middleware.SessionCookie{
+		Name:     cfg.SessionCookieName,
+		Path:     cfg.SessionCookiePath,
+		Secure:   cfg.SessionCookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	}
+
 	return &sessionRuntime{
-		Handler: sessionhandler.Handler{Service: service},
+		Handler: sessionhandler.Handler{Service: service, Cookies: sessionCookie},
 		OAuth: oauthhandler.Handler{
 			Service:    oauthService,
 			Auth:       authenticator,
@@ -423,6 +434,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		OAuthLogin: oauthloginhandler.Handler{
 			Service:       oauthLoginService,
 			ErrorRedirect: cfg.OAuthLoginErrorRedirect,
+			Cookies:       sessionCookie,
 		},
 		Admin: adminhandler.Handler{
 			Clients:   adminClientService,

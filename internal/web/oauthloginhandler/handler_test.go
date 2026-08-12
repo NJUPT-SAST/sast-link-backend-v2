@@ -325,6 +325,36 @@ func TestExchangeCodeReturnsTokenPair(t *testing.T) {
 	}
 }
 
+func TestExchangeCodeSetsSessionCookie(t *testing.T) {
+	service := &fakeService{exchangeResult: &oauthlogin.ExchangeCodeResult{
+		AccessToken:      "access",
+		RefreshToken:     "refresh",
+		TokenType:        "Bearer",
+		AccessExpiresAt:  time.Now().Add(time.Hour),
+		RefreshExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		User: &model.User{
+			ID: 42, Name: "Existing", LoginEmail: "existing@sast.fun",
+			Role: model.UserRoleFreshman, State: model.UserStateNJUPTer,
+		},
+	}}
+	cookies := &middleware.SessionCookie{Name: "sl_session", Path: "/v2", SameSite: http.SameSiteLaxMode}
+	router := newTestRouter(Handler{Service: service, Cookies: cookies}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
+		strings.NewReader(`{"code":"lc_abc"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", recorder.Code, recorder.Body.String())
+	}
+	setCookie := recorder.Header().Get("Set-Cookie")
+	if !strings.Contains(setCookie, "sl_session=refresh") || !strings.Contains(setCookie, "HttpOnly") {
+		t.Fatalf("Set-Cookie = %q, want session cookie with refresh token", setCookie)
+	}
+}
+
 func TestExchangeCodeRejectsMissingCode(t *testing.T) {
 	router := newTestRouter(Handler{Service: &fakeService{}}, 0)
 

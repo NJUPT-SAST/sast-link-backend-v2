@@ -766,6 +766,12 @@ func TestTokenRefreshGraceWindowPreservesFamily(t *testing.T) {
 	if len(h.tokens.revokedFamilies) != 0 {
 		t.Fatalf("revoked families = %v, want the family preserved on a benign concurrent refresh", h.tokens.revokedFamilies)
 	}
+	// The benign in-grace case must audit as concurrent_refresh, never as a
+	// replay — a reviewer filtering refresh_replayed would otherwise mistake a
+	// routine two-tab race for a stolen-token attack.
+	if !slices.Contains(h.audit.outcomes(), "concurrent_refresh") {
+		t.Fatalf("audit outcomes = %v, want a concurrent_refresh row for the benign in-grace refresh", h.audit.outcomes())
+	}
 }
 
 // A refresh token belongs to one client. This check is also what keeps the OAuth

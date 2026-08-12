@@ -18,6 +18,8 @@ func mapServiceError(err error) error {
 	switch serviceErr.Code {
 	case errcode.CodeRegisterTicketInvalid:
 		message = "Register-Ticket 无效或已过期"
+	case errcode.CodeConcurrentRefresh:
+		message = "刷新请求冲突，请重试"
 	case errcode.CodeBindTicketInvalid:
 		message = "Bind-Ticket 无效或已过期"
 	case errcode.CodeVerificationCodeWrong:

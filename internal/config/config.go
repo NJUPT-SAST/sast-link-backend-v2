@@ -122,6 +122,15 @@ type Config struct {
 	CORSAllowedOrigins    []string `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
 	TrustedProxies        []string `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
 	HSTSMaxAge            int      `env:"HSTS_MAX_AGE" envDefault:"31536000"`
+
+	// The httpOnly session cookie a fresh tab uses to rebuild its session. The
+	// path is /v2 because that is the prefix the external Caddy proxy routes to
+	// this service; the cookie only ever needs to reach /v2/* endpoints. Secure
+	// defaults on (production is HTTPS-only) and is turned off for plain-http
+	// local development.
+	SessionCookieName   string `env:"SESSION_COOKIE_NAME" envDefault:"sl_session"`
+	SessionCookiePath   string `env:"SESSION_COOKIE_PATH" envDefault:"/v2"`
+	SessionCookieSecure bool   `env:"SESSION_COOKIE_SECURE" envDefault:"true"`
 	// The per-IP defaults are tuned for the campus NAT reality: hundreds of users
 	// share one egress IP, so any per-IP cap must accommodate the whole campus's
 	// aggregate volume or login breaks during a rush. The login defense is the
@@ -354,6 +363,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("DB_NAME is required")
 	case (strings.TrimSpace(c.JWTSecretKeyPrev) == "") != (strings.TrimSpace(c.JWTPreviousKID) == ""):
 		return fmt.Errorf("JWT_SECRET_KEY_PREV and JWT_PREVIOUS_KID must be both set or both empty")
+	case !strings.HasPrefix(c.SessionCookiePath, "/"):
+		return fmt.Errorf("SESSION_COOKIE_PATH must start with '/'")
+	case c.SessionCookieName == "":
+		// envDefault only applies when the variable is unset; an explicitly empty
+		// value would write a malformed `=value` cookie and Read would never find it.
+		return fmt.Errorf("SESSION_COOKIE_NAME must not be empty")
 	}
 	return nil
 }

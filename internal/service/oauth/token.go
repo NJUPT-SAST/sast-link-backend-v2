@@ -243,9 +243,16 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		// would log out the winner. Beyond the window it is a true replay of a
 		// long-dead token and the family is cut.
 		if !repository.IsWithinRefreshGrace(*current.RevokedAt, s.now()) {
+			// A true replay of a long-dead token: cut the family.
 			s.revokeFamily(ctx, current.FamilyID)
+			s.auditToken(ctx, &current.UserID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
+		} else {
+			// A benign concurrent refresh within the grace window: the winning
+			// rotation preserved the family, so report invalid without cutting —
+			// audited distinctly so a reviewer can tell it apart from a replay
+			// (matching the session path's concurrent_refresh).
+			s.auditToken(ctx, &current.UserID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "concurrent_refresh")
 		}
-		s.auditToken(ctx, &current.UserID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
 		return nil, newError(ErrInvalidGrant, "refresh_token 无效", nil)
 	}
 	if !current.ExpiresAt.After(s.now()) {
@@ -319,14 +326,19 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		s.capabilityRefreshLifetime(scopes),
 	)
 	if rotateErr != nil {
-		if errors.Is(rotateErr, repository.ErrTokenReplayWithinGrace) ||
-			errors.Is(rotateErr, repository.ErrTokenReplay) ||
+		if errors.Is(rotateErr, repository.ErrTokenReplayWithinGrace) {
+			// The rotation transaction preserved the family for a benign concurrent
+			// refresh within the grace window; re-revoking here would cut the
+			// preserved family and log out the winning request. Audited as
+			// concurrent_refresh, not a replay, matching the session path.
+			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "concurrent_refresh")
+			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
+		}
+		if errors.Is(rotateErr, repository.ErrTokenReplay) ||
 			errors.Is(rotateErr, repository.ErrTokenExpired) ||
 			errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) {
-			// The rotation transaction already decided: it cut the family for a true
-			// replay and preserved it for a benign concurrent refresh (grace
-			// window). Re-revoking here would cut the preserved family and log out
-			// the winning request, so just report invalid.
+			// A true replay: the rotation transaction already cut the family, so
+			// report invalid without re-revoking. Audited as a replay.
 			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
 			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
 		}
