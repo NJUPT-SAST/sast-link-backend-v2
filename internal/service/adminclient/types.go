@@ -19,14 +19,15 @@ type ClientRepository interface {
 	FindByID(ctx context.Context, id int64) (*model.OAuthClient, error)
 	// UpdateAndRevoke applies fields and, when revokeTokens is set, revokes the
 	// client's live tokens in the same transaction, returning the access-token
-	// entries that still need revocation delivery.
+	// entries that still need revocation delivery plus the count of unrevoked
+	// refresh tokens that were revoked.
 	UpdateAndRevoke(
 		ctx context.Context,
 		id int64,
 		fields map[string]any,
 		revokeTokens bool,
 		revokedAt time.Time,
-	) ([]model.BlacklistEntry, error)
+	) ([]model.BlacklistEntry, int64, error)
 	// DeleteAndRevoke permanently removes a client and revokes its live tokens in
 	// the same transaction, returning the access-token entries that still need
 	// revocation delivery plus the count of unrevoked refresh tokens that were
@@ -119,7 +120,9 @@ type CreateClientResult struct {
 
 // UpdateClientResult reports what the update did.
 type UpdateClientResult struct {
-	// RevokedTokens counts the access tokens revoked because the client was disabled.
+	// RevokedTokens counts every token revoked because of this update (a disable,
+	// a scope narrowing, or a capability grant): the still-live access tokens plus
+	// the unrevoked refresh tokens (one per family).
 	RevokedTokens int
 }
 

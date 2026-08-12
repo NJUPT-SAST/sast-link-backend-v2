@@ -297,6 +297,36 @@ func TestUpdateClientDisablingRevokesTokens(t *testing.T) {
 	}
 }
 
+// A client whose access tokens have all expired but still holds a live refresh
+// session is cut by a disable just the same, and the count must include the
+// refresh family — the reporting contract is identical to DeleteClient's.
+func TestUpdateClientDisablingReportsRefreshOnlyRevocation(t *testing.T) {
+	h := newHarness(t)
+	h.clients.findResult = activeClient(5)
+	h.clients.updateRefresh = 1
+	disabled := false
+
+	result, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 5, IsActive: &disabled, AdminUserID: 99,
+	})
+	if err != nil {
+		t.Fatalf("UpdateClient() error = %v", err)
+	}
+	if result.RevokedTokens != 1 {
+		t.Fatalf("RevokedTokens = %d, want 1 (the revoked refresh session)", result.RevokedTokens)
+	}
+	if len(h.blacklist.jtis) != 0 {
+		t.Fatalf("auth-state cache invalidation jtis = %v, want empty", h.blacklist.jtis)
+	}
+	if len(h.audit.entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(h.audit.entries))
+	}
+	detail := decodeAuditDetail(t, h.audit.entries[0])
+	if detail["revoked_tokens"] != float64(1) {
+		t.Fatalf("audit detail revoked_tokens = %v, want 1", detail["revoked_tokens"])
+	}
+}
+
 // Disabling the built-in client is an unrecoverable lockout: session
 // .findInternalClient resolves it through an is_active filter, so login, refresh
 // and registration all fail afterwards — including for the administrator who would

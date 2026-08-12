@@ -125,7 +125,9 @@ func (r *OAuthClientRepository) Create(ctx context.Context, client *model.OAuthC
 // would leave live tokens behind a client the console reports as disabled. The
 // returned entries are the still-live access JTIs needing revocation delivery;
 // their durable outbox rows are written here, so a later delivery failure only
-// delays the fast-reject path.
+// delays the fast-reject path. revokedRefresh is the count of unrevoked refresh
+// tokens that were revoked, so a disable that only cuts a live refresh session
+// still reports it — same reporting contract as DeleteAndRevoke.
 //
 // Returns ErrNotFound when the client does not exist.
 func (r *OAuthClientRepository) UpdateAndRevoke(
@@ -134,14 +136,15 @@ func (r *OAuthClientRepository) UpdateAndRevoke(
 	fields map[string]any,
 	revokeTokens bool,
 	revokedAt time.Time,
-) ([]model.BlacklistEntry, error) {
+) ([]model.BlacklistEntry, int64, error) {
 	if id <= 0 {
-		return nil, fmt.Errorf("%w: client ID must be positive", ErrInvalidArgument)
+		return nil, 0, fmt.Errorf("%w: client ID must be positive", ErrInvalidArgument)
 	}
 	if len(fields) == 0 {
-		return nil, fmt.Errorf("%w: no fields to update", ErrInvalidArgument)
+		return nil, 0, fmt.Errorf("%w: no fields to update", ErrInvalidArgument)
 	}
 	var entries []model.BlacklistEntry
+	var revokedRefresh int64
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		result := transaction.Model(&model.OAuthClient{}).Where("id = ?", id).Updates(fields)
 		if result.Error != nil {
@@ -153,17 +156,18 @@ func (r *OAuthClientRepository) UpdateAndRevoke(
 		if !revokeTokens {
 			return nil
 		}
-		revoked, _, revokeErr := revokeAllByClientInTransaction(transaction, id, revokedAt)
+		revoked, refreshed, revokeErr := revokeAllByClientInTransaction(transaction, id, revokedAt)
 		if revokeErr != nil {
 			return revokeErr
 		}
 		entries = revoked
+		revokedRefresh = refreshed
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return entries, nil
+	return entries, revokedRefresh, nil
 }
 
 // DeleteAndRevoke permanently removes an OAuth client and, in the same

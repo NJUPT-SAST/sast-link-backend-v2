@@ -64,7 +64,7 @@ func TestOAuthClientRepositoryFindByIDIgnoresActiveState(t *testing.T) {
 	clients := repository.NewOAuthClient(database)
 	client := createOAuthClient(t, database)
 
-	if _, err := clients.UpdateAndRevoke(context.Background(), client.ID,
+	if _, _, err := clients.UpdateAndRevoke(context.Background(), client.ID,
 		map[string]any{"is_active": false}, false, time.Now()); err != nil {
 		t.Fatalf("UpdateAndRevoke(deactivate) error = %v", err)
 	}
@@ -104,7 +104,7 @@ func TestOAuthClientRepositoryListAndCreate(t *testing.T) {
 
 	// Deactivated clients must still be listed, or the console could not re-enable
 	// one it had just disabled.
-	if _, err := clients.UpdateAndRevoke(context.Background(), created.ID,
+	if _, _, err := clients.UpdateAndRevoke(context.Background(), created.ID,
 		map[string]any{"is_active": false}, false, time.Now()); err != nil {
 		t.Fatalf("UpdateAndRevoke(deactivate) error = %v", err)
 	}
@@ -124,7 +124,7 @@ func TestOAuthClientRepositoryListAndCreate(t *testing.T) {
 	if !sawBuiltin || !sawDisabled {
 		t.Fatalf("List() = %d clients, want the built-in and the disabled one", len(listed))
 	}
-	if _, err := clients.UpdateAndRevoke(context.Background(), 999999,
+	if _, _, err := clients.UpdateAndRevoke(context.Background(), 999999,
 		map[string]any{"client_name": "x"}, false, time.Now()); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("UpdateAndRevoke(missing) error = %v, want ErrNotFound", err)
 	}
@@ -157,7 +157,7 @@ func TestOAuthClientRepositoryUpdateAndRevokeIsScopedToOneClient(t *testing.T) {
 	createTokenPair(t, tokens, "bystander", "family-bystander", 0, other.ID, user.ID)
 
 	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
-	entries, err := clients.UpdateAndRevoke(context.Background(), target.ID,
+	entries, _, err := clients.UpdateAndRevoke(context.Background(), target.ID,
 		map[string]any{"is_active": false}, true, revokedAt)
 	if err != nil {
 		t.Fatalf("UpdateAndRevoke(disable) error = %v", err)
@@ -195,7 +195,7 @@ func TestOAuthClientRepositoryUpdateWithoutRevokeLeavesTokensAlone(t *testing.T)
 	client := createOAuthClient(t, database)
 	createTokenPair(t, tokens, "kept", "family-kept", 0, client.ID, user.ID)
 
-	entries, err := clients.UpdateAndRevoke(context.Background(), client.ID,
+	entries, _, err := clients.UpdateAndRevoke(context.Background(), client.ID,
 		map[string]any{"client_name": "Renamed"}, false, time.Now())
 	if err != nil {
 		t.Fatalf("UpdateAndRevoke(rename) error = %v", err)

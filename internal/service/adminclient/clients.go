@@ -264,7 +264,7 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	revoke := (input.IsActive != nil && !*input.IsActive && current.IsActive != nil && *current.IsActive) ||
 		reason.scopesNarrowed() || reason.AdminScopeGranted || reason.UserScopeGranted
 	now := s.now()
-	entries, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, fields, revoke, now)
+	entries, revokedRefresh, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, fields, revoke, now)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
 	}
@@ -276,9 +276,13 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 		s.auditUpdate(ctx, input, false, ErrInternal.Code, 0, &current.ClientID, nil)
 		return nil, newError(ErrInternal, "更新 OAuth 客户端失败", err)
 	}
+	// Both sides of the revocation are reported, matching DeleteClient's contract: a
+	// client whose access tokens have all expired but still holds a live refresh
+	// session is cut just the same, so the count must say so.
+	total := len(entries) + int(revokedRefresh)
 	s.deliverBlacklist(ctx, entries, now)
-	s.auditUpdate(ctx, input, true, 0, len(entries), &current.ClientID, &reason)
-	return &UpdateClientResult{RevokedTokens: len(entries)}, nil
+	s.auditUpdate(ctx, input, true, 0, total, &current.ClientID, &reason)
+	return &UpdateClientResult{RevokedTokens: total}, nil
 }
 
 // DeleteClient permanently removes a registration. Deleting is one step past
@@ -387,7 +391,7 @@ func (s Service) RotateClientSecret(ctx context.Context, input RotateClientSecre
 		return nil, newError(ErrInternal, "生成 client_secret 失败", err)
 	}
 	now := s.now()
-	if _, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, map[string]any{"client_secret": hash}, false, now); err != nil {
+	if _, _, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, map[string]any{"client_secret": hash}, false, now); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrNotFound.Code)
 			return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
