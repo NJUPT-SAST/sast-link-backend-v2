@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -194,6 +195,110 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 	return &UpdateUserResult{ChangedFields: validated.changed, RevokedSessions: sessionsRevoked}, nil
 }
 
+// GetUsersByIDs returns the full records of the requested ids, in request
+// order, with duplicates collapsed to their first occurrence.
+//
+// Order preservation is the point of the endpoint: the caller holds a list
+// (mailing-batch targets, grading sheets) and reads the details back aligned
+// with it. A missing id is silently absent rather than an error — SQL does not
+// promise IN-list order and the caller diffs its own list, so an explicit
+// per-id error here would only double the work.
+func (s Service) GetUsersByIDs(ctx context.Context, input GetUsersByIDsInput) ([]UserDetail, error) {
+	if s.Users == nil {
+		return nil, newError(ErrInternal, "用户仓储未配置", nil)
+	}
+	ids, err := normalizeBatchIDs(input.IDs, maxBatchQueryIDs, "单次最多查询 100 个用户")
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.Users.FindByIDs(ctx, ids)
+	if err != nil {
+		return nil, internalError(ctx, "get admin users by ids", "批量查询用户失败", err)
+	}
+	byID := make(map[int64]model.User, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	details := make([]UserDetail, 0, len(ids))
+	for _, id := range ids {
+		row, ok := byID[id]
+		if !ok {
+			continue
+		}
+		details = append(details, userDetail(&row))
+	}
+	return details, nil
+}
+
+// UpdateUserRoles applies one role change to every id, independently, and
+// reports each outcome.
+//
+// Deliberately not atomic: the caller needs to retry or alert on the failures
+// (PRD-style batch semantics), and each item already runs its own transaction
+// with its own guards — the self-demotion refusal, the last-admin check against
+// the advisory lock, the closed-account state check, and the session revocation
+// on an actual role change. Reusing UpdateUser per item means the batch cannot
+// bypass a guard the single-user endpoint honors.
+func (s Service) UpdateUserRoles(ctx context.Context, input UpdateUserRolesInput) (*UpdateUserRolesResult, error) {
+	if s.Users == nil {
+		return nil, newError(ErrInternal, "用户仓储未配置", nil)
+	}
+	role := model.UserRole(strings.TrimSpace(input.Role))
+	if !validRole(role) {
+		return nil, newError(ErrInvalidInput, "role 取值非法", nil)
+	}
+	ids, err := normalizeBatchIDs(input.IDs, maxBatchUpdateIDs, "单次最多更新 500 个用户")
+	if err != nil {
+		return nil, err
+	}
+	requestedRole := string(role)
+
+	results := make([]RoleUpdateResult, 0, len(ids))
+	for _, id := range ids {
+		result := RoleUpdateResult{ID: id, Role: requestedRole}
+		_, updateErr := s.UpdateUser(ctx, UpdateUserInput{
+			UserID:        id,
+			Role:          &requestedRole,
+			Batch:         true,
+			AdminUserID:   input.AdminUserID,
+			ActorClientID: input.ActorClientID,
+			ClientIP:      input.ClientIP,
+			UserAgent:     input.UserAgent,
+		})
+		if updateErr == nil {
+			result.Success = true
+			results = append(results, result)
+			continue
+		}
+		// A failure carries the reason and no role: the role was not applied, and
+		// echoing it back would read as an outcome.
+		result.Role = ""
+		result.Reason = roleUpdateReason(updateErr)
+		results = append(results, result)
+	}
+	return &UpdateUserRolesResult{Results: results}, nil
+}
+
+// roleUpdateReason turns a per-item update failure into the literal shown in
+// the batch response. The messages mirror the single-user endpoint's HTTP
+// mapping (mapUserServiceError), so a caller sees the same words whether one
+// user or one hundred were submitted.
+func roleUpdateReason(err error) string {
+	var serviceErr *Error
+	if !errors.As(err, &serviceErr) {
+		return "服务器内部错误"
+	}
+	switch serviceErr.Kind {
+	case KindInvalidInput, KindStateConflict, KindProtected:
+		// The service's messages are literals naming the rule that was broken.
+		return serviceErr.Message
+	case KindNotFound:
+		return "用户不存在"
+	default:
+		return "服务器内部错误"
+	}
+}
+
 // DeleteUser closes an account and cuts every session it holds.
 func (s Service) DeleteUser(ctx context.Context, input TargetUserInput) error {
 	if s.Users == nil {
@@ -311,6 +416,12 @@ func (s Service) auditUpdate(
 	detail := map[string]any{}
 	if len(changed) > 0 {
 		detail["changed_fields"] = changed
+	}
+	if input.Batch {
+		// The batch role-update endpoint reuses this audit path per item; the marker
+		// tells a mass promotion apart from an individual edit without a second action
+		// name to maintain.
+		detail["batch"] = true
 	}
 	s.audit(ctx, auditParams{
 		AdminUserID:   input.AdminUserID,

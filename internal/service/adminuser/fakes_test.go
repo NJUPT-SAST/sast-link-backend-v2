@@ -18,6 +18,10 @@ type fakeUsers struct {
 	findResult *model.User
 	findErr    error
 
+	findByIDsResult []model.User
+	findByIDsErr    error
+	findByIDsInput  []int64
+
 	// Every write fake records the user id it was handed. A mis-targeted write is the
 	// one bug in this layer that no other assertion can see: the audit entry is built
 	// from the input rather than from what the repository was told, so it stays
@@ -28,6 +32,7 @@ type fakeUsers struct {
 	updateEntries  []model.BlacklistEntry
 	updateRevoked  bool
 	updateErr      error
+	updateErrs     []error
 	deleteCalls    int
 	deletedUserID  int64
 	deleteEntries  []model.BlacklistEntry
@@ -57,6 +62,14 @@ func (f *fakeUsers) FindByID(_ context.Context, _ int64) (*model.User, error) {
 	return f.findResult, nil
 }
 
+func (f *fakeUsers) FindByIDs(_ context.Context, ids []int64) ([]model.User, error) {
+	f.findByIDsInput = ids
+	if f.findByIDsErr != nil {
+		return nil, f.findByIDsErr
+	}
+	return f.findByIDsResult, nil
+}
+
 func (f *fakeUsers) FindAuthUserByID(_ context.Context, _ int64) (*model.User, error) {
 	return f.FindByID(context.Background(), 0)
 }
@@ -72,6 +85,15 @@ func (f *fakeUsers) UpdateAdminUser(
 	f.updateInput = update
 	if f.updateErr != nil {
 		return nil, false, f.updateErr
+	}
+	// updateErrs is a per-call failure queue for batch tests: the first call may
+	// fail while the rest succeed. A nil slot in the queue means success.
+	if len(f.updateErrs) > 0 {
+		err := f.updateErrs[0]
+		f.updateErrs = f.updateErrs[1:]
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	return f.updateEntries, f.updateRevoked, nil
 }

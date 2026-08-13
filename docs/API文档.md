@@ -1542,6 +1542,7 @@ DELETE /oauth/grants/:client_id
 > 2. **`email_type` 只能与 `login_email` 一同提交，且必须与其域名一致**，否则返回 `400`。V001 触发器 `auto_set_email_type` 仅在 `login_email` 出现在 UPDATE 列中时才重算该字段，单独提交 `email_type` 会写入与邮箱域名矛盾的值。
 > 3. **`page_size` 上限统一为 100**（含 `/admin/audit-logs`，契约未定上限）。超出上限按 100 截断，不报错。`page` / `page_size` 传非正整数或非数字返回 `400`，不静默回落默认值。`page` 另有上限 2^30：偏移量由 `page × page_size` 算出，`page` 过大时该乘积会整数溢出，`4611686018427387905` 恰好绕回 0，会在回显所请求页码的同时返回第一页——溢出按 `400` 拒绝而非截断，避免答非所问。
 > 4. **`keyword` 长度上限 255**（所匹配列的最宽列宽）。超长返回 `400`：该参数会展开为三个无法走索引的 `ILIKE` 加一次全表 `COUNT(*)`，且本组端点未接入限流。
+> 5. **批量接口单次上限**：`GET /admin/users/batch` 的 `ids` 最多 100 个、`PUT /admin/users` 的 `ids` 最多 500 个，超出返回 `400`（不截断——静默截断会让调用方拿到的结果无法与其输入对齐）。
 >
 > 另有三条契约未写明的管理员自我保护规则，均返回 `403`：不可修改自己的 `role`；不可注销自己的账号；不可将系统中最后一名活跃管理员降权或注销（「活跃」指 `role = admin` 且 `state <> is_deleted`）。三者都是不可自行恢复的锁死场景 —— 能撤销该操作的端点正是被交出的那一个。
 >
@@ -1746,6 +1747,100 @@ PUT /admin/users/:id/restore
 对未注销的用户调用返回 `422`。
 
 **错误码**：`40100`、`40300`、`40401`、`42200`（用户未被注销）。
+
+---
+
+### 6.5.1 批量查询用户（按 ID）
+
+```
+GET /admin/users/batch?ids=1,2,3
+```
+
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
+
+**Query Parameters**:
+
+| 参数 | 说明 |
+| ------ | ------ |
+| `ids` | 逗号分隔的用户 ID 列表，单次最多 **100** 个，超过需分页调用 |
+
+**说明**：
+
+- 返回的 `users` 数组**按请求顺序**排列（People 的邮件批次目标 / 阅卷列表需要与输入对齐），重复 ID 只返回一次（按首次出现位置）。
+- **不存在的 ID 直接缺席**（不报错，调用方自行 diff 重试）；已注销用户照常返回（与 `GET /admin/users/:id` 一致）。
+- 每条记录字段与 `GET /admin/users/:id` 完全一致（含 `profile` / `identities`），People 可直接复用现有转换逻辑。
+- `ids` 缺失、含非数字/非正整数段（如 `1,abc,2`、`1,,2`）、超过 100 个，均返回 `400`——静默丢弃非法段会返回一个无法与输入对齐的列表。
+
+**错误码**：`40000`（ids 缺失 / 非法 / 超上限）、`40100`、`40300`。
+
+**Response** `200`:
+
+```json
+{
+  "users": [
+    {
+      "id": 1,
+      "name": "张三",
+      "student_id": "B2404****",
+      "college": "计算机学院、软件学院、网络空间安全学院",
+      "major": "软件工程",
+      "login_email": "b2404****@njupt.edu.cn",
+      "role": "freshman",
+      "state": "njupter",
+      "email_type": "njupt_email",
+      "phone_number": "13800138000",
+      "qq_number": "1234567890",
+      "profile": { ... },
+      "identities": [ ... ],
+      "created_at": "2026-05-28T12:00:00Z",
+      "updated_at": "2026-05-28T12:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+### 6.5.2 批量修改用户角色
+
+```
+PUT /admin/users
+```
+
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
+
+**Request**:
+
+```json
+{
+  "ids": [1, 2, 3],
+  "role": "member"
+}
+```
+
+**说明**：
+
+- `ids` 单次最多 **500** 个（招新录取批量升级一次可覆盖），重复 ID 去重后只执行一次；`role` 枚举与单条接口一致：freshman / member / lecturer / admin。
+- **逐条独立执行（非原子）**：每个 ID 走与 `PUT /admin/users/:id` 完全相同的守卫与事务——不可修改自己的角色（403 语义）、系统至少保留一名管理员、已注销用户拒绝（需先恢复）；角色实际变化时同一事务递增 `token_version` 并撤销该用户全部 Token。**freshman→member 批量录取后，被录取者需重新登录一次**（与单条行为一致）。
+- 请求本身合法即返回 `200`，**失败是逐条数据而非传输错误**：`results` 与去重后的 ids 一一对应，调用方对失败项重试或告警。
+- 未知字段 / 尾部多余内容返回 `400`（strict 解码）。
+- 审计：每个 ID 各记一条 `admin_user_update`，detail 含 `"batch": true` 标记，便于控制台区分批量操作与单条编辑。
+
+**错误码**：`40000`（ids 为空 / 超过 500 / 含非正整数 / role 取值非法 / 未知字段）、`40100`、`40300`。
+
+**Response** `200`:
+
+```json
+{
+  "results": [
+    { "id": 1, "success": true, "role": "member" },
+    { "id": 2, "success": false, "reason": "用户不存在" },
+    { "id": 3, "success": false, "reason": "用户已注销，请先恢复后再编辑" }
+  ]
+}
+```
+
+`reason` 取值：`用户不存在` / `用户已注销，请先恢复后再编辑` / `不可修改自己的角色` / `系统中至少需要保留一名管理员` / `服务器内部错误`。
 
 ---
 

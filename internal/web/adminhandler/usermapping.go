@@ -40,6 +40,26 @@ type adminUserListResponse struct {
 	PageSize int            `json:"page_size"`
 }
 
+// batchUsersResponse is the batch user-detail read: the same record shape as
+// GET /admin/users/:id, in request order, with missing ids absent.
+type batchUsersResponse struct {
+	Users []userDetailDTO `json:"users"`
+}
+
+// roleUpdateResultDTO is one id's outcome of a batch role change. omitempty
+// keeps a success from carrying an empty reason and a failure from carrying a
+// role that was never applied.
+type roleUpdateResultDTO struct {
+	ID      int64  `json:"id"`
+	Success bool   `json:"success"`
+	Role    string `json:"role,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+type batchRoleUpdateResponse struct {
+	Results []roleUpdateResultDTO `json:"results"`
+}
+
 // userDetailDTO is one full user record. Same reasoning as adminUserDTO, plus the
 // profile and identity halves.
 type userDetailDTO struct {

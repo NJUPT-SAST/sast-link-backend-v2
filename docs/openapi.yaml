@@ -2128,6 +2128,88 @@ paths:
           description: 无权限（403xx）
       security:
         - bearerAuth: []
+    put:
+      summary: 批量修改用户角色
+      deprecated: false
+      description: |
+        需 admin 角色。委派调用需 `admin:write` scope。
+        对每个 id 独立执行一次角色更新（非原子）：单条失败不影响其余项，
+        失败原因在 results 中逐条返回，便于调用方重试或告警。
+        每个 id 走与 `PUT /admin/users/{id}` 相同的守卫：不可修改自己的角色、
+        系统至少保留一名管理员、已注销用户拒绝；角色实际发生变化时同事务递增
+        token_version 并撤销该用户全部 Token（freshman→member 批量录取后需重新登录）。
+        单次最多 500 个 id，重复 id 去重后执行一次。
+      operationId: adminBatchUpdateUsersRole
+      tags:
+        - Admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRoleUpdateRequest"
+      responses:
+        "200":
+          description: |
+            请求本身合法即 200；逐条结果中 success=false 的项携带 reason
+            （用户不存在 / 用户已注销，请先恢复后再编辑 / 不可修改自己的角色 /
+            系统中至少需要保留一名管理员 / 服务器内部错误）。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchRoleUpdateResponse"
+          headers: {}
+        "400":
+          $ref: "#/components/responses/BadRequest"
+          description: ids 为空 / 超过 500 / 含非正整数，或 role 取值非法（40000）
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 无权限（403xx）
+      security:
+        - bearerAuth: []
+  /admin/users/batch:
+    get:
+      summary: 批量查询用户（按 ID）
+      deprecated: false
+      description: |
+        需 admin 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
+        按请求顺序返回与 `GET /admin/users/{id}` 相同结构的完整记录；
+        重复 id 只返回一次，不存在的 id 直接缺席（不报错，调用方自行 diff）。
+        已注销用户照常返回（与单条详情一致）。
+        单次最多 100 个 id，超过需分页调用。
+      operationId: adminGetUsersByIDs
+      tags:
+        - Admin
+      parameters:
+        - name: ids
+          in: query
+          description: 逗号分隔的用户 ID 列表，最多 100 个
+          required: true
+          example: "1,2,3"
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 按请求顺序排列的用户详情数组（缺失 id 缺席）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchUsersResponse"
+          headers: {}
+        "400":
+          $ref: "#/components/responses/BadRequest"
+          description: ids 缺失 / 含非正整数段 / 超过 100 个（40000）
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 无权限（403xx）
+      security:
+        - bearerAuth: []
   /admin/users/{id}:
     get:
       summary: 用户详情
@@ -3817,6 +3899,83 @@ components:
               type: integer
               description: 每页条数
               example: 20
+    BatchUsersResponse:
+      type: object
+      description: 批量查询用户响应（GET /admin/users/batch）
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            users:
+              type: array
+              description: |
+                按请求顺序返回的用户详情（字段与 GET /admin/users/{id} 一致，
+                含 profile / identities）；不存在的 id 缺席，重复 id 只出现一次
+              items:
+                $ref: "#/components/schemas/UserProfileData"
+    BatchRoleUpdateRequest:
+      type: object
+      description: 批量修改用户角色请求
+      required:
+        - ids
+        - role
+      properties:
+        ids:
+          type: array
+          description: 用户 ID 列表，最多 500 个，重复 id 只执行一次
+          items:
+            type: integer
+            format: int64
+            minimum: 1
+          example: [1, 2, 3]
+        role:
+          $ref: "#/components/schemas/UserRole"
+    BatchRoleUpdateResponse:
+      type: object
+      description: 批量修改用户角色响应（请求合法即 200，逐条失败是数据而非传输错误）
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            results:
+              type: array
+              description: 逐条结果，与请求 ids 一一对应（去重后）
+              items:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                    format: int64
+                    description: 用户 ID
+                  success:
+                    type: boolean
+                    description: 本条是否成功
+                  role:
+                    type: string
+                    description: 成功时回显的目标角色（失败项无此字段）
+                    example: member
+                  reason:
+                    type: string
+                    description: |
+                      失败原因（失败项才有）：用户不存在 / 用户已注销，请先恢复后再编辑 /
+                      不可修改自己的角色 / 系统中至少需要保留一名管理员 / 服务器内部错误
+
     AdminOAuthClientsListResponse:
       type: object
       description: OAuth 客户端列表响应
