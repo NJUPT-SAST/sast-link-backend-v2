@@ -26,6 +26,7 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 
 	sessionhandler.RegisterRoutes(router, sessionhandler.Handler{}, sessionhandler.Gates{
 		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
+		RequireLogoutAuth: passthrough,
 	})
 	oauthhandler.RegisterRoutes(router, oauthhandler.Handler{}, passthrough)
 	oauthloginhandler.RegisterRoutes(router, oauthloginhandler.Handler{}, passthrough)

@@ -112,6 +112,7 @@ func setupDeviceE2E(t *testing.T) *deviceE2EHarness {
 		},
 		RequireReadScope:  func(c *gin.Context) { c.Next() },
 		RequireWriteScope: func(c *gin.Context) { c.Next() },
+		RequireLogoutAuth: func(c *gin.Context) { c.Next() },
 	})
 	return &deviceE2EHarness{router: router, service: service, userID: user.ID}
 }

@@ -226,6 +226,12 @@ type Gates struct {
 	// unchanged.
 	RequireReadScope  gin.HandlerFunc
 	RequireWriteScope gin.HandlerFunc
+	// RequireLogoutAuth authenticates /auth/logout. It is the /user scoped
+	// gate with one deliberate difference: an expired access token is still
+	// admitted, because logout is family-wide revocation and a stale tab whose
+	// token ran out (1h TTL) must be able to end its session without
+	// re-authenticating.
+	RequireLogoutAuth gin.HandlerFunc
 }
 
 // ReadScopes and WriteScopes are the scoped access each class of
@@ -244,7 +250,7 @@ var (
 func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	// Fail at boot rather than serve an ungated /user route. gin would happily
 	// mount a nil handler and panic on the first request instead.
-	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil {
+	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil || g.RequireLogoutAuth == nil {
 		panic("sessionhandler: every gate in Gates must be set")
 	}
 
@@ -268,6 +274,13 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	// internal console token is exempt from every scope gate (its ceiling is
 	// being an authenticated session), so the console keeps its current access to
 	// all of these endpoints.
+	// Logout sits outside the RequireUserAuth group: it runs behind
+	// RequireLogoutAuth, the scoped gate that admits an expired access token so
+	// a stale tab can end its session. The scope gate is kept — a scoped
+	// third-party token may still end its own session — and the internal
+	// console token is exempt from it as everywhere on this surface.
+	r.POST("/auth/logout", g.RequireLogoutAuth, g.RequireWriteScope, h.Logout)
+
 	protected := r.Group("")
 	protected.Use(g.RequireAuth)
 	protected.GET("/user/profile", g.RequireReadScope, h.Profile)
@@ -279,7 +292,6 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	protected.DELETE("/user/identities/:id", g.RequireWriteScope, h.UnbindIdentity)
 	protected.GET("/user/devices", g.RequireReadScope, h.ListDevices)
 	protected.DELETE("/user/devices/:id", g.RequireWriteScope, h.LogoutDevice)
-	protected.POST("/auth/logout", g.RequireWriteScope, h.Logout)
 	protected.POST("/auth/change-password", g.RequireWriteScope, h.ChangePassword)
 }
 
@@ -350,6 +362,15 @@ func (h Handler) Refresh(c *gin.Context) {
 			switch be.Code {
 			case errcode.CodeAccessTokenInvalid, errcode.CodeAccountDeleted:
 				h.clearSessionCookie(c)
+			}
+			// A cookie-sourced refresh hitting a dead account answers 401, not the
+			// 403 a live-account state error gets: the front end clears its session
+			// and bounces to login only when a refresh ends in 401, and an account
+			// that no longer exists must not leave the tab stranded in a dead-session
+			// shell. A body token keeps the 403 — that caller authenticated in-band
+			// and deserves the accurate account state.
+			if be.Code == errcode.CodeAccountDeleted {
+				be.HTTPStatus = http.StatusUnauthorized
 			}
 		}
 		response.Error(c, mapped)

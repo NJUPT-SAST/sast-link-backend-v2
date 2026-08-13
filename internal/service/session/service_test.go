@@ -1473,21 +1473,28 @@ func TestLogoutAuditFailureIsFailOpen(t *testing.T) {
 	}
 }
 
-func TestLogoutRejectsRevokedOrExpiredAccessMetadata(t *testing.T) {
+func TestLogoutRejectsRevokedAccessMetadataAndRevokesExpired(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
-	login, claims := loginForLogout(t, &service)
 	now := service.now()
 
+	// A revoked access token is a dead session: idempotent failure (the handler
+	// maps it to success and clears the cookie).
+	login, claims := loginForLogout(t, &service)
 	tokens.createdAccess.RevokedAt = &now
 	_, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
 	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
-	tokens.createdAccess.RevokedAt = nil
 
+	// An expired access token still names a live refresh family — logout must
+	// revoke it (the stale-tab case the expired-tolerant gate admits), not treat
+	// expiry as "nothing to revoke".
+	login2, claims2 := loginForLogout(t, &service)
 	tokens.createdAccess.ExpiresAt = now.Add(-time.Second)
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
-	tokens.createdAccess.ExpiresAt = login.AccessExpiresAt
-	tokens.createdAccess.RevokedAt = nil
+	if _, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims2.ID, PrincipalUserID: 42, RefreshToken: login2.RefreshToken}); err != nil {
+		t.Fatalf("logout with an expired access token should still revoke the family, got %v", err)
+	}
+	if len(tokens.revokedFamilies) != 1 {
+		t.Fatalf("revoked families = %#v, want exactly one (the expired session's)", tokens.revokedFamilies)
+	}
 }
 
 func TestLogoutIgnoresDeadRefreshToken(t *testing.T) {

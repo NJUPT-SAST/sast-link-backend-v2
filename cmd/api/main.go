@@ -100,6 +100,9 @@ func run() error {
 		RequireAuth:       runtime.Auth.RequireUserAuth(),
 		RequireReadScope:  runtime.Auth.RequireDelegatedScope(sessionhandler.ReadScopes...),
 		RequireWriteScope: runtime.Auth.RequireDelegatedScope(sessionhandler.WriteScopes...),
+		// Logout admits an expired access token so a stale tab can end its
+		// session; RequireUserLogoutAuth applies the same /user scope policy.
+		RequireLogoutAuth: runtime.Auth.RequireUserLogoutAuth(),
 	})
 	oauthhandler.RegisterRoutes(router, runtime.OAuth, runtime.Auth.RequireAuth())
 	oauthloginhandler.RegisterRoutes(router, runtime.OAuthLogin, runtime.Auth.RequireAuth())

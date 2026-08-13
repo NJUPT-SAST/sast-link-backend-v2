@@ -410,7 +410,14 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 		return nil, newError(ErrInternal, "查询 Access Token 失败", err)
 	}
 	now := s.now()
-	if access.RevokedAt != nil || !access.ExpiresAt.After(now) {
+	// A revoked access token is a dead session — the handler maps this to an
+	// idempotent success. An *expired* one is not dead in the family sense: it
+	// still names a live refresh family, and logout is family-wide revocation, so
+	// a stale tab whose 1h access token ran out must still revoke the family its
+	// refresh tokens outlive. This mirrors oauth.familyByAccessJTI, which likewise
+	// revokes an expired access token's family rather than treating expiry as
+	// "nothing to revoke".
+	if access.RevokedAt != nil {
 		return nil, newError(ErrInvalidToken, "会话已失效", nil)
 	}
 	// The family to revoke is the authenticated session's own — the access

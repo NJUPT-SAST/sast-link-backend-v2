@@ -319,6 +319,41 @@ func TestRefresh401KeepsCookieWhenBodyTokenFails(t *testing.T) {
 	}
 }
 
+func TestRefreshAccountDeletedCookieBecomes401(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{refreshErr: session.ErrUserDeleted}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+
+	// Cookie-sourced: 401, not the 403 a live-account state error gets — the
+	// front end clears its session and bounces to login only on a 401 refresh,
+	// so a dead account must not leave the tab in a dead-session shell.
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "sl_session", Value: "dead-account-cookie", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("cookie-sourced deleted-account refresh = %d %#v, want 401", recorder.Code, decodeBody(t, recorder))
+	}
+	if setCookie := recorder.Header().Get("Set-Cookie"); !strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want cleared session cookie", setCookie)
+	}
+
+	// Body-sourced: stays 403, and the healthy cookie is not cleared.
+	recorder2 := httptest.NewRecorder()
+	request2 := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{"refresh_token":"dead-body-token"}`))
+	request2.Header.Set("Content-Type", "application/json")
+	request2.AddCookie(&http.Cookie{Name: "sl_session", Value: "healthy-cookie", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder2, request2)
+	if recorder2.Code != http.StatusForbidden {
+		t.Fatalf("body-sourced deleted-account refresh = %d %#v, want 403", recorder2.Code, decodeBody(t, recorder2))
+	}
+	if setCookie := recorder2.Header().Get("Set-Cookie"); strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want no cookie clear when the body token failed", setCookie)
+	}
+}
+
 func TestRefreshConcurrentDoesNotClearCookie(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{refreshErr: session.ErrConcurrentRefresh}
@@ -486,6 +521,43 @@ func TestLogoutIdempotentWhenSessionAlreadyDead(t *testing.T) {
 	}
 	if setCookie := recorder2.Header().Get("Set-Cookie"); strings.Contains(setCookie, "Max-Age=0") {
 		t.Fatalf("Set-Cookie = %q, want no clear on a transient failure", setCookie)
+	}
+}
+
+// Logout must run behind RequireLogoutAuth, not RequireAuth: a gate that
+// rejects every request would otherwise 401 a logout the (expired-token
+// tolerant) logout gate is meant to admit. Mount a denying RequireAuth beside a
+// working RequireLogoutAuth — a logout must reach the handler, while a
+// RequireAuth-gated /user route must still be blocked.
+func TestLogoutRunsBehindRequireLogoutAuthNotRequireAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{logoutResult: &session.LogoutResult{BlacklistedJTI: "jti", FamilyID: "family"}}
+	deny := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40101, "message": "denied"})
+	}
+	gates := Gates{
+		RequireAuth:       deny,
+		RequireReadScope:  func(c *gin.Context) { c.Next() },
+		RequireWriteScope: func(c *gin.Context) { c.Next() },
+		RequireLogoutAuth: allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}),
+	}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, gates)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("logout behind a denying RequireAuth = %d %#v, want 200 (RequireLogoutAuth ran)", recorder.Code, decodeBody(t, recorder))
+	}
+
+	// The same denying RequireAuth must still block a protected /user route.
+	recorder2 := httptest.NewRecorder()
+	request2 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/user/profile", nil)
+	router.ServeHTTP(recorder2, request2)
+	if recorder2.Code != http.StatusUnauthorized {
+		t.Fatalf("protected route behind denying RequireAuth = %d, want 401", recorder2.Code)
 	}
 }
 
@@ -1146,7 +1218,10 @@ func allowAuthWith(principal middleware.Principal) gin.HandlerFunc {
 // middleware.TestRequireUserAuthAndDelegatedScope.
 func scopedGates(auth gin.HandlerFunc) Gates {
 	passthrough := func(c *gin.Context) { c.Next() }
-	return Gates{RequireAuth: auth, RequireReadScope: passthrough, RequireWriteScope: passthrough}
+	// Logout runs behind RequireLogoutAuth, but in these handler-behavior tests
+	// the same authenticated principal is fine — the logout-specific gate (the
+	// expired-token tolerance) is covered by middleware.TestAuthenticatorUserLogout.
+	return Gates{RequireAuth: auth, RequireReadScope: passthrough, RequireWriteScope: passthrough, RequireLogoutAuth: auth}
 }
 
 type responseBody struct {
