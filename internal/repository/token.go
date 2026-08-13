@@ -391,6 +391,27 @@ func validateRefreshRotation(
 	return nil
 }
 
+// lockLiveTokenFamilies takes the family advisory lock on every live refresh
+// family matching the caller-supplied predicate, in family_id order, inside the
+// caller's transaction.
+//
+// Bulk revocations revoke by user/client without knowing the families up front,
+// while refresh rotation serializes per family through lockTokenFamily. Without
+// this lock a rotation that commits between the bulk UPDATE's statement snapshot
+// and its row-lock wait would escape the revocation: the rotated row is inserted
+// after the snapshot and the UPDATE never sees it. Taking the family locks first
+// pushes the revocation's read set past any in-flight rotation, so the rotated
+// row is revoked like every other. The predicate is an internal constant (never
+// caller input), and the ORDER BY makes concurrent bulk revocations acquire the
+// same locks in the same order, so they cannot deadlock each other.
+func lockLiveTokenFamilies(transaction *gorm.DB, predicate string, args ...any) error {
+	query := "SELECT pg_advisory_xact_lock(?, hashtext(family_id)) " +
+		"FROM (SELECT DISTINCT family_id FROM oauth_refresh_tokens WHERE " + predicate + ") AS live_families " +
+		"ORDER BY family_id"
+	lockArgs := append([]any{tokenFamilyAdvisoryLockNamespace}, args...)
+	return transaction.Exec(query, lockArgs...).Error
+}
+
 func lockTokenFamily(transaction *gorm.DB, familyID string) error {
 	return transaction.Exec(
 		"SELECT pg_advisory_xact_lock(?, hashtext(?))",
@@ -611,6 +632,9 @@ func revokeAllByClientInTransaction(
 	clientPK int64,
 	revokedAt time.Time,
 ) ([]model.BlacklistEntry, int64, error) {
+	if err := lockLiveTokenFamilies(transaction, "client_id = ? AND revoked_at IS NULL", clientPK); err != nil {
+		return nil, 0, fmt.Errorf("lock live token families by client: %w", err)
+	}
 	var entries []model.BlacklistEntry
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Select("token_id", "expires_at").
@@ -673,6 +697,9 @@ func revokeAllByUserInTransaction(
 	userID int64,
 	revokedAt time.Time,
 ) ([]model.BlacklistEntry, error) {
+	if err := lockLiveTokenFamilies(transaction, "user_id = ? AND revoked_at IS NULL", userID); err != nil {
+		return nil, fmt.Errorf("lock live token families by user: %w", err)
+	}
 	var entries []model.BlacklistEntry
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Select("token_id", "expires_at").
@@ -715,6 +742,9 @@ func (r *TokenRepository) RevokeUserClientTokens(
 ) ([]model.BlacklistEntry, error) {
 	var entries []model.BlacklistEntry
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := lockLiveTokenFamilies(transaction, "user_id = ? AND client_id = ? AND revoked_at IS NULL", userID, clientID); err != nil {
+			return fmt.Errorf("lock live token families by user and client: %w", err)
+		}
 		if err := transaction.Model(&model.OAuthAccessToken{}).
 			Select("token_id", "expires_at").
 			Where("user_id = ? AND client_id = ? AND expires_at > ? AND revoked_at IS NULL",
