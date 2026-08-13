@@ -101,6 +101,7 @@
 | `40105` | 密码错误 |
 | `40106` | 登录邮箱不存在 |
 | `40107` | login_code 无效或已过期 |
+| `40108` | 刷新请求冲突（30s 宽限窗内被并发刷新，家族保留） |
 
 #### 权限错误（403xx）
 
@@ -378,6 +379,10 @@ POST /auth/refresh
 }
 ```
 
+> `refresh_token` 可省略：为空时从 httpOnly 会话 cookie（`sl_session`，登录/刷新时下发）读取 refresh token。这是新开标签页 bootstrap 会话的路径——新 tab 没有 sessionStorage 里的 token，但浏览器会带同源 cookie。
+>
+> 请求体必须为 `Content-Type: application/json` 的 JSON 对象；省略 refresh_token 时发送空对象 `{}`（0 字节空 body 会被拒，返回 400）。
+
 **Response** `200`:
 
 ```json
@@ -391,7 +396,9 @@ POST /auth/refresh
 
 **说明**:
 
-- Refresh Token 旋转机制 — 每次使用后旧 token 立即撤销，下发新 token
+- Refresh Token 旋转机制 — 每次使用后旧 token 立即撤销，下发新 token；同时通过 `Set-Cookie` 更新 `sl_session` cookie，保持其与最新 refresh token 同步
+- `40108`（刷新请求冲突）出现在多 tab 并发冷启动：同一 cookie 的 refresh token 已被兄弟请求在 30s 宽限窗内轮换，家族保留。客户端应**重读当前 cookie 后重试一次**（此时 cookie 已携带赢家的新 token），不要拿同一枚旧 token 无限重试——超过 30s 宽限窗仍用旧 token 会按真重放处理并撤销整个家族（连带赢家会话）
+- 账号已注销（`40301`）时，**cookie 来源**的刷新返回 `401`（错误码仍是 `40301`）而非 `403`：前端只在刷新以 401 结束时清会话并跳登录，已注销的账号必须让标签页脱离死会话壳。请求体携带 `refresh_token` 的调用保持 `403`——调用方已在带内认证，应当得到准确的账号状态
 - 此端点用于内部登录（密码/第三方）的 token 刷新；OAuth 客户端刷新请使用 `POST /oauth/token`（grant_type=refresh_token）
 
 ---
@@ -412,6 +419,12 @@ POST /auth/logout
 }
 ```
 
+> `refresh_token` 已不再参与登出，可省略：服务端按当前 access_token 所属的会话 family 撤销，请求体里的 `refresh_token` 字段被忽略。登出成功后服务端清掉 httpOnly 会话 cookie（`Set-Cookie: sl_session=; Max-Age=0`）。
+>
+> 登出使用**过期宽容认证**：access token 已过期（1h TTL 后）但签名有效时仍能登出——按其会话 family 撤销并清 cookie 返回成功；会话的 access 行已不存在或已撤销时同样幂等清 cookie 返回成功（`40102`）。缺失 Authorization Header 返回 `40100`（未登录）；伪造或签名无效的 token 返回 `40102`。
+>
+> 会话 cookie 是**浏览器级**的（同一浏览器的所有标签页共享）：单个标签页登出会清掉它，但不影响其他标签页 `sessionStorage` 里的凭据——它们下次刷新会通过 `/auth/refresh` 自动重建 cookie。因此"在一处登出，本浏览器其他标签页仍保有 session 直到其 token 过期"是预期行为。
+
 **Response** `200`:
 
 ```json
@@ -420,7 +433,7 @@ POST /auth/logout
 }
 ```
 
-**说明**: 撤销当前 access_token（jti）及整条 refresh_token family。
+**说明**: 撤销当前 access_token（jti）及整条 refresh_token family；同时清掉 httpOnly 会话 cookie。
 
 ---
 
@@ -1176,8 +1189,8 @@ GET /oauth/authorize
 ```
 第三方 app
   └─> GET /oauth/authorize?client_id=..&redirect_uri=..&code_challenge=..
-        校验参数 → 暂存请求（10min）→ 302
-  └─> {OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..&expires_in=600
+        校验参数 → 暂存请求（20min，`OAUTH_AUTHORIZE_REQUEST_TTL`）→ 302
+  └─> {OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..&expires_in=1200
         前端展示授权页，读取本地 access_token
         expires_in 为暂存剩余秒数，供页面显示截止时间并在超时后
         阻止提交（否则用户会提交进一个没有预告的 400）

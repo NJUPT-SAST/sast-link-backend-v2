@@ -117,6 +117,7 @@ func setupAvatarE2E(t *testing.T) *avatarE2EHarness {
 		},
 		RequireReadScope:  func(c *gin.Context) { c.Next() },
 		RequireWriteScope: func(c *gin.Context) { c.Next() },
+		RequireLogoutAuth: func(c *gin.Context) { c.Next() },
 	})
 	return &avatarE2EHarness{router: router, database: database, userID: user.ID, store: objects}
 }
@@ -242,6 +243,7 @@ func avatarE2ERouterWithAuditor(t *testing.T, harness *avatarE2EHarness, auditor
 		},
 		RequireReadScope:  func(c *gin.Context) { c.Next() },
 		RequireWriteScope: func(c *gin.Context) { c.Next() },
+		RequireLogoutAuth: func(c *gin.Context) { c.Next() },
 	})
 	return router
 }

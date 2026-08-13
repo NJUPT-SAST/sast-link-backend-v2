@@ -40,6 +40,10 @@ type Handler struct {
 	// callback arrives in a browser, so answering with a JSON envelope would
 	// show the user raw JSON; it redirects with an error query instead.
 	ErrorRedirect string
+	// Cookies writes the httpOnly session cookie on exchange-code success, so a
+	// third-party login also establishes the browser-level session. Nil in tests
+	// that don't exercise the cookie flow.
+	Cookies *middleware.SessionCookie
 }
 
 func (h Handler) now() time.Time {
@@ -210,6 +214,9 @@ func (h Handler) ExchangeCode(c *gin.Context) {
 		response.Error(c, mapServiceError(err))
 		return
 	}
+	// Establish the browser-level session cookie (nil-safe: tests without cookie
+	// config skip it; a zero or past expiry is a no-op inside SessionCookie.Set).
+	h.Cookies.Set(c, result.RefreshToken, result.RefreshExpiresAt.Sub(h.now()))
 	response.Ok(c, authResultDTO{
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,

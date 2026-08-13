@@ -1260,7 +1260,9 @@ func TestRefreshWithinGraceReplayPreservesDeviceRecord(t *testing.T) {
 	// does for the within-grace case.
 	tokens.rotateErr = repository.ErrTokenReplayWithinGrace
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	// A benign concurrent refresh is still a 401-class invalid-token outcome, but
+	// with the distinct code so the handler keeps the winner's session cookie.
+	assertKind(t, err, KindInvalidToken, errcode.CodeConcurrentRefresh)
 	if len(tokens.revokedFamilies) != 0 {
 		t.Fatalf("revoked families = %#v, want no revoke for a within-grace replay", tokens.revokedFamilies)
 	}
@@ -1287,7 +1289,9 @@ func TestRefreshRevokedTokenRejectsWithoutRedundantRevoke(t *testing.T) {
 	users.byID[42].State = model.UserStateDeleted
 
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	// Benign concurrent refresh within the grace window: distinct code so the
+	// handler does not clear the (winner's) session cookie.
+	assertKind(t, err, KindInvalidToken, errcode.CodeConcurrentRefresh)
 	// A revoked refresh token belongs to an already-cut family: the revoking
 	// transaction wrote its blacklist outbox rows, so re-revoking here would find
 	// no live token and deliver nothing. The service rejects without repeating it.
@@ -1469,29 +1473,47 @@ func TestLogoutAuditFailureIsFailOpen(t *testing.T) {
 	}
 }
 
-func TestLogoutRejectsRevokedMetadataAndExpiredMetadata(t *testing.T) {
+func TestLogoutRejectsRevokedAccessMetadataAndRevokesExpired(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
-	login, claims := loginForLogout(t, &service)
 	now := service.now()
 
+	// A revoked access token is a dead session: idempotent failure (the handler
+	// maps it to success and clears the cookie).
+	login, claims := loginForLogout(t, &service)
 	tokens.createdAccess.RevokedAt = &now
 	_, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
 	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
-	tokens.createdAccess.RevokedAt = nil
 
+	// An expired access token still names a live refresh family — logout must
+	// revoke it (the stale-tab case the expired-tolerant gate admits), not treat
+	// expiry as "nothing to revoke".
+	login2, claims2 := loginForLogout(t, &service)
 	tokens.createdAccess.ExpiresAt = now.Add(-time.Second)
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
-	tokens.createdAccess.ExpiresAt = login.AccessExpiresAt
-	tokens.createdAccess.RevokedAt = nil
-	tokens.createdRefresh.RevokedAt = &now
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
-	tokens.createdRefresh.RevokedAt = nil
+	if _, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims2.ID, PrincipalUserID: 42, RefreshToken: login2.RefreshToken}); err != nil {
+		t.Fatalf("logout with an expired access token should still revoke the family, got %v", err)
+	}
+	if len(tokens.revokedFamilies) != 1 {
+		t.Fatalf("revoked families = %#v, want exactly one (the expired session's)", tokens.revokedFamilies)
+	}
+}
 
-	tokens.createdRefresh.ExpiresAt = now.Add(-time.Second)
-	_, err = service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims.ID, PrincipalUserID: 42, RefreshToken: login.RefreshToken})
-	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+func TestLogoutIgnoresDeadRefreshToken(t *testing.T) {
+	service, _, _, tokens, _, _ := newTestService(t)
+	now := service.now()
+
+	// A dead refresh token no longer blocks logout: the service revokes the
+	// access token's own family (the session being logged out). Each case needs a
+	// fresh login — the previous logout revoked that session's family.
+	for _, mutate := range []func(*fakeTokens){
+		func(t *fakeTokens) { t.createdRefresh.RevokedAt = &now },
+		func(t *fakeTokens) { t.createdRefresh.ExpiresAt = now.Add(-time.Second) },
+	} {
+		login2, claims2 := loginForLogout(t, &service)
+		mutate(tokens)
+		if _, err := service.Logout(context.Background(), LogoutInput{PrincipalJTI: claims2.ID, PrincipalUserID: 42, RefreshToken: login2.RefreshToken}); err != nil {
+			t.Fatalf("logout with a dead refresh token should still succeed, got %v", err)
+		}
+	}
 }
 
 func TestProfileDTOExcludesSecrets(t *testing.T) {
@@ -2962,8 +2984,10 @@ func TestRefreshAuditRecordsReplayOutcome(t *testing.T) {
 }
 
 // The already-revoked branch is a separate code path from the rotation-error
-// branch above, and it is the one a stolen-then-reused token hits.
-func TestRefreshAuditRecordsReplayOutcomeForRevokedToken(t *testing.T) {
+// branch above. Within the grace window it is a benign concurrent refresh, so it
+// audits as concurrent_refresh — never as a replay, which would mislead a
+// reviewer into treating routine multi-tab cold starts as replay attacks.
+func TestRefreshAuditRecordsConcurrentOutcomeForRecentlyRevokedToken(t *testing.T) {
 	service, _, _, _, audit, _ := newTestService(t)
 	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
 	if err != nil {
@@ -2972,12 +2996,13 @@ func TestRefreshAuditRecordsReplayOutcomeForRevokedToken(t *testing.T) {
 	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	// The original token is now revoked; presenting it again is the replay.
+	// The original token is now revoked within the grace window; presenting it
+	// again is a benign concurrent refresh (the family is preserved).
 	if _, err := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); err == nil {
 		t.Fatal("Refresh accepted a revoked token")
 	}
-	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeReplayed {
-		t.Fatalf("revoked-token outcome = %q, want %q", got, refreshOutcomeReplayed)
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeConcurrent {
+		t.Fatalf("revoked-token outcome = %q, want %q", got, refreshOutcomeConcurrent)
 	}
 }
 

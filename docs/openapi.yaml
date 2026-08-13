@@ -284,7 +284,8 @@ paths:
       summary: 刷新 Token（内部登录用）
       deprecated: false
       description: >-
-        Refresh Token 旋转机制，每次使用后旧 token 撤销，下发新 token。OAuth 客户端请用 `POST
+        Refresh Token 旋转机制，每次使用后旧 token 撤销，下发新 token，并同步更新
+        httpOnly 会话 cookie（sl_session）。OAuth 客户端请用 `POST
         /oauth/token`（grant_type=refresh_token）。
       operationId: authRefreshToken
       tags:
@@ -295,12 +296,12 @@ paths:
           application/json:
             schema:
               type: object
-              required:
-                - refresh_token
               properties:
                 refresh_token:
                   type: string
-                  description: 刷新令牌
+                  description: >-
+                    刷新令牌，可省略：为空时从 httpOnly 会话 cookie（sl_session，
+                    登录/刷新时下发）读取 refresh token，作为新开标签页 bootstrap 会话的凭据。
                   example: rt_abc123...
               additionalProperties: false
             examples: {}
@@ -318,10 +319,14 @@ paths:
           description: 参数错误（400xx）
         "401":
           $ref: "#/components/responses/Unauthorized"
-          description: Refresh Token 无效、过期或被撤销（40102）
+          description: >-
+            Refresh Token 无效、过期或被撤销（40102）；30s 宽限窗内被并发刷新时返回
+            40108（家族保留，客户端应重读 cookie 后重试一次）。cookie 来源且账号已
+            注销时也返回 401（错误码仍为 40301），以便前端清会话并跳登录。
         "403":
           $ref: "#/components/responses/Forbidden"
-          description: 账号已注销（40301）
+          description: >-
+            账号已注销（40301），仅当刷新凭据来自请求体（refresh_token）时返回。
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: >-
@@ -346,12 +351,12 @@ paths:
           application/json:
             schema:
               type: object
-              required:
-                - refresh_token
               properties:
                 refresh_token:
                   type: string
-                  description: 刷新令牌
+                  description: >-
+                    已弃用，可省略：登出按当前 access_token 所属会话 family 撤销，
+                    请求体里的 refresh_token 字段被忽略。
               additionalProperties: false
         required: true
       responses:
@@ -367,7 +372,10 @@ paths:
           description: 参数错误（400xx）
         "401":
           $ref: "#/components/responses/Unauthorized"
-          description: Access/Refresh Token 无效（401xx）
+          description: >-
+            缺失 Authorization Header（40100）或伪造/签名无效（40102）。已过期的
+            access token 仍可登出：过期宽容认证按 RFC 7009 的过期路径读取其
+            claims，撤销所属 family 并清 cookie，返回 200。
         "403":
           $ref: "#/components/responses/Forbidden"
           description: 账号已注销（40301）

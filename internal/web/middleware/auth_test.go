@@ -62,10 +62,18 @@ func (f *fakeAccessStates) FindAccessAuthStateByJTI(_ context.Context, jti strin
 type fakeVerifier struct {
 	claims *auth.TokenClaims
 	err    error
+	// expiredErr is returned by VerifyExpiredAccessToken; when VerifyAccessToken
+	// reports ErrExpiredToken and this is nil, the expired-token path succeeds
+	// (the RFC 7009 pattern: everything but the clock verifies).
+	expiredErr error
 }
 
 func (f fakeVerifier) VerifyAccessToken(string) (*auth.TokenClaims, error) {
 	return f.claims, f.err
+}
+
+func (f fakeVerifier) VerifyExpiredAccessToken(string) (*auth.TokenClaims, error) {
+	return f.claims, f.expiredErr
 }
 
 func TestAuthenticatorRequireAuth(t *testing.T) {
@@ -173,6 +181,84 @@ func performAuthRequest(manager *auth.JWTManager, cache *fakeAuthStateCache, sta
 	var body envelope
 	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
 	return recorder, body
+}
+
+func performLogoutAuthRequest(manager *auth.JWTManager, states *fakeAccessStates, now time.Time, header string) (*httptest.ResponseRecorder, envelope) {
+	router := gin.New()
+	authenticator := Authenticator{JWT: manager, Tokens: states, AuthStateCache: &fakeAuthStateCache{}, AuthStateTTL: time.Minute, Clock: testClock{value: now}, InternalClientID: testInternalClientID}
+	router.POST("/logout", authenticator.RequireUserLogoutAuth(), func(c *gin.Context) {
+		principal, _ := PrincipalFrom(c)
+		c.JSON(http.StatusOK, envelope{Code: 0, Message: "ok", Data: map[string]any{"user_id": principal.UserID, "jti": principal.JTI}})
+	})
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/logout", nil)
+	if header != "" {
+		request.Header.Set("Authorization", header)
+	}
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	var body envelope
+	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+	return recorder, body
+}
+
+// Logout admits an expired access token so a stale tab can end its session: the
+// RFC 7009 expired-token path re-parses the claims and skips the auth-state
+// cache (the service confirms the row before revoking — an idempotent success
+// when the row is gone). A fresh token runs the full chain as usual; an invalid
+// signature is still rejected; the scoped gate applies to the expired path too.
+func TestAuthenticatorUserLogoutToleratesExpiredToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+
+	expiredManager := newTestJWTManager(t, now)
+	expiredToken := signTestToken(t, expiredManager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid"}, TTL: time.Minute,
+	})
+	expiredManager.Clock = testClock{value: now.Add(2 * time.Minute)}
+
+	// Expired but signature-valid: admitted, and the auth-state cache is never
+	// touched.
+	states := validStates(now)
+	recorder, body := performLogoutAuthRequest(expiredManager, states, now, "Bearer "+expiredToken)
+	if recorder.Code != http.StatusOK || body.Code != 0 {
+		t.Fatalf("expired-token logout = %d %#v, want 200/0", recorder.Code, body)
+	}
+	if states.calls != 0 {
+		t.Fatalf("auth-state queries = %d, want 0 on the expired path", states.calls)
+	}
+
+	// A fresh token runs the full chain: the auth-state query happens.
+	manager := newTestJWTManager(t, now)
+	freshToken := signTestToken(t, manager, auth.TokenInput{
+		Subject: "42", JTI: "jti-42", Role: "member", State: "on_sast", TokenVersion: 7,
+		Scopes: []string{"openid"}, TTL: time.Hour,
+	})
+	states2 := validStates(now)
+	recorder2, body2 := performLogoutAuthRequest(manager, states2, now, "Bearer "+freshToken)
+	if recorder2.Code != http.StatusOK || body2.Code != 0 || states2.calls != 1 {
+		t.Fatalf("fresh-token logout = %d %#v (calls %d), want 200/0 with one state query", recorder2.Code, body2, states2.calls)
+	}
+
+	// An invalid signature is rejected on the expired path too — an
+	// attacker-chosen jti must not revoke an arbitrary family.
+	recorder3, body3 := performLogoutAuthRequest(expiredManager, states, now, "Bearer not-a-jwt")
+	if recorder3.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid-signature logout = %d %#v, want 401", recorder3.Code, body3)
+	}
+
+	// A third-party token whose claims carry no user scope is refused even when
+	// expired: the scoped gate applies to the expired path exactly as to a fresh one.
+	thirdPartyManager := newTestJWTManager(t, now)
+	thirdPartyExpired := signTestToken(t, thirdPartyManager, auth.TokenInput{
+		Subject: "42", JTI: "jti-3p", AuthorizedParty: "third-party-client", Role: "member", State: "on_sast",
+		TokenVersion: 7, Scopes: []string{"openid"}, TTL: time.Minute,
+	})
+	thirdPartyManager.Clock = testClock{value: now.Add(2 * time.Minute)}
+	recorder4, body4 := performLogoutAuthRequest(thirdPartyManager, states, now, "Bearer "+thirdPartyExpired)
+	if recorder4.Code != http.StatusForbidden {
+		t.Fatalf("third-party expired logout without user scope = %d %#v, want 403", recorder4.Code, body4)
+	}
 }
 
 func TestAuthenticatorUsesSingleDBAuthStateQuery(t *testing.T) {

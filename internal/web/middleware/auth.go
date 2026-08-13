@@ -37,6 +37,11 @@ type Principal struct {
 
 type JWTVerifier interface {
 	VerifyAccessToken(token string) (*auth.TokenClaims, error)
+	// VerifyExpiredAccessToken verifies everything VerifyAccessToken does except
+	// the expiry, returning an expired token's claims. Logout relies on it: a
+	// stale tab whose access token has run out must still be able to end its
+	// session, because the expired token names a live refresh family.
+	VerifyExpiredAccessToken(token string) (*auth.TokenClaims, error)
 }
 
 // AuthStateCache is the short-TTL Redis cache for the per-token auth state. A
@@ -211,6 +216,62 @@ func (a Authenticator) AuthenticateUserScoped(ctx context.Context, header string
 		"该 Access Token 未携带访问用户接口所需的 scope")
 }
 
+// RequireUserLogoutAuth authenticates the logout endpoint, tolerating an
+// expired access token. Everything else follows the /user scoped gate: the
+// console session is exempt, any other client must carry a self-service scope.
+func (a Authenticator) RequireUserLogoutAuth() gin.HandlerFunc {
+	return a.requireScopedAuth(a.AuthenticateUserLogout)
+}
+
+// AuthenticateUserLogout validates the logout request, tolerating an expired
+// access token. A fresh token runs the full chain exactly as
+// AuthenticateUserScoped does; an expired one is re-parsed through the RFC 7009
+// expired-token path and admitted on its claims alone.
+//
+// Why expire is forgiven here and nowhere else: logout is family-wide
+// revocation, and an expired access token still names a live refresh family
+// whose tokens outlive it by weeks. A stale tab whose access token ran out (1h
+// TTL) must be able to end its session without re-authenticating. Signature,
+// issuer, audience, and the required-claim set all stay verified — the only
+// thing relaxed is the clock, so an attacker-chosen jti cannot revoke an
+// arbitrary family — and the service layer confirms the jti resolves to a real
+// token row (an idempotent success when the row is gone) before it touches a
+// family. The auth-state cache is deliberately skipped on the expired path: the
+// cache is short-TTL and can no longer be satisfied for a token past its
+// expiry, and the authoritative row check belongs to the service, which
+// performs it.
+func (a Authenticator) AuthenticateUserLogout(ctx context.Context, header string) (Principal, error) {
+	token, ok := strictBearerToken(header)
+	if !ok {
+		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeUnauthenticated, "未登录（缺少或无效 Authorization Header）")
+	}
+	if a.JWT == nil {
+		return Principal{}, backendError()
+	}
+	_, err := a.JWT.VerifyAccessToken(token)
+	if errors.Is(err, auth.ErrExpiredToken) {
+		expiredClaims, expiredErr := a.JWT.VerifyExpiredAccessToken(token)
+		if expiredErr != nil {
+			return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
+		}
+		userID, parseErr := strconv.ParseInt(expiredClaims.Subject, 10, 64)
+		if parseErr != nil || userID <= 0 || strings.TrimSpace(expiredClaims.ID) == "" || expiredClaims.ExpiresAt == nil {
+			return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
+		}
+		scopes, parseErr := scope.ParseClaim(expiredClaims.Scope)
+		if parseErr != nil {
+			return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
+		}
+		return a.applyScopedPolicy(principalFromClaims(expiredClaims, userID, scopes, nil),
+			func(p Principal) bool { return scope.ContainsUser(p.Scopes) },
+			"该 Access Token 未携带访问用户接口所需的 scope")
+	}
+	if err != nil {
+		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
+	}
+	return a.AuthenticateUserScoped(ctx, header)
+}
+
 // authenticateScoped is the shared core of the two scoped-surface authenticators:
 // validate the token, exempt the console session unconditionally, and otherwise
 // require the capability predicate to pass. A missing InternalClientID fails
@@ -222,12 +283,25 @@ func (a Authenticator) authenticateScoped(
 	carriesCapability func(Principal) bool,
 	deniedMessage string,
 ) (Principal, error) {
-	if strings.TrimSpace(a.InternalClientID) == "" {
-		return Principal{}, backendError()
-	}
 	principal, err := a.authenticate(ctx, header)
 	if err != nil {
 		return Principal{}, err
+	}
+	return a.applyScopedPolicy(principal, carriesCapability, deniedMessage)
+}
+
+// applyScopedPolicy decides whether an already-authenticated principal may act
+// on a scoped surface: the console session is exempt unconditionally, every
+// other client must carry the capability scope. A missing InternalClientID
+// fails closed before the scoped branch — a deployment that forgot it must
+// refuse every scoped token rather than admit all of them.
+func (a Authenticator) applyScopedPolicy(
+	principal Principal,
+	carriesCapability func(Principal) bool,
+	deniedMessage string,
+) (Principal, error) {
+	if strings.TrimSpace(a.InternalClientID) == "" {
+		return Principal{}, backendError()
 	}
 	// An absent azp is a first-party session token predating the claim; those are
 	// only ever issued to the built-in client.
@@ -337,6 +411,13 @@ func (a Authenticator) authenticate(ctx context.Context, header string) (Princip
 	if err != nil {
 		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
 	}
+	return a.authenticateClaims(ctx, claims)
+}
+
+// authenticateClaims derives the DB-backed principal from an already-verified
+// token's claims: it re-checks the token against the authoritative state row
+// (auth-state cache with DB fallback), the account state, and the token version.
+func (a Authenticator) authenticateClaims(ctx context.Context, claims *auth.TokenClaims) (Principal, error) {
 	userID, err := strconv.ParseInt(claims.Subject, 10, 64)
 	if err != nil || userID <= 0 || strings.TrimSpace(claims.ID) == "" || claims.ExpiresAt == nil {
 		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
@@ -367,6 +448,20 @@ func (a Authenticator) authenticate(ctx context.Context, header string) (Princip
 	if state.TokenVersion != claims.TokenVersion {
 		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
 	}
+	return principalFromClaims(claims, userID, scopes, state), nil
+}
+
+// principalFromClaims assembles the Principal from verified claims, the parsed
+// scopes, and the DB-backed state row. role/state come from the row, never from
+// claims.Role, which is a snapshot that survives a demotion; a nil state (the
+// expired-token logout path) leaves them empty, and nothing authorizes on
+// Principal.State today.
+func principalFromClaims(claims *auth.TokenClaims, userID int64, scopes []string, state *repository.AccessAuthState) Principal {
+	role, userState := "", ""
+	if state != nil {
+		role = string(state.UserRole)
+		userState = string(state.UserState)
+	}
 	return Principal{
 		UserID: userID,
 		JTI:    claims.ID,
@@ -377,12 +472,12 @@ func (a Authenticator) authenticate(ctx context.Context, header string) (Princip
 		// the same row costs no extra round trip and makes a demotion effective on the
 		// next request. claims.Role is still validated for presence but is not what
 		// authorization decisions are made on.
-		Role:      string(state.UserRole),
-		State:     string(state.UserState),
+		Role:      role,
+		State:     userState,
 		Scopes:    scopes,
 		ClientID:  strings.TrimSpace(claims.AZP),
 		ExpiresAt: claims.ExpiresAt.UTC(),
-	}, nil
+	}
 }
 
 // authState resolves the DB-authoritative state for one access token, serving it

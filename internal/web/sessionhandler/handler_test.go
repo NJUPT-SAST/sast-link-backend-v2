@@ -247,6 +247,390 @@ func TestRefreshReturnsTokenEnvelope(t *testing.T) {
 	}
 }
 
+func TestRefreshFromCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	service := &fakeService{refreshResult: &session.RefreshResult{
+		AccessToken:      "new-access",
+		RefreshToken:     "new-refresh",
+		TokenType:        "Bearer",
+		AccessExpiresAt:  now.Add(time.Minute),
+		RefreshExpiresAt: now.Add(30 * 24 * time.Hour),
+	}}
+	cookies := &middleware.SessionCookie{Name: "sl_session", Path: "/v2", SameSite: http.SameSiteLaxMode}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}, Cookies: cookies}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "sl_session", Value: "cookie-refresh", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	if service.refreshInput.RefreshToken != "cookie-refresh" {
+		t.Fatalf("refresh used token %q, want cookie value", service.refreshInput.RefreshToken)
+	}
+	setCookie := recorder.Header().Get("Set-Cookie")
+	if !strings.Contains(setCookie, "sl_session=new-refresh") {
+		t.Fatalf("Set-Cookie = %q, want rotated token in session cookie", setCookie)
+	}
+	if !strings.Contains(setCookie, "HttpOnly") || !strings.Contains(setCookie, "Path=/v2") || !strings.Contains(setCookie, "SameSite=Lax") {
+		t.Fatalf("Set-Cookie = %q, want HttpOnly Path=/v2 SameSite=Lax", setCookie)
+	}
+}
+
+func TestRefresh401ClearsStaleCookieWhenCredentialFromCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{refreshErr: session.ErrInvalidToken}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "sl_session", Value: "dead-cookie-token", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	if setCookie := recorder.Header().Get("Set-Cookie"); !strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want cleared stale session cookie", setCookie)
+	}
+}
+
+func TestRefresh401KeepsCookieWhenBodyTokenFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{refreshErr: session.ErrInvalidToken}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{"refresh_token":"dead-body-token"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "sl_session", Value: "healthy-newer-cookie", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	// The failed credential came from the body, not the cookie — a stale body
+	// token must not delete a healthy newer cookie, and a cross-site POST that
+	// carries no cookie must not be able to clear the victim's session.
+	if setCookie := recorder.Header().Get("Set-Cookie"); strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want no cookie clear when the body token failed", setCookie)
+	}
+}
+
+func TestRefreshAccountDeletedCookieBecomes401(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{refreshErr: session.ErrUserDeleted}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+
+	// Cookie-sourced: 401, not the 403 a live-account state error gets — the
+	// front end clears its session and bounces to login only on a 401 refresh,
+	// so a dead account must not leave the tab in a dead-session shell.
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "sl_session", Value: "dead-account-cookie", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("cookie-sourced deleted-account refresh = %d %#v, want 401", recorder.Code, decodeBody(t, recorder))
+	}
+	if setCookie := recorder.Header().Get("Set-Cookie"); !strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want cleared session cookie", setCookie)
+	}
+
+	// Body-sourced: stays 403, and the healthy cookie is not cleared.
+	recorder2 := httptest.NewRecorder()
+	request2 := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{"refresh_token":"dead-body-token"}`))
+	request2.Header.Set("Content-Type", "application/json")
+	request2.AddCookie(&http.Cookie{Name: "sl_session", Value: "healthy-cookie", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder2, request2)
+	if recorder2.Code != http.StatusForbidden {
+		t.Fatalf("body-sourced deleted-account refresh = %d %#v, want 403", recorder2.Code, decodeBody(t, recorder2))
+	}
+	if setCookie := recorder2.Header().Get("Set-Cookie"); strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want no cookie clear when the body token failed", setCookie)
+	}
+}
+
+func TestRefreshConcurrentDoesNotClearCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{refreshErr: session.ErrConcurrentRefresh}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "sl_session", Value: "winner-token", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	// A benign concurrent refresh must keep the cookie — it now holds the
+	// winning tab's rotated token.
+	if setCookie := recorder.Header().Get("Set-Cookie"); strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want no cookie clear on a concurrent refresh", setCookie)
+	}
+}
+
+func TestRefreshTransientFailureKeepsCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// A 500 (or any transient failure) must not clear the cookie — the session
+	// may be perfectly healthy, only the call failed.
+	service := &fakeService{refreshErr: session.ErrInternal}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "sl_session", Value: "healthy-token", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	if setCookie := recorder.Header().Get("Set-Cookie"); strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want no cookie clear on a transient failure", setCookie)
+	}
+}
+
+func TestRefreshPrefersBodyTokenOverCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	service := &fakeService{refreshResult: &session.RefreshResult{
+		AccessToken:      "new-access",
+		RefreshToken:     "new-refresh",
+		TokenType:        "Bearer",
+		AccessExpiresAt:  now.Add(time.Minute),
+		RefreshExpiresAt: now.Add(time.Hour),
+	}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{"refresh_token":"body-token"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: "sl_session", Value: "cookie-token", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	if service.refreshInput.RefreshToken != "body-token" {
+		t.Fatalf("refresh used token %q, want the body token to win over the cookie", service.refreshInput.RefreshToken)
+	}
+}
+
+func TestRegisterSetsSessionCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	service := &fakeService{registerResult: &session.RegisterResult{
+		AccessToken:      "access",
+		RefreshToken:     "refresh",
+		TokenType:        "Bearer",
+		AccessExpiresAt:  now.Add(time.Minute),
+		RefreshExpiresAt: now.Add(30 * 24 * time.Hour),
+		Profile:          session.UserProfileDTO{ID: 7},
+	}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/register", strings.NewReader(`{"register_ticket":"t","password":"Password123","name":"张三","phone_number":"13800138000","qq_number":"123456","college":"其他","major":"软件工程","student_id":"B24040001"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	setCookie := recorder.Header().Get("Set-Cookie")
+	if !strings.Contains(setCookie, "sl_session=refresh") {
+		t.Fatalf("Set-Cookie = %q, want register refresh token in session cookie", setCookie)
+	}
+}
+
+func TestResetPasswordClearsSessionCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{resetPasswordResult: &session.ResetPasswordResult{}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/reset-password", strings.NewReader(`{"login_email":"a@njupt.edu.cn","code":"123456","new_password":"NewPassword123"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	if setCookie := recorder.Header().Get("Set-Cookie"); !strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want cleared session cookie", setCookie)
+	}
+}
+
+func TestLogoutEmptyBodySucceedsAndClearsCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	expires := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
+	service := &fakeService{logoutResult: &session.LogoutResult{BlacklistedJTI: "jti", FamilyID: "family"}}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: expires})))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	// The service revokes the access token's own family; an empty body with no
+	// cookie must still log out (no refresh token is required).
+	if service.logoutInput.PrincipalJTI != "jti" || service.logoutInput.PrincipalUserID != 42 {
+		t.Fatalf("logout input = %+v, want the authenticated principal", service.logoutInput)
+	}
+	if setCookie := recorder.Header().Get("Set-Cookie"); !strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want cleared session cookie", setCookie)
+	}
+}
+
+func TestLogoutIdempotentWhenSessionAlreadyDead(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	expires := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
+
+	// A dead access token (revoked/expired under the service's clock) makes the
+	// service report 401; logout stays idempotent — clear the (dead) cookie and
+	// report success, so a user whose session died mid-flight is never stuck
+	// unable to log out of this tab.
+	service := &fakeService{logoutErr: session.ErrInvalidToken}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: expires})))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("response = %d %#v, want idempotent 200", recorder.Code, decodeBody(t, recorder))
+	}
+	if setCookie := recorder.Header().Get("Set-Cookie"); !strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want cleared session cookie", setCookie)
+	}
+
+	// A transient failure (500) is NOT a dead session — logout must surface it
+	// honestly and keep the cookie, which is still valid.
+	service2 := &fakeService{logoutErr: session.ErrInternal}
+	router2 := gin.New()
+	RegisterRoutes(router2, Handler{Service: service2, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: expires})))
+	recorder2 := httptest.NewRecorder()
+	request2 := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", strings.NewReader(`{}`))
+	request2.Header.Set("Content-Type", "application/json")
+	router2.ServeHTTP(recorder2, request2)
+	if recorder2.Code != http.StatusInternalServerError {
+		t.Fatalf("response = %d %#v, want 500", recorder2.Code, decodeBody(t, recorder2))
+	}
+	if setCookie := recorder2.Header().Get("Set-Cookie"); strings.Contains(setCookie, "Max-Age=0") {
+		t.Fatalf("Set-Cookie = %q, want no clear on a transient failure", setCookie)
+	}
+}
+
+// Logout must run behind RequireLogoutAuth, not RequireAuth: a gate that
+// rejects every request would otherwise 401 a logout the (expired-token
+// tolerant) logout gate is meant to admit. Mount a denying RequireAuth beside a
+// working RequireLogoutAuth — a logout must reach the handler, while a
+// RequireAuth-gated /user route must still be blocked.
+func TestLogoutRunsBehindRequireLogoutAuthNotRequireAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{logoutResult: &session.LogoutResult{BlacklistedJTI: "jti", FamilyID: "family"}}
+	deny := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40101, "message": "denied"})
+	}
+	gates := Gates{
+		RequireAuth:       deny,
+		RequireReadScope:  func(c *gin.Context) { c.Next() },
+		RequireWriteScope: func(c *gin.Context) { c.Next() },
+		RequireLogoutAuth: allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)}),
+	}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, gates)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/logout", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("logout behind a denying RequireAuth = %d %#v, want 200 (RequireLogoutAuth ran)", recorder.Code, decodeBody(t, recorder))
+	}
+
+	// The same denying RequireAuth must still block a protected /user route.
+	recorder2 := httptest.NewRecorder()
+	request2 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/user/profile", nil)
+	router.ServeHTTP(recorder2, request2)
+	if recorder2.Code != http.StatusUnauthorized {
+		t.Fatalf("protected route behind denying RequireAuth = %d, want 401", recorder2.Code)
+	}
+}
+
+func TestRefreshRequiresCredential(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Cookies: &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/refresh", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	body := decodeBody(t, recorder)
+	if recorder.Code != http.StatusUnauthorized || body.Code != errcode.CodeUnauthenticated {
+		t.Fatalf("response = %d %#v", recorder.Code, body)
+	}
+}
+
+func TestLoginSetsSessionCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	service := &fakeService{loginResult: &session.LoginResult{
+		AccessToken:      "access",
+		RefreshToken:     "refresh",
+		TokenType:        "Bearer",
+		AccessExpiresAt:  now.Add(time.Minute),
+		RefreshExpiresAt: now.Add(30 * 24 * time.Hour),
+		Profile:          session.UserProfileDTO{ID: 1},
+	}}
+	cookies := &middleware.SessionCookie{Name: "sl_session", Path: "/v2", Secure: true, SameSite: http.SameSiteLaxMode}
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service, Clock: fixedClock{value: now}, Cookies: cookies}, scopedGates(allowAuth()))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(`{"login_email":"a@njupt.edu.cn","password":"Password123"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("response = %d %#v", recorder.Code, decodeBody(t, recorder))
+	}
+	setCookie := recorder.Header().Get("Set-Cookie")
+	if !strings.Contains(setCookie, "sl_session=refresh") || !strings.Contains(setCookie, "Secure") {
+		t.Fatalf("Set-Cookie = %q, want login refresh token with Secure", setCookie)
+	}
+}
+
+func TestLogoutAndChangePasswordClearSessionCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	expires := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
+	service := &fakeService{
+		logoutResult:         &session.LogoutResult{BlacklistedJTI: "jti", FamilyID: "family"},
+		changePasswordResult: &session.ChangePasswordResult{},
+	}
+	cookies := &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}
+	for _, test := range []struct{ path, body string }{
+		{"/auth/logout", `{"refresh_token":"rt_x"}`},
+		{"/auth/change-password", `{"old_password":"old","new_password":"NewPassword123"}`},
+	} {
+		router := gin.New()
+		RegisterRoutes(router, Handler{Service: service, Cookies: cookies}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: expires})))
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, test.path, strings.NewReader(test.body))
+		request.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s response = %d %#v", test.path, recorder.Code, decodeBody(t, recorder))
+		}
+		setCookie := recorder.Header().Get("Set-Cookie")
+		if !strings.Contains(setCookie, "Max-Age=0") {
+			t.Fatalf("%s Set-Cookie = %q, want cleared session cookie", test.path, setCookie)
+		}
+	}
+}
+
 func TestProtectedLogoutUsesPrincipalOnlyFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	expires := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
@@ -268,7 +652,7 @@ func TestProtectedLogoutUsesPrincipalOnlyFields(t *testing.T) {
 	if _, exists := data["family_id"]; exists {
 		t.Fatalf("logout response leaked family: %#v", data)
 	}
-	if service.logoutInput.PrincipalJTI != "jti" || service.logoutInput.PrincipalUserID != 42 || service.logoutInput.RefreshToken != "rt_x" {
+	if service.logoutInput.PrincipalJTI != "jti" || service.logoutInput.PrincipalUserID != 42 {
 		t.Fatalf("logout input = %+v", service.logoutInput)
 	}
 }
@@ -338,7 +722,11 @@ func TestInvalidJSONRequestsReturnBadRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	RegisterRoutes(router, Handler{Service: &fakeService{}}, scopedGates(allowAuth()))
-	for _, route := range []string{"/user/login", "/auth/refresh", "/auth/logout"} {
+	// /auth/refresh and /auth/logout are intentionally absent: an empty body is
+	// valid for both (refresh reads the cookie as its credential; logout revokes
+	// the access token's own family, so no refresh token is required). They are
+	// covered by their own cookie/idempotency tests.
+	for _, route := range []string{"/user/login"} {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, route, strings.NewReader(`{}`))
 		request.Header.Set("Content-Type", "application/json")
@@ -830,7 +1218,10 @@ func allowAuthWith(principal middleware.Principal) gin.HandlerFunc {
 // middleware.TestRequireUserAuthAndDelegatedScope.
 func scopedGates(auth gin.HandlerFunc) Gates {
 	passthrough := func(c *gin.Context) { c.Next() }
-	return Gates{RequireAuth: auth, RequireReadScope: passthrough, RequireWriteScope: passthrough}
+	// Logout runs behind RequireLogoutAuth, but in these handler-behavior tests
+	// the same authenticated principal is fine — the logout-specific gate (the
+	// expired-token tolerance) is covered by middleware.TestAuthenticatorUserLogout.
+	return Gates{RequireAuth: auth, RequireReadScope: passthrough, RequireWriteScope: passthrough, RequireLogoutAuth: auth}
 }
 
 type responseBody struct {

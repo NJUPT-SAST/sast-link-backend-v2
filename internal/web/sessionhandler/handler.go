@@ -41,6 +41,10 @@ type Service interface {
 type Handler struct {
 	Service Service
 	Clock   auth.Clock
+	// Cookies writes/reads the httpOnly session cookie (refresh token) that a
+	// fresh tab uses to bootstrap a session. Nil in tests that don't exercise
+	// the cookie flow; handlers skip cookie handling when it is.
+	Cookies *middleware.SessionCookie
 }
 
 type loginRequest struct {
@@ -99,11 +103,16 @@ type bindEmailVerifyRequest struct {
 }
 
 type refreshRequest struct {
-	RefreshToken string `json:"refresh_token" binding:"required"`
+	// Optional: a fresh tab sends an empty body and the httpOnly session cookie
+	// is the refresh credential instead.
+	RefreshToken string `json:"refresh_token"`
 }
 
 type logoutRequest struct {
-	RefreshToken string `json:"refresh_token" binding:"required"`
+	// Accepted for contract compatibility (the frontend sends an empty object
+	// now); the service revokes the authenticated access token's own family, so
+	// the refresh token is no longer consulted.
+	RefreshToken string `json:"refresh_token"`
 }
 
 type tokenResponse struct {
@@ -217,6 +226,12 @@ type Gates struct {
 	// unchanged.
 	RequireReadScope  gin.HandlerFunc
 	RequireWriteScope gin.HandlerFunc
+	// RequireLogoutAuth authenticates /auth/logout. It is the /user scoped
+	// gate with one deliberate difference: an expired access token is still
+	// admitted, because logout is family-wide revocation and a stale tab whose
+	// token ran out (1h TTL) must be able to end its session without
+	// re-authenticating.
+	RequireLogoutAuth gin.HandlerFunc
 }
 
 // ReadScopes and WriteScopes are the scoped access each class of
@@ -235,7 +250,7 @@ var (
 func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	// Fail at boot rather than serve an ungated /user route. gin would happily
 	// mount a nil handler and panic on the first request instead.
-	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil {
+	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil || g.RequireLogoutAuth == nil {
 		panic("sessionhandler: every gate in Gates must be set")
 	}
 
@@ -259,6 +274,13 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	// internal console token is exempt from every scope gate (its ceiling is
 	// being an authenticated session), so the console keeps its current access to
 	// all of these endpoints.
+	// Logout sits outside the RequireUserAuth group: it runs behind
+	// RequireLogoutAuth, the scoped gate that admits an expired access token so
+	// a stale tab can end its session. The scope gate is kept — a scoped
+	// third-party token may still end its own session — and the internal
+	// console token is exempt from it as everywhere on this surface.
+	r.POST("/auth/logout", g.RequireLogoutAuth, g.RequireWriteScope, h.Logout)
+
 	protected := r.Group("")
 	protected.Use(g.RequireAuth)
 	protected.GET("/user/profile", g.RequireReadScope, h.Profile)
@@ -270,7 +292,6 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	protected.DELETE("/user/identities/:id", g.RequireWriteScope, h.UnbindIdentity)
 	protected.GET("/user/devices", g.RequireReadScope, h.ListDevices)
 	protected.DELETE("/user/devices/:id", g.RequireWriteScope, h.LogoutDevice)
-	protected.POST("/auth/logout", g.RequireWriteScope, h.Logout)
 	protected.POST("/auth/change-password", g.RequireWriteScope, h.ChangePassword)
 }
 
@@ -290,6 +311,7 @@ func (h Handler) Login(c *gin.Context) {
 		response.Error(c, mapServiceError(err))
 		return
 	}
+	h.setSessionCookie(c, result.RefreshToken, result.RefreshExpiresAt)
 	response.Ok(c, loginResponse{
 		tokenResponse: tokenResponse{
 			AccessToken:  result.AccessToken,
@@ -307,15 +329,57 @@ func (h Handler) Refresh(c *gin.Context) {
 		response.Error(c, badRequest())
 		return
 	}
+	refreshToken := req.RefreshToken
+	fromCookie := false
+	if refreshToken == "" {
+		// A fresh tab holds no sessionStorage token, but the httpOnly session
+		// cookie — set at login/refresh — is the refresh credential.
+		refreshToken = h.readSessionCookie(c)
+		fromCookie = refreshToken != ""
+	}
+	if refreshToken == "" {
+		response.Error(c, unauthorized())
+		return
+	}
 	result, err := h.Service.Refresh(c.Request.Context(), session.RefreshInput{
-		RefreshToken: req.RefreshToken,
+		RefreshToken: refreshToken,
 		ClientIP:     c.ClientIP(),
 		UserAgent:    c.Request.UserAgent(),
 	})
 	if err != nil {
-		response.Error(c, mapServiceError(err))
+		mapped := mapServiceError(err)
+		// Clear a stale cookie only when the dead token actually came from it,
+		// and only for a definitively dead family — whitelisted codes. A benign
+		// concurrent refresh (another tab rotated the same cookie within the grace
+		// window) must keep the cookie, it now holds the winner's token; a body
+		// token that failed must not delete a healthy newer cookie (this also
+		// makes a cross-site POST, which carries no cookie, a no-op instead of a
+		// cookie-clearing CSRF); transient failures (429/500) never clear. The
+		// whitelist is forward-safe: a future 401 code that does not mean "the
+		// family is gone" defaults to keeping the cookie rather than wiping a
+		// possibly-healthy session.
+		if be, ok := mapped.(*response.BusinessError); ok && fromCookie {
+			switch be.Code {
+			case errcode.CodeAccessTokenInvalid, errcode.CodeAccountDeleted:
+				h.clearSessionCookie(c)
+			}
+			// A cookie-sourced refresh hitting a dead account answers 401, not the
+			// 403 a live-account state error gets: the front end clears its session
+			// and bounces to login only when a refresh ends in 401, and an account
+			// that no longer exists must not leave the tab stranded in a dead-session
+			// shell. A body token keeps the 403 — that caller authenticated in-band
+			// and deserves the accurate account state.
+			if be.Code == errcode.CodeAccountDeleted {
+				be.HTTPStatus = http.StatusUnauthorized
+			}
+		}
+		response.Error(c, mapped)
 		return
 	}
+	// Refresh always rotates the refresh token, so the cookie must follow the
+	// new value — otherwise the next bootstrap reads a dead token and replay
+	// detection cuts the whole family.
+	h.setSessionCookie(c, result.RefreshToken, result.RefreshExpiresAt)
 	response.Ok(c, tokenResponse{
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
@@ -335,17 +399,35 @@ func (h Handler) Logout(c *gin.Context) {
 		response.Error(c, badRequest())
 		return
 	}
+	// The service revokes the authenticated session's own family (from the
+	// access token), so a refresh token is not required. The body may still
+	// carry one (the frontend sends an empty object now); it is ignored.
 	if _, err := h.Service.Logout(c.Request.Context(), session.LogoutInput{
 		PrincipalJTI:    principal.JTI,
 		PrincipalUserID: principal.UserID,
-		RefreshToken:    req.RefreshToken,
 		ActorClientID:   principal.ClientID,
 		ClientIP:        c.ClientIP(),
 		UserAgent:       c.Request.UserAgent(),
 	}); err != nil {
-		response.Error(c, mapServiceError(err))
+		mapped := mapServiceError(err)
+		// A dead access token (revoked/expired under the service's clock, within
+		// the TOCTOU window between the middleware's DB check and here) means the
+		// session is already gone. Logout stays idempotent — clear the dead
+		// cookie and report success, so a session that died mid-request never
+		// leaves the user stuck. The whitelist is by code, not HTTP status, so a
+		// future 401 semantics that does not mean "the session is dead" defaults
+		// to surfacing the error with the cookie intact.
+		if be, ok := mapped.(*response.BusinessError); ok && be.Code == errcode.CodeAccessTokenInvalid {
+			h.clearSessionCookie(c)
+			response.Ok(c, logoutResponse{Message: "已登出"})
+			return
+		}
+		response.Error(c, mapped)
 		return
 	}
+	// The session cookie is part of the same session family — drop it so the
+	// browser cannot bootstrap a dead session from a fresh tab.
+	h.clearSessionCookie(c)
 	response.Ok(c, logoutResponse{Message: "已登出"})
 }
 
@@ -424,6 +506,7 @@ func (h Handler) Register(c *gin.Context) {
 		response.Error(c, mapServiceError(err))
 		return
 	}
+	h.setSessionCookie(c, result.RefreshToken, result.RefreshExpiresAt)
 	response.Created(c, registerResponse{
 		tokenResponse: tokenResponse{
 			AccessToken:  result.AccessToken,
@@ -469,6 +552,9 @@ func (h Handler) ResetPassword(c *gin.Context) {
 		response.Error(c, mapServiceError(err))
 		return
 	}
+	// Reset-password revokes every session the user holds (like change-password);
+	// clear the browser's session cookie so it cannot bootstrap a dead session.
+	h.clearSessionCookie(c)
 	response.Ok(c, messageResponse{Message: "密码重置成功，请重新登录"})
 }
 
@@ -494,6 +580,9 @@ func (h Handler) ChangePassword(c *gin.Context) {
 		response.Error(c, mapServiceError(err))
 		return
 	}
+	// Change-password revokes every session the user holds; clear the browser's
+	// session cookie too so it cannot bootstrap one of those dead sessions.
+	h.clearSessionCookie(c)
 	response.Ok(c, messageResponse{Message: "密码修改成功"})
 }
 
@@ -569,6 +658,28 @@ func badRequest() error {
 	return &response.BusinessError{HTTPStatus: http.StatusBadRequest, Code: errcode.CodeBadRequest, Message: "请求参数错误"}
 }
 
+func unauthorized() error {
+	return &response.BusinessError{HTTPStatus: http.StatusUnauthorized, Code: errcode.CodeUnauthenticated, Message: "未登录"}
+}
+
 func internalError() error {
 	return &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"}
+}
+
+// setSessionCookie writes the httpOnly session cookie for a freshly issued
+// refresh token, scoped to its remaining lifetime (computed against the same
+// injected clock the response's expires_in uses). A zero or past expiry is a
+// no-op inside middleware.SessionCookie.Set — never a silent clear.
+func (h Handler) setSessionCookie(c *gin.Context, refreshToken string, expiresAt time.Time) {
+	h.Cookies.Set(c, refreshToken, expiresAt.Sub(h.now()))
+}
+
+// clearSessionCookie deletes the session cookie (logout, password change).
+func (h Handler) clearSessionCookie(c *gin.Context) {
+	h.Cookies.Clear(c)
+}
+
+// readSessionCookie returns the session cookie value, or "" when unset.
+func (h Handler) readSessionCookie(c *gin.Context) string {
+	return h.Cookies.Read(c)
 }
