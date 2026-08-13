@@ -1,6 +1,9 @@
 package adminhandler
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
@@ -122,6 +125,96 @@ func (h Handler) UpdateUser(c *gin.Context) {
 		message = "用户信息更新成功，已撤销该用户的全部 Token"
 	}
 	response.Ok(c, messageResponse{Message: message})
+}
+
+// GetUsersByIDs returns the full records of the requested user ids, in request
+// order, with duplicates collapsed.
+//
+// The ids arrive comma-separated in the query string: a batch of up to 100 ids
+// stays well inside URL limits, and a GET keeps the response cacheable and the
+// permission surface identical to GET /admin/users/:id.
+func (h Handler) GetUsersByIDs(c *gin.Context) {
+	ids, ok := parseIDList(c.Query("ids"))
+	if !ok {
+		response.Error(c, badRequest())
+		return
+	}
+	users, err := h.Users.GetUsersByIDs(c.Request.Context(), adminuser.GetUsersByIDsInput{IDs: ids})
+	if err != nil {
+		response.Error(c, mapUserServiceError(err))
+		return
+	}
+	items := make([]userDetailDTO, 0, len(users))
+	for _, user := range users {
+		items = append(items, mapUserDetail(user))
+	}
+	response.Ok(c, batchUsersResponse{Users: items})
+}
+
+// parseIDList splits a comma-separated id list. A blank list, a blank segment
+// or a non-numeric segment is rejected as a whole: silently dropping "abc"
+// from "1,abc,2" would return a page the caller cannot line up with its input.
+func parseIDList(raw string) ([]int64, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, false
+	}
+	segments := strings.Split(raw, ",")
+	ids := make([]int64, 0, len(segments))
+	for _, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			return nil, false
+		}
+		id, err := strconv.ParseInt(segment, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, false
+		}
+		ids = append(ids, id)
+	}
+	return ids, true
+}
+
+// batchRoleUpdateRequest is the body of the batch role-change endpoint.
+type batchRoleUpdateRequest struct {
+	IDs  []int64 `json:"ids"`
+	Role string  `json:"role"`
+}
+
+// UpdateUsersRole applies one role change to every listed user and reports the
+// per-item outcome, so the caller can retry or alert on the failures.
+func (h Handler) UpdateUsersRole(c *gin.Context) {
+	principal, ok := middleware.PrincipalFrom(c)
+	if !ok {
+		response.Error(c, internalError())
+		return
+	}
+	var req batchRoleUpdateRequest
+	if err := decodeStrictJSON(c, &req); err != nil {
+		response.Error(c, badRequest())
+		return
+	}
+	result, err := h.Users.UpdateUserRoles(c.Request.Context(), adminuser.UpdateUserRolesInput{
+		IDs:           req.IDs,
+		Role:          req.Role,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
+	})
+	if err != nil {
+		response.Error(c, mapUserServiceError(err))
+		return
+	}
+	items := make([]roleUpdateResultDTO, 0, len(result.Results))
+	for _, item := range result.Results {
+		items = append(items, roleUpdateResultDTO{
+			ID:      item.ID,
+			Success: item.Success,
+			Role:    item.Role,
+			Reason:  item.Reason,
+		})
+	}
+	response.Ok(c, batchRoleUpdateResponse{Results: items})
 }
 
 // DeleteUser closes an account and cuts every session it holds.

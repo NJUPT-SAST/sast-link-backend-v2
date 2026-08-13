@@ -149,6 +149,29 @@ func (r *UserRepository) FindByID(ctx context.Context, userID int64) (*model.Use
 	return nil, fmt.Errorf("find user by ID: %w", err)
 }
 
+// FindByIDs finds the users matching the given ids with their profile and
+// identities, regardless of state, in unspecified order.
+//
+// Unlike FindByID it is not an error when some ids match nothing: the caller is
+// a batch lookup that reports per-id results, and a missing row is a fact about
+// the input rather than a failure of the query. Ordering is the caller's to
+// restore from its request order — SQL does not promise IN-list order.
+func (r *UserRepository) FindByIDs(ctx context.Context, ids []int64) ([]model.User, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("%w: id list must not be empty", ErrInvalidArgument)
+	}
+	users := make([]model.User, 0, len(ids))
+	err := r.database.WithContext(ctx).
+		Preload("Profile").
+		Preload("Identities").
+		Where("id IN ?", ids).
+		Find(&users).Error
+	if err != nil {
+		return nil, fmt.Errorf("find users by IDs: %w", err)
+	}
+	return users, nil
+}
+
 // FindProfileByID loads a user for a profile response in two queries instead of
 // three: the profile row joins the user row (one-to-one), and identities are
 // preloaded with a column projection that excludes the provider access/refresh

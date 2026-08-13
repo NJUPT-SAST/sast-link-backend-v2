@@ -24,6 +24,9 @@ type UserRepository interface {
 	// FindByID resolves a user with its profile and identities, regardless of state:
 	// the console must be able to inspect a closed account in order to restore it.
 	FindByID(ctx context.Context, userID int64) (*model.User, error)
+	// FindByIDs resolves many users with their profile and identities, regardless
+	// of state, in unspecified order; ids that match nothing are silently absent.
+	FindByIDs(ctx context.Context, ids []int64) ([]model.User, error)
 	// FindAuthUserByID returns the scalar columns without the Profile/Identities
 	// preloads, for edit paths that only act on the account row itself.
 	FindAuthUserByID(ctx context.Context, userID int64) (*model.User, error)
@@ -112,6 +115,10 @@ type UserListItem struct {
 // UpdateUserInput is a partial administrative edit. A nil field is left
 // unchanged. There is no PasswordHash or TokenVersion field: a credential rewrite
 // is not an edit, and the version counter is the repository's to bump.
+//
+// Batch marks an edit issued by the batch role-update endpoint; it changes
+// nothing about the write, only the audit detail, which records "batch": true so
+// the console can tell a mass promotion from an individual edit.
 type UpdateUserInput struct {
 	UserID      int64
 	Name        *string
@@ -124,6 +131,7 @@ type UpdateUserInput struct {
 	Role        *string
 	State       *string
 	EmailType   *string
+	Batch       bool
 	// AdminUserID is the authenticated administrator, for the audit trail and for
 	// the self-demotion guard.
 	AdminUserID int64
@@ -153,6 +161,47 @@ type TargetUserInput struct {
 	ActorClientID string
 	ClientIP      string
 	UserAgent     string
+}
+
+// GetUsersByIDsInput is a batch user-detail read. IDs must be non-empty and
+// within the documented batch cap; duplicates are collapsed in the service.
+type GetUsersByIDsInput struct {
+	IDs []int64
+}
+
+// UpdateUserRolesInput is a batch role change. IDs must be non-empty and within
+// the documented batch cap; Role must be one of the four user roles. Each id is
+// updated independently and reported per item, so one failure does not abort
+// the rest.
+type UpdateUserRolesInput struct {
+	IDs  []int64
+	Role string
+	// AdminUserID is the authenticated administrator, for the audit trail and for
+	// the self-demotion guard (an administrator cannot change their own role
+	// through the batch either).
+	AdminUserID int64
+	// ActorClientID is the azp of the token that authorized this call. Empty means a
+	// console session, which the audit records as ConsoleClientID.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
+}
+
+// UpdateUserRolesResult is the per-item outcome of a batch role change. The HTTP
+// response is 200 whenever the request itself was well formed; an item-level
+// failure is data, not transport, so the caller can retry or alert on it.
+type UpdateUserRolesResult struct {
+	Results []RoleUpdateResult
+}
+
+// RoleUpdateResult is one id's outcome. Success carries the requested role so
+// the caller can confirm what landed; failure carries a literal reason, never
+// an echo of submitted values.
+type RoleUpdateResult struct {
+	ID      int64
+	Success bool
+	Role    string
+	Reason  string
 }
 
 // ListAuditLogsInput is a filtered, paged audit query.

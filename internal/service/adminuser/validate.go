@@ -16,6 +16,45 @@ const (
 	defaultAuditPageSize = 50
 )
 
+// Batch caps. The query cap is the contract's documented maximum (100); the
+// update cap is higher because its documented use is a recruitment promotion of
+// hundreds of accounts, and each item is an independent single-row transaction.
+// Both are far below what one request could plausibly need, so a caller that
+// hits them is misusing the endpoint, not paging.
+const (
+	maxBatchQueryIDs  = 100
+	maxBatchUpdateIDs = 500
+)
+
+// normalizeBatchIDs validates a batch id list and collapses duplicates, keeping
+// first-occurrence order.
+//
+// The cap is checked against the submitted length before deduplication, so the
+// response cannot be steered by padding — sending 200 ids, 150 of them
+// duplicates, is still 200 ids. Messages are literals at the call site, so each
+// endpoint names its own bound.
+func normalizeBatchIDs(ids []int64, limit int, tooManyMessage string) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, newError(ErrInvalidInput, "ids 不能为空", nil)
+	}
+	if len(ids) > limit {
+		return nil, newError(ErrInvalidInput, tooManyMessage, nil)
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	normalized := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, newError(ErrInvalidInput, "用户 id 必须为正整数", nil)
+		}
+		if _, duplicated := seen[id]; duplicated {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	return normalized, nil
+}
+
 // userFieldOrder is the contract order used for the admin_user_update audit
 // detail, so the log reads the same way regardless of map iteration.
 var userFieldOrder = []string{

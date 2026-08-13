@@ -435,6 +435,8 @@ Payload: {
 | `/admin/users/:id` | PUT | admin | admin:write | 更新用户信息（含 role / state / email_type） |
 | `/admin/users/:id` | DELETE | admin | admin:write | 软删除（state → is_deleted），级联撤销所有 token |
 | `/admin/users/:id/restore` | PUT | admin | admin:write | 恢复已注销用户（state: is_deleted → njupter） |
+| `/admin/users/batch` | GET | admin / lecturer | admin:read | 批量查询：`ids` 逗号分隔（≤100），按请求顺序返回详情（字段同 `/admin/users/:id`），缺失 id 缺席，重复 id 只返回一次 |
+| `/admin/users` | PUT | admin | admin:write | 批量改角色：`ids`（≤500，去重）+ `role`（同单条枚举），逐条独立执行并复用单条全部守卫（自查角色 / 最后一名管理员 / 已注销），响应逐条 `results`（success / reason），审计逐条 `admin_user_update` 且 detail 带 `batch: true` |
 | `/admin/oauth-clients` | GET | admin | admin:read | 客户端列表 |
 | `/admin/oauth-clients` | POST | admin | admin:write | 注册新客户端（第三方返回 client_secret，第一方不返回） |
 | `/admin/oauth-clients/:id` | PUT | admin | admin:write | 更新客户端（名称/回调地址/授权模式/scope/启用状态；`client_id`/`client_secret`/`id`/`client_type` 不可改）。收窄 scope 或新授予能力 scope 会撤销该客户端存量 token，扩大 scope 不会（见 §4.12） |

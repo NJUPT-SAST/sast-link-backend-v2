@@ -597,3 +597,63 @@ func TestUserRepositoryStatsExcludesSoftDeletedAccounts(t *testing.T) {
 		t.Fatalf("NoDepartment = %d, want 1", stats.NoDepartment)
 	}
 }
+
+// FindByIDs resolves many users with their profile and identities in one round
+// trip, regardless of state, and silently skips ids that match nothing.
+func TestFindByIDsPreloadsProfileAndIdentities(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	department := model.DepartmentSoftware
+	first := adminSeed(t, database, "batch-001@njupt.edu.cn", "批量甲",
+		model.UserRoleMember, model.UserStateOnSAST, &department)
+	// A closed account must be returned too: the batch read mirrors
+	// FindByID, which exists to let the console inspect deleted accounts.
+	deleted := adminSeed(t, database, "batch-002@njupt.edu.cn", "批量乙",
+		model.UserRoleMember, model.UserStateDeleted, nil)
+	identity := &model.Identity{
+		UserID:     first.ID,
+		Provider:   model.LoginMethodGitHub,
+		ProviderID: "gh-batch-001",
+	}
+	if err := database.Create(identity).Error; err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+
+	// The missing id (999) is silently absent; the duplicate resolves once.
+	found, err := users.FindByIDs(context.Background(), []int64{deleted.ID, first.ID, 999, first.ID})
+	if err != nil {
+		t.Fatalf("FindByIDs: %v", err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("found = %d users, want 2", len(found))
+	}
+	byID := map[int64]model.User{}
+	for _, user := range found {
+		byID[user.ID] = user
+	}
+	firstFound, ok := byID[first.ID]
+	if !ok {
+		t.Fatalf("found ids = %v, want the seeded ids", []int64{})
+	}
+	if firstFound.Profile == nil || firstFound.Profile.Department == nil ||
+		*firstFound.Profile.Department != department {
+		t.Fatalf("profile department = %v, want preloaded software", firstFound.Profile)
+	}
+	if len(firstFound.Identities) != 1 || firstFound.Identities[0].ProviderID != "gh-batch-001" {
+		t.Fatalf("identities = %+v, want the github binding preloaded", firstFound.Identities)
+	}
+	if _, ok := byID[deleted.ID]; !ok {
+		t.Fatal("deleted account absent, want it returned regardless of state")
+	}
+}
+
+// The batch read refuses an empty list at the repository boundary: the service
+// already rejects it, this is the backstop for a direct caller.
+func TestFindByIDsRejectsEmptyList(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+
+	if _, err := users.FindByIDs(context.Background(), nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("FindByIDs(nil) error = %v, want ErrInvalidArgument", err)
+	}
+}

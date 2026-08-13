@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -19,22 +20,28 @@ import (
 )
 
 type fakeUsers struct {
-	listResult   *adminuser.ListUsersResult
-	listErr      error
-	listInput    adminuser.ListUsersInput
-	getResult    *adminuser.UserDetail
-	getErr       error
-	getID        int64
-	updateResult *adminuser.UpdateUserResult
-	updateErr    error
-	updateInput  adminuser.UpdateUserInput
-	updateCalls  int
-	deleteErr    error
-	deleteInput  adminuser.TargetUserInput
-	restoreErr   error
-	restoreInput adminuser.TargetUserInput
-	statsResult  repository.UserStats
-	statsErr     error
+	listResult     *adminuser.ListUsersResult
+	listErr        error
+	listInput      adminuser.ListUsersInput
+	getResult      *adminuser.UserDetail
+	getErr         error
+	getID          int64
+	getByIDsResult []adminuser.UserDetail
+	getByIDsErr    error
+	getByIDsInput  adminuser.GetUsersByIDsInput
+	updateResult   *adminuser.UpdateUserResult
+	updateErr      error
+	updateInput    adminuser.UpdateUserInput
+	updateCalls    int
+	rolesResult    *adminuser.UpdateUserRolesResult
+	rolesErr       error
+	rolesInput     adminuser.UpdateUserRolesInput
+	deleteErr      error
+	deleteInput    adminuser.TargetUserInput
+	restoreErr     error
+	restoreInput   adminuser.TargetUserInput
+	statsResult    repository.UserStats
+	statsErr       error
 }
 
 func (f *fakeUsers) ListUsers(
@@ -62,6 +69,20 @@ func (f *fakeUsers) GetUser(_ context.Context, userID int64) (*adminuser.UserDet
 	return f.getResult, nil
 }
 
+func (f *fakeUsers) GetUsersByIDs(
+	_ context.Context,
+	input adminuser.GetUsersByIDsInput,
+) ([]adminuser.UserDetail, error) {
+	f.getByIDsInput = input
+	if f.getByIDsErr != nil {
+		return nil, f.getByIDsErr
+	}
+	if f.getByIDsResult == nil {
+		return []adminuser.UserDetail{}, nil
+	}
+	return f.getByIDsResult, nil
+}
+
 func (f *fakeUsers) UpdateUser(
 	_ context.Context,
 	input adminuser.UpdateUserInput,
@@ -75,6 +96,20 @@ func (f *fakeUsers) UpdateUser(
 		return &adminuser.UpdateUserResult{}, nil
 	}
 	return f.updateResult, nil
+}
+
+func (f *fakeUsers) UpdateUserRoles(
+	_ context.Context,
+	input adminuser.UpdateUserRolesInput,
+) (*adminuser.UpdateUserRolesResult, error) {
+	f.rolesInput = input
+	if f.rolesErr != nil {
+		return nil, f.rolesErr
+	}
+	if f.rolesResult == nil {
+		return &adminuser.UpdateUserRolesResult{Results: []adminuser.RoleUpdateResult{}}, nil
+	}
+	return f.rolesResult, nil
 }
 
 func (f *fakeUsers) DeleteUser(_ context.Context, input adminuser.TargetUserInput) error {
@@ -231,11 +266,12 @@ func TestUserResponsesOmitPasswordFields(t *testing.T) {
 			}},
 			Total: 1, Page: 1, PageSize: 20,
 		},
-		getResult: &adminuser.UserDetail{ID: 5, Name: "李四", Role: "member"},
+		getResult:      &adminuser.UserDetail{ID: 5, Name: "李四", Role: "member"},
+		getByIDsResult: []adminuser.UserDetail{{ID: 5, Name: "李四", Role: "member"}},
 	}
 	router := newUserRouter(t, users, nil)
 
-	for _, path := range []string{"/admin/users", "/admin/users/5"} {
+	for _, path := range []string{"/admin/users", "/admin/users/5", "/admin/users/batch?ids=5"} {
 		recorder := doRequest(t, router, http.MethodGet, path, "", "")
 		body := recorder.Body.String()
 		for _, forbidden := range []string{"password", "PasswordHash", "token_version"} {
@@ -536,6 +572,190 @@ func TestUserWritesWithoutPrincipalAreInternalErrors(t *testing.T) {
 			t.Fatalf("%s %s: status = %d, want 500",
 				testCase.method, testCase.path, recorder.Code)
 		}
+	}
+}
+
+// The batch read passes the parsed id list through and serializes the users in
+// the order the service returned them, which is the request order.
+func TestGetUsersByIDsPassesListAndReturnsOrder(t *testing.T) {
+	users := &fakeUsers{getByIDsResult: []adminuser.UserDetail{
+		{ID: 3, Name: "丙", Role: "member"},
+		{ID: 1, Name: "甲", Role: "freshman"},
+	}}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodGet, "/admin/users/batch?ids=3,1,3,2", "", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := users.getByIDsInput.IDs; !reflect.DeepEqual(got, []int64{3, 1, 3, 2}) {
+		t.Fatalf("ids = %v, want [3 1 3 2] passed through verbatim", got)
+	}
+	var payload struct {
+		Users []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"users"`
+	}
+	decodeData(t, recorder, &payload)
+	if len(payload.Users) != 2 || payload.Users[0].ID != 3 || payload.Users[1].ID != 1 {
+		t.Fatalf("users = %+v, want [3 1] in service order", payload.Users)
+	}
+}
+
+// A blank list, a blank segment or a non-numeric segment is rejected as a whole:
+// silently dropping "abc" from "1,abc,2" would return a page the caller cannot
+// line up with its input.
+func TestGetUsersByIDsRejectsBadLists(t *testing.T) {
+	for _, ids := range []string{"", " ", "1,abc,2", "1,,2", "0", "-1", "1,0", "1,-2"} {
+		t.Run(ids, func(t *testing.T) {
+			users := &fakeUsers{}
+			router := newUserRouter(t, users, nil)
+
+			query := ""
+			if ids != "" {
+				query = "?ids=" + url.QueryEscape(ids)
+			}
+			recorder := doRequest(t, router, http.MethodGet, "/admin/users/batch"+query, "", "")
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for ids=%q", recorder.Code, ids)
+			}
+			if users.getByIDsInput.IDs != nil {
+				t.Fatalf("service called with %v, want the request refused before it", users.getByIDsInput.IDs)
+			}
+		})
+	}
+}
+
+// An empty batch must serialize as [] rather than null, like the list endpoint.
+func TestGetUsersByIDsSerializesEmptyAsArray(t *testing.T) {
+	users := &fakeUsers{}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodGet, "/admin/users/batch?ids=9", "", "")
+	var payload struct {
+		Users json.RawMessage `json:"users"`
+	}
+	decodeData(t, recorder, &payload)
+	if string(payload.Users) != "[]" {
+		t.Fatalf("users = %s, want []", payload.Users)
+	}
+}
+
+// The batch role change passes the body and principal through and serializes the
+// per-item results.
+func TestUpdateUsersRolePassesPrincipalAndBody(t *testing.T) {
+	users := &fakeUsers{rolesResult: &adminuser.UpdateUserRolesResult{Results: []adminuser.RoleUpdateResult{
+		{ID: 1, Success: true, Role: "member"},
+		{ID: 2, Success: false, Reason: "用户不存在"},
+	}}}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodPut, "/admin/users", "application/json",
+		`{"ids":[1,2],"role":"member"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	input := users.rolesInput
+	if !reflect.DeepEqual(input.IDs, []int64{1, 2}) || input.Role != "member" {
+		t.Fatalf("input = %+v, want ids [1 2] role member", input)
+	}
+	if input.AdminUserID != testHandlerAdminID {
+		t.Fatalf("admin id = %d, want %d", input.AdminUserID, testHandlerAdminID)
+	}
+	var payload struct {
+		Results []struct {
+			ID      int64  `json:"id"`
+			Success bool   `json:"success"`
+			Role    string `json:"role"`
+			Reason  string `json:"reason"`
+		} `json:"results"`
+	}
+	decodeData(t, recorder, &payload)
+	if len(payload.Results) != 2 || !payload.Results[0].Success || payload.Results[0].Role != "member" {
+		t.Fatalf("results = %+v, want success entry with role", payload.Results)
+	}
+	if payload.Results[1].Success || payload.Results[1].Reason != "用户不存在" {
+		t.Fatalf("failure result = %+v, want reason 用户不存在", payload.Results[1])
+	}
+	// omitempty keeps the two shapes distinct: no reason on success, no role on failure.
+	if strings.Contains(recorder.Body.String(), `"reason":""`) ||
+		strings.Contains(recorder.Body.String(), `"role":""`) {
+		t.Fatalf("response carries empty optional fields: %s", recorder.Body.String())
+	}
+}
+
+// The strict decoder protects the batch body the same way it protects the
+// single-user one: an unknown field or a trailing value is refused outright
+// rather than partially honored.
+func TestUpdateUsersRoleRejectsBadBodies(t *testing.T) {
+	for _, body := range []string{
+		`{"ids":[1,2],"role":"member","state":"on_sast"}`, // unknown field
+		`{"ids":[1,2],"role":"member"} trailing`,          // trailing value
+	} {
+		t.Run(body, func(t *testing.T) {
+			users := &fakeUsers{}
+			router := newUserRouter(t, users, nil)
+
+			recorder := doRequest(t, router, http.MethodPut, "/admin/users", "application/json", body)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for %s", recorder.Code, body)
+			}
+			if users.rolesInput.IDs != nil {
+				t.Fatalf("service called with %+v, want the request refused before it", users.rolesInput)
+			}
+		})
+	}
+}
+
+// Missing required fields reach the service untouched: the service is the layer
+// that owns the "ids 不能为空" / "role 取值非法" rules, exactly as it owns the
+// single-user endpoint's "没有需要更新的字段".
+func TestUpdateUsersRolePassesMissingFieldsThrough(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		body string
+	}{
+		{"role absent", `{"ids":[1,2]}`},
+		{"ids absent", `{"role":"member"}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			users := &fakeUsers{}
+			router := newUserRouter(t, users, nil)
+
+			recorder := doRequest(t, router, http.MethodPut, "/admin/users", "application/json", testCase.body)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 so the service rules on it", recorder.Code)
+			}
+			if testCase.name == "role absent" && users.rolesInput.Role != "" {
+				t.Fatalf("role = %q, want empty to reach the service", users.rolesInput.Role)
+			}
+			if testCase.name == "ids absent" && len(users.rolesInput.IDs) != 0 {
+				t.Fatalf("ids = %v, want empty to reach the service", users.rolesInput.IDs)
+			}
+		})
+	}
+}
+
+// A request-level validation failure (bad role, over-cap ids) surfaces as the
+// service's 400 with its literal message, like the single-user endpoint.
+func TestUpdateUsersRoleMapsServiceError(t *testing.T) {
+	users := &fakeUsers{rolesErr: &adminuser.Error{
+		Kind: adminuser.KindInvalidInput, Code: errcode.CodeBadRequest, Message: "role 取值非法",
+	}}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodPut, "/admin/users", "application/json",
+		`{"ids":[1],"role":"boss"}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", recorder.Code)
+	}
+	var body envelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if body.Message != "role 取值非法" {
+		t.Fatalf("message = %q, want the service's literal", body.Message)
 	}
 }
 

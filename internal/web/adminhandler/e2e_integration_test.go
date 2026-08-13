@@ -713,3 +713,113 @@ func TestAdminE2EDeletingClientCutsRedeemedTokens(t *testing.T) {
 		t.Fatalf("userinfo after delete status = %d, want 401: %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+// The batch read returns full records in request order with missing ids absent,
+// and the batch role change applies per-item outcomes through the real service —
+// a promotion, a missing id, and the audit trail behind both.
+func TestAdminE2EBatchReadAndRoleUpdate(t *testing.T) {
+	testutil.RequireProvider(t)
+	h := setupAdminE2E(t)
+
+	freshman := adminE2EUser("batch-e2e@njupt.edu.cn", "B24040303", model.UserRoleFreshman)
+	if err := repository.NewUser(h.database).
+		CreateWithProfile(context.Background(), freshman, &model.Profile{}); err != nil {
+		t.Fatalf("create freshman: %v", err)
+	}
+
+	// Batch read: request order preserved, missing id silently absent.
+	ids := strconv.FormatInt(freshman.ID, 10) + "," + strconv.FormatInt(h.admin.ID, 10) + ",999999"
+	read := h.do(t, http.MethodGet, "/admin/users/batch?ids="+ids, "", "")
+	if read.Code != http.StatusOK {
+		t.Fatalf("batch read status = %d, want 200: %s", read.Code, read.Body.String())
+	}
+	var readPayload struct {
+		Data struct {
+			Users []struct {
+				ID   int64  `json:"id"`
+				Role string `json:"role"`
+				Name string `json:"name"`
+			} `json:"users"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(read.Body.Bytes(), &readPayload); err != nil {
+		t.Fatalf("decode batch read: %v", err)
+	}
+	if len(readPayload.Data.Users) != 2 ||
+		readPayload.Data.Users[0].ID != freshman.ID || readPayload.Data.Users[1].ID != h.admin.ID {
+		t.Fatalf("users = %+v, want [freshman admin] in request order, missing id absent",
+			readPayload.Data.Users)
+	}
+	if readPayload.Data.Users[0].Role != string(model.UserRoleFreshman) ||
+		readPayload.Data.Users[1].Role != string(model.UserRoleAdmin) {
+		t.Fatalf("roles = %q/%q, want the records' own roles",
+			readPayload.Data.Users[0].Role, readPayload.Data.Users[1].Role)
+	}
+
+	// Batch role update over a real promotion plus a missing id: 200 overall, with
+	// the failure reported per item rather than aborting the batch.
+	updated := h.do(t, http.MethodPut, "/admin/users", "application/json",
+		`{"ids":[`+strconv.FormatInt(freshman.ID, 10)+`,999999],"role":"member"}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("batch update status = %d, want 200: %s", updated.Code, updated.Body.String())
+	}
+	var updatePayload struct {
+		Data struct {
+			Results []struct {
+				ID      int64  `json:"id"`
+				Success bool   `json:"success"`
+				Role    string `json:"role"`
+				Reason  string `json:"reason"`
+			} `json:"results"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(updated.Body.Bytes(), &updatePayload); err != nil {
+		t.Fatalf("decode batch update: %v", err)
+	}
+	if len(updatePayload.Data.Results) != 2 {
+		t.Fatalf("results = %d, want 2", len(updatePayload.Data.Results))
+	}
+	first, second := updatePayload.Data.Results[0], updatePayload.Data.Results[1]
+	if !first.Success || first.Role != "member" || first.Reason != "" {
+		t.Fatalf("first result = %+v, want success with role member", first)
+	}
+	if second.Success || second.Reason != "用户不存在" || second.Role != "" {
+		t.Fatalf("second result = %+v, want a not-found reason", second)
+	}
+
+	var reloaded model.User
+	if err := h.database.First(&reloaded, freshman.ID).Error; err != nil {
+		t.Fatalf("reload freshman: %v", err)
+	}
+	if reloaded.Role != model.UserRoleMember {
+		t.Fatalf("role = %q, want member after the batch promotion", reloaded.Role)
+	}
+	if reloaded.TokenVersion != freshman.TokenVersion+1 {
+		t.Fatalf("token_version = %d, want %d: a role change must revoke sessions",
+			reloaded.TokenVersion, freshman.TokenVersion+1)
+	}
+
+	// Both items land in the audit trail with the batch marker.
+	audited := h.do(t, http.MethodGet, "/admin/audit-logs?action=admin_user_update", "", "")
+	var auditPayload struct {
+		Data struct {
+			Logs []struct {
+				ResourceID *string         `json:"resource_id"`
+				Success    bool            `json:"success"`
+				Detail     json.RawMessage `json:"detail"`
+			} `json:"logs"`
+			Total int64 `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(audited.Body.Bytes(), &auditPayload); err != nil {
+		t.Fatalf("decode audit list: %v", err)
+	}
+	if auditPayload.Data.Total != 2 {
+		t.Fatalf("audit total = %d, want 2 (one per id, success and failure)", auditPayload.Data.Total)
+	}
+	for _, entry := range auditPayload.Data.Logs {
+		if !strings.Contains(string(entry.Detail), `"batch":true`) {
+			t.Fatalf("audit detail = %s, want the batch marker", entry.Detail)
+		}
+	}
+}
