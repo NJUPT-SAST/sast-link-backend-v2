@@ -45,7 +45,7 @@ func TestOAuthAuthorizationRepositoryCreateAndConsume(t *testing.T) {
 		t.Fatal("Create() left the authorization without a primary key")
 	}
 
-	consumed, err := authorizations.Consume(context.Background(), "code-consume", time.Now())
+	consumed, _, err := authorizations.Consume(context.Background(), "code-consume", time.Now())
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -76,11 +76,11 @@ func TestOAuthAuthorizationRepositoryConsumeReportsReplayWithFamily(t *testing.T
 	); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if _, err := authorizations.Consume(context.Background(), "code-replay", time.Now()); err != nil {
+	if _, _, err := authorizations.Consume(context.Background(), "code-replay", time.Now()); err != nil {
 		t.Fatalf("first Consume() error = %v", err)
 	}
 
-	replayed, err := authorizations.Consume(context.Background(), "code-replay", time.Now())
+	replayed, _, err := authorizations.Consume(context.Background(), "code-replay", time.Now())
 	if !errors.Is(err, repository.ErrAuthorizationReplayed) {
 		t.Fatalf("second Consume() error = %v, want ErrAuthorizationReplayed", err)
 	}
@@ -113,7 +113,7 @@ func TestOAuthAuthorizationRepositoryConsumeConcurrentSingleSuccess(t *testing.T
 		go func() {
 			defer waitGroup.Done()
 			<-start
-			_, err := authorizations.Consume(context.Background(), "code-concurrent", time.Now())
+			_, _, err := authorizations.Consume(context.Background(), "code-concurrent", time.Now())
 			results <- err
 		}()
 	}
@@ -153,7 +153,7 @@ func TestOAuthAuthorizationRepositoryConsumeReportsExpiryWithoutMarkingUsed(t *t
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	if _, err := authorizations.Consume(context.Background(), "code-expired", time.Now()); !errors.Is(err, repository.ErrAuthorizationExpired) {
+	if _, _, err := authorizations.Consume(context.Background(), "code-expired", time.Now()); !errors.Is(err, repository.ErrAuthorizationExpired) {
 		t.Fatalf("Consume() error = %v, want ErrAuthorizationExpired", err)
 	}
 	assertAuthorizationUsed(t, database, "code-expired", false)
@@ -310,7 +310,7 @@ func TestOAuthAuthorizationRepositoryConsumeUnknownCode(t *testing.T) {
 	database := setupDatabase(t)
 	authorizations := repository.NewOAuthAuthorization(database)
 
-	if _, err := authorizations.Consume(context.Background(), "code-missing", time.Now()); !errors.Is(err, repository.ErrNotFound) {
+	if _, _, err := authorizations.Consume(context.Background(), "code-missing", time.Now()); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("Consume() error = %v, want ErrNotFound", err)
 	}
 }
@@ -325,10 +325,10 @@ func TestOAuthAuthorizationRepositoryRejectsInvalidArguments(t *testing.T) {
 	if err := authorizations.Create(context.Background(), &model.OAuthAuthorization{}); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("Create(empty) error = %v, want ErrInvalidArgument", err)
 	}
-	if _, err := authorizations.Consume(context.Background(), "  ", time.Now()); !errors.Is(err, repository.ErrInvalidArgument) {
+	if _, _, err := authorizations.Consume(context.Background(), "  ", time.Now()); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("Consume(blank) error = %v, want ErrInvalidArgument", err)
 	}
-	if _, err := authorizations.Consume(context.Background(), "code", time.Time{}); !errors.Is(err, repository.ErrInvalidArgument) {
+	if _, _, err := authorizations.Consume(context.Background(), "code", time.Time{}); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("Consume(zero time) error = %v, want ErrInvalidArgument", err)
 	}
 }
@@ -357,4 +357,65 @@ func assertAuthorizationUsed(t *testing.T, database *gorm.DB, code string, want 
 	if stored.IsUsed != want {
 		t.Fatalf("authorization %q is_used = %v, want %v", code, stored.IsUsed, want)
 	}
+}
+
+// Consume must snapshot the owning user's token_version inside its transaction:
+// the redemption compares its later read and its locked pair write against it,
+// so a bulk revocation committing between consume and write refuses the pair.
+func TestOAuthAuthorizationConsumeReturnsUserTokenVersion(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "consume-version@njupt.edu.cn")
+	authorizations := repository.NewOAuthAuthorization(database)
+
+	before := user.TokenVersion
+	if err := database.Model(&model.User{}).Where("id = ?", user.ID).
+		Update("token_version", gorm.Expr("token_version + 1")).Error; err != nil {
+		t.Fatalf("bump user token version: %v", err)
+	}
+
+	if err := authorizations.Create(context.Background(), testAuthorization("code-consume-version", 1, user.ID, time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	_, version, err := authorizations.Consume(context.Background(), "code-consume-version", time.Now())
+	if err != nil {
+		t.Fatalf("Consume() error = %v", err)
+	}
+	if version != int64(before+1) {
+		t.Fatalf("Consume() version = %d, want the bumped version %d", version, before+1)
+	}
+}
+
+// The redemption TOCTOU end to end: a revocation committing between the code
+// consume and the pair write must refuse the pair, because the version snapshot
+// no longer matches the locked row.
+func TestOAuthAuthorizationRedemptionRefusesPairAfterBulkRevocation(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "redeem-after-revoke@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	authorizations := repository.NewOAuthAuthorization(database)
+	tokens := repository.NewToken(database)
+
+	if err := authorizations.Create(context.Background(), testAuthorization("code-redeem-after-revoke", client.ID, user.ID, time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	_, consumedVersion, err := authorizations.Consume(context.Background(), "code-redeem-after-revoke", time.Now())
+	if err != nil {
+		t.Fatalf("Consume() error = %v", err)
+	}
+
+	// The revocation (password change shape) commits between consume and write.
+	userRepository := repository.NewUser(database)
+	if _, err := userRepository.UpdatePasswordAndRevokeSessions(
+		context.Background(), user.ID, "new-argon2-hash", time.Now(),
+	); err != nil {
+		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", err)
+	}
+
+	access := accessToken("redeem-after-revoke-access", client.ID, user.ID, ptr("redeem-after-revoke-family"))
+	refresh := refreshToken("redeem-after-revoke-refresh", "redeem-after-revoke-family", 0, client.ID, user.ID)
+	err = tokens.CreatePairWithUserLock(context.Background(), user.ID, consumedVersion, access, refresh, nil)
+	if !errors.Is(err, repository.ErrUserStateChanged) {
+		t.Fatalf("CreatePairWithUserLock() error = %v, want ErrUserStateChanged", err)
+	}
+	assertTokenPairAbsent(t, database, access.TokenID, refresh.TokenHash)
 }

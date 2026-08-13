@@ -64,7 +64,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, newError(ErrInvalidRequest, "code_verifier 不能为空", nil)
 	}
 
-	authorization, consumeErr := s.Authorizations.Consume(ctx, code, s.now())
+	authorization, consumedVersion, consumeErr := s.Authorizations.Consume(ctx, code, s.now())
 	switch {
 	case errors.Is(consumeErr, repository.ErrNotFound):
 		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
@@ -122,6 +122,17 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if user.State == model.UserStateDeleted {
 		return nil, newError(ErrInvalidGrant, "账号已注销", nil)
 	}
+	// A bulk revocation (password change, demotion, account close) bumps
+	// token_version in the same transaction that cuts tokens, and the code was
+	// already consumed. If the version moved since the consume, the revocation
+	// happened in between: issuing now would mint a session the revocation never
+	// saw. The write below re-checks under the user row lock, so this early exit
+	// only skips work — the pair cannot land on a stale version either way.
+	if user.TokenVersion != int(consumedVersion) {
+		s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_redeemed_after_revocation")
+		return nil, newError(ErrInvalidGrant, "授权码已失效，请重新发起授权",
+			errors.New("user token version changed since code consume"))
+	}
 
 	// The code's scopes are re-checked against the registration as it stands now, the
 	// same live re-check Consent applies to a stash and this function already applies
@@ -177,7 +188,14 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 			codeAudit = nil
 		}
 	}
-	if createErr := s.Tokens.CreatePairWithAudit(ctx, pair.Access, pair.Refresh, codeAudit); createErr != nil {
+	if createErr := s.Tokens.CreatePairWithUserLock(ctx, user.ID, consumedVersion, pair.Access, pair.Refresh, codeAudit); createErr != nil {
+		if errors.Is(createErr, repository.ErrUserStateChanged) || errors.Is(createErr, repository.ErrNotFound) {
+			// A revocation committed between the consume and this write (or the
+			// account vanished): the pair must not land, and the answer matches an
+			// unknown code so the endpoint stays non-oracular.
+			s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_redeemed_after_revocation")
+			return nil, newError(ErrInvalidGrant, "授权码已失效，请重新发起授权", createErr)
+		}
 		return nil, newError(ErrInternal, "持久化 Token Pair 失败", createErr)
 	}
 

@@ -20,6 +20,12 @@ const tokenFamilyAdvisoryLockNamespace int32 = 0x53415354
 // family that already contains revoked token metadata.
 var ErrTokenFamilyRevoked = errors.New("token family is revoked")
 
+// ErrUserStateChanged indicates that the owning user's token_version no longer
+// matches the snapshot a caller captured before the write: a bulk revocation
+// (password change, demotion, account close) committed in between, so the
+// pending token pair must not be created — it would outlive the revocation.
+var ErrUserStateChanged = errors.New("repository: user token version changed")
+
 // refreshGracePeriod distinguishes a benign concurrent refresh from a true
 // replay. Two tabs refreshing the same family land here: the first rotation
 // revokes the presented token, the second sees revoked_at. Within this window
@@ -111,6 +117,51 @@ func (r *TokenRepository) CreatePairWithAudit(
 		if audit != nil {
 			if err := transaction.Create(audit).Error; err != nil {
 				return fmt.Errorf("create login audit: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// CreatePairWithUserLock persists a token pair inside a transaction that first
+// locks the owning user's row and verifies its token_version still matches
+// expectedTokenVersion.
+//
+// The authorization-code redemption uses this: the code was consumed in its own
+// transaction (so a failed verification still burns it), and a bulk revocation
+// committing between the consume and this write bumps token_version. Locking the
+// user row serializes the two: either this transaction lands first and the
+// revocation cuts the pair like every other token, or the revocation landed
+// first and the version mismatch refuses the pair — the redemption cannot mint
+// a session that outlives a revocation that already happened.
+func (r *TokenRepository) CreatePairWithUserLock(
+	ctx context.Context,
+	userID int64,
+	expectedTokenVersion int64,
+	access *model.OAuthAccessToken,
+	refresh *model.OAuthRefreshToken,
+	audit *model.AuditLog,
+) error {
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var locked model.User
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("token_version").
+			Where("id = ?", userID).
+			First(&locked).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock user for pair creation: %w", err)
+		}
+		if int64(locked.TokenVersion) != expectedTokenVersion {
+			return ErrUserStateChanged
+		}
+		if err := createTokenPairInTransaction(transaction, access, refresh); err != nil {
+			return err
+		}
+		if audit != nil {
+			if err := transaction.Create(audit).Error; err != nil {
+				return fmt.Errorf("create pair audit: %w", err)
 			}
 		}
 		return nil

@@ -996,3 +996,54 @@ func TestTokenAuthorizationCodeRejectsScopeRevokedAfterConsent(t *testing.T) {
 		t.Fatal("the code survived a rejected redemption and was redeemable again")
 	}
 }
+
+// A bulk revocation (password change, demotion, account close) that commits
+// between the code consume and the token-pair write bumps token_version. The
+// redemption must refuse — minting a pair then would create a session the
+// revocation never saw (the same escape as a rotated refresh token).
+func TestTokenAuthorizationCodeRejectsVersionMovedSinceConsume(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.authorizations.consumeUserVersion = 7 // user's version is 2
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}
+
+// The locked-write half of the same defense: even when the early check passes,
+// a revocation committing between the check and the write must refuse the pair
+// under the user row lock.
+func TestTokenAuthorizationCodeRejectsUserLockVersionMismatch(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.tokens.storedUserVersion = 3 // service passes the consumed snapshot, 2
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}
+
+// The locked-write refuses a redemption whose user row disappeared between the
+// consume and the write.
+func TestTokenAuthorizationCodeRejectsUserLockNotFound(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.tokens.userVersionErr = repository.ErrNotFound
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}
