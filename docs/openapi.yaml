@@ -321,10 +321,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
           description: >-
             Refresh Token 无效、过期或被撤销（40102）；30s 宽限窗内被并发刷新时返回
-            40108（家族保留，客户端应重读 cookie 后重试一次）。
+            40108（家族保留，客户端应重读 cookie 后重试一次）。cookie 来源且账号已
+            注销时也返回 401（错误码仍为 40301），以便前端清会话并跳登录。
         "403":
           $ref: "#/components/responses/Forbidden"
-          description: 账号已注销（40301）
+          description: >-
+            账号已注销（40301），仅当刷新凭据来自请求体（refresh_token）时返回。
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: >-
@@ -370,7 +372,10 @@ paths:
           description: 参数错误（400xx）
         "401":
           $ref: "#/components/responses/Unauthorized"
-          description: Access/Refresh Token 无效（401xx）
+          description: >-
+            缺失 Authorization Header（40100）或伪造/签名无效（40102）。已过期的
+            access token 仍可登出：过期宽容认证按 RFC 7009 的过期路径读取其
+            claims，撤销所属 family 并清 cookie，返回 200。
         "403":
           $ref: "#/components/responses/Forbidden"
           description: 账号已注销（40301）
