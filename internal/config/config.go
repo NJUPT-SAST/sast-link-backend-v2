@@ -82,8 +82,10 @@ type Config struct {
 	// OAuthCodeTTL bounds an authorization code's lifetime (PRD §4.10: 5min).
 	OAuthCodeTTL time.Duration `env:"OAUTH_CODE_TTL" envDefault:"5m"`
 	// OAuthAuthorizeRequestTTL bounds how long a validated authorize request waits
-	// in Redis for the user's consent decision.
-	OAuthAuthorizeRequestTTL time.Duration `env:"OAUTH_AUTHORIZE_REQUEST_TTL" envDefault:"10m"`
+	// in Redis for the user's consent decision. Sized for the register-resume
+	// path (consent → login → signup → back to consent), which can take the
+	// better part of twenty minutes.
+	OAuthAuthorizeRequestTTL time.Duration `env:"OAUTH_AUTHORIZE_REQUEST_TTL" envDefault:"20m"`
 
 	// Third-party login providers: SAST Link acting as an OAuth *client*, the
 	// opposite direction from the OAuth* provider settings above. Each provider
