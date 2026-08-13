@@ -2,6 +2,9 @@ package oauthlogin
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +36,22 @@ func (s Service) providerClient(name model.LoginMethod) (ProviderClient, error) 
 		return nil, newError(ErrInvalidInput, "不支持的第三方登录方式", nil)
 	}
 	return client, nil
+}
+
+// stateDigest is the login-CSRF cookie value for a state: hex(SHA-256(state)).
+// The state is a high-entropy random token, so a bare digest suffices — the
+// cookie's job is to prove the callback browser is the one that started the
+// authorization, not to hide the state (which the same browser already knows).
+func stateDigest(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return hex.EncodeToString(sum[:])
+}
+
+// stateDigestMatches compares a state against a cookie value in constant time,
+// so a mismatch leaks nothing about the digest.
+func stateDigestMatches(state, cookieValue string) bool {
+	expected := stateDigest(state)
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(cookieValue)) == 1
 }
 
 // resolveRedirect validates a requested frontend redirect against the

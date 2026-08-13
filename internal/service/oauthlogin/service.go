@@ -145,7 +145,12 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 		// validated, so the login must not start.
 		return nil, newError(ErrDependencyUnavailable, "保存 OAuth state 失败", err)
 	}
-	return &AuthorizeResult{AuthorizeURL: client.AuthorizeURL(state), State: state}, nil
+	return &AuthorizeResult{
+		AuthorizeURL: client.AuthorizeURL(state),
+		State:        state,
+		StateDigest:  stateDigest(state),
+		StateTTL:     s.stateTTL(),
+	}, nil
 }
 
 // Callback validates the provider callback and splits into the login branch or
@@ -170,6 +175,16 @@ func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackRe
 	}
 	if !found {
 		return nil, newError(ErrStateInvalid, "state 无效或已过期", nil)
+	}
+	// Login CSRF (OAuth 2.0 §10.12): the state alone proves somebody started a
+	// login, not that the browser completing it is the one that did. The digest
+	// cookie written at authorize time binds the state to that browser; a
+	// callback whose cookie is missing or does not match was completed by a
+	// browser an attacker lured onto their own authorization URL, and handing it
+	// a login_code or registration_state would plant the attacker's provider
+	// identity into the victim's session.
+	if !stateDigestMatches(input.State, input.StateCookie) {
+		return nil, newError(ErrStateInvalid, "state 与发起授权的浏览器不匹配", nil)
 	}
 	// A state issued for one provider must not be redeemable at another
 	// provider's callback, which would let a caller pair a GitHub state with a

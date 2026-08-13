@@ -94,9 +94,10 @@ func TestAuthorizeFailsClosedWhenStateStoreIsDown(t *testing.T) {
 	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
 }
 
-// authorizedState runs Authorize and returns the issued state, so callback tests
-// start from a genuinely stored state rather than a hand-written one.
-func authorizedState(t *testing.T, service Service) string {
+// authorizedState runs Authorize and returns the issued state and its digest,
+// so callback tests start from a genuinely stored state — and present the
+// matching login-CSRF cookie, which the callback now requires.
+func authorizedState(t *testing.T, service Service) (state, digest string) {
 	t.Helper()
 	result, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodGitHub,
@@ -104,7 +105,7 @@ func authorizedState(t *testing.T, service Service) string {
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
-	return result.State
+	return result.State, result.StateDigest
 }
 
 func TestCallbackBoundUserIssuesLoginCode(t *testing.T) {
@@ -113,12 +114,13 @@ func TestCallbackBoundUserIssuesLoginCode(t *testing.T) {
 	doubles.Identities.put(&model.Identity{
 		UserID: 42, Provider: model.LoginMethodGitHub, ProviderID: "145339646",
 	})
-	state := authorizedState(t, service)
+	state, stateDigest := authorizedState(t, service)
 
 	result, err := service.Callback(context.Background(), CallbackInput{
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		State:    state,
+		State:       state,
+		StateCookie: stateDigest,
 	})
 	if err != nil {
 		t.Fatalf("Callback: %v", err)
@@ -143,12 +145,13 @@ func TestCallbackBoundUserIssuesLoginCode(t *testing.T) {
 
 func TestCallbackUnboundUserIssuesRegistrationStateBoundToOAuthState(t *testing.T) {
 	service, doubles := newTestService(t)
-	state := authorizedState(t, service)
+	state, stateDigest := authorizedState(t, service)
 
 	result, err := service.Callback(context.Background(), CallbackInput{
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		State:    state,
+		State:       state,
+		StateCookie: stateDigest,
 	})
 	if err != nil {
 		t.Fatalf("Callback: %v", err)
@@ -195,9 +198,9 @@ func TestCallbackRejectsReplayedState(t *testing.T) {
 	doubles.Identities.put(&model.Identity{
 		UserID: 42, Provider: model.LoginMethodGitHub, ProviderID: "145339646",
 	})
-	state := authorizedState(t, service)
+	state, stateDigest := authorizedState(t, service)
 
-	input := CallbackInput{Provider: model.LoginMethodGitHub, Code: "provider-code", State: state}
+	input := CallbackInput{Provider: model.LoginMethodGitHub, Code: "provider-code", State: state, StateCookie: stateDigest}
 	if _, err := service.Callback(context.Background(), input); err != nil {
 		t.Fatalf("first Callback: %v", err)
 	}
@@ -220,23 +223,25 @@ func TestCallbackRejectsStateIssuedForAnotherProvider(t *testing.T) {
 		authorizeURL: "https://lark.test/authorize",
 		identity:     &provider.Identity{ProviderID: "on_union", Data: map[string]any{}},
 	}
-	state := authorizedState(t, service) // issued for github
+	state, stateDigest := authorizedState(t, service) // issued for github
 
 	_, err := service.Callback(context.Background(), CallbackInput{
 		Provider: model.LoginMethodLark,
 		Code:     "provider-code",
-		State:    state,
+		State:       state,
+		StateCookie: stateDigest,
 	})
 	assertKind(t, err, KindInvalidState, errcode.CodeBadRequest)
 }
 
 func TestCallbackRejectsMissingCodeWithoutSpendingState(t *testing.T) {
 	service, doubles := newTestService(t)
-	state := authorizedState(t, service)
+	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
 		Provider: model.LoginMethodGitHub,
-		State:    state,
+		State:       state,
+		StateCookie: stateDigest,
 	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 	// A rejectable request must not burn the one-time state.
@@ -248,12 +253,13 @@ func TestCallbackRejectsMissingCodeWithoutSpendingState(t *testing.T) {
 func TestCallbackMapsForeignTenantToBusinessCode(t *testing.T) {
 	service, doubles := newTestService(t)
 	doubles.GitHub.err = provider.ErrForeignTenant
-	state := authorizedState(t, service)
+	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		State:    state,
+		State:       state,
+		StateCookie: stateDigest,
 	})
 	assertKind(t, err, KindForbidden, errcode.CodeLarkTenantRequired)
 }
@@ -261,12 +267,13 @@ func TestCallbackMapsForeignTenantToBusinessCode(t *testing.T) {
 func TestCallbackMapsInvalidGrantToRestartableFailure(t *testing.T) {
 	service, doubles := newTestService(t)
 	doubles.GitHub.err = provider.ErrInvalidGrant
-	state := authorizedState(t, service)
+	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
 		Provider: model.LoginMethodGitHub,
 		Code:     "spent",
-		State:    state,
+		State:       state,
+		StateCookie: stateDigest,
 	})
 	// The user's browser carried a stale code; that is a restart, not a 502.
 	assertKind(t, err, KindInvalidState, errcode.CodeBadRequest)
@@ -275,12 +282,13 @@ func TestCallbackMapsInvalidGrantToRestartableFailure(t *testing.T) {
 func TestCallbackMapsProviderOutageToBadGatewayKind(t *testing.T) {
 	service, doubles := newTestService(t)
 	doubles.GitHub.err = provider.ErrUnexpectedResponse
-	state := authorizedState(t, service)
+	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		State:    state,
+		State:       state,
+		StateCookie: stateDigest,
 	})
 	assertKind(t, err, KindProviderUnavailable, errcode.CodeDependencyUnavailable)
 }
@@ -293,12 +301,13 @@ func TestCallbackRefusesDeletedAccount(t *testing.T) {
 	doubles.Identities.put(&model.Identity{
 		UserID: 42, Provider: model.LoginMethodGitHub, ProviderID: "145339646",
 	})
-	state := authorizedState(t, service)
+	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		State:    state,
+		State:       state,
+		StateCookie: stateDigest,
 	})
 	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
 	if len(doubles.LoginCodes.codes) != 0 {
@@ -670,5 +679,68 @@ func TestExchangeCodeAllowsWhenLimiterUnavailable(t *testing.T) {
 		ClientIP: "203.0.113.9",
 	}); err != nil {
 		t.Fatalf("ExchangeCode with a broken limiter = %v, want fail-open", err)
+	}
+}
+
+// The authorize result carries the login-CSRF cookie value: a digest the
+// callback must present back, so a state an attacker started cannot complete
+// in a victim's browser (OAuth 2.0 §10.12).
+func TestAuthorizeReturnsStateDigestAndTTL(t *testing.T) {
+	service, _ := newTestService(t)
+
+	result, err := service.Authorize(context.Background(), AuthorizeInput{
+		Provider: model.LoginMethodGitHub,
+	})
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if result.StateDigest != stateDigest(result.State) {
+		t.Fatalf("StateDigest = %q, want hex(sha256(state)) %q", result.StateDigest, stateDigest(result.State))
+	}
+	if result.StateTTL <= 0 {
+		t.Fatalf("StateTTL = %v, want positive", result.StateTTL)
+	}
+}
+
+// A callback without the cookie is the login-CSRF attack shape: the browser
+// completing the callback did not start the authorization.
+func TestCallbackRejectsMissingStateCookie(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.Users.byID[42] = activeUser(42)
+	doubles.Identities.put(&model.Identity{
+		UserID: 42, Provider: model.LoginMethodGitHub, ProviderID: "145339646",
+	})
+	state, _ := authorizedState(t, service)
+
+	_, err := service.Callback(context.Background(), CallbackInput{
+		Provider: model.LoginMethodGitHub,
+		Code:     "provider-code",
+		State:    state,
+	})
+	assertKind(t, err, KindInvalidState, errcode.CodeBadRequest)
+	// The provider exchange must not run for a callback the browser did not start.
+	if doubles.GitHub.calls != 0 {
+		t.Fatalf("provider exchange ran %d times for a cookie-less callback", doubles.GitHub.calls)
+	}
+}
+
+// A callback whose cookie does not match the state is refused the same way.
+func TestCallbackRejectsMismatchedStateCookie(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.Users.byID[42] = activeUser(42)
+	doubles.Identities.put(&model.Identity{
+		UserID: 42, Provider: model.LoginMethodGitHub, ProviderID: "145339646",
+	})
+	state, _ := authorizedState(t, service)
+
+	_, err := service.Callback(context.Background(), CallbackInput{
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
+		State:       state,
+		StateCookie: stateDigest("some-other-state"),
+	})
+	assertKind(t, err, KindInvalidState, errcode.CodeBadRequest)
+	if doubles.GitHub.calls != 0 {
+		t.Fatalf("provider exchange ran %d times for a mismatched cookie", doubles.GitHub.calls)
 	}
 }
