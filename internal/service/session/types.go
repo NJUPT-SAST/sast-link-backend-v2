@@ -301,7 +301,10 @@ type RefreshResult struct {
 type LogoutInput struct {
 	PrincipalJTI    string
 	PrincipalUserID int64
-	RefreshToken    string
+	// RefreshToken is deprecated and ignored: logout revokes the authenticated
+	// access token's own family, so no refresh credential is read anymore.
+	// Retained only for call-site/contract compatibility.
+	RefreshToken string
 	// ActorClientID is the azp of the token that authorized the logout; empty
 	// means a legacy console token, resolved to InternalClientID at audit time.
 	ActorClientID string

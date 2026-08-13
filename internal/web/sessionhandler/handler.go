@@ -393,9 +393,10 @@ func (h Handler) Logout(c *gin.Context) {
 		// the TOCTOU window between the middleware's DB check and here) means the
 		// session is already gone. Logout stays idempotent — clear the dead
 		// cookie and report success, so a session that died mid-request never
-		// leaves the user stuck. Other failures (429/500, nil-family anomaly)
-		// keep the cookie and surface honestly.
-		if be, ok := mapped.(*response.BusinessError); ok && be.HTTPStatus == http.StatusUnauthorized {
+		// leaves the user stuck. The whitelist is by code, not HTTP status, so a
+		// future 401 semantics that does not mean "the session is dead" defaults
+		// to surfacing the error with the cookie intact.
+		if be, ok := mapped.(*response.BusinessError); ok && be.Code == errcode.CodeAccessTokenInvalid {
 			h.clearSessionCookie(c)
 			response.Ok(c, logoutResponse{Message: "已登出"})
 			return

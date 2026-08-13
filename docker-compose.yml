@@ -83,6 +83,12 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_PORT: "8080"
+      # The compose stack serves the API at the root over plain HTTP, so the
+      # httpOnly session cookie must be root-scoped and non-Secure here — with
+      # the production defaults (/v2 + Secure) the browser never sends it back
+      # and the fresh-tab bootstrap silently no-ops.
+      SESSION_COOKIE_PATH: ${SESSION_COOKIE_PATH:-/}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       LOG_LEVEL: ${LOG_LEVEL:-warn}
       GOMEMLIMIT: ${GOMEMLIMIT:-900MiB}
       DB_HOST: postgres

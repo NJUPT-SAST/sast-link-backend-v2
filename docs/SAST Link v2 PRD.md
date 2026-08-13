@@ -189,11 +189,33 @@ family_id (UUID) ─── seq=0 (初始) ──rotated──► seq=1 ──rot
 ```
 POST /auth/logout
 Authorization: Bearer <access_token>
-Body: { "refresh_token": "rt_..." }
+Body: {}（refresh_token 可选，忽略）
 ```
 
+- 撤销的是**当前 access_token 所属的 refresh_token family**（会话家族从 access token 读取，不再要求 body 里的 refresh token 与之一致）
 - 当前 access_token 的 jti 写入 outbox 行，worker 失效对应 auth-state 缓存
-- 整条 refresh_token family 标记 revoked
+- 整条 refresh_token family 标记 revoked，同时清掉 httpOnly 会话 cookie（`sl_session`）
+- 幂等：access token 恰好在校验与撤销之间失效时，清 cookie 并返回成功，不让用户卡在无法登出
+- **权限面变化（自觉取舍）**：旧契约需要 access+refresh 双凭证才能登出；现在仅持 access token 即可撤销整个家族。一个被窃的 access token（XSS / sessionStorage / 日志泄露）在其 TTL 内可以持续踢掉受害者（登出 DoS）——这是换取「stale tab 登出不再假成功」「死会话幂等登出」的代价，access token TTL（1h）即为该能力的暴露窗口。若未来缩短 TTL 或引入 refresh 凭证校验的登出选项，此条目应同步修订
+
+#### 浏览器会话 Cookie（sl_session）
+
+新开标签页没有 sessionStorage 里的 token，无法自建会话。为此登录 / 注册 / 第三方登录兑换 / 刷新时通过 `Set-Cookie` 下发 httpOnly 会话 cookie，值即**轮换中的 refresh token**；新 tab 调 `POST /auth/refresh`（空 body `{}`）时由 cookie 充当 refresh 凭证，换取新 token pair 后写入 sessionStorage 并轮换 cookie。
+
+| 属性 | 值 | 理由 |
+| --- | --- | --- |
+| Name | `sl_session`（`SESSION_COOKIE_NAME`） | — |
+| Path | `/v2`（`SESSION_COOKIE_PATH`） | 外部 Caddy 代理以 `/v2` 前缀路由到本服务，cookie 只需到达 `/v2/*` |
+| Secure | true（`SESSION_COOKIE_SECURE`） | 生产 HTTPS-only；纯 HTTP 本地开发置 false |
+| HttpOnly | true | XSS 无法读 cookie（refresh token 不再暴露给脚本，比 sessionStorage 更安全） |
+| SameSite | Lax | 跨站 POST 不携带 cookie（阻断 cookie-CSRF），同站导航正常 |
+| Domain | 不设（host-only） | 子域不可读取 |
+| Max-Age | = refresh token 剩余寿命 | cookie 与 token 生命周期同步，过期自动消失 |
+
+- 登出 / 修改密码 / 重置密码时清 cookie（这些路径撤销了全部或该浏览器会话，cookie 不能引导回死会话）
+- `POST /auth/refresh` 失败时的清 cookie 规则：仅当凭证**来自 cookie** 且错误码判定家族已死（40102 无效 token / 40301 账号注销）才清；body token 失败不清（可能误删更新的健康 cookie，且跨站 POST 不带 cookie 无法被利用来清 cookie）；并发刷新冲突（40108，见下）不清——同浏览器共享 cookie jar，赢家的 Set-Cookie 已更新 jar，客户端重读 cookie 重试一次即可拿到赢家 token；429/500 等瞬时失败永不清
+- **40108（刷新请求冲突）**：cookie 里的 token 已被兄弟请求在 30s 宽限窗内轮换，家族保留。客户端应重读当前 cookie 后重试一次；拿旧 token 无限重试会在宽限窗后按真重放处理，撤销整个家族（连带赢家会话）。注意多浏览器容器（如隐身窗口）各自持有独立 cookie jar，跨容器并发仍按重放语义处理
+- 与 per-IP 刷新限流的关系：cookie bootstrap 让每个新 tab 触发一次 `/auth/refresh`，校园 NAT 共享出口 IP，高峰注意 `RATE_LIMIT_REFRESH_RPM`（默认 300/min）的 429 尖峰；429 时 cookie 保留、客户端可稍后重试
 
 ### 4.7 密码管理
 
