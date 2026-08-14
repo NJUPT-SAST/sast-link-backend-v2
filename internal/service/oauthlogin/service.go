@@ -156,6 +156,19 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 // Callback validates the provider callback and splits into the login branch or
 // the registration branch.
 func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
+	result, err := s.callback(ctx, input)
+	if err != nil {
+		// Failed callbacks were previously silent in the audit trail — exactly
+		// the events an incident review wants when someone drives a stolen or
+		// replayed state at the endpoint. The success legs audit themselves with
+		// the resolved user and provider identity.
+		s.auditLogin(ctx, nil, input, false, auditErrorCode(err), "")
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
 	if input.Code == "" {
 		return nil, newError(ErrInvalidInput, "code 不能为空", nil)
 	}
@@ -301,6 +314,20 @@ func (s Service) registrationBranch(
 
 // ExchangeCode redeems a one-time login_code for a session.
 func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*ExchangeCodeResult, error) {
+	result, err := s.exchangeCode(ctx, input)
+	if err != nil {
+		// The user is unknown on most failure legs (the code may name no one),
+		// so the subject stays nil; the action and outcome are what matter.
+		if auditErr := s.audit(ctx, nil, "oauth_login_exchange", "session", nil, false, auditErrorCode(err),
+			input.ClientIP, input.UserAgent, nil); auditErr != nil {
+			logAuditFailure(ctx, "oauth_login_exchange", auditErr)
+		}
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*ExchangeCodeResult, error) {
 	// Throttled ahead of the empty-code check: an attacker probing the code space
 	// controls the input, so rejecting blanks for free would leave the expensive
 	// path — a Redis GetDel per guess — uncapped.

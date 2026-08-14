@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/provider"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -105,6 +106,16 @@ func credentialUpdate(ctx context.Context, identity *providerIdentity) repositor
 		RefreshToken:   nonEmpty(identity.RefreshToken),
 		TokenExpiresAt: identity.TokenExpiresAt,
 	}
+}
+
+// auditErrorCode extracts the business error code carried by a service *Error,
+// falling back to the internal code for wrapped or plain errors.
+func auditErrorCode(err error) int {
+	var serviceErr *Error
+	if errors.As(err, &serviceErr) {
+		return serviceErr.Code
+	}
+	return errcode.CodeInternal
 }
 
 func (s Service) now() time.Time {

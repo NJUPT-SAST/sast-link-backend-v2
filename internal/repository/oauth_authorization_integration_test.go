@@ -405,10 +405,10 @@ func TestOAuthAuthorizationRedemptionRefusesPairAfterBulkRevocation(t *testing.T
 
 	// The revocation (password change shape) commits between consume and write.
 	userRepository := repository.NewUser(database)
-	if _, err := userRepository.UpdatePasswordAndRevokeSessions(
+	if _, revokeErr := userRepository.UpdatePasswordAndRevokeSessions(
 		context.Background(), user.ID, "new-argon2-hash", time.Now(),
-	); err != nil {
-		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", err)
+	); revokeErr != nil {
+		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", revokeErr)
 	}
 
 	access := accessToken("redeem-after-revoke-access", client.ID, user.ID, ptr("redeem-after-revoke-family"))

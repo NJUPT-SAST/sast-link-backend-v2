@@ -50,6 +50,10 @@ func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, err
 func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput) (*TokenResult, error) {
 	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
 	if err != nil {
+		// Client-authentication failures previously left no audit row — a
+		// client_secret sweep against the token endpoint was indistinguishable
+		// from silence.
+		s.auditToken(ctx, nil, input.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeUnauthenticated, "client_auth_failed")
 		return nil, err
 	}
 	if !slices.Contains([]string(client.GrantTypes), grantTypeAuthorizationCode) {
@@ -155,9 +159,15 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	// A capability family's first refresh token is born at this moment, so its
 	// expiry is its lifetime cap: the rotation leg later clamps every refresh to
 	// origin+cap, and clamping here keeps the very first token inside it too.
+	// The access token is clamped the same way, or a redemption at the cap's edge
+	// would carry a full access TTL past the delegation's boundary.
 	refreshTTL := s.refreshTTL()
+	accessTTL := s.accessTTL()
 	if lifetime := s.capabilityRefreshLifetime(scopes); lifetime > 0 && lifetime < refreshTTL {
 		refreshTTL = lifetime
+		if accessTTL > lifetime {
+			accessTTL = lifetime
+		}
 	}
 	pair, err := s.issuer().Issue(tokenissue.Request{
 		User:       user,
@@ -165,7 +175,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		Sequence:   0,
 		FamilyID:   familyID,
 		Scopes:     scopes,
-		AccessTTL:  s.accessTTL(),
+		AccessTTL:  accessTTL,
 		RefreshTTL: refreshTTL,
 	})
 	if err != nil {
@@ -220,6 +230,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*TokenResult, error) {
 	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
 	if err != nil {
+		s.auditToken(ctx, nil, input.ClientID, grantTypeRefreshToken, input, false, errcode.CodeUnauthenticated, "client_auth_failed")
 		return nil, err
 	}
 	if !slices.Contains([]string(client.GrantTypes), grantTypeRefreshToken) {

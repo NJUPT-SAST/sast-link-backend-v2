@@ -250,6 +250,46 @@ func TestTokenRepositoryRotateRefreshTokenCapOnFamilyLifetime(t *testing.T) {
 		}
 	})
 
+	t.Run("clamps the access token to the same deadline", func(t *testing.T) {
+		// A family whose cap expires within the next access TTL: the rotation
+		// would otherwise mint an access token outliving the delegation.
+		edgeFamily := familyID + "-access-edge"
+		createTokenPair(t, tokenRepository, "rotate-cap-access-edge", edgeFamily, 0, client.ID, user.ID)
+		if err := database.Model(&model.OAuthRefreshToken{}).
+			Where("family_id = ?", edgeFamily).
+			Update("created_at", time.Now().Add(-(7*24*time.Hour - 30*time.Minute))).Error; err != nil {
+			t.Fatalf("rewind family origin: %v", err)
+		}
+
+		newAccess := accessToken("rotate-cap-access-edge-new-access", client.ID, user.ID, &edgeFamily)
+		newRefresh := refreshToken("rotate-cap-access-edge-new-refresh", edgeFamily, 1, client.ID, user.ID)
+		if _, err := tokenRepository.RotateRefreshTokenWithAuditCapped(
+			context.Background(), edgeFamily, "rotate-cap-access-edge-refresh", newAccess, newRefresh, nil, 7*24*time.Hour,
+		); err != nil {
+			t.Fatalf("RotateRefreshTokenWithAuditCapped() error = %v", err)
+		}
+
+		var origin model.OAuthRefreshToken
+		if err := database.Where("family_id = ?", edgeFamily).Order("sequence ASC").First(&origin).Error; err != nil {
+			t.Fatalf("load family origin: %v", err)
+		}
+		var rotatedAccess model.OAuthAccessToken
+		if err := database.Where("token_id = ?", "rotate-cap-access-edge-new-access").First(&rotatedAccess).Error; err != nil {
+			t.Fatalf("load rotated access: %v", err)
+		}
+		want := origin.CreatedAt.Add(7 * 24 * time.Hour)
+		if !rotatedAccess.ExpiresAt.Equal(want) {
+			t.Fatalf("rotated access expiry = %v, want origin+7d %v", rotatedAccess.ExpiresAt, want)
+		}
+		var rotatedRefresh model.OAuthRefreshToken
+		if err := database.Where("token_hash = ?", "rotate-cap-access-edge-new-refresh").First(&rotatedRefresh).Error; err != nil {
+			t.Fatalf("load rotated refresh: %v", err)
+		}
+		if !rotatedRefresh.ExpiresAt.Equal(want) {
+			t.Fatalf("rotated refresh expiry = %v, want origin+7d %v", rotatedRefresh.ExpiresAt, want)
+		}
+	})
+
 	t.Run("revokes a family whose origin predates the cap", func(t *testing.T) {
 		pastFamily := familyID + "-past"
 		createTokenPair(t, tokenRepository, "rotate-cap-past", pastFamily, 0, client.ID, user.ID)

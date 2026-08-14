@@ -499,3 +499,31 @@ func TestPasswordHasherWithoutSemaphoreIgnoresCancellation(t *testing.T) {
 		t.Fatalf("HashPassword() with nil semaphore error = %v, want nil", err)
 	}
 }
+
+// The authorize leg refuses a challenge that is 43 bytes but not base64url: a
+// challenge no verifier could ever produce yields a code guaranteed to fail at
+// redemption, so it is better refused while the client can still fix it.
+func TestIsValidPKCEChallenge(t *testing.T) {
+	valid := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM" // 43 base64url chars
+	for _, test := range []struct {
+		name      string
+		challenge string
+		want      bool
+	}{
+		{"valid digest", valid, true},
+		{"uppercase and underscore are base64url", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop_", true},
+		{"too short", valid[:42], false},
+		{"too long", valid + "a", false},
+		{"empty", "", false},
+		{"slash is not base64url", valid[:42] + "/", false},
+		{"plus is not base64url", valid[:42] + "+", false},
+		{"padding is not base64url", valid[:42] + "=", false},
+		{"space", valid[:42] + " ", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsValidPKCEChallenge(test.challenge); got != test.want {
+				t.Fatalf("IsValidPKCEChallenge(%q) = %v, want %v", test.challenge, got, test.want)
+			}
+		})
+	}
+}

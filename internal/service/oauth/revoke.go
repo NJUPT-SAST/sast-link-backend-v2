@@ -31,6 +31,9 @@ func (s Service) Revoke(ctx context.Context, input RevokeInput) error {
 	}
 	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
 	if err != nil {
+		// Audited like the token endpoint's client-authentication failures: a
+		// credential sweep against /oauth/revoke must leave a trail too.
+		s.auditRevoke(ctx, nil, input.ClientID, input, false, errcode.CodeUnauthenticated, "client_auth_failed")
 		return err
 	}
 	token := strings.TrimSpace(input.Token)
@@ -44,7 +47,7 @@ func (s Service) Revoke(ctx context.Context, input RevokeInput) error {
 	}
 	if !found {
 		// Deliberately a success. See the doc comment.
-		s.auditRevoke(ctx, nil, client.ClientID, input, true, "not_found")
+		s.auditRevoke(ctx, nil, client.ClientID, input, true, 0, "not_found")
 		return nil
 	}
 
@@ -56,10 +59,10 @@ func (s Service) Revoke(ctx context.Context, input RevokeInput) error {
 		slog.ErrorContext(ctx, "revoke oauth token family",
 			"security_event", "token_family_revocation_failed",
 			"family_id", familyID, "error", revokeErr)
-		s.auditRevoke(ctx, userID, client.ClientID, input, false, "revocation_failed")
+		s.auditRevoke(ctx, userID, client.ClientID, input, false, errcode.CodeInternal, "revocation_failed")
 		return newError(ErrInternal, "撤销 Token 失败，请重试", revokeErr)
 	}
-	s.auditRevoke(ctx, userID, client.ClientID, input, true, "revoked")
+	s.auditRevoke(ctx, userID, client.ClientID, input, true, 0, "revoked")
 	return nil
 }
 
@@ -152,13 +155,10 @@ func (s Service) auditRevoke(
 	clientID string,
 	input RevokeInput,
 	success bool,
+	errCode int,
 	outcome string,
 ) {
 	resourceID := clientID
-	errCode := 0
-	if !success {
-		errCode = errcode.CodeInternal
-	}
 	s.audit(ctx, userID, "oauth_revoke", &resourceID, success, errCode, input.ClientIP, input.UserAgent, map[string]any{
 		"client_id":       clientID,
 		"token_type_hint": strings.TrimSpace(input.TokenTypeHint),

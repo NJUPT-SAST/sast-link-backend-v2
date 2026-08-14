@@ -266,6 +266,10 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	now := s.now()
 	entries, revokedRefresh, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, fields, revoke, now)
 	if errors.Is(err, repository.ErrNotFound) {
+		// A row that vanished between the read and the write leaves no trace
+		// without this: the audit trail is how an incident review finds the
+		// concurrent delete that raced this update.
+		s.auditUpdate(ctx, input, false, ErrNotFound.Code, 0, &current.ClientID, nil)
 		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
 	}
 	if err != nil {
@@ -357,8 +361,9 @@ func (s Service) DeleteClient(ctx context.Context, input DeleteClientInput) (*De
 // returned exactly once, only its hash is stored. Existing access and refresh
 // tokens are untouched — they never depended on the secret — so rotation cuts a
 // leaked credential without logging anyone out. Refused for a public (first_party)
-// client, which has no secret to rotate, and for any non-console actor, mirroring
-// checkProtected's console-actor rule for every other sensitive edit.
+// client, which has no secret to rotate, and for any non-console actor — the same
+// console-actor rule checkCapabilityScopeGrant applies to capability grants, so a
+// delegated token cannot re-key the client it was issued to.
 func (s Service) RotateClientSecret(ctx context.Context, input RotateClientSecretInput) (*RotateClientSecretResult, error) {
 	if s.Clients == nil {
 		return nil, newError(ErrInternal, "客户端仓储未配置", nil)

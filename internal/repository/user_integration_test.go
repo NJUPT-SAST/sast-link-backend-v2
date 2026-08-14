@@ -615,3 +615,15 @@ func TestUserRepositoryUpdatePasswordBurnsAuthorizationCodes(t *testing.T) {
 		t.Fatalf("Consume(code-other-user) error = %v, want the code to survive", err)
 	}
 }
+
+// Reporting success for a user that does not exist would tell the caller
+// "password changed, sessions revoked" while nothing happened.
+func TestUserRepositoryUpdatePasswordAndRevokeSessionsReportsMissingUser(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+
+	_, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), 999999, "new-hash", time.Now())
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("UpdatePasswordAndRevokeSessions(missing) error = %v, want ErrNotFound", err)
+	}
+}

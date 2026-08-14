@@ -269,13 +269,19 @@ func (r *UserRepository) UpdatePasswordAndRevokeSessions(
 ) ([]model.BlacklistEntry, error) {
 	var entries []model.BlacklistEntry
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		if err := transaction.Model(&model.User{}).
+		result := transaction.Model(&model.User{}).
 			Where("id = ?", userID).
 			Updates(map[string]any{
 				"password":      passwordHash,
 				"token_version": gorm.Expr("token_version + 1"),
-			}).Error; err != nil {
-			return fmt.Errorf("update password and token version: %w", err)
+			})
+		if result.Error != nil {
+			return fmt.Errorf("update password and token version: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			// Reporting success for a user that does not exist would tell the
+			// caller "password changed, sessions revoked" while nothing happened.
+			return ErrNotFound
 		}
 		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
 		if revokeErr != nil {

@@ -297,3 +297,47 @@ func TestCreateRegistrationWithIdentityRejectsBoundProviderAccount(t *testing.T)
 		t.Fatalf("account was created despite the binding conflict: %v", findErr)
 	}
 }
+
+// The credential columns share the IdentityData nil-is-keep semantics: a login
+// callback usually carries no refresh token (GitHub only issues one on first
+// authorization), and overwriting the stored value with NULL would discard a
+// still-valid credential.
+func TestIdentityRepositoryUpdateProviderCredentialsKeepsTokensWhenNil(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	identityRepository := repository.NewIdentity(database)
+	user := createUserWithProfile(t, userRepository, "ghkeep@njupt.edu.cn")
+
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	identity := &model.Identity{
+		UserID:         user.ID,
+		Provider:       model.LoginMethodGitHub,
+		ProviderID:     "800",
+		AccessToken:    stringPtr("stored-access"),
+		RefreshToken:   stringPtr("stored-refresh"),
+		TokenExpiresAt: &expires,
+	}
+	if err := identityRepository.CreateWithinLimit(context.Background(), identity, 1); err != nil {
+		t.Fatalf("CreateWithinLimit() error = %v", err)
+	}
+
+	// A callback that returns only a fresh access token must not wipe the rest.
+	if err := identityRepository.UpdateProviderCredentials(context.Background(), identity.ID,
+		repository.IdentityCredentialUpdate{AccessToken: stringPtr("fresh-access")}); err != nil {
+		t.Fatalf("UpdateProviderCredentials() error = %v", err)
+	}
+
+	reloaded, err := identityRepository.FindByProviderID(context.Background(), model.LoginMethodGitHub, "800")
+	if err != nil {
+		t.Fatalf("FindByProviderID() error = %v", err)
+	}
+	if reloaded.AccessToken == nil || *reloaded.AccessToken != "fresh-access" {
+		t.Fatalf("access_token = %v, want fresh-access", reloaded.AccessToken)
+	}
+	if reloaded.RefreshToken == nil || *reloaded.RefreshToken != "stored-refresh" {
+		t.Fatalf("refresh_token = %v, want the stored value kept", reloaded.RefreshToken)
+	}
+	if reloaded.TokenExpiresAt == nil || !reloaded.TokenExpiresAt.Equal(expires) {
+		t.Fatalf("token_expires_at = %v, want the stored value kept", reloaded.TokenExpiresAt)
+	}
+}

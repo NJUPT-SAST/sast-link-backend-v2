@@ -629,6 +629,9 @@ func TestAuthorizeBoundsPersistedParameters(t *testing.T) {
 		{"oversized state", func(i *AuthorizeInput) { i.State = strings.Repeat("s", 513) }},
 		{"short code_challenge", func(i *AuthorizeInput) { i.CodeChallenge = "too-short" }},
 		{"oversized code_challenge", func(i *AuthorizeInput) { i.CodeChallenge = strings.Repeat("c", 256) }},
+		{"43-char challenge with non-base64url characters", func(i *AuthorizeInput) {
+			i.CodeChallenge = strings.Repeat("!", 43)
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -867,5 +870,48 @@ func TestConsentInfoThrottlesByUser(t *testing.T) {
 	calls := h.limiter.callsSnapshot()
 	if len(calls) != 1 || calls[0] != "consent_info:user:7" {
 		t.Fatalf("limiter calls = %v, want one keyed by user", calls)
+	}
+}
+
+// A denial redirects access_denied to the client's callback — but only while
+// that callback is still registered. An operator who removes a compromised
+// callback between the two legs expects nothing delivered there, the refusal
+// included, exactly like the approval branch's re-check.
+func TestConsentDenialRechecksRedirectURIAgainstLiveRegistration(t *testing.T) {
+	h := newHarness(t)
+	authorized, err := h.service.Authorize(context.Background(), validAuthorizeInput(t))
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	// The registration loses the callback between the legs.
+	h.clients.byID[10].RedirectURIs = model.StringArray{"https://elsewhere.test/cb"}
+
+	_, err = h.service.Consent(context.Background(), ConsentInput{
+		RequestID: authorized.RequestID,
+		Approve:   false,
+		UserID:    1,
+	})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Consent(deny after redirect removal) error = %v, want ErrInvalidRequest (no redirect)", err)
+	}
+}
+
+// Same shape, client disabled between the legs: the denial must not be
+// delivered anywhere.
+func TestConsentDenialRefusesWhenClientDisabled(t *testing.T) {
+	h := newHarness(t)
+	authorized, err := h.service.Authorize(context.Background(), validAuthorizeInput(t))
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	delete(h.clients.byClientID, testPublicClientID) // disabled clients read as not found
+
+	_, err = h.service.Consent(context.Background(), ConsentInput{
+		RequestID: authorized.RequestID,
+		Approve:   false,
+		UserID:    1,
+	})
+	if !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("Consent(deny after disable) error = %v, want ErrInvalidClient", err)
 	}
 }
