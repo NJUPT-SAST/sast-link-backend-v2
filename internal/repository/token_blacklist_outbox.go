@@ -30,6 +30,15 @@ func NewTokenBlacklistOutbox(database *gorm.DB) *TokenBlacklistOutboxRepository 
 // ClaimDue atomically leases up to limit due, unexpired deliveries.
 // Claim leases make concurrent workers safe: each row is returned to one worker
 // until its lease expires, after which it can be retried by another worker.
+//
+// The query's two claim states are served by two partial indexes from V004:
+// idx_token_blacklist_outbox_due (next_delivery_at, expires_at, id) WHERE
+// claim_token IS NULL covers the never-claimed rows, and
+// idx_token_blacklist_outbox_claimed_until (claimed_until) WHERE claim_token
+// IS NOT NULL covers lease-expired retries. The OR joins the two scans, so the
+// ORDER BY cannot ride either index — the due set is bounded by the delivery
+// backlog and the sort is in memory. idx_token_blacklist_outbox_expiry
+// (expires_at, all rows) serves CleanupExpired's delete scan instead.
 func (r *TokenBlacklistOutboxRepository) ClaimDue(
 	ctx context.Context,
 	now time.Time,
