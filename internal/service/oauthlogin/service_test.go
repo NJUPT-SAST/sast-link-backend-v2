@@ -117,8 +117,8 @@ func TestCallbackBoundUserIssuesLoginCode(t *testing.T) {
 	state, stateDigest := authorizedState(t, service)
 
 	result, err := service.Callback(context.Background(), CallbackInput{
-		Provider: model.LoginMethodGitHub,
-		Code:     "provider-code",
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
 		State:       state,
 		StateCookie: stateDigest,
 	})
@@ -148,8 +148,8 @@ func TestCallbackUnboundUserIssuesRegistrationStateBoundToOAuthState(t *testing.
 	state, stateDigest := authorizedState(t, service)
 
 	result, err := service.Callback(context.Background(), CallbackInput{
-		Provider: model.LoginMethodGitHub,
-		Code:     "provider-code",
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
 		State:       state,
 		StateCookie: stateDigest,
 	})
@@ -226,8 +226,8 @@ func TestCallbackRejectsStateIssuedForAnotherProvider(t *testing.T) {
 	state, stateDigest := authorizedState(t, service) // issued for github
 
 	_, err := service.Callback(context.Background(), CallbackInput{
-		Provider: model.LoginMethodLark,
-		Code:     "provider-code",
+		Provider:    model.LoginMethodLark,
+		Code:        "provider-code",
 		State:       state,
 		StateCookie: stateDigest,
 	})
@@ -239,7 +239,7 @@ func TestCallbackRejectsMissingCodeWithoutSpendingState(t *testing.T) {
 	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
-		Provider: model.LoginMethodGitHub,
+		Provider:    model.LoginMethodGitHub,
 		State:       state,
 		StateCookie: stateDigest,
 	})
@@ -256,8 +256,8 @@ func TestCallbackMapsForeignTenantToBusinessCode(t *testing.T) {
 	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
-		Provider: model.LoginMethodGitHub,
-		Code:     "provider-code",
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
 		State:       state,
 		StateCookie: stateDigest,
 	})
@@ -270,8 +270,8 @@ func TestCallbackMapsInvalidGrantToRestartableFailure(t *testing.T) {
 	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
-		Provider: model.LoginMethodGitHub,
-		Code:     "spent",
+		Provider:    model.LoginMethodGitHub,
+		Code:        "spent",
 		State:       state,
 		StateCookie: stateDigest,
 	})
@@ -285,8 +285,8 @@ func TestCallbackMapsProviderOutageToBadGatewayKind(t *testing.T) {
 	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
-		Provider: model.LoginMethodGitHub,
-		Code:     "provider-code",
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
 		State:       state,
 		StateCookie: stateDigest,
 	})
@@ -304,8 +304,8 @@ func TestCallbackRefusesDeletedAccount(t *testing.T) {
 	state, stateDigest := authorizedState(t, service)
 
 	_, err := service.Callback(context.Background(), CallbackInput{
-		Provider: model.LoginMethodGitHub,
-		Code:     "provider-code",
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
 		State:       state,
 		StateCookie: stateDigest,
 	})

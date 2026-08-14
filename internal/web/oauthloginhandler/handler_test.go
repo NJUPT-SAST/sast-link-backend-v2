@@ -647,6 +647,8 @@ func TestCallbackPassesStateCookieAndClearsIt(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
 		"/oauth/github/callback?code=provider-code&state=os_abc", nil)
+	// #nosec G124 -- test fixture: a browser callback request, not a cookie this
+	// service writes.
 	request.AddCookie(&http.Cookie{Name: "sl_oauth_state", Value: "deadbeef"})
 	router.ServeHTTP(recorder, request)
 

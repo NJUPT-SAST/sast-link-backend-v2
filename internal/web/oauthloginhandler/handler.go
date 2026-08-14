@@ -128,11 +128,11 @@ func (h Handler) authorize(name model.LoginMethod) gin.HandlerFunc {
 func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		result, err := h.Service.Callback(c.Request.Context(), oauthlogin.CallbackInput{
-			Provider:  name,
-			Code:      c.Query("code"),
-			State:     c.Query("state"),
-			ClientIP:  c.ClientIP(),
-			UserAgent: c.Request.UserAgent(),
+			Provider:    name,
+			Code:        c.Query("code"),
+			State:       c.Query("state"),
+			ClientIP:    c.ClientIP(),
+			UserAgent:   c.Request.UserAgent(),
 			StateCookie: h.readStateCookie(c),
 		})
 		if err != nil {

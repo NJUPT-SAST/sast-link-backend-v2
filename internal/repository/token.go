@@ -364,6 +364,16 @@ func (r *TokenRepository) rotateRefreshToken(
 				newRefresh.ExpiresAt = capDeadline
 			}
 		}
+		// The access token is clamped to the same deadline: a refresh at the cap's
+		// edge would otherwise mint a fully-lifetime access token that outlives
+		// the delegation by up to one access TTL. A zero-length remainder yields a
+		// token the middleware rejects as expired; the caller then treats the
+		// rotation as failed, so the shorter-lived access never authenticates.
+		if maxLifetime > 0 {
+			if capDeadline := originCreatedAt.Add(maxLifetime); !newAccess.ExpiresAt.Before(capDeadline) {
+				newAccess.ExpiresAt = capDeadline
+			}
+		}
 
 		result := transaction.Model(&model.OAuthRefreshToken{}).
 			Where("id = ? AND revoked_at IS NULL", current.ID).
