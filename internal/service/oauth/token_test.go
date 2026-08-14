@@ -1047,3 +1047,38 @@ func TestTokenAuthorizationCodeRejectsUserLockNotFound(t *testing.T) {
 		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
 	}
 }
+
+// A client disable that commits between the code consume and the pair write must
+// refuse the pair: the client row lock in the write serializes against the
+// disable's own client-row write, so an in-flight redemption cannot mint a
+// session for a client the console just turned off.
+func TestTokenAuthorizationCodeRejectsInactiveClient(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.tokens.clientErr = repository.ErrClientInactive
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}
+
+// The same shape for a scope narrowing: the code was issued under a scope set
+// the registration no longer holds, so the pair would assert a scope the client
+// does not own.
+func TestTokenAuthorizationCodeRejectsClientScopeNarrowed(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.tokens.clientErr = repository.ErrClientScopeChanged
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}

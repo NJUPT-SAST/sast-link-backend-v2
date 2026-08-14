@@ -413,9 +413,9 @@ func TestOAuthAuthorizationRedemptionRefusesPairAfterBulkRevocation(t *testing.T
 
 	access := accessToken("redeem-after-revoke-access", client.ID, user.ID, ptr("redeem-after-revoke-family"))
 	refresh := refreshToken("redeem-after-revoke-refresh", "redeem-after-revoke-family", 0, client.ID, user.ID)
-	err = tokens.CreatePairWithUserLock(context.Background(), user.ID, consumedVersion, access, refresh, nil)
+	err = tokens.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID, consumedVersion, access, refresh, nil)
 	if !errors.Is(err, repository.ErrUserStateChanged) {
-		t.Fatalf("CreatePairWithUserLock() error = %v, want ErrUserStateChanged", err)
+		t.Fatalf("CreatePairWithUserAndClientLock() error = %v, want ErrUserStateChanged", err)
 	}
 	assertTokenPairAbsent(t, database, access.TokenID, refresh.TokenHash)
 }

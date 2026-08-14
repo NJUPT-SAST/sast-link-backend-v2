@@ -154,6 +154,9 @@ type fakeTokens struct {
 	originErr         error
 	userVersionErr    error
 	storedUserVersion int64
+	// clientErr is returned by CreatePairWithUserAndClientLock when set,
+	// simulating a refused client check (inactive, narrowed scope, deleted).
+	clientErr error
 	// now is the wall clock for family-lifetime decisions, mirroring the
 	// repository's rotationTime := time.Now(). Tests that drive a fixed service
 	// clock set it to that clock so origin+cap comparisons stay deterministic.
@@ -192,14 +195,18 @@ func (f *fakeTokens) CreatePairWithAudit(_ context.Context, access *model.OAuthA
 	return nil
 }
 
-// CreatePairWithUserLock mirrors the repository's user-lock write: it refuses
-// when the stored version differs, and otherwise records like CreatePairWithAudit.
-func (f *fakeTokens) CreatePairWithUserLock(_ context.Context, _ int64, expected int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error {
+// CreatePairWithUserAndClientLock mirrors the repository's user-and-client-lock
+// write: it refuses when the stored version differs or the client check fails,
+// and otherwise records like CreatePairWithAudit.
+func (f *fakeTokens) CreatePairWithUserAndClientLock(_ context.Context, _ int64, _ int64, expected int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error {
 	if f.userVersionErr != nil {
 		return f.userVersionErr
 	}
 	if f.storedUserVersion != 0 && f.storedUserVersion != expected {
 		return repository.ErrUserStateChanged
+	}
+	if f.clientErr != nil {
+		return f.clientErr
 	}
 	if f.createErr != nil {
 		return f.createErr

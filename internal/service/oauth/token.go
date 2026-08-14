@@ -198,11 +198,13 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 			codeAudit = nil
 		}
 	}
-	if createErr := s.Tokens.CreatePairWithUserLock(ctx, user.ID, consumedVersion, pair.Access, pair.Refresh, codeAudit); createErr != nil {
-		if errors.Is(createErr, repository.ErrUserStateChanged) || errors.Is(createErr, repository.ErrNotFound) {
-			// A revocation committed between the consume and this write (or the
-			// account vanished): the pair must not land, and the answer matches an
-			// unknown code so the endpoint stays non-oracular.
+	if createErr := s.Tokens.CreatePairWithUserAndClientLock(ctx, user.ID, client.ID, consumedVersion, pair.Access, pair.Refresh, codeAudit); createErr != nil {
+		if errors.Is(createErr, repository.ErrUserStateChanged) || errors.Is(createErr, repository.ErrClientInactive) ||
+			errors.Is(createErr, repository.ErrClientScopeChanged) || errors.Is(createErr, repository.ErrNotFound) {
+			// A revocation committed between the consume and this write (the
+			// account vanished or its version moved, or the client was disabled /
+			// narrowed in scope / deleted): the pair must not land, and the answer
+			// matches an unknown code so the endpoint stays non-oracular.
 			s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_redeemed_after_revocation")
 			return nil, newError(ErrInvalidGrant, "授权码已失效，请重新发起授权", createErr)
 		}

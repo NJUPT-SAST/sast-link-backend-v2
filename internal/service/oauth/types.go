@@ -112,13 +112,17 @@ type TokenRepository interface {
 	// into audit_logs in the same transaction (nil audit disables it), so the pair
 	// and its audit commit atomically on one fsync.
 	CreatePairWithAudit(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
-	// CreatePairWithUserLock is CreatePairWithAudit inside a transaction that
-	// first locks the owning user's row and refuses (ErrUserStateChanged) when
-	// the stored token_version differs from expectedTokenVersion. The
+	// CreatePairWithUserAndClientLock is CreatePairWithAudit inside a transaction
+	// that first locks the owning user's and issuing client's rows and refuses
+	// (ErrUserStateChanged / ErrClientInactive / ErrClientScopeChanged /
+	// ErrNotFound) when the state the code was issued under changed: the user's
+	// token_version no longer matches the Consume snapshot, the client is no
+	// longer active, or its scopes no longer contain the pair's. The
 	// authorization-code redemption passes the version snapshot taken by Consume,
-	// so a bulk revocation committing between consume and write cannot be
+	// so a bulk revocation (password change, demotion, account close) or a client
+	// disable / scope narrowing committing between consume and write cannot be
 	// outlived by the pair.
-	CreatePairWithUserLock(ctx context.Context, userID int64, expectedTokenVersion int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
+	CreatePairWithUserAndClientLock(ctx context.Context, userID int64, clientID int64, expectedTokenVersion int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
 	// RotateRefreshToken rotates currentRefreshTokenHash inside familyID and
 	// returns the family origin's created_at, i.e. when the user actually
 	// authorized. Rotation must not advance the ID Token's auth_time, so it is

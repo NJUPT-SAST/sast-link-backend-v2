@@ -26,6 +26,17 @@ var ErrTokenFamilyRevoked = errors.New("token family is revoked")
 // pending token pair must not be created — it would outlive the revocation.
 var ErrUserStateChanged = errors.New("repository: user token version changed")
 
+// ErrClientInactive indicates that the client the pending authorization was
+// issued to is no longer active: a disable committed in between, so the pending
+// token pair must not be created — it would outlive the disable.
+var ErrClientInactive = errors.New("repository: OAuth client is no longer active")
+
+// ErrClientScopeChanged indicates that the client's scopes no longer contain
+// the pair's scopes: an administrator narrowed the registration in between, so
+// the pending token pair must not be created — it would assert a scope the
+// client no longer holds.
+var ErrClientScopeChanged = errors.New("repository: OAuth client scopes no longer contain the pair's scopes")
+
 // refreshGracePeriod distinguishes a benign concurrent refresh from a true
 // replay. Two tabs refreshing the same family land here: the first rotation
 // revokes the presented token, the second sees revoked_at. Within this window
@@ -123,20 +134,26 @@ func (r *TokenRepository) CreatePairWithAudit(
 	})
 }
 
-// CreatePairWithUserLock persists a token pair inside a transaction that first
-// locks the owning user's row and verifies its token_version still matches
-// expectedTokenVersion.
+// CreatePairWithUserAndClientLock persists a token pair inside a transaction
+// that first locks the owning user's row and the issuing client's row, verifying
+// the user's token_version still matches expectedTokenVersion and that the client
+// is still active with scopes containing the pair's.
 //
 // The authorization-code redemption uses this: the code was consumed in its own
 // transaction (so a failed verification still burns it), and a bulk revocation
-// committing between the consume and this write bumps token_version. Locking the
-// user row serializes the two: either this transaction lands first and the
-// revocation cuts the pair like every other token, or the revocation landed
-// first and the version mismatch refuses the pair — the redemption cannot mint
-// a session that outlives a revocation that already happened.
-func (r *TokenRepository) CreatePairWithUserLock(
+// committing between the consume and this write cuts the state the code was
+// issued under. The user row serializes against the revocations that bump
+// token_version (password change, demotion, account close); the client row
+// serializes against the revocations that rewrite the registration (disable,
+// scope narrowing), because UpdateAndRevoke holds the client-row lock for its
+// whole transaction. Either this write lands first and the revocation cuts the
+// pair like every other token, or the revocation landed first and one of the
+// checks below refuses the pair — the redemption cannot mint a session that
+// outlives a revocation that already happened.
+func (r *TokenRepository) CreatePairWithUserAndClientLock(
 	ctx context.Context,
 	userID int64,
+	clientID int64,
 	expectedTokenVersion int64,
 	access *model.OAuthAccessToken,
 	refresh *model.OAuthRefreshToken,
@@ -155,6 +172,31 @@ func (r *TokenRepository) CreatePairWithUserLock(
 		}
 		if int64(locked.TokenVersion) != expectedTokenVersion {
 			return ErrUserStateChanged
+		}
+		// The client row is locked FOR UPDATE so the checks below serialize
+		// against UpdateAndRevoke's own client-row write: a disable or scope
+		// narrowing that committed before this lock is visible here and refuses
+		// the pair, while one that commits after it lets its revocation cut the
+		// pair once it lands. A deleted client leaves no row at all (ErrNotFound).
+		var client model.OAuthClient
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("is_active", "scopes").
+			Where("id = ?", clientID).
+			First(&client).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock client for pair creation: %w", err)
+		}
+		if client.IsActive == nil || !*client.IsActive {
+			return ErrClientInactive
+		}
+		contained, err := scope.ContainsAll([]string(client.Scopes), []string(access.Scopes))
+		if err != nil {
+			return fmt.Errorf("check client scopes for pair creation: %w", err)
+		}
+		if !contained {
+			return ErrClientScopeChanged
 		}
 		if err := createTokenPairInTransaction(transaction, access, refresh); err != nil {
 			return err
@@ -366,9 +408,11 @@ func (r *TokenRepository) rotateRefreshToken(
 		}
 		// The access token is clamped to the same deadline: a refresh at the cap's
 		// edge would otherwise mint a fully-lifetime access token that outlives
-		// the delegation by up to one access TTL. A zero-length remainder yields a
-		// token the middleware rejects as expired; the caller then treats the
-		// rotation as failed, so the shorter-lived access never authenticates.
+		// the delegation by up to one access TTL. Only a strictly positive
+		// remainder is reachable here — a family whose cap is already in the past
+		// was cut by the familyExpired guard above — so the rotated access is
+		// simply shorter-lived than requested and the pair is returned to the
+		// client as a normal success; nothing authenticates past the cap.
 		if maxLifetime > 0 {
 			if capDeadline := originCreatedAt.Add(maxLifetime); !newAccess.ExpiresAt.Before(capDeadline) {
 				newAccess.ExpiresAt = capDeadline
