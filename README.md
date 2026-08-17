@@ -6,7 +6,7 @@ SAST Link is the unified identity authentication center and personnel informatio
 
 [![CI](https://github.com/NJUPT-SAST/sast-link-backend-v2/actions/workflows/ci.yml/badge.svg)](https://github.com/NJUPT-SAST/sast-link-backend-v2/actions/workflows/ci.yml)
 [![Security](https://github.com/NJUPT-SAST/sast-link-backend-v2/actions/workflows/security.yml/badge.svg)](https://github.com/NJUPT-SAST/sast-link-backend-v2/actions/workflows/security.yml)
-[![Go](https://img.shields.io/badge/Go-1.26.5-blue.svg)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26.6-blue.svg)](https://go.dev)
 [![GitHub stars](https://img.shields.io/github/stars/NJUPT-SAST/sast-link-backend-v2.svg)](https://github.com/NJUPT-SAST/sast-link-backend-v2)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -49,7 +49,7 @@ Other documents — product requirements, database design, deployment guides —
 ## Development
 
 ```bash
-go test -race -shuffle=on ./...
+go test -race -shuffle=on -pgo=off ./...
 golangci-lint run ./...
 ```
 
