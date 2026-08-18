@@ -3,11 +3,23 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # main is also built and tested after the merge, not only on the pull request.
+  # Two pull requests can each be green in isolation and still break main
+  # together — a rename that lands beside a new caller, a repository method whose
+  # contract one branch tightened while another added a user of the old shape.
+  # Git merges those cleanly, so no textual conflict appears and no PR run ever
+  # sees the combination. Since a push to main deploys and now also migrates, the
+  # first thing to notice the breakage would otherwise be production traffic.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Keyed by ref, so a pull-request run and the post-merge main run never cancel
+# each other. cancel-in-progress stays on: superseding a push to the same branch
+# is the intended behaviour, and the deploy workflow has its own serial group.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -68,3 +80,26 @@ jobs:
         run: |
           go build -v -o bin/api ./cmd/api
           go build -v -o bin/migrate ./cmd/migrate
+
+  workflows:
+    name: workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # deploy.yml carries ~130 lines of shell that runs on the production server
+      # over SSH, where a typo is discovered by a half-finished deploy rather than
+      # by a failing job. actionlint checks the workflow schema and expression
+      # syntax, and shells out to shellcheck for every `run:` block, which is the
+      # part that matters here: the deploy script is POSIX sh (the deploy user's
+      # login shell is not guaranteed to be bash), so it cannot rely on pipefail
+      # and every pipeline has to be guarded explicitly.
+      #
+      # Pinned by version rather than @latest: a new actionlint release adding a
+      # rule would otherwise fail unrelated pull requests with no change on our
+      # side. shellcheck is preinstalled on ubuntu-latest runners.
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
