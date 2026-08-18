@@ -1,0 +1,74 @@
+# Dependency update automation.
+#
+# Every version in this repository was pinned by hand and updated by hand, which
+# for a service whose deploy path holds an SSH private key and a registry
+# credential is the wrong default: the highest supply-chain risk (the actions the
+# deploy job runs) had no mechanism telling anyone a new version existed. The
+# weekly govulncheck sweep only reports advisories that already exist for what is
+# already committed; it never proposes the bump.
+#
+# Grouping is deliberate. Ungrouped Go module updates on a module this size open
+# enough parallel pull requests to make the required status checks the bottleneck,
+# and each one costs a full test run including Testcontainers-backed PostgreSQL
+# integration tests. Patch and minor updates travel together; a major update
+# arrives alone, because it needs to be read rather than merged on green checks.
+version: 2
+
+updates:
+  # GitHub Actions used by ci.yml, security.yml, and deploy.yml. This is the
+  # ecosystem that matters most here: appleboy/ssh-action receives the deploy
+  # SSH key, and docker/login-action receives the registry password, so a
+  # compromised or abandoned version has direct access to both.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      # Ahead of the Monday 03:00 UTC security sweep, so a bump and the sweep that
+      # would judge it do not land in the same hour.
+      time: "01:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # Go modules. Direct dependencies only: an indirect bump that matters arrives
+  # through its parent, and subscribing to the full transitive set on a module
+  # with this many testcontainers and AWS-style SDK dependencies produces steady
+  # noise nobody reads.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "01:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: scope
+    allow:
+      - dependency-type: direct
+    groups:
+      go-minor:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The Dockerfile's golang and alpine base images. A golang bump here fails
+  # ci.yml's toolchain job until go.mod's `go` directive moves with it, which is
+  # intentional: that job exists so the image that compiles the deployed binaries
+  # and the toolchain CI tested against cannot silently diverge.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "01:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "build"
