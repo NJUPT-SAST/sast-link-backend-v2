@@ -49,6 +49,10 @@ on:
         description: "Do not auto-rollback to :backup when the health check fails (leave the broken version up for diagnosis)"
         type: boolean
         default: false
+      allow_unverified:
+        description: "EMERGENCY ONLY: deploy without a green CI run for this commit"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,8 +76,87 @@ env:
   TCR_HOST: ccr.ccs.tencentyun.com
 
 jobs:
+  # Deploying is gated on CI having passed for THIS commit. The required status
+  # checks on main gate merging, which is a different thing: they say a pull
+  # request was green, not that the commit now on main is. Nothing connected the
+  # two, so `push: main` started this workflow in parallel with CI and never
+  # looked at the result — and since the deploy now also migrates the schema, an
+  # untested commit could take the database with it.
+  #
+  # A gate job rather than an `on: workflow_run` trigger, for two reasons. First,
+  # workflow_run sets GITHUB_SHA to the default branch's newest commit rather than
+  # the head_sha of the run that triggered it, so two pushes in quick succession
+  # can deploy a commit CI never saw. Second, workflow_run would leave
+  # workflow_dispatch ungated, and that is the path that can aim at any commit at
+  # all.
+  #
+  # This relies on ci.yml running on `push: main`, not only on pull requests:
+  # without a run keyed to the merged commit's SHA there is nothing to find and
+  # every deploy would wait out the timeout. Both changes ship together.
+  verify:
+    name: verify CI
+    runs-on: ubuntu-latest
+    # Covers CI's own worst case: test is capped at 20 minutes, and the run may sit
+    # queued before that.
+    timeout-minutes: 30
+    permissions:
+      actions: read
+    steps:
+      - name: Require a successful CI run for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ github.sha }}
+          ALLOW_UNVERIFIED: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_unverified || false }}
+        run: |
+          set -eu
+
+          if [ "${ALLOW_UNVERIFIED}" = "true" ]; then
+            echo "::warning::allow_unverified=true, deploying ${TARGET_SHA} without checking CI"
+            exit 0
+          fi
+
+          # Poll rather than fail fast on a missing run: a push to main starts CI
+          # and this workflow at the same moment, so "no run yet" is the normal
+          # first observation, not an error. Only a completed non-success, or the
+          # timeout, stops the deploy.
+          attempt=0
+          while [ "${attempt}" -lt 60 ]; do
+            attempt=$((attempt + 1))
+            run_json=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${TARGET_SHA}&per_page=1" \
+              --jq '.workflow_runs[0] // empty' 2>/dev/null || true)
+
+            if [ -z "${run_json}" ]; then
+              echo "  (${attempt}/60) no CI run for ${TARGET_SHA} yet"
+              sleep 20
+              continue
+            fi
+
+            status=$(printf '%s' "${run_json}" | jq -r '.status')
+            conclusion=$(printf '%s' "${run_json}" | jq -r '.conclusion // ""')
+            run_url=$(printf '%s' "${run_json}" | jq -r '.html_url')
+
+            if [ "${status}" != "completed" ]; then
+              echo "  (${attempt}/60) CI is ${status}"
+              sleep 20
+              continue
+            fi
+
+            if [ "${conclusion}" = "success" ]; then
+              echo "CI passed for ${TARGET_SHA}: ${run_url}"
+              exit 0
+            fi
+
+            echo "::error::CI concluded ${conclusion} for ${TARGET_SHA}: ${run_url}"
+            exit 1
+          done
+
+          echo "::error::timed out waiting for a CI run on ${TARGET_SHA}"
+          exit 1
+
   deploy:
     name: build and deploy
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
