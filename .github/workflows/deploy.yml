@@ -13,19 +13,36 @@ name: Deploy
 # network; the repository's docker-compose.yml (which provisions its own) is for
 # local development only.
 #
-# Schema migrations are deliberately NOT part of the automatic path. This project's
-# CLI refuses `up` when APP_ENV=production without --confirm-production, and
-# docs/runbooks/manual-migration.md requires a backup, a maintenance window, and a
-# paused deployment first. Running it on every push would defeat that guard, so it
-# sits behind an explicit workflow_dispatch input.
+# Schema migrations run automatically, before the API container is replaced. A
+# deploy IS this project's maintenance window — it is a single-container swap on a
+# scheduled push — and the manual procedure never took a fresh dump either, so
+# gating migrations behind a dispatch input bought no safety while costing a real
+# failure mode: a binary built against V00N silently serving a V00N-1 schema, with
+# /health reporting ok because it only probes connectivity.
+#
+# What still protects the schema:
+#   - golang-migrate refuses Up() on a dirty version (ErrDirty), so an interrupted
+#     migration halts the deploy instead of compounding
+#   - the migration step precedes `compose up api` and any failure exits non-zero,
+#     so a failed migration never gets a new binary stacked on top of it
+#   - `environment: production` keeps whatever approval rule that environment holds
+#   - skip_migration below is the escape hatch for a deploy that must not touch
+#     the schema
+#
+# Two consequences worth knowing. Migrations apply while the OLD binary is still
+# serving, so a destructive change (dropped or renamed column) breaks it for the
+# seconds until the swap — forward-only additive migrations are the assumption,
+# which is also what the absence of a `down` command implies. And a migration
+# taking a heavy lock (a bare CREATE INDEX blocks writes on its table) stalls
+# traffic for its duration; prefer CONCURRENTLY on anything large.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
-      run_migration:
-        description: "Run `migrate up --confirm-production` before restarting the API (requires a fresh DB backup)"
+      skip_migration:
+        description: "Deploy the image without applying migrations (leaves the schema at its current version)"
         type: boolean
         default: false
       skip_rollback:
@@ -106,14 +123,17 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ vars.SERVER_SSH_PORT || 22 }}
           command_timeout: 20m
-          envs: RUN_MIGRATION,SKIP_ROLLBACK,TCR_USERNAME,TCR_PASSWORD
+          envs: SKIP_MIGRATION,SKIP_ROLLBACK,TCR_USERNAME,TCR_PASSWORD
           # No script_stop: it is not an input of this action version and was
           # rejected with "Unexpected input(s) 'script_stop'". The script sets
           # `set -eu` itself, which is what actually stops it on the first error.
           script: |
             # -eu only. `set -o pipefail` is not POSIX, and this runs under whatever
-            # login shell the deploy user has; the one pipeline below is guarded by
-            # `if` rather than by the pipe's exit status.
+            # login shell the deploy user has, so no pipeline here may rely on the
+            # exit status of a non-final stage: the health probe is guarded by `if`,
+            # and the two migration-version pipelines are guarded by a `test -n` on
+            # the captured value, which fails whenever the CLI stage produced no
+            # parseable version.
             set -eu
 
             SERVICE_DIR="/data/${{ env.SERVICE_NAME }}"
@@ -183,17 +203,43 @@ jobs:
             # here — before the api container is replaced — rather than showing up
             # as an unexplained health-check timeout.
             #
-            # Run directly rather than inside "echo $(...)": under set -e a command
-            # substitution that fails still leaves echo's own exit status 0, so a
-            # wrapped failure would pass silently.
-            echo "migration state before:"
-            docker compose run --rm --no-deps migrate /usr/local/bin/migrate version
+            # Assigned rather than wrapped in "echo $(...)": under set -e a command
+            # substitution inside echo still leaves echo's own exit status 0, so a
+            # wrapped failure would pass silently. An assignment propagates it.
+            #
+            # Only the version=N token is kept, so compose's own progress output
+            # cannot leak into the before/after comparison. An unparseable result is
+            # a hard failure: that comparison decides whether an image rollback is
+            # still safe, and "" = "" would falsely claim the schema never moved.
+            echo "reading migration state"
+            VERSION_BEFORE=$(docker compose run --rm --no-deps migrate \
+              /usr/local/bin/migrate version 2>/dev/null | grep -o 'version=[0-9]*' | head -1)
+            test -n "${VERSION_BEFORE}" || {
+              echo "could not read migration version, aborting"; exit 1; }
+            echo "  before: ${VERSION_BEFORE}"
 
-            if [ "${RUN_MIGRATION:-false}" = "true" ]; then
+            # MIGRATED records whether the schema actually moved, which is not the
+            # same as whether the step ran: the common case is ErrNoChange (nothing
+            # pending), and that deploy stays image-rollback-safe. Only a real
+            # version change forfeits the rollback.
+            MIGRATED=0
+            if [ "${SKIP_MIGRATION:-false}" = "true" ]; then
+              echo "skip_migration=true, leaving the schema untouched"
+            else
               echo "applying migrations"
-              docker compose run --rm --no-deps migrate /usr/local/bin/migrate up --confirm-production
-              echo "migration state after:"
-              docker compose run --rm --no-deps migrate /usr/local/bin/migrate version
+              docker compose run --rm --no-deps migrate \
+                /usr/local/bin/migrate up --confirm-production
+              VERSION_AFTER=$(docker compose run --rm --no-deps migrate \
+                /usr/local/bin/migrate version 2>/dev/null | grep -o 'version=[0-9]*' | head -1)
+              test -n "${VERSION_AFTER}" || {
+                echo "could not read migration version after up, aborting"; exit 1; }
+              echo "  after: ${VERSION_AFTER}"
+              if [ "${VERSION_AFTER}" != "${VERSION_BEFORE}" ]; then
+                MIGRATED=1
+                echo "schema moved ${VERSION_BEFORE} -> ${VERSION_AFTER}"
+              else
+                echo "no pending migrations"
+              fi
             fi
 
             echo "starting api"
@@ -207,7 +253,7 @@ jobs:
             #    `migrate up` — refused under APP_ENV=production
             #    ("migration up in production requires --confirm-production") — then
             #    watch it exit non-zero and never start api. Migrations are handled
-            #    by the explicit, opt-in step above.
+            #    by the explicit step above, which passes the confirmation flag.
             docker compose up -d --no-deps api
 
             # /health reports db and redis separately. redis=degraded is a healthy
@@ -233,11 +279,11 @@ jobs:
                 echo "not rolling back (skip_rollback=${SKIP_ROLLBACK:-false}, backup_available=${ROLLBACK_AVAILABLE})"
                 exit 1
               fi
-              # Only safe because migrations are opt-in: an unmigrated deploy has
-              # changed nothing the old binary cannot read. A run with
-              # run_migration=true that reaches this point needs the runbook, not
-              # an image swap — the migration already committed.
-              if [ "${RUN_MIGRATION:-false}" = "true" ]; then
+              # Safe only when the schema did not move: the old binary can still
+              # read exactly what it read before. A deploy that applied a migration
+              # needs the runbook, not an image swap — the DDL already committed and
+              # the CLI exposes no `down`.
+              if [ "${MIGRATED}" = "1" ]; then
                 echo "migrations were applied in this run; refusing to auto-rollback the image."
                 echo "follow docs/runbooks/manual-migration.md"
                 exit 1
@@ -254,7 +300,7 @@ jobs:
 
             echo "deploy ok, running ${NEW_TAG}"
         env:
-          RUN_MIGRATION: ${{ github.event_name == 'workflow_dispatch' && inputs.run_migration || false }}
+          SKIP_MIGRATION: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_migration || false }}
           SKIP_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_rollback || false }}
           # Forwarded to the remote shell via `envs:` above so the credential is
           # never interpolated into the script text. ssh-action masks values it
