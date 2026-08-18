@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
 # Runtime stage
-FROM alpine:3.20
+FROM alpine:3.24
 # ca-certificates for outbound HTTPS (GitHub / Feishu / SMTP); tzdata keeps the
 # process timezone sane.
 RUN apk add --no-cache ca-certificates tzdata
