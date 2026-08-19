@@ -88,17 +88,22 @@ type ClientRepository interface {
 	FindActiveByClientID(ctx context.Context, clientID string) (*model.OAuthClient, error)
 }
 
-// AuthorizationRepository persists single-use authorization codes.
+// AuthorizationRepository persists single-use authorization codes and the
+// long-lived consent grants behind the authorized-apps list.
 type AuthorizationRepository interface {
-	Create(ctx context.Context, authorization *model.OAuthAuthorization) error
+	// CreateWithGrant persists a new authorization code and records the user's
+	// consent for the client in oauth_grants, in one transaction. Consent is the
+	// only code-minting path.
+	CreateWithGrant(ctx context.Context, authorization *model.OAuthAuthorization) error
 	// Consume marks a code used under a row lock. On replay it returns
 	// repository.ErrAuthorizationReplayed together with the record, whose family
 	// ID the caller must revoke.
 	Consume(ctx context.Context, code string, now time.Time) (*model.OAuthAuthorization, error)
-	// ListGrantsByUser returns the distinct applications a user has authorized.
+	// ListGrantsByUser returns the applications a user has authorized.
 	ListGrantsByUser(ctx context.Context, userID int64) ([]repository.OAuthGrant, error)
-	// DeleteByUserClient removes every authorization a user holds with one
-	// client (dropping it from the authorized-apps list).
+	// DeleteByUserClient removes every authorization and consent grant a user
+	// holds with one client (dropping it from the authorized-apps list and
+	// killing any in-flight code).
 	DeleteByUserClient(ctx context.Context, userID, clientID int64) error
 }
 

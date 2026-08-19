@@ -162,11 +162,11 @@ func TestOAuthAuthorizationRepositoryConsumeReportsExpiryWithoutMarkingUsed(t *t
 // ListGrantsByUser is only exercised through fakes elsewhere, so this is the one
 // test that proves the wire types scan against a real database. OAuthGrant's
 // redirect_uris and scopes are text[] columns: a []string field has no
-// sql.Scanner and would fail this Scan on the first grant. The test also pins the
-// DISTINCT ON semantics — per client only the most recent consent comes back —
-// and the user_id filter, without which another user's consent could leak into
-// the list.
-func TestOAuthAuthorizationRepositoryListGrantsScansTextArraysAndPicksLatest(t *testing.T) {
+// sql.Scanner and would fail this Scan on the first grant. The test also pins
+// the JOIN against oauth_clients for the display fields, the user_id filter
+// (another user's grant must not leak into the list), and that a disabled
+// client's grant is still listed with an explicit is_active false.
+func TestOAuthAuthorizationRepositoryListGrantsScansTextArraysAndJoinsClient(t *testing.T) {
 	database := setupDatabase(t)
 	user := createUserWithProfile(t, repository.NewUser(database), "grants-scan@njupt.edu.cn")
 	otherUser := createUserWithProfile(t, repository.NewUser(database), "grants-scan-2@njupt.edu.cn")
@@ -206,43 +206,50 @@ func TestOAuthAuthorizationRepositoryListGrantsScansTextArraysAndPicksLatest(t *
 		}
 	}
 
-	// Two consents for client A, older then newer, with different scope sets.
+	// Seed one grant per user-client pair, as the V008 primary key enforces.
 	// created_at carries microsecond precision in PostgreSQL, so truncate the
 	// source values or the round-tripped read-back never matches.
-	older := testAuthorization("code-grant-a-old", firstClient.ID, user.ID, time.Now().Add(5*time.Minute))
-	older.CreatedAt = time.Now().Add(-2 * time.Hour).Truncate(time.Microsecond)
-	older.Scopes = model.StringArray{"openid"}
-	if err := authorizations.Create(context.Background(), older); err != nil {
-		t.Fatalf("Create(older) error = %v", err)
+	now := time.Now()
+	seedGrantA := &model.OAuthGrant{
+		UserID:    user.ID,
+		ClientID:  firstClient.ID,
+		Scopes:    model.StringArray{"openid", "profile"},
+		GrantedAt: now.Add(-1 * time.Hour).Truncate(time.Microsecond),
 	}
-	newer := testAuthorization("code-grant-a-new", firstClient.ID, user.ID, time.Now().Add(5*time.Minute))
-	newer.CreatedAt = time.Now().Add(-1 * time.Hour).Truncate(time.Microsecond)
-	newer.Scopes = model.StringArray{"openid", "profile"}
-	if err := authorizations.Create(context.Background(), newer); err != nil {
-		t.Fatalf("Create(newer) error = %v", err)
+	if err := database.Create(seedGrantA).Error; err != nil {
+		t.Fatalf("Create(grant A) error = %v", err)
 	}
-	// Scopes come from the authorization row (what the user actually consented to),
+	// Scopes come from the grant row (what the user actually consented to),
 	// not the client registration — the grant's scopes are the granted set.
-	only := testAuthorization("code-grant-b", secondClient.ID, user.ID, time.Now().Add(5*time.Minute))
-	only.CreatedAt = time.Now().Add(-30 * time.Minute).Truncate(time.Microsecond)
-	only.Scopes = model.StringArray{"openid", "email"}
-	if err := authorizations.Create(context.Background(), only); err != nil {
-		t.Fatalf("Create(client B) error = %v", err)
+	seedGrantB := &model.OAuthGrant{
+		UserID:    user.ID,
+		ClientID:  secondClient.ID,
+		Scopes:    model.StringArray{"openid", "email"},
+		GrantedAt: now.Add(-30 * time.Minute).Truncate(time.Microsecond),
 	}
-	// Another user consents to client A *after* user's newest consent, with a
-	// different scope set. If the user_id filter regressed, DISTINCT ON would
-	// surface this row instead and grantA's scopes / last_authorized_at would flip.
-	intruder := testAuthorization("code-grant-a-intruder", firstClient.ID, otherUser.ID, time.Now().Add(5*time.Minute))
-	intruder.CreatedAt = time.Now().Add(-30 * time.Minute).Truncate(time.Microsecond)
-	intruder.Scopes = model.StringArray{"openid"}
-	if err := authorizations.Create(context.Background(), intruder); err != nil {
-		t.Fatalf("Create(other user consent) error = %v", err)
+	if err := database.Create(seedGrantB).Error; err != nil {
+		t.Fatalf("Create(grant B) error = %v", err)
 	}
-	// A consent to the disabled client C, so the list has a grant to show there.
-	disabledGrant := testAuthorization("code-grant-c", disabledClient.ID, user.ID, time.Now().Add(5*time.Minute))
-	disabledGrant.CreatedAt = time.Now().Add(-15 * time.Minute).Truncate(time.Microsecond)
-	if err := authorizations.Create(context.Background(), disabledGrant); err != nil {
-		t.Fatalf("Create(client C consent) error = %v", err)
+	// A grant to the disabled client C, so the list has an entry to show there.
+	seedGrantC := &model.OAuthGrant{
+		UserID:    user.ID,
+		ClientID:  disabledClient.ID,
+		Scopes:    model.StringArray{"openid"},
+		GrantedAt: now.Add(-15 * time.Minute).Truncate(time.Microsecond),
+	}
+	if err := database.Create(seedGrantC).Error; err != nil {
+		t.Fatalf("Create(grant C) error = %v", err)
+	}
+	// Another user's grant to client A: if the user_id filter regressed, the
+	// list would gain a row it must not show.
+	intruder := &model.OAuthGrant{
+		UserID:    otherUser.ID,
+		ClientID:  firstClient.ID,
+		Scopes:    model.StringArray{"openid"},
+		GrantedAt: now.Add(-30 * time.Minute).Truncate(time.Microsecond),
+	}
+	if err := database.Create(intruder).Error; err != nil {
+		t.Fatalf("Create(other user grant) error = %v", err)
 	}
 
 	grants, err := authorizations.ListGrantsByUser(context.Background(), user.ID)
@@ -266,14 +273,13 @@ func TestOAuthAuthorizationRepositoryListGrantsScansTextArraysAndPicksLatest(t *
 	if len(grantA.RedirectURIs) != 1 || grantA.RedirectURIs[0] != "https://a.test/cb" {
 		t.Fatalf("grantA.RedirectURIs = %v, want the scanned text[]", grantA.RedirectURIs)
 	}
-	// ...the DISTINCT ON must have surfaced the newer consent's scopes...
+	// ...scopes come from the grant row, not the client registration...
 	if len(grantA.Scopes) != 2 || grantA.Scopes[0] != "openid" || grantA.Scopes[1] != "profile" {
-		t.Fatalf("grantA.Scopes = %v, want the newer authorization's scopes", grantA.Scopes)
+		t.Fatalf("grantA.Scopes = %v, want the granted set", grantA.Scopes)
 	}
-	// ...and the user_id filter must have kept the other user's later consent out.
-	if !grantA.LastAuthorizedAt.Equal(newer.CreatedAt) {
-		t.Fatalf("grantA.LastAuthorizedAt = %v, want the user's own newer consent %v (other user's consent leaked)",
-			grantA.LastAuthorizedAt, newer.CreatedAt)
+	// ...and the user_id filter must have kept the other user's grant out.
+	if !grantA.LastAuthorizedAt.Equal(seedGrantA.GrantedAt) {
+		t.Fatalf("grantA.LastAuthorizedAt = %v, want the grant time %v", grantA.LastAuthorizedAt, seedGrantA.GrantedAt)
 	}
 
 	var grantB *repository.OAuthGrant
@@ -303,6 +309,107 @@ func TestOAuthAuthorizationRepositoryListGrantsScansTextArraysAndPicksLatest(t *
 	}
 	if grantC.IsActive == nil || *grantC.IsActive {
 		t.Fatalf("grantC.IsActive = %v, want an explicit false", grantC.IsActive)
+	}
+}
+
+// CreateWithGrant persists the code and the consent grant in one transaction.
+// Re-consenting the same client upserts the grant row rather than duplicating
+// it, so the authorized-apps list keeps exactly one entry per client, carrying
+// the latest scopes and grant time.
+func TestOAuthAuthorizationRepositoryCreateWithGrantUpserts(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "authz-grant@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	authorizations := repository.NewOAuthAuthorization(database)
+
+	// First consent: code and grant row created together.
+	first := testAuthorization("code-grant-first", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	first.CreatedAt = time.Now().Truncate(time.Microsecond)
+	first.Scopes = model.StringArray{"openid"}
+	if err := authorizations.CreateWithGrant(context.Background(), first); err != nil {
+		t.Fatalf("CreateWithGrant(first) error = %v", err)
+	}
+
+	// Re-consenting the same client upserts the grant: still one row, scopes and
+	// grant time refreshed to the new decision. The code, by contrast, is a
+	// fresh single-use row every consent.
+	second := testAuthorization("code-grant-second", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	second.CreatedAt = first.CreatedAt.Add(1 * time.Minute)
+	second.ExpiresAt = second.CreatedAt.Add(5 * time.Minute)
+	second.Scopes = model.StringArray{"openid", "profile"}
+	if err := authorizations.CreateWithGrant(context.Background(), second); err != nil {
+		t.Fatalf("CreateWithGrant(second) error = %v", err)
+	}
+
+	var count int64
+	if err := database.Model(&model.OAuthGrant{}).
+		Where("user_id = ? AND client_id = ?", user.ID, client.ID).
+		Count(&count).Error; err != nil {
+		t.Fatalf("count grants: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("grant rows = %d, want 1 (upsert, not duplicate)", count)
+	}
+
+	var grant model.OAuthGrant
+	if err := database.Where("user_id = ? AND client_id = ?", user.ID, client.ID).
+		First(&grant).Error; err != nil {
+		t.Fatalf("read grant: %v", err)
+	}
+	if len(grant.Scopes) != 2 || grant.Scopes[0] != "openid" || grant.Scopes[1] != "profile" {
+		t.Fatalf("grant scopes = %v, want the newer consent's set", grant.Scopes)
+	}
+	if !grant.GrantedAt.Equal(second.CreatedAt) {
+		t.Fatalf("grant.GrantedAt = %v, want the newer consent's time %v", grant.GrantedAt, second.CreatedAt)
+	}
+
+	// The authorized-apps list reflects the upserted grant.
+	grants, err := authorizations.ListGrantsByUser(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("ListGrantsByUser() error = %v", err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("grants = %d, want 1", len(grants))
+	}
+	if len(grants[0].Scopes) != 2 || grants[0].Scopes[0] != "openid" || grants[0].Scopes[1] != "profile" {
+		t.Fatalf("list scopes = %v, want the newer consent's set", grants[0].Scopes)
+	}
+}
+
+// DeleteByUserClient drops both the consent grant and any in-flight
+// authorization codes for the user-client pair, so a revoke both removes the
+// application from the authorized-apps list and makes an unredeemed code
+// unexchangeable.
+func TestOAuthAuthorizationRepositoryDeleteByUserClientClearsBothTables(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "authz-revoke@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	authorizations := repository.NewOAuthAuthorization(database)
+
+	authorization := testAuthorization("code-revoke-grant", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	authorization.CreatedAt = time.Now().Truncate(time.Microsecond)
+	if err := authorizations.CreateWithGrant(context.Background(), authorization); err != nil {
+		t.Fatalf("CreateWithGrant() error = %v", err)
+	}
+
+	if err := authorizations.DeleteByUserClient(context.Background(), user.ID, client.ID); err != nil {
+		t.Fatalf("DeleteByUserClient() error = %v", err)
+	}
+
+	var grantCount int64
+	if err := database.Model(&model.OAuthGrant{}).
+		Where("user_id = ? AND client_id = ?", user.ID, client.ID).
+		Count(&grantCount).Error; err != nil {
+		t.Fatalf("count grants: %v", err)
+	}
+	if grantCount != 0 {
+		t.Fatalf("grant rows = %d, want 0 after revoke", grantCount)
+	}
+
+	// The in-flight code is gone too: consuming it must report not-found rather
+	// than issuing a token from a code the revoke was supposed to kill.
+	if _, err := authorizations.Consume(context.Background(), "code-revoke-grant", time.Now()); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("Consume() after revoke = %v, want ErrNotFound", err)
 	}
 }
 

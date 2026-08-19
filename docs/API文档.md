@@ -1497,6 +1497,7 @@ GET /oauth/grants
 **说明**：
 
 - 返回该用户授权过的**不同应用**，每个客户端一行，取最近一次授权记录：`last_authorized_at` 是该用户对该客户端最近一次点击同意的时间，`scopes` 为那次授权的 scope
+- 授权记录是**长效持久化**的（V008 起存于独立的 `oauth_grants` 表，与一次性授权码分离），不会随授权码过期或定时清理消失；同一个应用重复授权是**覆盖**记录而非累积
 - 客户端被停用（`is_active: false`）仍会列出——用户需要看到「我授权过但已失效」的应用，而不是凭空消失；此时该客户端的 token 已被停用事务撤销
 - `client_id` 是客户端**主键**（与客户端列表的 `id` 一致，即 `DELETE /oauth/grants/:client_id` 要用的值）；`client_key` 才是客户端对外标识（授权端点与 token 交换里的 `client_id`）
 
@@ -1523,7 +1524,7 @@ DELETE /oauth/grants/:client_id
 **说明**：
 
 - `:client_id` 为客户端主键（`GET /oauth/grants` 返回的 `client_id`）
-- 撤销语义是「断开该应用的访问」：先在同一事务内撤销该用户持有该客户端的全部活跃 Access / Refresh Token 并失效对应 auth-state 缓存，再删除与该客户端的授权历史。应用随即从已授权列表消失，下次使用必须重新走同意页
+- 撤销语义是「断开该应用的访问」：先撤销该用户持有该客户端的全部活跃 Access / Refresh Token 并失效对应 auth-state 缓存，再在一个事务内删除该客户端的授权记录（`oauth_grants`）**和在途授权码**（`oauth_authorizations`）。应用随即从已授权列表消失，下次使用必须重新走同意页；在途授权码一并删除，撤销前几分钟签发的 code 也不会再兑换出新 token
 - 两步各为独立事务，token 撤销在前：即使删除授权历史失败，该应用的访问已被切断（fail-closed），只是列表仍可能短暂显示它
 - 撤销一个从未授权过的客户端返回 `200`（幂等）：用户的诉求「该应用不再有我的授权」已经成立
 - 审计 action 为 `oauth_grant_revoke`（`resource = oauth`）。`resource_id` 是被撤销客户端的主键，`actor_client_id` 是调用方自己的 `azp`：这条 action 的行为主体与被操作对象不是同一个客户端

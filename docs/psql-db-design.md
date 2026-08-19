@@ -353,6 +353,8 @@ V003 是幂等的：重复 apply 为 no-op，带漂移检测（既有行属性�
 
 Authorization Code + PKCE 流程中的短期授权码。一次性使用，过期后定时任务清理。
 
+> **V008 起**：本表只承载「一次性授权码」。用户授权过的应用记录改存 [oauth_grants 授权记录](#oauth_grants-授权记录)，「已授权应用」列表不再以本表为数据源。
+
 > 协议层要求 PKCE S256-only。V001 历史迁移中的 `ck_oauth_authorizations_challenge_method` 仍允许 `plain`，用于保留已发布 schema 的真实状态；V002 迁移已将该约束收紧为仅允许 `S256`。
 
 ```sql
@@ -408,6 +410,37 @@ CREATE INDEX idx_oauth_authorizations_user_client
 ```
 
 > 此表无 `updated_at`。生命周期为"创建 → 标记已用"。已使用 + 已过期的 code 由 API 内 retention worker 统一清理；V006 增设全量 `expires_at` 索引 `idx_oauth_authorizations_expires_at_all`，过期行按索引定位，无需 seq scan
+
+## oauth_grants 授权记录
+
+V008 新增。记录用户在同意页**授权过哪些应用**（consent history），是「已授权应用」列表
+（`GET /oauth/grants`）的唯一数据源。**长效数据**：由 consent 时与授权码在同一个事务里
+upsert，撤销时删除，retention worker 永不清理（见[清理策略](#清理策略说明)）。
+
+```sql
+CREATE TABLE oauth_grants (
+    user_id    BIGINT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+    client_id  BIGINT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+    scopes     TEXT[] NOT NULL,
+    granted_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (user_id, client_id)
+);
+CREATE INDEX idx_oauth_grants_client_id ON oauth_grants(client_id);
+```
+
+|字段名|说明|
+|---|---|
+|`user_id`||
+|`client_id`||
+|`scopes`|该用户**实际同意**的 scope（consent 时点），不是客户端注册的 scope|
+|`granted_at`|最近一次同意时间（即列表的 `last_authorized_at`）|
+
+> 每 user×client 一行：重复 consent 是 upsert，刷新 `scopes` / `granted_at`，不累积历史
+> 行。历史审计在 `audit_logs`（`oauth_authorize` granted / `oauth_grant_revoke`，保留 90 天），
+> 本表只承载当前态。列表 JOIN `oauth_clients` 实时取展示字段（`client_name` / `is_active`
+> 等），不落地进 grant 行；disabled client 的 grant 照列。撤销（`DELETE /oauth/grants/:client_id`）
+> 在删除本表行的同时删除 `oauth_authorizations` 行——后者杀掉在途未兑换授权码，否则撤销
+> 前几分钟内签发的 code 仍可兑换出新 token。
 
 ## oauth_access_tokens 元数据
 
@@ -756,6 +789,10 @@ oauth_authorizations.family_id
 | `oauth_access_tokens` | 已过期元数据 | `expires_at` + 24h | 远宽于默认 1h 的 access token TTL，且校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的配置。原因：中间件对「JTI 不存在」与「已撤销」返回同一个 401，若在 JWT 仍处于 `exp` 内时删掉元数据，仅仅过期的 token 会被呈现为已撤销——客户端读到的是被强制登出，而不是该去刷新。JWT 校验器没有 leeway 可依赖，这些行又很小，窗口宽一点很便宜 |
 | `oauth_refresh_tokens` | 已撤销、已过期，且 `sequence > 0` | `expires_at` + 24h | **必须保留每个 family 的 sequence-0 行**：`FindFamilyOriginCreatedAt` 靠它给 ID Token 的 `auth_time` 定时间，而该行从首次轮换起就带有 `revoked_at`。只要 family 还在轮换，它会活得比自己的 `expires_at` 更久；删掉会让刷新流程撤销整个 family 并返回 500——即用户被强制登出。每个 family 长期留一行，是换取 `auth_time` 准确的成本 |
 | `audit_logs` | 超过保留期 | `created_at` + 90d | 90 天（PRD §9）是**默认值**：审计日志在这里属运维用途而非合规强制，可调大以保留更多历史，也可收紧至 30 天下限；低于下限启动时拒绝，避免误配到「事故排查时相关记录已被删」的程度 |
+
+`oauth_grants` 不在此列，且**刻意永不清理**：授权记录是长效 consent history（当前态，历史
+审计在 `audit_logs`），不是一次性凭据。把它加进这张表会重新制造 V008 之前「已授权应用列表
+随授权码被清空」的旧 bug——后续编辑请勿添加。
 
 `token_blacklist_outbox` 不在此列：`sessionworker.TokenBlacklist` 已负责清理它，再加一个
 清理者只会让两者竞争同一张表。
