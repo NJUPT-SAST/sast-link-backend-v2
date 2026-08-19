@@ -167,15 +167,28 @@ func (r *IdentityRepository) UpdateProviderCredentials(
 	if identityID <= 0 {
 		return ErrInvalidArgument
 	}
-	fields := map[string]any{
-		"access_token":     update.AccessToken,
-		"refresh_token":    update.RefreshToken,
-		"token_expires_at": update.TokenExpiresAt,
+	// Nil means "the provider did not return this field", which must leave the
+	// stored value alone: a login callback usually returns no refresh token (the
+	// provider only issues one on first authorization), and blanking the column
+	// would throw away the still-valid credential. This mirrors the IdentityData
+	// nil-is-keep semantics, so every column of this update means the same thing.
+	fields := map[string]any{}
+	if update.AccessToken != nil {
+		fields["access_token"] = *update.AccessToken
+	}
+	if update.RefreshToken != nil {
+		fields["refresh_token"] = *update.RefreshToken
+	}
+	if update.TokenExpiresAt != nil {
+		fields["token_expires_at"] = *update.TokenExpiresAt
 	}
 	// A nil IdentityData means the provider returned nothing worth storing;
 	// leave the column untouched rather than blanking it.
 	if update.IdentityData != nil {
 		fields["identity_data"] = update.IdentityData
+	}
+	if len(fields) == 0 {
+		return nil
 	}
 	result := r.database.WithContext(ctx).
 		Model(&model.Identity{}).

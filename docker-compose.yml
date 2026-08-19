@@ -90,7 +90,10 @@ services:
       SESSION_COOKIE_PATH: ${SESSION_COOKIE_PATH:-/}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       LOG_LEVEL: ${LOG_LEVEL:-warn}
-      GOMEMLIMIT: ${GOMEMLIMIT:-900MiB}
+      # Kept below the 512M container limit (deploy.resources.limits.memory)
+      # with headroom for non-heap memory: a GOMEMLIMIT above the cgroup limit
+      # stops the GC from tightening and gets the container OOM-killed.
+      GOMEMLIMIT: ${GOMEMLIMIT:-400MiB}
       DB_HOST: postgres
       DB_PORT: "5432"
       DB_USER: ${DB_USER:-sastlink}
@@ -114,7 +117,7 @@ services:
       INTERNAL_OAUTH_CLIENT_ID: ${INTERNAL_OAUTH_CLIENT_ID:-sast-link-web}
       OAUTH_CONSENT_URL: ${OAUTH_CONSENT_URL}
       OAUTH_CODE_TTL: ${OAUTH_CODE_TTL:-5m}
-      OAUTH_AUTHORIZE_REQUEST_TTL: ${OAUTH_AUTHORIZE_REQUEST_TTL:-10m}
+      OAUTH_AUTHORIZE_REQUEST_TTL: ${OAUTH_AUTHORIZE_REQUEST_TTL:-20m}
       # Third-party login: SAST Link acting as an OAuth *client*, the opposite
       # direction from the provider settings above. Both providers default to
       # off; a disabled one needs no credentials. Enabling either makes

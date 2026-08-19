@@ -10,14 +10,11 @@ import (
 const (
 	actionCreateClient = "admin_oauth_client_create"
 	actionUpdateClient = "admin_oauth_client_update"
-	// Both suppressions are needed and neither is redundant: golangci-lint's gosec
-	// linter reads //nolint, while the standalone gosec binary in the security
-	// workflow only honours #nosec, so dropping either one turns G101 back on in
-	// one of the two places. The finding itself is the name: G101 matches the
-	// "Secret" in the identifier, and this is the audit action string written to
-	// audit_logs.action, not a credential.
-	//nolint:gosec // G101 trips on the "Secret" in the name; this is an audit action string, not a credential.
-	actionRotateClientSecret = "admin_oauth_client_rotate_secret" // #nosec G101
+	// #nosec G101 -- G101 matches the "Secret" in the identifier, not a credential:
+	// this is the audit action string written to audit_logs.action. The standalone
+	// gosec binary in the security workflow and golangci-lint's gosec linter both
+	// honour #nosec, so this one directive covers both scanners.
+	actionRotateClientSecret = "admin_oauth_client_rotate_secret"
 	actionDeleteClient       = "admin_oauth_client_delete"
 )
 

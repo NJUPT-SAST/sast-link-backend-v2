@@ -828,3 +828,21 @@ func TestCreateClientAuditOmitsSecret(t *testing.T) {
 func boolPtr(value bool) *bool { return &value }
 
 func stringPtr(value string) *string { return &value }
+
+// A client row that vanished between the read and the write is audited like
+// every other rejection — the trail is how an incident review finds the
+// concurrent delete that raced the update.
+func TestUpdateClientAuditsConcurrentDelete(t *testing.T) {
+	h := newHarness(t)
+	h.clients.findResult = activeClient(5)
+	h.clients.updateErr = repository.ErrNotFound
+
+	_, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 5, AdminUserID: 99, ActorClientID: "ops-tool-delegate",
+		ClientName: func() *string { name := "renamed"; return &name }(),
+	})
+	assertKind(t, err, KindNotFound)
+	if len(h.audit.entries) != 1 || h.audit.entries[0].Success == nil || *h.audit.entries[0].Success {
+		t.Fatalf("audit entries = %+v, want one failed update row", h.audit.entries)
+	}
+}

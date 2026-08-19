@@ -44,6 +44,11 @@ type Handler struct {
 	// third-party login also establishes the browser-level session. Nil in tests
 	// that don't exercise the cookie flow.
 	Cookies *middleware.SessionCookie
+	// StateCookie writes the login-CSRF state cookie at authorize time and reads
+	// it back at callback time. Nil disables the defense — tests that predate it
+	// or deployments that never wired it would fail every third-party login
+	// closed, so wiring it in runtime.go is mandatory for production.
+	StateCookie *middleware.SessionCookie
 }
 
 func (h Handler) now() time.Time {
@@ -51,6 +56,19 @@ func (h Handler) now() time.Time {
 		return h.Clock.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+// readStateCookie returns the login-CSRF state cookie value, or an empty string
+// when the cookie is absent or the handler is not wired to write it.
+func (h Handler) readStateCookie(c *gin.Context) string {
+	if h.StateCookie == nil || strings.TrimSpace(h.StateCookie.Name) == "" {
+		return ""
+	}
+	value, err := c.Cookie(h.StateCookie.Name)
+	if err != nil {
+		return ""
+	}
+	return value
 }
 
 // RegisterRoutes mounts the third-party OAuth endpoints.
@@ -89,6 +107,12 @@ func (h Handler) authorize(name model.LoginMethod) gin.HandlerFunc {
 			response.Error(c, mapServiceError(err))
 			return
 		}
+		// The login-CSRF binding: the state digest cookie ties this callback to
+		// the browser that started the authorization, so a state an attacker
+		// started cannot complete here.
+		if h.StateCookie != nil {
+			h.StateCookie.Set(c, result.StateDigest, result.StateTTL)
+		}
 		// 302 rather than 307: this is a plain GET with no body to preserve, and
 		// 302 is what every OAuth client expects here.
 		c.Redirect(http.StatusFound, result.AuthorizeURL)
@@ -104,15 +128,23 @@ func (h Handler) authorize(name model.LoginMethod) gin.HandlerFunc {
 func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		result, err := h.Service.Callback(c.Request.Context(), oauthlogin.CallbackInput{
-			Provider:  name,
-			Code:      c.Query("code"),
-			State:     c.Query("state"),
-			ClientIP:  c.ClientIP(),
-			UserAgent: c.Request.UserAgent(),
+			Provider:    name,
+			Code:        c.Query("code"),
+			State:       c.Query("state"),
+			ClientIP:    c.ClientIP(),
+			UserAgent:   c.Request.UserAgent(),
+			StateCookie: h.readStateCookie(c),
 		})
 		if err != nil {
+			// The state is consumed either way; the cookie pairing it is spent too.
+			if h.StateCookie != nil {
+				h.StateCookie.Clear(c)
+			}
 			h.redirectFailure(c, err)
 			return
+		}
+		if h.StateCookie != nil {
+			h.StateCookie.Clear(c)
 		}
 
 		target, parseErr := url.Parse(result.Redirect)

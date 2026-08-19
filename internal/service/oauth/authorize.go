@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -33,9 +34,6 @@ const (
 	// in a column but is held in the Redis stash and reflected into a Location
 	// header, so it needs a cap of its own.
 	maxStateLength = 512
-	// An S256 challenge is always 43 base64url characters. A shorter value cannot be
-	// a SHA-256 digest, so it is rejected up front rather than at redemption.
-	pkceS256ChallengeLength = 43
 )
 
 // Authorize validates an authorization request and stashes it for the consent page.
@@ -111,7 +109,7 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	// malformed. Checked here rather than only at redemption: the code is minted from
 	// this value, and a challenge no verifier could ever match yields a code that is
 	// guaranteed to fail — better to refuse the request the client can still fix.
-	if len(challenge) != pkceS256ChallengeLength {
+	if !auth.IsValidPKCEChallenge(challenge) {
 		return nil, redirectableError(ErrInvalidRequest, "code_challenge 必须为 43 位 base64url S256 摘要", nil)
 	}
 	nonce := strings.TrimSpace(input.Nonce)
@@ -192,8 +190,23 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 
 	if !input.Approve {
 		// RFC 6749 §4.1.2.1: a refusal is reported to the client as access_denied,
-		// not hidden. The redirect_uri was validated on the first leg, so echoing it
-		// back is safe.
+		// not hidden. The redirect_uri was validated on the first leg — but like
+		// the approval branch below, the refusal re-checks it against the
+		// registration as it stands now: an operator who removed a compromised
+		// callback expects nothing to be delivered there, access_denied included.
+		client, lookupErr := s.Clients.FindActiveByClientID(ctx, payload.ClientID)
+		if errors.Is(lookupErr, repository.ErrNotFound) || errors.Is(lookupErr, repository.ErrInvalidArgument) {
+			s.auditAuthorize(ctx, input, payload, nil, false, errcode.CodeUnauthenticated, "denied_client_gone")
+			return nil, newError(ErrInvalidClient, "客户端已停用，请重新发起授权", nil)
+		}
+		if lookupErr != nil {
+			s.auditAuthorize(ctx, input, payload, nil, false, errcode.CodeInternal, "denied_redirect_unverifiable")
+			return nil, newError(ErrInternal, "查询 OAuth 客户端失败", lookupErr)
+		}
+		if !slices.Contains([]string(client.RedirectURIs), payload.RedirectURI) {
+			s.auditAuthorize(ctx, input, payload, nil, false, errcode.CodeBadRequest, "denied_redirect_removed")
+			return nil, newError(ErrInvalidRequest, "redirect_uri 已不在客户端注册值中，请重新发起授权", nil)
+		}
 		s.auditAuthorize(ctx, input, payload, nil, false, errcode.CodeForbidden, "denied")
 		return &ConsentResult{
 			RedirectURI: errorRedirectURI(payload.RedirectURI, payload.State, ErrorAccessDenied, "用户拒绝授权"),

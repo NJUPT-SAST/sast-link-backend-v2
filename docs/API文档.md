@@ -540,6 +540,8 @@ POST /auth/reset-password
 > **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。两处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 >
 > 回调端点（`/oauth/{github,lark}/callback`）不单独限流：它需要一个有效的一次性 `oauth_state` 才能推进，而该 state 由已限流的授权端点签发。
+>
+> **登录 CSRF 防护**（OAuth 2.0 §10.12）：`GET /oauth/{github,lark}` 响应同时下发 `sl_oauth_state` cookie（HttpOnly、SameSite=Lax、值为 `state` 的 SHA-256 摘要、Path/Secure 与 `sl_session` 相同、有效期与 state TTL 一致）。回调要求浏览器携带与 `state` 匹配的该 cookie，缺失或不匹配按 state 无效处理（重定向到错误页）；state 单次消费，回调结束后 cookie 即清除。
 
 ### 2.1 GitHub 登录
 
@@ -1497,7 +1499,7 @@ GET /oauth/grants
 **说明**：
 
 - 返回该用户授权过的**不同应用**，每个客户端一行，取最近一次授权记录：`last_authorized_at` 是该用户对该客户端最近一次点击同意的时间，`scopes` 为那次授权的 scope
-- 授权记录是**长效持久化**的（V008 起存于独立的 `oauth_grants` 表，与一次性授权码分离），不会随授权码过期或定时清理消失；同一个应用重复授权是**覆盖**记录而非累积
+- 授权记录是**长效持久化**的（V009 起存于独立的 `oauth_grants` 表，与一次性授权码分离），不会随授权码过期或定时清理消失；同一个应用重复授权是**覆盖**记录而非累积
 - 客户端被停用（`is_active: false`）仍会列出——用户需要看到「我授权过但已失效」的应用，而不是凭空消失；此时该客户端的 token 已被停用事务撤销
 - `client_id` 是客户端**主键**（与客户端列表的 `id` 一致，即 `DELETE /oauth/grants/:client_id` 要用的值）；`client_key` 才是客户端对外标识（授权端点与 token 交换里的 `client_id`）
 

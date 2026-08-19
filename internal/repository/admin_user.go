@@ -321,6 +321,14 @@ func (r *UserRepository) UpdateAdminUser(
 	if update.EmailType != nil && update.LoginEmail == nil {
 		return nil, false, fmt.Errorf("%w: email_type cannot be set without login_email", ErrInvalidArgument)
 	}
+	// Closing an account is SoftDeleteAndRevokeSessions' job: it bumps
+	// token_version and revokes every session in the same transaction. Accepting
+	// state=is_deleted here would mark the row deleted while every session stays
+	// live — a silent bypass of the "cut access now" invariant that the handler
+	// layer alone cannot be trusted to always remember.
+	if update.State != nil && *update.State == model.UserStateDeleted {
+		return nil, false, fmt.Errorf("%w: account close must go through SoftDeleteAndRevokeSessions", ErrInvalidArgument)
+	}
 	columns := update.columns()
 	if len(columns) == 0 {
 		return nil, false, fmt.Errorf("%w: update has no fields", ErrInvalidArgument)
@@ -329,6 +337,14 @@ func (r *UserRepository) UpdateAdminUser(
 	var entries []model.BlacklistEntry
 	sessionsRevoked := false
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		// The last-admin advisory lock is taken unconditionally, before the user
+		// row: SoftDeleteAndRevokeSessions takes the same lock first too, so the
+		// two write paths acquire row and advisory locks in one consistent order
+		// (advisory first, row second) and cannot deadlock each other. Admin
+		// edits are rare enough that serializing all of them costs nothing.
+		if err := transaction.Exec("SELECT pg_advisory_xact_lock(?)", adminLockKey).Error; err != nil {
+			return fmt.Errorf("lock admin guard: %w", err)
+		}
 		// Lock the row before reading the role it is being compared against, so the
 		// decision below cannot be made against a value another writer is replacing.
 		var stored model.User

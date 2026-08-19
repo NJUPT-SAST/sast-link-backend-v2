@@ -92,11 +92,12 @@ func (r *OAuthAuthorizationRepository) Consume(
 	ctx context.Context,
 	code string,
 	now time.Time,
-) (*model.OAuthAuthorization, error) {
+) (*model.OAuthAuthorization, int64, error) {
 	if strings.TrimSpace(code) == "" || now.IsZero() {
-		return nil, fmt.Errorf("consume authorization: %w", ErrInvalidArgument)
+		return nil, 0, fmt.Errorf("consume authorization: %w", ErrInvalidArgument)
 	}
 	var authorization model.OAuthAuthorization
+	var userTokenVersion int64
 	var replayed bool
 	var expired bool
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -132,18 +133,30 @@ func (r *OAuthAuthorizationRepository) Consume(
 			return nil
 		}
 		authorization.IsUsed = true
+		// The user's token_version rides the consume transaction as a snapshot: a
+		// bulk revocation (password change, demotion, account close) that commits
+		// after this consume bumps the version, and the token-pair creation below
+		// compares its locked read against this snapshot to refuse the redemption.
+		// Without the snapshot the pair would be created after the revocation and
+		// escape it, exactly like a rotated refresh token.
+		if err := transaction.Model(&model.User{}).
+			Select("token_version").
+			Where("id = ?", authorization.UserID).
+			Scan(&userTokenVersion).Error; err != nil {
+			return fmt.Errorf("read user token version: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if replayed {
-		return &authorization, ErrAuthorizationReplayed
+		return &authorization, userTokenVersion, ErrAuthorizationReplayed
 	}
 	if expired {
-		return &authorization, ErrAuthorizationExpired
+		return &authorization, userTokenVersion, ErrAuthorizationExpired
 	}
-	return &authorization, nil
+	return &authorization, userTokenVersion, nil
 }
 
 // OAuthGrant is one application a user has authorized via the consent screen,

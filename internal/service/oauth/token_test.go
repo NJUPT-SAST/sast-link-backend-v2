@@ -996,3 +996,89 @@ func TestTokenAuthorizationCodeRejectsScopeRevokedAfterConsent(t *testing.T) {
 		t.Fatal("the code survived a rejected redemption and was redeemable again")
 	}
 }
+
+// A bulk revocation (password change, demotion, account close) that commits
+// between the code consume and the token-pair write bumps token_version. The
+// redemption must refuse — minting a pair then would create a session the
+// revocation never saw (the same escape as a rotated refresh token).
+func TestTokenAuthorizationCodeRejectsVersionMovedSinceConsume(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.authorizations.consumeUserVersion = 7 // user's version is 2
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}
+
+// The locked-write half of the same defense: even when the early check passes,
+// a revocation committing between the check and the write must refuse the pair
+// under the user row lock.
+func TestTokenAuthorizationCodeRejectsUserLockVersionMismatch(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.tokens.storedUserVersion = 3 // service passes the consumed snapshot, 2
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}
+
+// The locked-write refuses a redemption whose user row disappeared between the
+// consume and the write.
+func TestTokenAuthorizationCodeRejectsUserLockNotFound(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.tokens.userVersionErr = repository.ErrNotFound
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}
+
+// A client disable that commits between the code consume and the pair write must
+// refuse the pair: the client row lock in the write serializes against the
+// disable's own client-row write, so an in-flight redemption cannot mint a
+// session for a client the console just turned off.
+func TestTokenAuthorizationCodeRejectsInactiveClient(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.tokens.clientErr = repository.ErrClientInactive
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}
+
+// The same shape for a scope narrowing: the code was issued under a scope set
+// the registration no longer holds, so the pair would assert a scope the client
+// does not own.
+func TestTokenAuthorizationCodeRejectsClientScopeNarrowed(t *testing.T) {
+	h := newHarness(t)
+	code := issueCode(t, h, testPublicClientID, "openid profile")
+	h.tokens.clientErr = repository.ErrClientScopeChanged
+
+	_, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+	if err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("Token() error = %v, want invalid_grant", err)
+	}
+	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
+		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}

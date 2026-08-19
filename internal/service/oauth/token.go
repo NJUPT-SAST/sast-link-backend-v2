@@ -50,6 +50,10 @@ func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, err
 func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput) (*TokenResult, error) {
 	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
 	if err != nil {
+		// Client-authentication failures previously left no audit row — a
+		// client_secret sweep against the token endpoint was indistinguishable
+		// from silence.
+		s.auditToken(ctx, nil, input.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeUnauthenticated, "client_auth_failed")
 		return nil, err
 	}
 	if !slices.Contains([]string(client.GrantTypes), grantTypeAuthorizationCode) {
@@ -64,7 +68,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, newError(ErrInvalidRequest, "code_verifier 不能为空", nil)
 	}
 
-	authorization, consumeErr := s.Authorizations.Consume(ctx, code, s.now())
+	authorization, consumedVersion, consumeErr := s.Authorizations.Consume(ctx, code, s.now())
 	switch {
 	case errors.Is(consumeErr, repository.ErrNotFound):
 		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
@@ -122,6 +126,17 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if user.State == model.UserStateDeleted {
 		return nil, newError(ErrInvalidGrant, "账号已注销", nil)
 	}
+	// A bulk revocation (password change, demotion, account close) bumps
+	// token_version in the same transaction that cuts tokens, and the code was
+	// already consumed. If the version moved since the consume, the revocation
+	// happened in between: issuing now would mint a session the revocation never
+	// saw. The write below re-checks under the user row lock, so this early exit
+	// only skips work — the pair cannot land on a stale version either way.
+	if user.TokenVersion != int(consumedVersion) {
+		s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_redeemed_after_revocation")
+		return nil, newError(ErrInvalidGrant, "授权码已失效，请重新发起授权",
+			errors.New("user token version changed since code consume"))
+	}
 
 	// The code's scopes are re-checked against the registration as it stands now, the
 	// same live re-check Consent applies to a stash and this function already applies
@@ -144,9 +159,15 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	// A capability family's first refresh token is born at this moment, so its
 	// expiry is its lifetime cap: the rotation leg later clamps every refresh to
 	// origin+cap, and clamping here keeps the very first token inside it too.
+	// The access token is clamped the same way, or a redemption at the cap's edge
+	// would carry a full access TTL past the delegation's boundary.
 	refreshTTL := s.refreshTTL()
+	accessTTL := s.accessTTL()
 	if lifetime := s.capabilityRefreshLifetime(scopes); lifetime > 0 && lifetime < refreshTTL {
 		refreshTTL = lifetime
+		if accessTTL > lifetime {
+			accessTTL = lifetime
+		}
 	}
 	pair, err := s.issuer().Issue(tokenissue.Request{
 		User:       user,
@@ -154,7 +175,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		Sequence:   0,
 		FamilyID:   familyID,
 		Scopes:     scopes,
-		AccessTTL:  s.accessTTL(),
+		AccessTTL:  accessTTL,
 		RefreshTTL: refreshTTL,
 	})
 	if err != nil {
@@ -177,7 +198,16 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 			codeAudit = nil
 		}
 	}
-	if createErr := s.Tokens.CreatePairWithAudit(ctx, pair.Access, pair.Refresh, codeAudit); createErr != nil {
+	if createErr := s.Tokens.CreatePairWithUserAndClientLock(ctx, user.ID, client.ID, consumedVersion, pair.Access, pair.Refresh, codeAudit); createErr != nil {
+		if errors.Is(createErr, repository.ErrUserStateChanged) || errors.Is(createErr, repository.ErrClientInactive) ||
+			errors.Is(createErr, repository.ErrClientScopeChanged) || errors.Is(createErr, repository.ErrNotFound) {
+			// A revocation committed between the consume and this write (the
+			// account vanished or its version moved, or the client was disabled /
+			// narrowed in scope / deleted): the pair must not land, and the answer
+			// matches an unknown code so the endpoint stays non-oracular.
+			s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_redeemed_after_revocation")
+			return nil, newError(ErrInvalidGrant, "授权码已失效，请重新发起授权", createErr)
+		}
 		return nil, newError(ErrInternal, "持久化 Token Pair 失败", createErr)
 	}
 
@@ -202,6 +232,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*TokenResult, error) {
 	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
 	if err != nil {
+		s.auditToken(ctx, nil, input.ClientID, grantTypeRefreshToken, input, false, errcode.CodeUnauthenticated, "client_auth_failed")
 		return nil, err
 	}
 	if !slices.Contains([]string(client.GrantTypes), grantTypeRefreshToken) {

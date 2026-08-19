@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 )
@@ -45,7 +46,7 @@ func (h Handler) ListUsers(c *gin.Context) {
 
 // GetUser returns one account with its profile and bindings.
 func (h Handler) GetUser(c *gin.Context) {
-	userID, ok := parsePositiveID(c.Param("id"))
+	userID, ok := web.ParsePositiveID(c.Param("id"))
 	if !ok {
 		// A non-numeric or non-positive segment names no user, so it gets the same 404
 		// as a missing one rather than a 400 that distinguishes the two.
@@ -87,7 +88,7 @@ func (h Handler) UpdateUser(c *gin.Context) {
 		response.Error(c, internalError())
 		return
 	}
-	userID, ok := parsePositiveID(c.Param("id"))
+	userID, ok := web.ParsePositiveID(c.Param("id"))
 	if !ok {
 		response.Error(c, userNotFound())
 		return
@@ -224,7 +225,7 @@ func (h Handler) DeleteUser(c *gin.Context) {
 		response.Error(c, internalError())
 		return
 	}
-	userID, ok := parsePositiveID(c.Param("id"))
+	userID, ok := web.ParsePositiveID(c.Param("id"))
 	if !ok {
 		response.Error(c, userNotFound())
 		return
@@ -250,7 +251,7 @@ func (h Handler) RestoreUser(c *gin.Context) {
 		response.Error(c, internalError())
 		return
 	}
-	userID, ok := parsePositiveID(c.Param("id"))
+	userID, ok := web.ParsePositiveID(c.Param("id"))
 	if !ok {
 		response.Error(c, userNotFound())
 		return

@@ -45,7 +45,7 @@ func (OAuthAuthorization) TableName() string {
 }
 
 // OAuthGrant records that a user authorized one application via the consent
-// screen. One row per user-client pair (V008), upserted on each consent and
+// screen. One row per user-client pair (V009), upserted on each consent and
 // deleted on revocation. Unlike OAuthAuthorization it is long-lived: the
 // retention worker never sweeps it.
 type OAuthGrant struct {
@@ -55,7 +55,7 @@ type OAuthGrant struct {
 	GrantedAt time.Time
 }
 
-// TableName returns the exact V008 table name for OAuthGrant.
+// TableName returns the exact V009 table name for OAuthGrant.
 func (OAuthGrant) TableName() string {
 	return "oauth_grants"
 }

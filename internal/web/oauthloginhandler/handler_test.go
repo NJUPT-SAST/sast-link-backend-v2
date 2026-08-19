@@ -595,3 +595,90 @@ func TestAuthorizeMapsRateLimitTo429(t *testing.T) {
 		t.Fatalf("status = %d, want 429 (body: %s)", recorder.Code, recorder.Body.String())
 	}
 }
+
+// The authorize leg writes the login-CSRF state cookie, so the callback can
+// prove it completes in the browser that started the authorization.
+func TestAuthorizeSetsStateCookie(t *testing.T) {
+	service := &fakeService{authorizeResult: &oauthlogin.AuthorizeResult{
+		AuthorizeURL: "https://github.test/authorize?state=os_abc",
+		State:        "os_abc",
+		StateDigest:  "deadbeef",
+		StateTTL:     10 * time.Minute,
+	}}
+	stateCookie := &middleware.SessionCookie{
+		Name: "sl_oauth_state", Path: "/v2", Secure: true, SameSite: http.SameSiteLaxMode,
+	}
+	router := newTestRouter(Handler{Service: service, StateCookie: stateCookie}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/github", nil))
+
+	response := recorder.Result()
+	defer response.Body.Close()
+	cookies := response.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("Set-Cookie count = %d, want the state cookie", len(cookies))
+	}
+	cookie := cookies[0]
+	if cookie.Name != "sl_oauth_state" || cookie.Value != "deadbeef" {
+		t.Fatalf("state cookie = %q=%q, want sl_oauth_state=deadbeef", cookie.Name, cookie.Value)
+	}
+	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || !cookie.Secure {
+		t.Fatalf("state cookie attributes = %+v, want HttpOnly, SameSite=Lax, Secure", cookie)
+	}
+	if cookie.MaxAge != 600 {
+		t.Fatalf("state cookie Max-Age = %d, want the state TTL in seconds", cookie.MaxAge)
+	}
+}
+
+// The callback presents the cookie back to the service and clears it — the
+// state is consumed either way, so the pairing is spent.
+func TestCallbackPassesStateCookieAndClearsIt(t *testing.T) {
+	service := &fakeService{callbackResult: &oauthlogin.CallbackResult{
+		Bound:     true,
+		LoginCode: "lc_abc123",
+		Redirect:  "https://link.sast.fun/callback",
+	}}
+	stateCookie := &middleware.SessionCookie{
+		Name: "sl_oauth_state", Path: "/v2", Secure: true, SameSite: http.SameSiteLaxMode,
+	}
+	router := newTestRouter(Handler{Service: service, StateCookie: stateCookie}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=provider-code&state=os_abc", nil)
+	// #nosec G124 -- test fixture: a browser callback request, not a cookie this
+	// service writes.
+	request.AddCookie(&http.Cookie{Name: "sl_oauth_state", Value: "deadbeef"})
+	router.ServeHTTP(recorder, request)
+
+	if service.callbackInput.StateCookie != "deadbeef" {
+		t.Fatalf("callback StateCookie = %q, want the cookie value", service.callbackInput.StateCookie)
+	}
+	response := recorder.Result()
+	defer response.Body.Close()
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "sl_oauth_state" && cookie.MaxAge >= 0 {
+			t.Fatalf("state cookie was not cleared: Max-Age = %d", cookie.MaxAge)
+		}
+	}
+}
+
+// Without the state cookie wired, the handler passes an empty cookie value —
+// the service refuses the callback rather than silently dropping the defense.
+func TestCallbackWithoutStateCookieWirePassesEmptyValue(t *testing.T) {
+	service := &fakeService{callbackResult: &oauthlogin.CallbackResult{
+		Bound:     true,
+		LoginCode: "lc_abc123",
+		Redirect:  "https://link.sast.fun/callback",
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=provider-code&state=os_abc", nil))
+
+	if service.callbackInput.StateCookie != "" {
+		t.Fatalf("callback StateCookie = %q, want empty when the cookie is not wired", service.callbackInput.StateCookie)
+	}
+}

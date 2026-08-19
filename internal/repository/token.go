@@ -20,6 +20,23 @@ const tokenFamilyAdvisoryLockNamespace int32 = 0x53415354
 // family that already contains revoked token metadata.
 var ErrTokenFamilyRevoked = errors.New("token family is revoked")
 
+// ErrUserStateChanged indicates that the owning user's token_version no longer
+// matches the snapshot a caller captured before the write: a bulk revocation
+// (password change, demotion, account close) committed in between, so the
+// pending token pair must not be created — it would outlive the revocation.
+var ErrUserStateChanged = errors.New("repository: user token version changed")
+
+// ErrClientInactive indicates that the client the pending authorization was
+// issued to is no longer active: a disable committed in between, so the pending
+// token pair must not be created — it would outlive the disable.
+var ErrClientInactive = errors.New("repository: OAuth client is no longer active")
+
+// ErrClientScopeChanged indicates that the client's scopes no longer contain
+// the pair's scopes: an administrator narrowed the registration in between, so
+// the pending token pair must not be created — it would assert a scope the
+// client no longer holds.
+var ErrClientScopeChanged = errors.New("repository: OAuth client scopes no longer contain the pair's scopes")
+
 // refreshGracePeriod distinguishes a benign concurrent refresh from a true
 // replay. Two tabs refreshing the same family land here: the first rotation
 // revokes the presented token, the second sees revoked_at. Within this window
@@ -111,6 +128,82 @@ func (r *TokenRepository) CreatePairWithAudit(
 		if audit != nil {
 			if err := transaction.Create(audit).Error; err != nil {
 				return fmt.Errorf("create login audit: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// CreatePairWithUserAndClientLock persists a token pair inside a transaction
+// that first locks the owning user's row and the issuing client's row, verifying
+// the user's token_version still matches expectedTokenVersion and that the client
+// is still active with scopes containing the pair's.
+//
+// The authorization-code redemption uses this: the code was consumed in its own
+// transaction (so a failed verification still burns it), and a bulk revocation
+// committing between the consume and this write cuts the state the code was
+// issued under. The user row serializes against the revocations that bump
+// token_version (password change, demotion, account close); the client row
+// serializes against the revocations that rewrite the registration (disable,
+// scope narrowing), because UpdateAndRevoke holds the client-row lock for its
+// whole transaction. Either this write lands first and the revocation cuts the
+// pair like every other token, or the revocation landed first and one of the
+// checks below refuses the pair — the redemption cannot mint a session that
+// outlives a revocation that already happened.
+func (r *TokenRepository) CreatePairWithUserAndClientLock(
+	ctx context.Context,
+	userID int64,
+	clientID int64,
+	expectedTokenVersion int64,
+	access *model.OAuthAccessToken,
+	refresh *model.OAuthRefreshToken,
+	audit *model.AuditLog,
+) error {
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var locked model.User
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("token_version").
+			Where("id = ?", userID).
+			First(&locked).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock user for pair creation: %w", err)
+		}
+		if int64(locked.TokenVersion) != expectedTokenVersion {
+			return ErrUserStateChanged
+		}
+		// The client row is locked FOR UPDATE so the checks below serialize
+		// against UpdateAndRevoke's own client-row write: a disable or scope
+		// narrowing that committed before this lock is visible here and refuses
+		// the pair, while one that commits after it lets its revocation cut the
+		// pair once it lands. A deleted client leaves no row at all (ErrNotFound).
+		var client model.OAuthClient
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("is_active", "scopes").
+			Where("id = ?", clientID).
+			First(&client).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock client for pair creation: %w", err)
+		}
+		if client.IsActive == nil || !*client.IsActive {
+			return ErrClientInactive
+		}
+		contained, err := scope.ContainsAll([]string(client.Scopes), []string(access.Scopes))
+		if err != nil {
+			return fmt.Errorf("check client scopes for pair creation: %w", err)
+		}
+		if !contained {
+			return ErrClientScopeChanged
+		}
+		if err := createTokenPairInTransaction(transaction, access, refresh); err != nil {
+			return err
+		}
+		if audit != nil {
+			if err := transaction.Create(audit).Error; err != nil {
+				return fmt.Errorf("create pair audit: %w", err)
 			}
 		}
 		return nil
@@ -313,6 +406,18 @@ func (r *TokenRepository) rotateRefreshToken(
 				newRefresh.ExpiresAt = capDeadline
 			}
 		}
+		// The access token is clamped to the same deadline: a refresh at the cap's
+		// edge would otherwise mint a fully-lifetime access token that outlives
+		// the delegation by up to one access TTL. Only a strictly positive
+		// remainder is reachable here — a family whose cap is already in the past
+		// was cut by the familyExpired guard above — so the rotated access is
+		// simply shorter-lived than requested and the pair is returned to the
+		// client as a normal success; nothing authenticates past the cap.
+		if maxLifetime > 0 {
+			if capDeadline := originCreatedAt.Add(maxLifetime); !newAccess.ExpiresAt.Before(capDeadline) {
+				newAccess.ExpiresAt = capDeadline
+			}
+		}
 
 		result := transaction.Model(&model.OAuthRefreshToken{}).
 			Where("id = ? AND revoked_at IS NULL", current.ID).
@@ -389,6 +494,27 @@ func validateRefreshRotation(
 		return fmt.Errorf("%w: rotated token scopes do not match current refresh token", ErrInvalidArgument)
 	}
 	return nil
+}
+
+// lockLiveTokenFamilies takes the family advisory lock on every live refresh
+// family matching the caller-supplied predicate, in family_id order, inside the
+// caller's transaction.
+//
+// Bulk revocations revoke by user/client without knowing the families up front,
+// while refresh rotation serializes per family through lockTokenFamily. Without
+// this lock a rotation that commits between the bulk UPDATE's statement snapshot
+// and its row-lock wait would escape the revocation: the rotated row is inserted
+// after the snapshot and the UPDATE never sees it. Taking the family locks first
+// pushes the revocation's read set past any in-flight rotation, so the rotated
+// row is revoked like every other. The predicate is an internal constant (never
+// caller input), and the ORDER BY makes concurrent bulk revocations acquire the
+// same locks in the same order, so they cannot deadlock each other.
+func lockLiveTokenFamilies(transaction *gorm.DB, predicate string, args ...any) error {
+	query := "SELECT pg_advisory_xact_lock(?, hashtext(family_id)) " +
+		"FROM (SELECT DISTINCT family_id FROM oauth_refresh_tokens WHERE " + predicate + ") AS live_families " +
+		"ORDER BY family_id"
+	lockArgs := append([]any{tokenFamilyAdvisoryLockNamespace}, args...)
+	return transaction.Exec(query, lockArgs...).Error
 }
 
 func lockTokenFamily(transaction *gorm.DB, familyID string) error {
@@ -611,6 +737,9 @@ func revokeAllByClientInTransaction(
 	clientPK int64,
 	revokedAt time.Time,
 ) ([]model.BlacklistEntry, int64, error) {
+	if err := lockLiveTokenFamilies(transaction, "client_id = ? AND revoked_at IS NULL", clientPK); err != nil {
+		return nil, 0, fmt.Errorf("lock live token families by client: %w", err)
+	}
 	var entries []model.BlacklistEntry
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Select("token_id", "expires_at").
@@ -673,6 +802,9 @@ func revokeAllByUserInTransaction(
 	userID int64,
 	revokedAt time.Time,
 ) ([]model.BlacklistEntry, error) {
+	if err := lockLiveTokenFamilies(transaction, "user_id = ? AND revoked_at IS NULL", userID); err != nil {
+		return nil, fmt.Errorf("lock live token families by user: %w", err)
+	}
 	var entries []model.BlacklistEntry
 	if err := transaction.Model(&model.OAuthAccessToken{}).
 		Select("token_id", "expires_at").
@@ -715,6 +847,9 @@ func (r *TokenRepository) RevokeUserClientTokens(
 ) ([]model.BlacklistEntry, error) {
 	var entries []model.BlacklistEntry
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := lockLiveTokenFamilies(transaction, "user_id = ? AND client_id = ? AND revoked_at IS NULL", userID, clientID); err != nil {
+			return fmt.Errorf("lock live token families by user and client: %w", err)
+		}
 		if err := transaction.Model(&model.OAuthAccessToken{}).
 			Select("token_id", "expires_at").
 			Where("user_id = ? AND client_id = ? AND expires_at > ? AND revoked_at IS NULL",
