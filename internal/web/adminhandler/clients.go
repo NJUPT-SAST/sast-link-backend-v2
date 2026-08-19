@@ -1,12 +1,10 @@
 package adminhandler
 
 import (
-	"strconv"
-	"strings"
-
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminclient"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 )
@@ -100,7 +98,7 @@ func (h Handler) UpdateClient(c *gin.Context) {
 		response.Error(c, internalError())
 		return
 	}
-	clientPK, ok := parsePositiveID(c.Param("id"))
+	clientPK, ok := web.ParsePositiveID(c.Param("id"))
 	if !ok {
 		// A non-numeric or non-positive segment names no client, so it gets the same 404
 		// as a missing one rather than a 400 that distinguishes the two.
@@ -147,7 +145,7 @@ func (h Handler) DeleteClient(c *gin.Context) {
 		response.Error(c, internalError())
 		return
 	}
-	clientPK, ok := parsePositiveID(c.Param("id"))
+	clientPK, ok := web.ParsePositiveID(c.Param("id"))
 	if !ok {
 		// A non-numeric or non-positive segment names no client, so it gets the same 404
 		// as a missing one rather than a 400 that distinguishes the two.
@@ -183,7 +181,7 @@ func (h Handler) RotateClientSecret(c *gin.Context) {
 		response.Error(c, internalError())
 		return
 	}
-	clientPK, ok := parsePositiveID(c.Param("id"))
+	clientPK, ok := web.ParsePositiveID(c.Param("id"))
 	if !ok {
 		response.Error(c, notFound())
 		return
@@ -201,17 +199,4 @@ func (h Handler) RotateClientSecret(c *gin.Context) {
 	}
 	c.Header("Cache-Control", "no-store")
 	response.Ok(c, rotatedClientSecretDTO{ClientID: clientPK, ClientSecret: result.ClientSecret})
-}
-
-// parsePositiveID parses a path segment as a positive primary key.
-func parsePositiveID(raw string) (int64, bool) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return 0, false
-	}
-	value, err := strconv.ParseInt(trimmed, 10, 64)
-	if err != nil || value <= 0 {
-		return 0, false
-	}
-	return value, true
 }

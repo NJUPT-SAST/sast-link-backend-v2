@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -308,5 +309,125 @@ func assertTokenPairAbsent(t *testing.T, database *gorm.DB, tokenID string, toke
 	}
 	if accessCount != 0 || refreshCount != 0 {
 		t.Fatalf("rejected token-pair counts = %d access, %d refresh; want 0 each", accessCount, refreshCount)
+	}
+}
+
+// TestTokenRepositoryBulkRevokeWaitsForFamilyLockAndRevokesRotatedToken
+// reproduces the rotation-vs-bulk-revoke race that previously let a refresh
+// token escape a password change: a rotation commits its rotated row while the
+// bulk revocation is already in flight, and the revocation's UPDATE statement
+// snapshot never sees the row. The revocation must take the family advisory
+// lock first, which serializes it after the rotation; the rotated row must then
+// be revoked like every other.
+func TestTokenRepositoryBulkRevokeWaitsForFamilyLockAndRevokesRotatedToken(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "bulk-revoke-rotate-race@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	tokenRepository := repository.NewToken(database)
+	familyID := "bulk-revoke-rotate-race-family"
+	createTokenPair(t, tokenRepository, "bulk-revoke-rotate-race-current", familyID, 0, client.ID, user.ID)
+
+	// Simulate a rotation that is past its lock acquisition and about to insert
+	// the rotated row: hold the family advisory lock and the current refresh
+	// token's row lock in a separate transaction.
+	lockTransaction := database.Begin()
+	if lockTransaction.Error != nil {
+		t.Fatalf("begin rotation transaction: %v", lockTransaction.Error)
+	}
+	rotationCommitted := false
+	defer func() {
+		if !rotationCommitted {
+			_ = lockTransaction.Rollback().Error
+		}
+	}()
+	if err := lockTransaction.Exec(
+		"SELECT pg_advisory_xact_lock(?, hashtext(?))",
+		tokenFamilyAdvisoryLockNamespace,
+		familyID,
+	).Error; err != nil {
+		t.Fatalf("acquire external token-family lock: %v", err)
+	}
+	var current model.OAuthRefreshToken
+	if err := lockTransaction.
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("token_hash = ?", "bulk-revoke-rotate-race-current-refresh").
+		First(&current).Error; err != nil {
+		t.Fatalf("lock current refresh token row: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	revoked := make(chan error, 1)
+	go func() {
+		_, err := tokenRepository.RevokeAllByUser(ctx, user.ID, time.Now())
+		revoked <- err
+	}()
+
+	// The revocation must be parked on a lock (the family advisory lock with the
+	// fix, the current row's lock without it): poll pg_stat_activity until the
+	// revoke session is provably waiting, so the rotation below provably commits
+	// after the revocation's UPDATE statement began. Without that proof the test
+	// could pass pre-fix by letting the revocation start only after the rotation
+	// committed — the very race the fix exists to close.
+	blockedDeadline := time.Now().Add(10 * time.Second)
+	blocked := false
+	for time.Now().Before(blockedDeadline) {
+		select {
+		case err := <-revoked:
+			t.Fatalf("RevokeAllByUser completed while the family lock was held (error = %v); lockLiveTokenFamilies is not serializing", err)
+		default:
+		}
+		var waiters int
+		if err := database.Raw(`
+			SELECT COUNT(*) FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND state = 'active'
+		`).Scan(&waiters).Error; err != nil {
+			t.Fatalf("count lock waiters: %v", err)
+		}
+		if waiters > 0 {
+			blocked = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !blocked {
+		t.Fatal("RevokeAllByUser never blocked on a lock")
+	}
+
+	// The rotation finishes: revoke the current row and insert the rotated row,
+	// exactly like rotateRefreshToken would after its lock acquisition.
+	if err := lockTransaction.Model(&model.OAuthRefreshToken{}).
+		Where("id = ?", current.ID).
+		Update("revoked_at", time.Now()).Error; err != nil {
+		t.Fatalf("revoke current refresh token in rotation transaction: %v", err)
+	}
+	rotated := refreshToken("bulk-revoke-rotate-race-rotated-refresh", familyID, 1, client.ID, user.ID)
+	if err := lockTransaction.Create(rotated).Error; err != nil {
+		t.Fatalf("insert rotated refresh token: %v", err)
+	}
+	if err := lockTransaction.Commit().Error; err != nil {
+		t.Fatalf("commit rotation transaction: %v", err)
+	}
+	rotationCommitted = true
+
+	select {
+	case err := <-revoked:
+		if err != nil {
+			t.Fatalf("RevokeAllByUser after lock release: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("RevokeAllByUser remained blocked after lock release: %v", ctx.Err())
+	}
+
+	// The rotated row was inserted by a rotation that committed before the
+	// revocation's read set was established; the revocation must have cut it.
+	// Pre-fix, this row escaped the UPDATE's snapshot and stayed live.
+	var rotatedRevoked model.OAuthRefreshToken
+	if err := database.Where("token_hash = ?", "bulk-revoke-rotate-race-rotated-refresh").
+		First(&rotatedRevoked).Error; err != nil {
+		t.Fatalf("read rotated refresh token: %v", err)
+	}
+	if rotatedRevoked.RevokedAt == nil {
+		t.Fatal("rotated refresh token escaped the bulk revocation: revoked_at IS NULL")
 	}
 }

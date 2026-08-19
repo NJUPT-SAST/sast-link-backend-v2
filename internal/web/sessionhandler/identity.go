@@ -5,6 +5,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 )
@@ -43,7 +44,7 @@ func (h Handler) UnbindIdentity(c *gin.Context) {
 		response.Error(c, internalError())
 		return
 	}
-	identityID, ok := parsePositiveID(c.Param("id"))
+	identityID, ok := web.ParsePositiveID(c.Param("id"))
 	if !ok {
 		// A non-numeric or non-positive path segment names no binding the caller
 		// could own, so it gets the same 404xx as somebody else's ID rather than a

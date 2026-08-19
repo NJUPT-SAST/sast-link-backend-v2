@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
@@ -655,5 +657,85 @@ func TestFindByIDsRejectsEmptyList(t *testing.T) {
 
 	if _, err := users.FindByIDs(context.Background(), nil); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("FindByIDs(nil) error = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// Closing an account is SoftDeleteAndRevokeSessions' job: accepting
+// state=is_deleted here would mark the row deleted while every session stays
+// live — a silent bypass of the cut-access-now invariant.
+func TestUpdateAdminUserRefusesStateIsDeleted(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "update-state-deleted@njupt.edu.cn")
+	userRepository := repository.NewUser(database)
+
+	deleted := model.UserStateDeleted
+	_, _, err := userRepository.UpdateAdminUser(context.Background(), user.ID,
+		repository.AdminUserUpdate{State: &deleted}, time.Now())
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("UpdateAdminUser(state=is_deleted) error = %v, want ErrInvalidArgument", err)
+	}
+
+	var stored model.User
+	if err := database.First(&stored, user.ID).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if stored.State == model.UserStateDeleted {
+		t.Fatal("state was still written despite the refusal")
+	}
+}
+
+// The demote path and the soft-delete path must acquire the admin advisory
+// lock and the user row lock in the same order, or the two transactions can
+// deadlock each other on concurrent execution. Both writers target one user
+// and one is guaranteed to lose the race; the invariant is that both settle
+// without PostgreSQL killing either transaction for a deadlock.
+func TestAdminUserDemoteAndSoftDeleteDoNotDeadlock(t *testing.T) {
+	database := setupDatabase(t)
+	// Two admins so the last-admin guard never rejects either write.
+	admin := createUserWithProfile(t, repository.NewUser(database), "deadlock-admin@njupt.edu.cn")
+	spare := createUserWithProfile(t, repository.NewUser(database), "deadlock-spare@njupt.edu.cn")
+	userRepository := repository.NewUser(database)
+	if err := database.Model(&model.User{}).Where("id IN ?", []int64{admin.ID, spare.ID}).
+		Update("role", model.UserRoleAdmin).Error; err != nil {
+		t.Fatalf("promote admins: %v", err)
+	}
+
+	// A deadlock kill surfaces as SQLSTATE 40P01. Neither writer should ever
+	// report it. Losing the race to the other writer is a normal outcome:
+	// the demote may find the account deleted (ErrStateConflict / ErrNotFound)
+	// and the delete may find its target already gone, but both must settle.
+	deadlock := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		var pgErr *pgconn.PgError
+		return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.DeadlockDetected
+	}
+	for round := 0; round < 5; round++ {
+		member := model.UserRoleMember
+		errs := make(chan error, 2)
+		go func() {
+			_, _, err := userRepository.UpdateAdminUser(context.Background(), admin.ID,
+				repository.AdminUserUpdate{Role: &member}, time.Now())
+			errs <- err
+		}()
+		go func() {
+			_, err := userRepository.SoftDeleteAndRevokeSessions(context.Background(), admin.ID, time.Now())
+			errs <- err
+		}()
+		for range 2 {
+			if err := <-errs; err != nil {
+				if deadlock(err) {
+					t.Fatalf("round %d: concurrent write hit a deadlock kill: %v", round, err)
+				}
+			}
+		}
+		if err := userRepository.RestoreUser(context.Background(), admin.ID); err != nil {
+			t.Fatalf("round %d: RestoreUser: %v", round, err)
+		}
+		if err := database.Model(&model.User{}).Where("id = ?", admin.ID).
+			Update("role", model.UserRoleAdmin).Error; err != nil {
+			t.Fatalf("round %d: re-promote: %v", round, err)
+		}
 	}
 }

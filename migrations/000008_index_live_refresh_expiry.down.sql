@@ -1,0 +1,1 @@
+DROP INDEX idx_oauth_refresh_tokens_expires_at_live;

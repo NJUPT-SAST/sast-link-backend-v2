@@ -2,12 +2,9 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"time"
-
-	goredis "github.com/redis/go-redis/v9"
 )
 
 // DeviceInfo is one logged-in device record, as stored in the device Hash.
@@ -305,7 +302,8 @@ return #members
 // set's member score is the login timestamp; the Hash carries ua/ip and both
 // timestamps. A missing set is an empty list, and an orphaned Hash (set gone,
 // record left) simply cannot be listed — the records are operational state, not
-// authoritative data.
+// authoritative data. The script always returns a (possibly empty) table for a
+// missing key, so there is deliberately no goredis.Nil branch here.
 func (s Store) ListDevices(ctx context.Context, userID int64) ([]DeviceInfo, error) {
 	if s.Client == nil || userID <= 0 {
 		return nil, fmt.Errorf("list devices: %w", ErrInvalidArgument)
@@ -315,9 +313,6 @@ func (s Store) ListDevices(ctx context.Context, userID int64) ([]DeviceInfo, err
 		s.Keys.deviceHashKeyPrefix(),
 	}).Slice()
 	if err != nil {
-		if errors.Is(err, goredis.Nil) {
-			return []DeviceInfo{}, nil
-		}
 		return nil, fmt.Errorf("list devices eval: %w", err)
 	}
 	const fieldsPerDevice = 6

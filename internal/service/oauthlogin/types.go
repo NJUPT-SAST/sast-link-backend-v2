@@ -173,6 +173,14 @@ type AuthorizeResult struct {
 	// AuthorizeURL is the provider page to redirect the browser to.
 	AuthorizeURL string
 	State        string
+	// StateDigest is the login-CSRF cookie value pairing the callback with the
+	// browser that started this authorization: hex(SHA-256(state)). The handler
+	// writes it into the SameSite=Lax state cookie; the callback must present it
+	// back, so a state an attacker started cannot complete in a victim's browser.
+	StateDigest string
+	// StateTTL is how long the state lives; the handler bounds the cookie's
+	// Max-Age to it.
+	StateTTL time.Duration
 }
 
 // CallbackInput is a provider callback. Provider comes from the route, not from
@@ -183,6 +191,11 @@ type CallbackInput struct {
 	State     string
 	ClientIP  string
 	UserAgent string
+	// StateCookie is the state cookie the browser sent back; Callback verifies
+	// it against the state's digest. Empty means the cookie is missing (or the
+	// deployment does not write it), which refuses the callback for any state
+	// that did not originate in this browser.
+	StateCookie string
 }
 
 // CallbackResult is one of two branches, distinguished by which field is set.

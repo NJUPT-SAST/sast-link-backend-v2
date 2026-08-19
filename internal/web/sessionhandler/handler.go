@@ -103,8 +103,9 @@ type bindEmailVerifyRequest struct {
 }
 
 type refreshRequest struct {
-	// Optional: a fresh tab sends an empty body and the httpOnly session cookie
-	// is the refresh credential instead.
+	// Optional: a fresh tab sends an empty JSON object ({}); the httpOnly
+	// session cookie is the refresh credential instead. A truly empty body is
+	// rejected by the strict JSON decoder, so clients must send an object.
 	RefreshToken string `json:"refresh_token"`
 }
 

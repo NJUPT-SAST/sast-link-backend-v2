@@ -2,12 +2,12 @@ package sessionhandler
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 )
 
@@ -24,7 +24,7 @@ type cardDTO struct {
 }
 
 func (h Handler) Card(c *gin.Context) {
-	userID, ok := parsePositiveID(c.Param("id"))
+	userID, ok := web.ParsePositiveID(c.Param("id"))
 	if !ok {
 		response.Error(c, notFound(errcode.CodeUserNotFound, "用户不存在"))
 		return
@@ -49,29 +49,6 @@ func (h Handler) Card(c *gin.Context) {
 		BlogURL:    result.Card.BlogURL,
 		GitHubURL:  result.Card.GitHubURL,
 	})
-}
-
-// parsePositiveID parses a path ID, accepting only a canonical run of decimal
-// digits denoting a positive value.
-//
-// The explicit digit check is not redundant with ParseInt: ParseInt accepts a
-// leading sign, so "+12" (reachable as the percent-encoded %2B12) would resolve
-// to identity 12 and give the same row two spellings in URLs and audit logs.
-// Overflow and empty input fall out of ParseInt itself.
-func parsePositiveID(raw string) (int64, bool) {
-	if raw == "" {
-		return 0, false
-	}
-	for _, symbol := range raw {
-		if symbol < '0' || symbol > '9' {
-			return 0, false
-		}
-	}
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || value <= 0 {
-		return 0, false
-	}
-	return value, true
 }
 
 // notFound builds a 404 for the paths that reject an ID before reaching the

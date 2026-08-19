@@ -363,11 +363,15 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeConcurrent, input)
 			return nil, newError(ErrConcurrentRefresh, "刷新请求冲突，请重试", rotateErr)
 		}
-		if errors.Is(rotateErr, repository.ErrTokenReplay) || errors.Is(rotateErr, repository.ErrTokenExpired) || errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) {
+		if errors.Is(rotateErr, repository.ErrTokenReplay) || errors.Is(rotateErr, repository.ErrTokenExpired) || errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) || errors.Is(rotateErr, repository.ErrNotFound) {
 			// RotateRefreshToken already cut the family in its own transaction and
 			// enqueued the blacklist outbox rows. A second RevokeFamily here would
 			// find no live token (the refresh token outlives every access token, so
 			// an expired one means the whole family is dead) and deliver nothing.
+			// ErrNotFound is the same shape — the presented row vanished between the
+			// pre-read and the rotation (a concurrent deletion) — and mapping it to
+			// 500 would tell the caller nothing actionable about a session that is
+			// simply gone.
 			// The repository cut the family; drop the device record so the list
 			// stops showing a session that can no longer authenticate.
 			if s.Devices != nil {

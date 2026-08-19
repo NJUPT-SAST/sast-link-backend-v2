@@ -145,12 +145,30 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 		// validated, so the login must not start.
 		return nil, newError(ErrDependencyUnavailable, "保存 OAuth state 失败", err)
 	}
-	return &AuthorizeResult{AuthorizeURL: client.AuthorizeURL(state), State: state}, nil
+	return &AuthorizeResult{
+		AuthorizeURL: client.AuthorizeURL(state),
+		State:        state,
+		StateDigest:  stateDigest(state),
+		StateTTL:     s.stateTTL(),
+	}, nil
 }
 
 // Callback validates the provider callback and splits into the login branch or
 // the registration branch.
 func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
+	result, err := s.callback(ctx, input)
+	if err != nil {
+		// Failed callbacks were previously silent in the audit trail — exactly
+		// the events an incident review wants when someone drives a stolen or
+		// replayed state at the endpoint. The success legs audit themselves with
+		// the resolved user and provider identity.
+		s.auditLogin(ctx, nil, input, false, auditErrorCode(err), "")
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
 	if input.Code == "" {
 		return nil, newError(ErrInvalidInput, "code 不能为空", nil)
 	}
@@ -170,6 +188,16 @@ func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackRe
 	}
 	if !found {
 		return nil, newError(ErrStateInvalid, "state 无效或已过期", nil)
+	}
+	// Login CSRF (OAuth 2.0 §10.12): the state alone proves somebody started a
+	// login, not that the browser completing it is the one that did. The digest
+	// cookie written at authorize time binds the state to that browser; a
+	// callback whose cookie is missing or does not match was completed by a
+	// browser an attacker lured onto their own authorization URL, and handing it
+	// a login_code or registration_state would plant the attacker's provider
+	// identity into the victim's session.
+	if !stateDigestMatches(input.State, input.StateCookie) {
+		return nil, newError(ErrStateInvalid, "state 与发起授权的浏览器不匹配", nil)
 	}
 	// A state issued for one provider must not be redeemable at another
 	// provider's callback, which would let a caller pair a GitHub state with a
@@ -286,6 +314,20 @@ func (s Service) registrationBranch(
 
 // ExchangeCode redeems a one-time login_code for a session.
 func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*ExchangeCodeResult, error) {
+	result, err := s.exchangeCode(ctx, input)
+	if err != nil {
+		// The user is unknown on most failure legs (the code may name no one),
+		// so the subject stays nil; the action and outcome are what matter.
+		if auditErr := s.audit(ctx, nil, "oauth_login_exchange", "session", nil, false, auditErrorCode(err),
+			input.ClientIP, input.UserAgent, nil); auditErr != nil {
+			logAuditFailure(ctx, "oauth_login_exchange", auditErr)
+		}
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*ExchangeCodeResult, error) {
 	// Throttled ahead of the empty-code check: an attacker probing the code space
 	// controls the input, so rejecting blanks for free would leave the expensive
 	// path — a Redis GetDel per guess — uncapped.

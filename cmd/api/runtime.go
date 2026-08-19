@@ -414,11 +414,26 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		ProtectedClientID: cfg.InternalOAuthClientID,
 	}
 
+	// oauthStateCookieName is the login-CSRF cookie written at third-party
+	// authorize time and read back at callback time. It must differ from the
+	// session cookie: the state digest is not a session credential.
+	const oauthStateCookieName = "sl_oauth_state"
+
 	// The httpOnly session cookie a fresh tab uses to rebuild a session. The
 	// value is the rotating refresh token; SameSite=Lax keeps it off cross-site
 	// POSTs (cookie-CSRF) while letting same-site navigations through.
 	sessionCookie := &middleware.SessionCookie{
 		Name:     cfg.SessionCookieName,
+		Path:     cfg.SessionCookiePath,
+		Secure:   cfg.SessionCookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	}
+	// The login-CSRF cookie pairs a callback with the browser that started the
+	// authorization (OAuth 2.0 §10.12). The value is hex(SHA-256(state)) — not
+	// the state itself — and it shares the session cookie's path/secure posture
+	// so the two can never be sent to different scopes.
+	stateCookie := &middleware.SessionCookie{
+		Name:     oauthStateCookieName,
 		Path:     cfg.SessionCookiePath,
 		Secure:   cfg.SessionCookieSecure,
 		SameSite: http.SameSiteLaxMode,
@@ -435,6 +450,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Service:       oauthLoginService,
 			ErrorRedirect: cfg.OAuthLoginErrorRedirect,
 			Cookies:       sessionCookie,
+			StateCookie:   stateCookie,
 		},
 		Admin: adminhandler.Handler{
 			Clients:   adminClientService,

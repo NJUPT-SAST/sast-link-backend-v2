@@ -93,8 +93,11 @@ type AuthorizationRepository interface {
 	Create(ctx context.Context, authorization *model.OAuthAuthorization) error
 	// Consume marks a code used under a row lock. On replay it returns
 	// repository.ErrAuthorizationReplayed together with the record, whose family
-	// ID the caller must revoke.
-	Consume(ctx context.Context, code string, now time.Time) (*model.OAuthAuthorization, error)
+	// ID the caller must revoke. The second return is the owning user's
+	// token_version snapshot taken inside the consume transaction: the
+	// redemption's token-pair write must verify against it, so a bulk revocation
+	// committing between consume and write refuses the pair.
+	Consume(ctx context.Context, code string, now time.Time) (*model.OAuthAuthorization, int64, error)
 	// ListGrantsByUser returns the distinct applications a user has authorized.
 	ListGrantsByUser(ctx context.Context, userID int64) ([]repository.OAuthGrant, error)
 	// DeleteByUserClient removes every authorization a user holds with one
@@ -109,6 +112,17 @@ type TokenRepository interface {
 	// into audit_logs in the same transaction (nil audit disables it), so the pair
 	// and its audit commit atomically on one fsync.
 	CreatePairWithAudit(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
+	// CreatePairWithUserAndClientLock is CreatePairWithAudit inside a transaction
+	// that first locks the owning user's and issuing client's rows and refuses
+	// (ErrUserStateChanged / ErrClientInactive / ErrClientScopeChanged /
+	// ErrNotFound) when the state the code was issued under changed: the user's
+	// token_version no longer matches the Consume snapshot, the client is no
+	// longer active, or its scopes no longer contain the pair's. The
+	// authorization-code redemption passes the version snapshot taken by Consume,
+	// so a bulk revocation (password change, demotion, account close) or a client
+	// disable / scope narrowing committing between consume and write cannot be
+	// outlived by the pair.
+	CreatePairWithUserAndClientLock(ctx context.Context, userID int64, clientID int64, expectedTokenVersion int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
 	// RotateRefreshToken rotates currentRefreshTokenHash inside familyID and
 	// returns the family origin's created_at, i.e. when the user actually
 	// authorized. Rotation must not advance the ID Token's auth_time, so it is

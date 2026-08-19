@@ -604,14 +604,26 @@ func TestUserRepositoryUpdatePasswordBurnsAuthorizationCodes(t *testing.T) {
 
 	// The victim's code is spent, so redeeming it now reports a replay rather than
 	// minting a post-reset session.
-	if _, err := authorizations.Consume(context.Background(), "code-live", revokedAt); !errors.Is(
+	if _, _, err := authorizations.Consume(context.Background(), "code-live", revokedAt); !errors.Is(
 		err, repository.ErrAuthorizationReplayed,
 	) {
 		t.Fatalf("Consume(code-live) error = %v, want ErrAuthorizationReplayed", err)
 	}
 	// Another user's pending authorization must survive: the reset is scoped to one
 	// account, and burning everyone's codes would log out unrelated users mid-flow.
-	if _, err := authorizations.Consume(context.Background(), "code-other-user", revokedAt); err != nil {
+	if _, _, err := authorizations.Consume(context.Background(), "code-other-user", revokedAt); err != nil {
 		t.Fatalf("Consume(code-other-user) error = %v, want the code to survive", err)
+	}
+}
+
+// Reporting success for a user that does not exist would tell the caller
+// "password changed, sessions revoked" while nothing happened.
+func TestUserRepositoryUpdatePasswordAndRevokeSessionsReportsMissingUser(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+
+	_, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), 999999, "new-hash", time.Now())
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("UpdatePasswordAndRevokeSessions(missing) error = %v, want ErrNotFound", err)
 	}
 }

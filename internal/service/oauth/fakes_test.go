@@ -57,15 +57,19 @@ func (f *fakeClients) FindActiveByClientID(_ context.Context, clientID string) (
 }
 
 type fakeAuthorizations struct {
-	mutex     sync.Mutex
-	byCode    map[string]*model.OAuthAuthorization
-	created   []*model.OAuthAuthorization
-	createErr error
-	consumeAs error
+	mutex              sync.Mutex
+	byCode             map[string]*model.OAuthAuthorization
+	created            []*model.OAuthAuthorization
+	createErr          error
+	consumeAs          error
+	consumeUserVersion int64
 }
 
 func newFakeAuthorizations() *fakeAuthorizations {
-	return &fakeAuthorizations{byCode: map[string]*model.OAuthAuthorization{}}
+	// consumeUserVersion defaults to activeUser().TokenVersion (2) so the
+	// redemption's snapshot check passes for the stock user; tests that drive a
+	// mismatch set consumeUserVersion explicitly.
+	return &fakeAuthorizations{byCode: map[string]*model.OAuthAuthorization{}, consumeUserVersion: 2}
 }
 
 func (f *fakeAuthorizations) Create(_ context.Context, authorization *model.OAuthAuthorization) error {
@@ -82,25 +86,25 @@ func (f *fakeAuthorizations) Create(_ context.Context, authorization *model.OAut
 
 // Consume mirrors the repository's single-use contract, including returning the
 // record alongside ErrAuthorizationReplayed so the caller can read its family.
-func (f *fakeAuthorizations) Consume(_ context.Context, code string, now time.Time) (*model.OAuthAuthorization, error) {
+func (f *fakeAuthorizations) Consume(_ context.Context, code string, now time.Time) (*model.OAuthAuthorization, int64, error) {
 	if f.consumeAs != nil {
-		return nil, f.consumeAs
+		return nil, 0, f.consumeAs
 	}
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
 	stored, ok := f.byCode[code]
 	if !ok {
-		return nil, repository.ErrNotFound
+		return nil, 0, repository.ErrNotFound
 	}
 	if stored.IsUsed {
-		return stored, repository.ErrAuthorizationReplayed
+		return stored, f.consumeUserVersion, repository.ErrAuthorizationReplayed
 	}
 	if !stored.ExpiresAt.After(now) {
-		return stored, repository.ErrAuthorizationExpired
+		return stored, f.consumeUserVersion, repository.ErrAuthorizationExpired
 	}
 	stored.IsUsed = true
 	consumed := *stored
-	return &consumed, nil
+	return &consumed, f.consumeUserVersion, nil
 }
 
 func (f *fakeAuthorizations) ListGrantsByUser(_ context.Context, _ int64) ([]repository.OAuthGrant, error) {
@@ -136,18 +140,23 @@ func (f *fakeTokens) RevokeUserClientTokens(_ context.Context, userID, clientID 
 }
 
 type fakeTokens struct {
-	accessByJTI     map[string]*model.OAuthAccessToken
-	refreshByHash   map[string]*model.OAuthRefreshToken
-	createdAccess   *model.OAuthAccessToken
-	createdRefresh  *model.OAuthRefreshToken
-	rotatedAccess   *model.OAuthAccessToken
-	rotatedRefresh  *model.OAuthRefreshToken
-	revokedFamilies []string
-	auditEntries    []*model.AuditLog
-	createErr       error
-	rotateErr       error
-	revokeErr       error
-	originErr       error
+	accessByJTI       map[string]*model.OAuthAccessToken
+	refreshByHash     map[string]*model.OAuthRefreshToken
+	createdAccess     *model.OAuthAccessToken
+	createdRefresh    *model.OAuthRefreshToken
+	rotatedAccess     *model.OAuthAccessToken
+	rotatedRefresh    *model.OAuthRefreshToken
+	revokedFamilies   []string
+	auditEntries      []*model.AuditLog
+	createErr         error
+	rotateErr         error
+	revokeErr         error
+	originErr         error
+	userVersionErr    error
+	storedUserVersion int64
+	// clientErr is returned by CreatePairWithUserAndClientLock when set,
+	// simulating a refused client check (inactive, narrowed scope, deleted).
+	clientErr error
 	// now is the wall clock for family-lifetime decisions, mirroring the
 	// repository's rotationTime := time.Now(). Tests that drive a fixed service
 	// clock set it to that clock so origin+cap comparisons stay deterministic.
@@ -173,6 +182,32 @@ func (f *fakeTokens) CreatePair(_ context.Context, access *model.OAuthAccessToke
 }
 
 func (f *fakeTokens) CreatePairWithAudit(_ context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
+	if audit != nil {
+		f.auditEntries = append(f.auditEntries, audit)
+	}
+	f.createdAccess = access
+	f.createdRefresh = refresh
+	f.accessByJTI[access.TokenID] = access
+	f.refreshByHash[refresh.TokenHash] = refresh
+	return nil
+}
+
+// CreatePairWithUserAndClientLock mirrors the repository's user-and-client-lock
+// write: it refuses when the stored version differs or the client check fails,
+// and otherwise records like CreatePairWithAudit.
+func (f *fakeTokens) CreatePairWithUserAndClientLock(_ context.Context, _ int64, _ int64, expected int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error {
+	if f.userVersionErr != nil {
+		return f.userVersionErr
+	}
+	if f.storedUserVersion != 0 && f.storedUserVersion != expected {
+		return repository.ErrUserStateChanged
+	}
+	if f.clientErr != nil {
+		return f.clientErr
+	}
 	if f.createErr != nil {
 		return f.createErr
 	}

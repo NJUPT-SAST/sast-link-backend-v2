@@ -511,6 +511,12 @@ CREATE INDEX idx_oauth_refresh_tokens_client_id
 CREATE INDEX idx_oauth_refresh_tokens_expires_at
     ON oauth_refresh_tokens(expires_at)
     WHERE revoked_at IS NOT NULL;
+
+-- V008 未撤销且已过期：retention 清理死族分支（含从未旋转的 sequence-0 行）的外层 expires_at 谓词。
+-- V001 的部分索引恰好排除 revoked_at IS NULL 的行，若无此索引该分支退化为全表扫描
+CREATE INDEX idx_oauth_refresh_tokens_expires_at_live
+    ON oauth_refresh_tokens(expires_at)
+    WHERE revoked_at IS NULL;
 ```
 
 > 此表无 `updated_at`。Token 旋转 = INSERT 新行 + UPDATE `revoked_at`。
@@ -754,7 +760,7 @@ oauth_authorizations.family_id
 |----|---------|---------|------|
 | `oauth_authorizations` | 已过期，无论是否使用 | `expires_at` + 1h | 授权码单次使用，重放由兑换时的 family 撤销处理，过期行不再承载任何权限。V001 的 `idx_oauth_authorizations_expires_at` 是部分索引（`WHERE is_used = FALSE`），而已兑换才是常态，故 **V006 增设全量索引** `idx_oauth_authorizations_expires_at_all`，否则每小时退化为全表扫描 |
 | `oauth_access_tokens` | 已过期元数据 | `expires_at` + 24h | 远宽于默认 1h 的 access token TTL，且校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的配置。原因：中间件对「JTI 不存在」与「已撤销」返回同一个 401，若在 JWT 仍处于 `exp` 内时删掉元数据，仅仅过期的 token 会被呈现为已撤销——客户端读到的是被强制登出，而不是该去刷新。JWT 校验器没有 leeway 可依赖，这些行又很小，窗口宽一点很便宜 |
-| `oauth_refresh_tokens` | 已撤销、已过期，且 `sequence > 0` | `expires_at` + 24h | **必须保留每个 family 的 sequence-0 行**：`FindFamilyOriginCreatedAt` 靠它给 ID Token 的 `auth_time` 定时间，而该行从首次轮换起就带有 `revoked_at`。只要 family 还在轮换，它会活得比自己的 `expires_at` 更久；删掉会让刷新流程撤销整个 family 并返回 500——即用户被强制登出。每个 family 长期留一行，是换取 `auth_time` 准确的成本 |
+| `oauth_refresh_tokens` | 已撤销且 `sequence > 0`；或整个 family 已死（无任何未撤销且未过期的成员） | `expires_at` + 24h | 两个分支：轮换掉的行（`revoked_at` 已设）由 V001 的部分索引服务；死族分支还包括从未旋转的 sequence-0 行（`revoked_at IS NULL`），其外层 `expires_at` 谓词由 **V008** 的 `idx_oauth_refresh_tokens_expires_at_live` 服务，族内探测用 `family_id` 索引。**必须保留每个存活 family 的 sequence-0 行**：`FindFamilyOriginCreatedAt` 靠它给 ID Token 的 `auth_time` 定时间，而该行从首次轮换起就带有 `revoked_at`。只要 family 还在轮换，它会活得比自己的 `expires_at` 更久；删掉会让刷新流程撤销整个 family 并返回 500——即用户被强制登出。每个 family 长期留一行，是换取 `auth_time` 准确的成本 |
 | `audit_logs` | 超过保留期 | `created_at` + 90d | 90 天（PRD §9）是**默认值**：审计日志在这里属运维用途而非合规强制，可调大以保留更多历史，也可收紧至 30 天下限；低于下限启动时拒绝，避免误配到「事故排查时相关记录已被删」的程度 |
 
 `token_blacklist_outbox` 不在此列：`sessionworker.TokenBlacklist` 已负责清理它，再加一个
