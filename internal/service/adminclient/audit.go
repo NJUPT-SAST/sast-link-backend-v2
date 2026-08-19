@@ -10,7 +10,10 @@ import (
 const (
 	actionCreateClient = "admin_oauth_client_create"
 	actionUpdateClient = "admin_oauth_client_update"
-	//nolint:gosec // G101 trips on the "Secret" in the name; this is an audit action string, not a credential.
+	// #nosec G101 -- G101 matches the "Secret" in the identifier, not a credential:
+	// this is the audit action string written to audit_logs.action. The standalone
+	// gosec binary in the security workflow and golangci-lint's gosec linter both
+	// honour #nosec, so this one directive covers both scanners.
 	actionRotateClientSecret = "admin_oauth_client_rotate_secret"
 	actionDeleteClient       = "admin_oauth_client_delete"
 )

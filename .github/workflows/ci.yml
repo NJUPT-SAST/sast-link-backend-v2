@@ -3,17 +3,33 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # main is also built and tested after the merge, not only on the pull request.
+  # Two pull requests can each be green in isolation and still break main
+  # together — a rename that lands beside a new caller, a repository method whose
+  # contract one branch tightened while another added a user of the old shape.
+  # Git merges those cleanly, so no textual conflict appears and no PR run ever
+  # sees the combination. Since a push to main deploys and now also migrates, the
+  # first thing to notice the breakage would otherwise be production traffic.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Keyed by ref, so a pull-request run and the post-merge main run never cancel
+# each other. cancel-in-progress stays on: superseding a push to the same branch
+# is the intended behaviour, and the deploy workflow has its own serial group.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  GO_VERSION: "1.26.5"
+# No GO_VERSION here on purpose. Every setup-go below reads go-version-file:
+# go.mod, so the toolchain is declared once, in the file the compiler itself
+# obeys. A hardcoded copy per workflow drifts silently: CI would keep testing
+# against the old toolchain while go.mod asked for a newer one, and nothing would
+# report it. The Dockerfile's golang base image is the one remaining copy, and
+# the toolchain job below fails when it disagrees.
 
 jobs:
   lint:
@@ -21,11 +37,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
 
       - name: golangci-lint
@@ -38,11 +54,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
 
       - name: Run tests
@@ -57,14 +73,64 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
 
       - name: Build
         run: |
           go build -v -o bin/api ./cmd/api
           go build -v -o bin/migrate ./cmd/migrate
+
+  workflows:
+    name: workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # deploy.yml carries ~130 lines of shell that runs on the production server
+      # over SSH, where a typo is discovered by a half-finished deploy rather than
+      # by a failing job. actionlint checks the workflow schema and expression
+      # syntax, and shells out to shellcheck for every `run:` block, which is the
+      # part that matters here: the deploy script is POSIX sh (the deploy user's
+      # login shell is not guaranteed to be bash), so it cannot rely on pipefail
+      # and every pipeline has to be guarded explicitly.
+      #
+      # Pinned by version rather than @latest: a new actionlint release adding a
+      # rule would otherwise fail unrelated pull requests with no change on our
+      # side. shellcheck is preinstalled on ubuntu-latest runners.
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
+  toolchain:
+    name: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # go.mod is the single source of truth for the toolchain: the workflows read
+      # it through go-version-file, and this job holds the one copy that cannot,
+      # the Dockerfile's build stage. They have to agree, because the Dockerfile
+      # is what actually compiles the deployed binaries — a mismatch means CI
+      # tested one toolchain and production runs another, and a Go release that
+      # changes codegen or standard-library behaviour would slip through green
+      # tests. Dependabot's docker updates land the base-image bump on its own, so
+      # this check is what forces go.mod to move with it.
+      - name: Dockerfile golang base matches go.mod
+        run: |
+          go_mod_version=$(awk '/^go / { print $2 }' go.mod)
+          dockerfile_version=$(sed -n 's/^FROM golang:\([0-9.]*\)-.*/\1/p' Dockerfile | head -1)
+          test -n "${go_mod_version}" || { echo "::error::no go directive in go.mod"; exit 1; }
+          test -n "${dockerfile_version}" || { echo "::error::no golang base image in Dockerfile"; exit 1; }
+          echo "go.mod: ${go_mod_version}"
+          echo "Dockerfile: ${dockerfile_version}"
+          test "${go_mod_version}" = "${dockerfile_version}" || {
+            echo "::error::toolchain mismatch: go.mod asks for ${go_mod_version}, Dockerfile builds with ${dockerfile_version}"
+            exit 1; }

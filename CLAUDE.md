@@ -22,7 +22,7 @@ It never performs DDL or schema migrations at startup. `cmd/migrate` is the only
 
 ## Current Commands
 
-The project targets Go `1.26.5`, Gin, GORM, PostgreSQL 16+, Redis 8+, and testcontainers-go. Full integration tests provision PostgreSQL 16 through Testcontainers and require Docker.
+The project targets Go `1.26.6`, Gin, GORM, PostgreSQL 16+, Redis 8+, and testcontainers-go. Full integration tests provision PostgreSQL 16 through Testcontainers and require Docker.
 
 ```powershell
 # Download modules
@@ -33,7 +33,7 @@ go mod download
 # so go test receives ".out" as a package path and fails with
 # "no required module provides package .out" before running anything. The same
 # applies to `go tool cover "-func=coverage.out"`.
-go test -race -shuffle=on "-coverprofile=coverage.out" "-covermode=atomic" ./...
+go test -race -shuffle=on -pgo=off "-coverprofile=coverage.out" "-covermode=atomic" ./...
 
 # Run lint
 golangci-lint run ./...
@@ -47,7 +47,7 @@ go build -o bin/migrate.exe ./cmd/migrate
 .\bin\migrate.exe up
 ```
 
-For a production database that already has the V001 schema, follow `docs/runbooks/database-baseline.md`. V001 already exists in production: do not run V001 `up` there. The guarded baseline command is `.\bin\migrate.exe force 1 --confirm-existing-baseline` after the runbook's preflight checks. Future production migrations require the explicit `.\bin\migrate.exe up --confirm-production` form.
+For a production database that already has the V001 schema, follow `docs/runbooks/database-baseline.md`. V001 already exists in production: do not run V001 `up` there. The guarded baseline command is `.\bin\migrate.exe force 1 --confirm-existing-baseline` after the runbook's preflight checks. Production migrations require the explicit `.\bin\migrate.exe up --confirm-production` form; the deploy workflow passes that flag itself and applies pending migrations before replacing the API container, so routine additive migrations do not need a manual run — `docs/runbooks/manual-migration.md` covers the shapes that do.
 
 `docker-compose.yml` is self-contained for local development: it provisions its own PostgreSQL and Redis, builds the image from the repository `Dockerfile`, runs `migrate up` as a one-shot service, and only then starts the API. Set `API_IMAGE` to point at a prebuilt image instead. The published host ports are deliberately offset (`15432`, `16379`) so the stack does not collide with a PostgreSQL or Redis already running on the machine.
 
@@ -144,10 +144,16 @@ Only PostgreSQL is a required dependency. When Redis is unreachable the endpoint
 
 ## CI And Security
 
-`.github/workflows/ci.yml` runs for pull requests targeting `main` and supports manual dispatch. It has three parallel jobs:
+`.github/workflows/ci.yml` runs for pull requests targeting `main`, for pushes to `main` (so the merge result is tested, not only each pull request in isolation), and supports manual dispatch. It has five parallel jobs:
 
 - **lint** — golangci-lint using `.golangci.yml` against the Go module.
-- **test** — `go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...` (CI runs bash, where the quoting caveat above does not apply); PostgreSQL integration tests provision isolated PostgreSQL 16 containers through Testcontainers and require a healthy Docker provider.
+- **test** — `go test -race -shuffle=on -pgo=off -coverprofile=coverage.out -covermode=atomic ./...` (CI runs bash, where the quoting caveat above does not apply); `-pgo=off` keeps the race/coverage build independent of `cmd/api/default.pgo`; PostgreSQL integration tests provision isolated PostgreSQL 16 containers through Testcontainers and require a healthy Docker provider.
 - **build** — builds both `./cmd/api` and `./cmd/migrate`.
+- **workflows** — actionlint over `.github/workflows`, which also runs shellcheck against every `run:` block. `deploy.yml` carries the production SSH shell, and it is POSIX `sh` with no `pipefail` available, so each pipeline has to be guarded explicitly.
+- **toolchain** — asserts the Dockerfile's `golang` base image matches `go.mod`'s `go` directive. Every `setup-go` reads `go-version-file: go.mod`, so `go.mod` is the single source of truth; the Dockerfile is the one copy that cannot read it, and it compiles the deployed binaries.
 
-`.github/workflows/security.yml` runs weekly (`0 3 * * 1`) or by manual dispatch and scans the Go module with version-pinned `gosec` and `govulncheck`.
+`.github/workflows/security.yml` runs for pull requests targeting `main`, weekly (`0 3 * * 1`), or by manual dispatch, and scans the Go module with version-pinned `gosec` and `govulncheck`. `govulncheck` gates pull requests, since it reports only vulnerabilities reachable from this module's call graph. `gosec` is scheduled-only (`if: github.event_name != 'pull_request'`): a periodic full-module sweep is what it is good at, and gating merges on its judgement-call findings would block work on style rather than on known-vulnerable code.
+
+`.github/workflows/deploy.yml` deploys on pushes to `main` and by manual dispatch. Its `verify` job resolves the CI run for the deployed commit through the Actions API and blocks the deploy unless it concluded `success`, so the merge gate (required status checks) and the deploy gate are no longer independent; `allow_unverified` is the documented emergency override. Schema migrations run automatically in that workflow, before the API container is replaced — see `docs/runbooks/manual-migration.md` for the migration shapes that must not use the automatic path.
+
+`.github/dependabot.yml` opens weekly grouped updates for GitHub Actions, direct Go modules, and the Dockerfile base images.

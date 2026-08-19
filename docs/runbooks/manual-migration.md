@@ -6,6 +6,33 @@
 
 注意：API 服务启动时不会执行 DDL，也不会自动迁移数据库。当前项目中只有 `cmd/migrate` 允许检查或变更 migration 状态。
 
+### 与自动部署的关系
+
+生产环境的常规迁移由 `.github/workflows/deploy.yml` 自动执行：每次 push 到 `main`（或 workflow_dispatch）都会在替换 api 容器**之前**运行 `migrate up --confirm-production`。一次 deploy 就是本项目的维护窗口，所以常规的 additive migration **不需要**按本文手工操作。
+
+自动路径的保护措施：
+
+- `dirty=true` 时 golang-migrate 直接返回 `ErrDirty`，迁移失败 → 脚本非零退出 → api 不会被替换。
+- 迁移步骤在 `compose up api` 之前，任何失败都不会让新 binary 落到半迁移的 schema 上。
+- 若本次 deploy 真的改变了 version，健康检查失败时脚本**拒绝**自动回滚镜像（DDL 已提交，换镜像撤不掉），并指向本文档。
+- `workflow_dispatch` 的 `skip_migration=true` 可以只换镜像、不动 schema。
+
+因此本文档适用于以下场景：
+
+1. 本地 / 开发 / 测试 / 预发环境的手工迁移。
+2. 自动部署中迁移失败后的排查与恢复（尤其是 `dirty=true`）。
+3. 破坏性或长耗时 migration —— 这类不应走自动路径，见下节。
+4. V001 baseline 登记。
+
+### 不适合自动路径的 migration
+
+自动迁移在**旧 binary 仍在服务**时执行，因此假设 migration 是 forward-only 且 additive。以下情况必须先用 `skip_migration=true` 部署，再按本文在受控窗口手工处理：
+
+- 删除或重命名列 / 表：旧 binary 会在迁移完成到容器替换之间的数秒内报错。
+- 大表上的裸 `CREATE INDEX`：持 SHARE 锁阻塞写入，登录与 refresh 会停顿。大表请改用 `CREATE INDEX CONCURRENTLY`（注意它不能在事务内执行）。
+- 需要数据回填或改写存量数据的 migration。
+- 设计上会在遇到不兼容存量数据时主动失败的 migration（例如 V002）。
+
 本文适用于 V002 及后续普通 migration。若生产库已经存在 V001 schema，但尚未登记 migration metadata，请先遵循 `docs/runbooks/database-baseline.md`，不要在该生产库上执行 V001 `up`。
 
 ## 支持的命令
@@ -55,6 +82,8 @@ CLI 会根据这些变量拼接 PostgreSQL URL，并通过 `pgx/v5` driver 执�
 000004_token_blacklist_outbox.up.sql / .down.sql
 000005_forbid_login_email_as_identity.up.sql / .down.sql
 000006_index_expired_authorizations.up.sql / .down.sql
+000007_audit_logs_actor_client.up.sql / .down.sql
+000008_index_live_refresh_expiry.up.sql / .down.sql
 ```
 
 ## 执行前检查清单
@@ -139,17 +168,19 @@ GET /health -> { "status": "ok", "db": "ok", "redis": "ok" }
 
 ## 生产环境标准流程
 
+生产环境的常规迁移已由 deploy workflow 自动执行（见「与自动部署的关系」）。本节适用于自动路径不适用或已经失败的场景：破坏性 migration、长耗时 migration、以及迁移失败后的人工恢复。
+
 生产环境必须使用显式确认参数。若 `APP_ENV=production`，直接运行 `up` 会失败。
 
-### 1. 确认备份和维护窗口
+### 1. 确认窗口与部署状态
 
 执行前必须确认：
 
-- 数据库已有可恢复备份。
 - 维护窗口或变更窗口已经批准。
-- 部署流程已暂停。
+- **deploy workflow 已暂停**，否则一次 push 会并发执行同一批 migration。
 - 没有其他进程或人工会话正在执行 DDL。
 - 当前 migration binary 对应的 release artifact 或 commit SHA 已记录到变更单。
+- 破坏性变更需确认存在可恢复备份。自动路径不做备份，这是 additive-only 假设换来的代价；一旦本次变更不可逆，备份就重新成为硬前置条件。
 
 ### 2. 获取或构建 release binary
 
@@ -266,12 +297,13 @@ VALUES ('manual-check', 1, 1, ARRAY['openid'], 'challenge', 'plain', NOW() + INT
 
 如果 `version` 输出 `dirty=true`：
 
-1. 立即停止。
+1. 立即停止。自动 deploy 也会在这里失败（`ErrDirty`），api 容器不会被替换，服务仍在旧版本上运行。
 2. 不要盲目再次运行 `up`。
 3. 不要手动修改 `schema_migrations` 表。
 4. 不要使用任意 `force` 修状态；唯一例外是文档化的 V001 baseline 命令，并且必须严格遵循 baseline runbook。
 5. 保存 CLI 输出、数据库日志、当前 version 和 dirty 状态。
-6. 通过 incident / change 流程判断下一步：
+6. 暂停 deploy workflow，避免后续 push 反复撞在同一个 dirty 状态上。
+7. 通过 incident / change 流程判断下一步：
    - 从备份恢复；
    - 人工修复部分 DDL；
    - 编写 forward migration；
@@ -295,12 +327,13 @@ VALUES ('manual-check', 1, 1, ARRAY['openid'], 'challenge', 'plain', NOW() + INT
 ## 明确禁止事项
 
 - 禁止在已经存在 V001 schema 的生产库上执行 V001 `up`。
-- 禁止假设 API 容器启动时会自动迁移 schema。
+- 禁止假设 API 容器启动时会自动迁移 schema（迁移由 deploy workflow 的独立步骤执行，不是 api 容器）。
 - 禁止把生产数据库凭据传给测试命令。
 - 禁止在 release binary 构建后再手改 embedded migration SQL。
 - 禁止对任意版本使用 `force`。
 - 禁止未经明确批准执行 SSH 或持久化服务器操作。
 - 禁止在 `dirty=true` 时继续盲目执行 `up`。
+- 禁止让破坏性或大表加锁的 migration 走自动 deploy 路径。
 
 ## 快速命令速查
 
