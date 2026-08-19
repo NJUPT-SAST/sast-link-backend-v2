@@ -832,8 +832,10 @@ oauth_authorizations.family_id
 
 11. `audit_logs` 表（FK → user）
 
-12. 所有索引
+12. `oauth_grants` 表（V009，FK → user, oauth_clients）
 
-13. 所有触发器
+13. 所有索引
 
-14. 索引/触发器复核（清理由 API 内 retention worker 执行，不使用 pg_cron）
+14. 所有触发器
+
+15. 索引/触发器复核（清理由 API 内 retention worker 执行，不使用 pg_cron）

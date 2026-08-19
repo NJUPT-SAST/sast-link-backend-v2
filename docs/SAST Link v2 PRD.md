@@ -305,8 +305,8 @@ Body: { "password": "current_password" }
 | `/oauth/authorize` | GET | 授权端点，**无认证**。强制参数：response_type=code / client_id / redirect_uri / scope / state / code_challenge / code_challenge_method；可选：nonce（OIDC） |
 | `/oauth/authorize/consent` | POST | 授权确认端点，Bearer 认证。SAST Link 自有端点，使用标准信封 |
 | `/oauth/authorize/consent` | GET | 同意页元数据，Bearer 认证。peek 暂存（不消费）返回已验证 `client_name` / `scopes` / `expires_in`——同意页展示值取自本端点而非可伪造的 consent URL 参数 |
-| `/oauth/grants` | GET | 授权应用列表，Bearer 认证。SAST Link 自有端点，标准信封；每客户端一行，取最近一次授权 |
-| `/oauth/grants/:client_id` | DELETE | 撤销用户对某客户端的授权，Bearer 认证：撤销该 user×client 全部活跃 token（同事务 + 黑名单入队）并删除授权历史，须重新同意 |
+| `/oauth/grants` | GET | 授权应用列表，Bearer 认证。SAST Link 自有端点，标准信封；读长效的 `oauth_grants`（V009），每客户端一行（联合主键保证），不随授权码过期或定时清理消失 |
+| `/oauth/grants/:client_id` | DELETE | 撤销用户对某客户端的授权，Bearer 认证：撤销该 user×client 全部活跃 token（同事务 + 黑名单入队），再在一个事务内删除授权记录与在途授权码，须重新同意 |
 | `/oauth/token` | POST | Token 端点。支持 grant_type: authorization_code / refresh_token。第一方用 PKCE（无 client_secret），第三方用 client_secret_post。scope 含 openid 时额外返回 id_token |
 | `/oauth/revoke` | POST | 撤销整条 token family |
 
@@ -561,7 +561,8 @@ Payload: {
 | `profile` | 用户展示资料 | 1:1 关联 user，department 用于权限隔离 |
 | `identities` | 第三方账号绑定 | provider + provider_id 全局唯一；github/lark 每用户仅 1 条（partial unique index）；other_mail 最多 2 条（触发器 + 应用层双重校验） |
 | `oauth_clients` | OAuth 客户端注册 | first_party 的 client_secret 为 NULL；redirect_uris/grant_types/scopes 数组存储 |
-| `oauth_authorizations` | 授权码 | PKCE 参数（code_challenge + method）+ OIDC nonce；`family_id` 支持重放检测级联撤销；无 updated_at |
+| `oauth_authorizations` | 授权码 | PKCE 参数（code_challenge + method）+ OIDC nonce；`family_id` 支持重放检测级联撤销；无 updated_at；V009 起仅承载一次性授权码，不再是「已授权应用」列表的数据源 |
+| `oauth_grants` | 授权记录（V009） | consent history，`(user_id, client_id)` 联合主键，重复同意为 upsert；长效数据，retention 永不清理；两个 FK 均 ON DELETE CASCADE；无 updated_at |
 | `oauth_access_tokens` | JWT 元数据 | `token_id` = JWT jti；`family_id` 级联撤销；无 updated_at |
 | `oauth_refresh_tokens` | Refresh Token | `token_hash` = HMAC-SHA256 存储；`(family_id, sequence)` 唯一约束实现 rotation 检测；无 updated_at |
 | `audit_logs` | 操作日志 | user_id ON DELETE SET NULL；JSONB detail |
@@ -692,7 +693,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 
 | 清理对象 | 默认窗口 | 说明 |
 | --------- | --------- | ------ |
-| `oauth_authorizations` 已过期（无论是否使用） | +1h | V006 增设全量 `expires_at` 索引，因 V001 的索引是 `WHERE is_used = FALSE` 的部分索引，而已兑换才是常态 |
+| `oauth_authorizations` 已过期（无论是否使用） | +1h | V006 增设全量 `expires_at` 索引，因 V001 的索引是 `WHERE is_used = FALSE` 的部分索引，而已兑换才是常态。本表曾是「已授权应用」列表的数据源，因此该列表在 consent 后约 65 分钟必然清空；V009 迁到长效的 `oauth_grants` 修正 |
 | `oauth_access_tokens` 已过期元数据 | +24h | 中间件对「JTI 不存在」与「已撤销」返回同一个 401，窗口过短会把仅仅过期的 token 呈现为已撤销，客户端读成被强制登出而不去刷新。校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的值 |
 | `oauth_refresh_tokens` 已撤销、已过期且 `sequence > 0` | +24h | 每个 family 的 sequence-0 行永久保留：它是 ID Token `auth_time` 的来源，且从首次轮换起即带 `revoked_at`；删掉会让活跃 family 的刷新返回 500 |
 | `audit_logs` 超过保留期 | 90d | 审计日志属运维用途而非合规强制，故 90 天是**默认值**而非硬下限：可调大，也可收紧到 720h（30 天）的下限；低于下限启动时拒绝 |
@@ -767,7 +768,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流，以及登录 / 登出 / 刷新审计接入（刷新以 `outcome` 区分 `rotated` 与 `refresh_replayed`，后者即重放防御触发并级联撤销整个 token family） |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
 | 用户资料管理 | 已完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、头像上传（`PUT /user/avatar`，腾讯云 COS + 内容审核，`STORAGE_*` 配置，未配置时返回 50002）。公开个人卡片 `GET /card/:id` 已下线（隐私重设计中） |
-| OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、同意页元数据（`GET /oauth/authorize/consent`，peek 暂存返回已验证 client_name / scopes / expires_in，防 consent URL 伪造应用名，按用户限流）、授权应用管理（`GET /oauth/grants` 列表 + `DELETE /oauth/grants/:client_id` 撤销：撤销该 user×client 全部活跃 token 并删除授权历史，须重新同意）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护；更新侧 `grant_types` / `scopes` 可改，`client_type` 不可就地修改；能力收缩会回溯——收窄 scope 或新授予能力 scope 撤销该客户端存量 token，且 consent 与授权码兑换两处重校验 scope），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
+| OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、同意页元数据（`GET /oauth/authorize/consent`，peek 暂存返回已验证 client_name / scopes / expires_in，防 consent URL 伪造应用名，按用户限流）、授权应用管理（`GET /oauth/grants` 列表 + `DELETE /oauth/grants/:client_id` 撤销：列表读 V009 长效 `oauth_grants` 表，consent 时与授权码同事务 upsert 且 retention 永不清理；撤销先切断该 user×client 全部活跃 token，再同事务删除授权记录与在途授权码，须重新同意）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护；更新侧 `grant_types` / `scopes` 可改，`client_type` 不可就地修改；能力收缩会回溯——收窄 scope 或新授予能力 scope 撤销该客户端存量 token，且 consent 与授权码兑换两处重校验 scope），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
 | 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）、审计日志查询（含 best-effort 的 `user_name` 显示名）与概览统计（`GET /admin/stats`：账户聚合 / 客户端数 / 最近审计），读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），以及角色门叠加委派 scope 门（`admin:read`/`admin:write`，仅约束第三方委派 token，内置控制台 token 豁免）、委派管理的通用授予流程（控制台可为任意 `third_party` 客户端授予 admin scope，四道守卫基于合并状态判定，收窄/授予连带撤销 token，consent 与 code 兑换重校验 scope）与 `audit_logs.actor_client_id` 行为主体追溯，含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
 | 其余运维接入 | 已完成 — 设备管理：`GET /user/devices` + `DELETE /user/devices/:id`（Redis ZSET + Hash，device_id 复用 token family_id，最多 5 台淘汰最旧，30d TTL；登录/注册登记、刷新更新 last_seen 不续期 TTL、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备的归属校验 fail-closed；按用户限流 `RATE_LIMIT_DEVICE_*`；审计 `logout_device`）。endpoint 限流已全量接入（见 §11）。数据保留清理已接入：由 `internal/worker/retention.go` 在 API 进程内按 ticker 执行，多实例用 advisory lock 协调；不用 pg_cron（生产库未装扩展，测试镜像亦无法加载），详见 §9.1 |
 

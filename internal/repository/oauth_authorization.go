@@ -31,20 +31,13 @@ func NewOAuthAuthorization(database *gorm.DB) *OAuthAuthorizationRepository {
 	return &OAuthAuthorizationRepository{database: database}
 }
 
-// Create persists a new authorization code.
-func (r *OAuthAuthorizationRepository) Create(ctx context.Context, authorization *model.OAuthAuthorization) error {
-	if authorization == nil || strings.TrimSpace(authorization.Code) == "" ||
-		authorization.ClientID <= 0 || authorization.UserID <= 0 {
-		return fmt.Errorf("create authorization: %w", ErrInvalidArgument)
-	}
-	if err := r.database.WithContext(ctx).Create(authorization).Error; err != nil {
-		return fmt.Errorf("create authorization: %w", err)
-	}
-	return nil
-}
-
 // CreateWithGrant persists a new authorization code and records the user's
 // consent in oauth_grants, in one transaction.
+//
+// This is the only authorization-code write path, deliberately. A bare code
+// insert would be the shorter and more obvious call, and it would silently
+// reintroduce the defect V009 fixed: an application holding a live code while
+// absent from the user's authorized-apps list.
 //
 // The two writes share a transaction so an application can never hold a live
 // code without appearing in the user's authorized-apps list, and vice versa: if

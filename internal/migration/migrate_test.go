@@ -110,6 +110,7 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 		"oauth_refresh_tokens",
 		"audit_logs",
 		"token_blacklist_outbox",
+		"oauth_grants",
 		"v003_builtin_oauth_client_ownership",
 	} {
 		assertExists(t, database, tableExistsQuery, tableName)
@@ -141,6 +142,11 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	// redeemed codes are the common case, so without this the hourly sweep is a
 	// sequential scan over the whole table.
 	assertExists(t, database, indexExistsQuery, "idx_oauth_authorizations_expires_at_all")
+
+	// V009. oauth_grants references oauth_clients, and PostgreSQL does not index
+	// the referencing side of a foreign key on its own: without this index the
+	// console's client delete degrades to a sequential scan over every user's grants.
+	assertExists(t, database, indexExistsQuery, "idx_oauth_grants_client_id")
 
 	userID := insertTestUser(t, database)
 	assertRejectsInvalidEmailDomain(t, database)
@@ -460,6 +466,15 @@ func TestDownDropsV1Schema(t *testing.T) {
 	}
 	if table.Valid {
 		t.Fatalf("user table remains after Down(): %q", table.String)
+	}
+	// V009's down must drop oauth_grants. Left behind, its foreign keys would block
+	// V001's down from dropping "user" and oauth_clients on the next cycle.
+	var grants sql.NullString
+	if err := database.QueryRowContext(context.Background(), `SELECT to_regclass('public.oauth_grants')`).Scan(&grants); err != nil {
+		t.Fatalf("query oauth_grants table: %v", err)
+	}
+	if grants.Valid {
+		t.Fatalf("oauth_grants table remains after Down(): %q", grants.String)
 	}
 }
 

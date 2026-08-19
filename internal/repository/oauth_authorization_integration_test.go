@@ -38,11 +38,11 @@ func TestOAuthAuthorizationRepositoryCreateAndConsume(t *testing.T) {
 	authorizations := repository.NewOAuthAuthorization(database)
 
 	authorization := testAuthorization("code-consume", client.ID, user.ID, time.Now().Add(5*time.Minute))
-	if err := authorizations.Create(context.Background(), authorization); err != nil {
-		t.Fatalf("Create() error = %v", err)
+	if err := authorizations.CreateWithGrant(context.Background(), authorization); err != nil {
+		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
 	if authorization.ID == 0 {
-		t.Fatal("Create() left the authorization without a primary key")
+		t.Fatal("CreateWithGrant() left the authorization without a primary key")
 	}
 
 	consumed, _, err := authorizations.Consume(context.Background(), "code-consume", time.Now())
@@ -70,11 +70,11 @@ func TestOAuthAuthorizationRepositoryConsumeReportsReplayWithFamily(t *testing.T
 	client := createOAuthClient(t, database)
 	authorizations := repository.NewOAuthAuthorization(database)
 
-	if err := authorizations.Create(
+	if err := authorizations.CreateWithGrant(
 		context.Background(),
 		testAuthorization("code-replay", client.ID, user.ID, time.Now().Add(5*time.Minute)),
 	); err != nil {
-		t.Fatalf("Create() error = %v", err)
+		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
 	if _, _, err := authorizations.Consume(context.Background(), "code-replay", time.Now()); err != nil {
 		t.Fatalf("first Consume() error = %v", err)
@@ -97,11 +97,11 @@ func TestOAuthAuthorizationRepositoryConsumeConcurrentSingleSuccess(t *testing.T
 	client := createOAuthClient(t, database)
 	authorizations := repository.NewOAuthAuthorization(database)
 
-	if err := authorizations.Create(
+	if err := authorizations.CreateWithGrant(
 		context.Background(),
 		testAuthorization("code-concurrent", client.ID, user.ID, time.Now().Add(5*time.Minute)),
 	); err != nil {
-		t.Fatalf("Create() error = %v", err)
+		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
 
 	const contenders = 8
@@ -149,8 +149,8 @@ func TestOAuthAuthorizationRepositoryConsumeReportsExpiryWithoutMarkingUsed(t *t
 	issuedAt := time.Now().Add(-10 * time.Minute)
 	authorization := testAuthorization("code-expired", client.ID, user.ID, issuedAt.Add(5*time.Minute))
 	authorization.CreatedAt = issuedAt
-	if err := authorizations.Create(context.Background(), authorization); err != nil {
-		t.Fatalf("Create() error = %v", err)
+	if err := authorizations.CreateWithGrant(context.Background(), authorization); err != nil {
+		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
 
 	if _, _, err := authorizations.Consume(context.Background(), "code-expired", time.Now()); !errors.Is(err, repository.ErrAuthorizationExpired) {
@@ -426,11 +426,11 @@ func TestOAuthAuthorizationRepositoryRejectsInvalidArguments(t *testing.T) {
 	database := setupDatabase(t)
 	authorizations := repository.NewOAuthAuthorization(database)
 
-	if err := authorizations.Create(context.Background(), nil); !errors.Is(err, repository.ErrInvalidArgument) {
-		t.Fatalf("Create(nil) error = %v, want ErrInvalidArgument", err)
+	if err := authorizations.CreateWithGrant(context.Background(), nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("CreateWithGrant(nil) error = %v, want ErrInvalidArgument", err)
 	}
-	if err := authorizations.Create(context.Background(), &model.OAuthAuthorization{}); !errors.Is(err, repository.ErrInvalidArgument) {
-		t.Fatalf("Create(empty) error = %v, want ErrInvalidArgument", err)
+	if err := authorizations.CreateWithGrant(context.Background(), &model.OAuthAuthorization{}); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("CreateWithGrant(empty) error = %v, want ErrInvalidArgument", err)
 	}
 	if _, _, err := authorizations.Consume(context.Background(), "  ", time.Now()); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("Consume(blank) error = %v, want ErrInvalidArgument", err)
@@ -450,8 +450,8 @@ func TestOAuthAuthorizationRepositoryRejectsPlainPKCEMethod(t *testing.T) {
 
 	authorization := testAuthorization("code-plain", client.ID, user.ID, time.Now().Add(5*time.Minute))
 	authorization.CodeChallengeMethod = "plain"
-	if err := authorizations.Create(context.Background(), authorization); err == nil {
-		t.Fatal("Create() accepted code_challenge_method=plain, want the V002 constraint to reject it")
+	if err := authorizations.CreateWithGrant(context.Background(), authorization); err == nil {
+		t.Fatal("CreateWithGrant() accepted code_challenge_method=plain, want the V002 constraint to reject it")
 	}
 }
 
@@ -480,8 +480,8 @@ func TestOAuthAuthorizationConsumeReturnsUserTokenVersion(t *testing.T) {
 		t.Fatalf("bump user token version: %v", err)
 	}
 
-	if err := authorizations.Create(context.Background(), testAuthorization("code-consume-version", 1, user.ID, time.Now().Add(time.Hour))); err != nil {
-		t.Fatalf("Create() error = %v", err)
+	if err := authorizations.CreateWithGrant(context.Background(), testAuthorization("code-consume-version", 1, user.ID, time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
 	_, version, err := authorizations.Consume(context.Background(), "code-consume-version", time.Now())
 	if err != nil {
@@ -502,8 +502,8 @@ func TestOAuthAuthorizationRedemptionRefusesPairAfterBulkRevocation(t *testing.T
 	authorizations := repository.NewOAuthAuthorization(database)
 	tokens := repository.NewToken(database)
 
-	if err := authorizations.Create(context.Background(), testAuthorization("code-redeem-after-revoke", client.ID, user.ID, time.Now().Add(time.Hour))); err != nil {
-		t.Fatalf("Create() error = %v", err)
+	if err := authorizations.CreateWithGrant(context.Background(), testAuthorization("code-redeem-after-revoke", client.ID, user.ID, time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
 	_, consumedVersion, err := authorizations.Consume(context.Background(), "code-redeem-after-revoke", time.Now())
 	if err != nil {
