@@ -25,7 +25,7 @@ body:
     attributes:
       label: Go 版本
       description: 本地复现时提供 `go version` 输出（非本地可留空）
-      placeholder: go version go1.26.5 darwin/arm64
+      placeholder: go version go1.26.6 darwin/arm64
   - type: textarea
     id: steps
     attributes:
