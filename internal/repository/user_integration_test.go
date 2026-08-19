@@ -590,8 +590,8 @@ func TestUserRepositoryUpdatePasswordBurnsAuthorizationCodes(t *testing.T) {
 	live := testAuthorization("code-live", client.ID, user.ID, time.Now().Add(5*time.Minute))
 	untouched := testAuthorization("code-other-user", client.ID, other.ID, time.Now().Add(5*time.Minute))
 	for _, authorization := range []*model.OAuthAuthorization{live, untouched} {
-		if err := authorizations.Create(context.Background(), authorization); err != nil {
-			t.Fatalf("Create(%s) error = %v", authorization.Code, err)
+		if err := authorizations.CreateWithGrant(context.Background(), authorization); err != nil {
+			t.Fatalf("CreateWithGrant(%s) error = %v", authorization.Code, err)
 		}
 	}
 

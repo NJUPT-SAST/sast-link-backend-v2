@@ -289,7 +289,7 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 		ExpiresAt:           now.Add(s.codeTTL()),
 		CreatedAt:           now,
 	}
-	if err := s.Authorizations.Create(ctx, authorization); err != nil {
+	if err := s.Authorizations.CreateWithGrant(ctx, authorization); err != nil {
 		return nil, newError(ErrInternal, "创建授权码失败", err)
 	}
 

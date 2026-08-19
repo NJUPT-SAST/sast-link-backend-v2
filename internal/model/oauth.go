@@ -44,6 +44,22 @@ func (OAuthAuthorization) TableName() string {
 	return "oauth_authorizations"
 }
 
+// OAuthGrant records that a user authorized one application via the consent
+// screen. One row per user-client pair (V009), upserted on each consent and
+// deleted on revocation. Unlike OAuthAuthorization it is long-lived: the
+// retention worker never sweeps it.
+type OAuthGrant struct {
+	UserID    int64
+	ClientID  int64
+	Scopes    StringArray `gorm:"type:text[]"`
+	GrantedAt time.Time
+}
+
+// TableName returns the exact V009 table name for OAuthGrant.
+func (OAuthGrant) TableName() string {
+	return "oauth_grants"
+}
+
 // OAuthAccessToken persists access-token metadata.
 type OAuthAccessToken struct {
 	ID        int64

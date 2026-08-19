@@ -31,14 +31,41 @@ func NewOAuthAuthorization(database *gorm.DB) *OAuthAuthorizationRepository {
 	return &OAuthAuthorizationRepository{database: database}
 }
 
-// Create persists a new authorization code.
-func (r *OAuthAuthorizationRepository) Create(ctx context.Context, authorization *model.OAuthAuthorization) error {
+// CreateWithGrant persists a new authorization code and records the user's
+// consent in oauth_grants, in one transaction.
+//
+// This is the only authorization-code write path, deliberately. A bare code
+// insert would be the shorter and more obvious call, and it would silently
+// reintroduce the defect V009 fixed: an application holding a live code while
+// absent from the user's authorized-apps list.
+//
+// The two writes share a transaction so an application can never hold a live
+// code without appearing in the user's authorized-apps list, and vice versa: if
+// the grant fails to record, the code is not issued and the user retries
+// consent. oauth_grants is keyed by (user_id, client_id), so a repeated consent
+// upserts the pair, refreshing scopes and granted_at to the latest decision.
+func (r *OAuthAuthorizationRepository) CreateWithGrant(ctx context.Context, authorization *model.OAuthAuthorization) error {
 	if authorization == nil || strings.TrimSpace(authorization.Code) == "" ||
 		authorization.ClientID <= 0 || authorization.UserID <= 0 {
-		return fmt.Errorf("create authorization: %w", ErrInvalidArgument)
+		return fmt.Errorf("create authorization with grant: %w", ErrInvalidArgument)
 	}
-	if err := r.database.WithContext(ctx).Create(authorization).Error; err != nil {
-		return fmt.Errorf("create authorization: %w", err)
+	grant := &model.OAuthGrant{
+		UserID:    authorization.UserID,
+		ClientID:  authorization.ClientID,
+		Scopes:    authorization.Scopes,
+		GrantedAt: authorization.CreatedAt,
+	}
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Create(authorization).Error; err != nil {
+			return err
+		}
+		return transaction.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "user_id"}, {Name: "client_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"scopes", "granted_at"}),
+		}).Create(grant).Error
+	})
+	if err != nil {
+		return fmt.Errorf("create authorization with grant: %w", err)
 	}
 	return nil
 }
@@ -142,24 +169,25 @@ type OAuthGrant struct {
 	LastAuthorizedAt time.Time         `json:"last_authorized_at"`
 }
 
-// ListGrantsByUser returns the distinct applications a user has authorized,
-// newest consent per client, joined with the client's public display fields.
+// ListGrantsByUser returns the applications a user has authorized, one row per
+// client (oauth_grants is keyed by user_id + client_id), joined with the
+// client's public display fields. Scopes and the grant time come from the grant
+// row, never from the client registration.
 func (r *OAuthAuthorizationRepository) ListGrantsByUser(ctx context.Context, userID int64) ([]OAuthGrant, error) {
 	grants := make([]OAuthGrant, 0, 8)
 	err := r.database.WithContext(ctx).
-		Model(&model.OAuthAuthorization{}).
-		Select(`DISTINCT ON (oauth_authorizations.client_id)
-			oauth_authorizations.client_id,
+		Model(&model.OAuthGrant{}).
+		Select(`oauth_grants.client_id,
 			oauth_clients.client_id AS client_key,
 			oauth_clients.client_name,
 			oauth_clients.client_type,
 			oauth_clients.redirect_uris,
 			oauth_clients.is_active,
-			oauth_authorizations.scopes,
-			oauth_authorizations.created_at AS last_authorized_at`).
-		Joins(`JOIN oauth_clients ON oauth_clients.id = oauth_authorizations.client_id`).
-		Where(`oauth_authorizations.user_id = ?`, userID).
-		Order(`oauth_authorizations.client_id, oauth_authorizations.created_at DESC`).
+			oauth_grants.scopes,
+			oauth_grants.granted_at AS last_authorized_at`).
+		Joins(`JOIN oauth_clients ON oauth_clients.id = oauth_grants.client_id`).
+		Where(`oauth_grants.user_id = ?`, userID).
+		Order(`oauth_grants.client_id`).
 		Scan(&grants).Error
 	if err != nil {
 		return nil, fmt.Errorf("list oauth grants: %w", err)
@@ -167,12 +195,22 @@ func (r *OAuthAuthorizationRepository) ListGrantsByUser(ctx context.Context, use
 	return grants, nil
 }
 
-// DeleteByUserClient removes every authorization a user holds with one client,
-// which drops the application from the user's authorized-apps list.
+// DeleteByUserClient removes every authorization and the consent grant a user
+// holds with one client, dropping the application from the authorized-apps list.
+//
+// The oauth_authorizations delete is not just cleanup: it kills any in-flight,
+// unredeemed authorization code the user holds with this client, so a revoke
+// takes effect at once instead of leaving a code redeemable for the rest of its
+// short TTL (the redemption leg checks the client and scope, not the grant).
 func (r *OAuthAuthorizationRepository) DeleteByUserClient(ctx context.Context, userID, clientID int64) error {
-	err := r.database.WithContext(ctx).
-		Where("user_id = ? AND client_id = ?", userID, clientID).
-		Delete(&model.OAuthAuthorization{}).Error
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Where("user_id = ? AND client_id = ?", userID, clientID).
+			Delete(&model.OAuthAuthorization{}).Error; err != nil {
+			return err
+		}
+		return transaction.Where("user_id = ? AND client_id = ?", userID, clientID).
+			Delete(&model.OAuthGrant{}).Error
+	})
 	if err != nil {
 		return fmt.Errorf("delete user client authorizations: %w", err)
 	}

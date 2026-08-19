@@ -3,6 +3,7 @@ package migration_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -60,6 +61,15 @@ const indexExistsQuery = `SELECT EXISTS (
   WHERE schemaname = 'public' AND indexname = $1
 )`
 
+// A partial index's predicate, normalized by PostgreSQL. Empty string for a
+// full index, no row at all when the index does not exist.
+const indexPredicateQuery = `SELECT COALESCE(pg_catalog.pg_get_expr(index.indpred, index.indrelid), '')
+FROM pg_catalog.pg_index index
+JOIN pg_catalog.pg_class index_relation ON index_relation.oid = index.indexrelid
+JOIN pg_catalog.pg_class table_relation ON table_relation.oid = index.indrelid
+JOIN pg_catalog.pg_namespace namespace ON namespace.oid = table_relation.relnamespace
+WHERE namespace.nspname = 'public' AND table_relation.relname = $1 AND index_relation.relname = $2`
+
 func TestNewRejectsMissingDatabaseName(t *testing.T) {
 	for _, databaseURL := range []string{
 		"postgres://user:password@localhost",
@@ -110,6 +120,7 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 		"oauth_refresh_tokens",
 		"audit_logs",
 		"token_blacklist_outbox",
+		"oauth_grants",
 		"v003_builtin_oauth_client_ownership",
 	} {
 		assertExists(t, database, tableExistsQuery, tableName)
@@ -141,6 +152,24 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	// redeemed codes are the common case, so without this the hourly sweep is a
 	// sequential scan over the whole table.
 	assertExists(t, database, indexExistsQuery, "idx_oauth_authorizations_expires_at_all")
+
+	// V008. The retention worker's dead-family branch sweeps refresh rows with
+	// revoked_at IS NULL, which V001's partial index excludes by construction
+	// (WHERE revoked_at IS NOT NULL). The predicate is asserted, not just the
+	// name: an index over the wrong half of the table is the failure this
+	// migration exists to prevent, and it is invisible to an existence check.
+	assertPartialIndex(t, database, "oauth_refresh_tokens",
+		"idx_oauth_refresh_tokens_expires_at_live", "(revoked_at IS NULL)")
+	// V001's half of the same pair, pinned here because the two predicates only
+	// cover the table between them: if either drifts, one sweep branch silently
+	// loses its index while both indexes still exist.
+	assertPartialIndex(t, database, "oauth_refresh_tokens",
+		"idx_oauth_refresh_tokens_expires_at", "(revoked_at IS NOT NULL)")
+
+	// V009. oauth_grants references oauth_clients, and PostgreSQL does not index
+	// the referencing side of a foreign key on its own: without this index the
+	// console's client delete degrades to a sequential scan over every user's grants.
+	assertExists(t, database, indexExistsQuery, "idx_oauth_grants_client_id")
 
 	userID := insertTestUser(t, database)
 	assertRejectsInvalidEmailDomain(t, database)
@@ -461,6 +490,15 @@ func TestDownDropsV1Schema(t *testing.T) {
 	if table.Valid {
 		t.Fatalf("user table remains after Down(): %q", table.String)
 	}
+	// V009's down must drop oauth_grants. Left behind, its foreign keys would block
+	// V001's down from dropping "user" and oauth_clients on the next cycle.
+	var grants sql.NullString
+	if err := database.QueryRowContext(context.Background(), `SELECT to_regclass('public.oauth_grants')`).Scan(&grants); err != nil {
+		t.Fatalf("query oauth_grants table: %v", err)
+	}
+	if grants.Valid {
+		t.Fatalf("oauth_grants table remains after Down(): %q", grants.String)
+	}
 }
 
 func newMigration(t *testing.T, databaseURL string) *migrate.Migrate {
@@ -472,6 +510,26 @@ func newMigration(t *testing.T, databaseURL string) *migrate.Migrate {
 	}
 	t.Cleanup(func() { _, _ = instance.Close() })
 	return instance
+}
+
+// assertPartialIndex pins a partial index's predicate, not just its name. For
+// the retention indexes the predicate *is* the index: one that names the wrong
+// rows still exists, still gets used by nothing, and leaves the sweep on the
+// sequential scan the migration was written to remove.
+func assertPartialIndex(t *testing.T, database *sql.DB, table, name, wantPredicate string) {
+	t.Helper()
+
+	var predicate string
+	err := database.QueryRowContext(context.Background(), indexPredicateQuery, table, name).Scan(&predicate)
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("required index %q on %q is missing", name, table)
+	}
+	if err != nil {
+		t.Fatalf("query predicate for index %q: %v", name, err)
+	}
+	if predicate != wantPredicate {
+		t.Fatalf("index %q predicate = %q, want %q", name, predicate, wantPredicate)
+	}
 }
 
 func assertExists(t *testing.T, database *sql.DB, query string, name string) {

@@ -72,7 +72,7 @@ func newFakeAuthorizations() *fakeAuthorizations {
 	return &fakeAuthorizations{byCode: map[string]*model.OAuthAuthorization{}, consumeUserVersion: 2}
 }
 
-func (f *fakeAuthorizations) Create(_ context.Context, authorization *model.OAuthAuthorization) error {
+func (f *fakeAuthorizations) CreateWithGrant(_ context.Context, authorization *model.OAuthAuthorization) error {
 	if f.createErr != nil {
 		return f.createErr
 	}
