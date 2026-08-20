@@ -30,9 +30,7 @@
 -- banner field the user can fill in through PUT /user/profile (name, phone,
 -- qq, major) is treated alike. The import left it empty for every row because
 -- the previous database had no such field, so a first login will prompt to
--- collect it once. That is the whole point of the guided completion, and an
--- early dump is not a reliable measure of what production holds today (users
--- may have added values since).
+-- collect it once, which is the whole point of the guided completion.
 --
 -- college is deliberately absent. '其他' is a legitimate college_enum
 -- member, and nothing in the row distinguishes "the import defaulted to it" from
