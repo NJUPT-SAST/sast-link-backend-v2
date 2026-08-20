@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // authResultDTO mirrors the session handler's login response, so a third-party
@@ -25,6 +26,18 @@ type authUserDTO struct {
 	State      string    `json:"state"`
 	EmailType  string    `json:"email_type"`
 	CreatedAt  time.Time `json:"created_at"`
+	// ProfileNeedsCompletion and IncompleteFields carry the same meaning as in
+	// sessionhandler: an account imported from the previous database still holds
+	// values no current write path would accept, and the client routes it to the
+	// completion page.
+	//
+	// This DTO is a separate type from sessionhandler's identically named one, and
+	// this is the exit that matters most for the flag: the accounts carrying
+	// migration debris are largely the ones that sign in through GitHub or Lark,
+	// so omitting the fields here would leave exactly the target population
+	// unable to see the prompt.
+	ProfileNeedsCompletion bool     `json:"profile_needs_completion"`
+	IncompleteFields       []string `json:"incomplete_fields"`
 }
 
 // identityBindDTO is the bind response envelope payload.
@@ -47,6 +60,12 @@ func mapUser(user *model.User) authUserDTO {
 	if user == nil {
 		return authUserDTO{}
 	}
+	fields := validate.IncompleteProfileFields(
+		user.Name, user.PhoneNumber, user.Major, user.StudentID)
+	if fields == nil {
+		// Always an array in JSON, so a client can read .length unconditionally.
+		fields = []string{}
+	}
 	return authUserDTO{
 		ID:         user.ID,
 		Name:       user.Name,
@@ -55,6 +74,9 @@ func mapUser(user *model.User) authUserDTO {
 		State:      string(user.State),
 		EmailType:  string(user.EmailType),
 		CreatedAt:  user.CreatedAt,
+
+		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
+		IncompleteFields:       fields,
 	}
 }
 
