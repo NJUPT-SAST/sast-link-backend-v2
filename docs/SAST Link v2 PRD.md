@@ -290,6 +290,17 @@ Body: { "password": "current_password" }
 | `profile` | nickname, department, intro, email, blog_url, github_url | `PUT /user/profile`（本人，department 仅 software/media 有值可设） |
 | `profile` | avatar | `PUT /user/avatar`（multipart/form-data，≤1MB 且任一维 ≤4096，jpg/png/webp；前端压缩后上传） |
 
+#### 迁移账号资料补全标志（V010）
+
+旧库迁移账号的部分必填字段带着当前写入路径不会接受的值（空白，或 `name` 被填成了 `student_id`）。为引导这类用户补全，`user` 表新增只读生成列 `profile_needs_completion`（V010），并在登录 / 注册 / 第三方登录 / 资料接口的响应中附带：
+
+- `profile_needs_completion: bool` —— 仍有必填字段为空，或 `name` 等于 `student_id`（比较忽略大小写，迁移数据中两种形式都有）
+- `incomplete_fields: string[]` —— 待补全字段名（`name` / `phone_number` / `major`），恒为数组不为 `null`
+
+**纯软提示**：不拒绝任何请求，不参与任何鉴权判断；重定向到补全页由前端自行决定。用户通过 `PUT /user/profile` 补齐字段后，生成列自动翻转为 `false`，无独立的「确认已补全」接口。
+
+**判定边界**：不包含 `qq_number`（旧库无此字段，全量迁移账号为空，纳入会使所有用户永久亮灯）；不包含 `college`（`'其他'` 是合法枚举值，无法区分迁移默认与真实选择，且持有该默认值的行必同时存在其他空白字段，已被覆盖）。管理后台 `GET /admin/users?needs_completion=true|false` 可筛选并跟进。
+
 #### 头像上传
 
 - 上传至腾讯云 COS（`STORAGE_*` 配置；未配置时端点返回 `50002`），返回 URL 写入 `profile.avatar`
@@ -767,7 +778,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | 认证基础设施 | 已完成 — 单方案 argon2id 密码哈希（默认 m=19456KiB/t2，存量 pbkdf2-sha512-v1 只读验证 + 登录时重哈希迁移）、EdDSA（Ed25519）JWT/JWKS 与密钥轮换、opaque Refresh Token、PKCE-S256、统一 `openid/profile/email` scope（另有 `admin:read`/`admin:write` 管理 scope（仅 `third_party` 机密客户端可持有）与 `user:read`/`user:write` 自助 scope（无客户端类型约束，任何客户端可持有），均不产生 OIDC claim）、token-family rotation/replay、Redis 一次性状态/auth-state 缓存/登录失败计数与 fixed-window limiter |
 | 内部会话业务 | 已完成 — 密码登录、Refresh Token rotation、登出、JWT middleware、当前用户资料查询、登录限流，以及登录 / 登出 / 刷新审计接入（刷新以 `outcome` 区分 `rotated` 与 `refresh_replayed`，后者即重放防御触发并级联撤销整个 token family） |
 | 用户注册与密码管理 | 已完成 — 邮箱验证码注册、改密 / 重置密码、全量 Token 吊销、第三方邮箱绑定 |
-| 用户资料管理 | 已完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、头像上传（`PUT /user/avatar`，腾讯云 COS + 内容审核，`STORAGE_*` 配置，未配置时返回 50002）。公开个人卡片 `GET /card/:id` 已下线（隐私重设计中） |
+| 用户资料管理 | 已完成 — 资料编辑（`PUT /user/profile`）、绑定列表、解绑（密码二次确认 + 唯一登录方式保护 + 60s 限流）、头像上传（`PUT /user/avatar`，腾讯云 COS + 内容审核，`STORAGE_*` 配置，未配置时返回 50002）。公开个人卡片 `GET /card/:id` 已下线（隐私重设计中）。**迁移资料补全标志（V010）**：`user.profile_needs_completion` 生成列 + 登录/注册/第三方登录/资料接口响应携带 `profile_needs_completion` / `incomplete_fields`（软提示，见 §4.9），管理台 `?needs_completion=true|false` 筛选 |
 | OAuth/OIDC 业务 | 已完成 — 授权服务端（两段式 authorize / consent / token / revoke，PKCE-S256、授权码与 refresh 重放级联撤销）、同意页元数据（`GET /oauth/authorize/consent`，peek 暂存返回已验证 client_name / scopes / expires_in，防 consent URL 伪造应用名，按用户限流）、授权应用管理（`GET /oauth/grants` 列表 + `DELETE /oauth/grants/:client_id` 撤销：列表读 V009 长效 `oauth_grants` 表，consent 时与授权码同事务 upsert 且 retention 永不清理；撤销先切断该 user×client 全部活跃 token，再同事务删除授权记录与在途授权码，须重新同意）、OIDC Provider（discovery / JWKS / UserInfo / ID Token）、OAuth 客户端管理 endpoints（`GET`/`POST /admin/oauth-clients`、`PUT /admin/oauth-clients/:id`，服务端生成 `client_id`、注册期 redirect_uri 校验、内置客户端保护；更新侧 `grant_types` / `scopes` 可改，`client_type` 不可就地修改；能力收缩会回溯——收窄 scope 或新授予能力 scope 撤销该客户端存量 token，且 consent 与授权码兑换两处重校验 scope），以及第三方登录（GitHub / 飞书授权跳转与回调、`login_code` 交换、登录态绑定 `POST /user/identities/{github,lark}`、registration_state + oauth_state 双重校验的注册补全）。飞书以 `union_id` 作 `provider_id` 并校验 `tenant_key` 限 SAST 租户；回调重定向按精确匹配白名单校验；`oauth_state` / `registration_state` / `login_code` 三者均为 GetDel 一次性消费且 fail-closed。含跨层端到端集成测试（真实 PostgreSQL + Redis） |
 | 管理后台 | 已完成 — OAuth 客户端管理、用户管理（分页列表 / 详情 / 更新 / 软删 / 恢复）、审计日志查询（含 best-effort 的 `user_name` 显示名）与概览统计（`GET /admin/stats`：账户聚合 / 客户端数 / 最近审计），读写分级鉴权（`GET /admin/users` 与详情开放 lecturer，其余 admin only），以及角色门叠加委派 scope 门（`admin:read`/`admin:write`，仅约束第三方委派 token，内置控制台 token 豁免）、委派管理的通用授予流程（控制台可为任意 `third_party` 客户端授予 admin scope，四道守卫基于合并状态判定，收窄/授予连带撤销 token，consent 与 code 兑换重校验 scope）与 `audit_logs.actor_client_id` 行为主体追溯，含跨层端到端集成测试（真实 PostgreSQL + Redis）。管理员自我保护：不可改自己的 role、不可注销自己、不可降权或注销最后一名活跃管理员（DB 事务内 advisory lock 串行化计数） |
 | 其余运维接入 | 已完成 — 设备管理：`GET /user/devices` + `DELETE /user/devices/:id`（Redis ZSET + Hash，device_id 复用 token family_id，最多 5 台淘汰最旧，30d TTL；登录/注册登记、刷新更新 last_seen 不续期 TTL、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备的归属校验 fail-closed；按用户限流 `RATE_LIMIT_DEVICE_*`；审计 `logout_device`）。endpoint 限流已全量接入（见 §11）。数据保留清理已接入：由 `internal/worker/retention.go` 在 API 进程内按 ticker 执行，多实例用 advisory lock 协调；不用 pg_cron（生产库未装扩展，测试镜像亦无法加载），详见 §9.1 |
@@ -793,4 +804,5 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [x] 定时清理过期数据（Go retention worker，非 pg_cron；见 §9.1）
 - [ ] 个人卡片端点（`GET /card/:id`）—— 曾实现后下线：顺序 ID 的公开 URL 可枚举全站成员名单。重开需 owner-only + 不可枚举标识（见 §4.14），handler / service / repository 代码保留待重设计
 - [x] 设备管理（`GET /user/devices` / `DELETE /user/devices/:id`；device_id 复用 token family_id；Redis ZSET + Hash，5 台淘汰、30d TTL；登录/注册登记、刷新 last_seen、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备归属校验 fail-closed；按用户限流；审计 `logout_device`）
+- [x] 迁移资料补全标志（V010 `profile_needs_completion` 生成列，软提示；登录/注册/第三方登录/资料响应带标志与待补全字段；管理台筛选跟进；SQL/Go 判定口径一致性测试）
 - [ ] 测试、联调、上线

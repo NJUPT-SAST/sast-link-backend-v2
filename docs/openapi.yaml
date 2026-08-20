@@ -2107,6 +2107,16 @@ paths:
           required: false
           schema:
             type: string
+        - name: needs_completion
+          in: query
+          description: |
+            筛选资料待补全账号（旧库迁移遗留，见 API 文档 §3.0）。
+            true 只列出待补全的，false 只列出已完整的，不传则不筛选。
+            只接受 true / false 字面量，其他值返回 40000 而非按 false 处理：
+            needs_completion=ture 若被静默当作 false，会返回与调用者意图相反的结果。
+          required: false
+          schema:
+            type: boolean
       responses:
         "200":
           description: |
@@ -3113,6 +3123,19 @@ components:
           type: string
           format: date-time
           description: 创建时间
+        profile_needs_completion:
+          type: boolean
+          description: >-
+            旧库迁移账号仍有必填字段为空，或 name 等于 student_id。纯展示提示，
+            没有任何端点会因此拒绝请求；重定向到补全页由前端自行决定。详见 API 文档 §3.0。
+        incomplete_fields:
+          type: array
+          items:
+            type: string
+            enum: [name, phone_number, major]
+          description: >-
+            待补全的字段名，为 PUT /user/profile 的请求字段名。无待补全时为空数组而非 null。
+            不包含 qq_number（旧库无此字段，全量账号为空）与 college（'其他' 是合法选项）。
     Profile:
       type: object
       properties:
@@ -3227,6 +3250,16 @@ components:
             - $ref: "#/components/schemas/Department"
           nullable: true
           description: 部门，用户尚无 profile 行时为 null
+        profile_needs_completion:
+          type: boolean
+          description: >-
+            旧库迁移账号仍有必填字段为空，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
+        incomplete_fields:
+          type: array
+          items:
+            type: string
+            enum: [name, phone_number, major]
+          description: 待补全的字段名。无待补全时为空数组而非 null。
         created_at:
           type: string
           format: date-time
@@ -3671,6 +3704,16 @@ components:
         major:
           type: string
           description: 专业
+        profile_needs_completion:
+          type: boolean
+          description: >-
+            旧库迁移账号仍有必填字段为空，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
+        incomplete_fields:
+          type: array
+          items:
+            type: string
+            enum: [name, phone_number, major]
+          description: 待补全的字段名。无待补全时为空数组而非 null。
         profile:
           allOf:
             - $ref: "#/components/schemas/Profile"

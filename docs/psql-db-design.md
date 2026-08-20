@@ -87,7 +87,14 @@ CREATE TABLE "user" (
     updated_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
     college       college_enum    NOT NULL DEFAULT '其他',
     major         VARCHAR(50)     NOT NULL DEFAULT '',
-    token_version INT             NOT NULL DEFAULT 0
+    token_version INT             NOT NULL DEFAULT 0,
+    -- V010 新增，生成列（GENERATED ALWAYS AS ... STORED）
+    profile_needs_completion BOOLEAN GENERATED ALWAYS AS (
+        sl_profile_is_blank(name)
+        OR sl_profile_is_blank(phone_number)
+        OR sl_profile_is_blank(major)
+        OR lower(btrim(name)) = lower(btrim(student_id))
+    ) STORED
 );
 ```
 
@@ -108,6 +115,43 @@ CREATE TABLE "user" (
 |updated_at|最后更新时间|
 |college|学院，见 `college_enum`|
 |major|专业|
+|profile_needs_completion|V010 生成列。旧库迁移账号的资料补全标志，详见下方说明|
+
+### profile_needs_completion（V010）
+
+旧数据库迁移过来的账号，部分必填字段带着当前写入路径不会接受的值：`name` / `phone_number` / `major`
+为空白，或 `name` 被填成了 `student_id`。这两种形态都会被现有输入层拒绝
+（`internal/service/session/profile.go`、`internal/service/adminuser/validate.go`），所以是纯存量
+遗留，不是仍在产生的问题。该列把这个事实暴露给前端，用于引导用户补全。
+
+**纯软提示**：没有任何认证或鉴权路径读取它，也没有任何端点因它为 `true` 而拒绝请求。
+
+**为什么是生成列，而不是 `CHECK ... NOT VALID`**：`NOT VALID` 只跳过建约束时的全表校验，
+之后**任何** UPDATE 都要整行过约束，包括不涉及问题列的更新。本服务写 `user` 行的路径包含
+`token_version` 递增（改密码 / 降权 / 关号，即「cut access now」）与旧密码就地重哈希。
+若用 `NOT VALID`，一个 `name` 为空的账号将无法改密码、无法封禁、无法撤销 token ——
+数据质量问题升级为拒绝服务。生成列没有这种耦合：它是本行值的纯函数，用户补齐字段后自动
+翻回 `false`，且 PostgreSQL 拒绝任何直接写入（应用侧对应 `gorm:"->"` 只读标签）。
+
+**为什么不含 `qq_number`**：旧库没有这个字段，全量迁移账号均为空，纳入会使所有用户永久亮灯，
+提示丧失信号意义。收集该字段与修复迁移遗留是两件事。
+
+**为什么不含 `college`**：`'其他'` 是合法的 `college_enum` 成员，行内没有任何信息能区分
+「迁移填了默认值」与「用户真的选了其他」，判脏会产生用户无法诚实消除的提示。这一排除是零代价的：
+实测持有该默认值的行同时 `phone_number` 与 `major` 为空，已被覆盖。
+
+**`sl_profile_is_blank` 为何要显式列出空白字符集**：PostgreSQL 单参数 `btrim(text)` 只裁 ASCII
+空格，而 Go 的 `strings.TrimSpace` 裁剪整个 Unicode 空白集。若写成 `btrim(name) = ''`，一个
+`name` 只含 NBSP 的账号会被判为「已完成」，而 `PUT /user/profile` 的 `TrimSpace` 认为它是空、
+拒绝任何提交 —— 用户被告知一切正常却什么都改不了。该函数的字符集即 Go 的口径
+（`unicode.IsSpace` 加 U+0085、U+00A0），与 `internal/validate.IsBlank` 成对，由
+`TestProfileCompletenessMatchesSQL` 用同一组输入喂两侧来防漂移。零宽字符（U+200B..U+200D、
+U+FEFF）两侧都不算空白，由 `validate.HasControlCharacter` 负责。
+
+`name` 与 `student_id` 的比较忽略大小写：迁移数据中同时存在 `B24040525` 与 `b24040525` 两种形式。
+
+配套 `idx_user_profile_needs_completion`（部分索引，`WHERE profile_needs_completion`）支撑管理台
+按 `?needs_completion=true` 列出待补全账号。
 
 ## Profile 用户信息表
 
@@ -833,6 +877,8 @@ oauth_authorizations.family_id
 11. `audit_logs` 表（FK → user）
 
 12. `oauth_grants` 表（V009，FK → user, oauth_clients）
+
+12.1 `sl_profile_is_blank()` 函数与 `"user".profile_needs_completion` 生成列（V010，生成列依赖该函数，顺序不可反；`down` 时先删列再删函数）
 
 13. 所有索引
 

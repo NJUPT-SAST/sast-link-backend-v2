@@ -297,7 +297,9 @@ POST /auth/register
     "role": "freshman",
     "state": "njupter",
     "email_type": "njupt_email",
-    "created_at": "2026-05-28T12:00:00Z"
+    "created_at": "2026-05-28T12:00:00Z",
+    "profile_needs_completion": false,
+    "incomplete_fields": []
   }
 }
 ```
@@ -350,7 +352,9 @@ POST /user/login
     "role": "freshman",
     "state": "njupter",
     "email_type": "njupt_email",
-    "created_at": "2026-05-28T12:00:00Z"
+    "created_at": "2026-05-28T12:00:00Z",
+    "profile_needs_completion": false,
+    "incomplete_fields": []
   }
 }
 ```
@@ -360,6 +364,7 @@ POST /user/login
 - 教育邮箱（`@njupt.edu.cn` / `@sast.fun`）查 `user.login_email` 后验证 `user.password`
 - 第三方邮箱查 `identities` 表 `provider = 'other_mail'` 的 `provider_id` 反查 `user_id`，同样验证 `user.password`
 - 所有密码登录共用同一套密码（`user.password`），第三方邮箱仅作为登录标识
+- `profile_needs_completion` / `incomplete_fields`：旧库迁移账号的资料补全提示，详见 §3.0
 
 ---
 
@@ -631,18 +636,47 @@ POST /oauth/exchange-code
     "role": "freshman",
     "state": "njupter",
     "email_type": "njupt_email",
-    "created_at": "2026-05-28T12:00:00Z"
+    "created_at": "2026-05-28T12:00:00Z",
+    "profile_needs_completion": true,
+    "incomplete_fields": ["name", "phone_number", "major"]
   }
 }
 ```
 
 **说明**: `login_code` 存储在 Redis，有效期 60 秒，一次性使用；交换成功后立即删除。签发的会话与密码登录完全一致（同一内置客户端、同一 `openid profile email` scope），第三方登录不因此更高或更低权限。
 
+`user` 对象同样带 `profile_needs_completion` / `incomplete_fields`（§3.0）。上例故意展示 `true` 的情形：旧库迁移账号大多通过 GitHub / 飞书登录，这条路径是补全引导的主要入口。
+
 **错误码**: `40000`（`code` 缺失、未知字段或 Content-Type 非 JSON）、`40107`（`login_code` 无效或已过期）、`40301`（账号已注销）、`40401`（用户不存在）、`50300`（Redis 不可用，fail-closed）、`50000`（服务器内部错误）
 
 ---
 
 ## 3. 用户资料（Profile）
+
+### 3.0 资料补全标志（旧库迁移账号）
+
+旧数据库迁移过来的账号，部分必填字段带着当前写入路径不会接受的值。两个只读字段把这个事实暂露给前端，以便引导用户补全：
+
+| 字段 | 类型 | 语义 |
+| ---- | ---- | ---- |
+| `profile_needs_completion` | `bool` | 仍有必填字段为空，或 `name` 等于 `student_id` |
+| `incomplete_fields` | `string[]` | 待补全的字段名，取值为 `name` / `phone_number` / `major`；无待补全时为 `[]`（**不是** `null`） |
+
+**出现位置**：密码登录（§1.4）、完成注册（§1.3）、交换登录码（§2.5，GitHub / 飞书登录）的 `user` 对象，以及 `GET`/`PUT /user/profile`（§3.1 / §3.2）的顶层。登录响应就带着它，所以前端无需额外请求即可判定是否跳转补全页。
+
+**语义边界**：
+
+- **纯提示，不影响任何正常路径**。没有任何端点会因为 `profile_needs_completion = true` 而拒绝请求，登录、刷新、OAuth 授权均不受影响。重定向完全由前端自行决定。
+- 不是权限输入，不参与任何鉴权判断。
+- 只读。该列是 PostgreSQL 生成列（V010），用户通过 `PUT /user/profile`（§3.2）补齐字段后自动转为 `false`，无专门的"确认已补全"接口。
+- **不包含 `qq_number`**：旧库无此字段，全量迁移账号均为空，纳入会使所有用户永久亮灯。
+- **不包含 `college`**：`其他` 是合法枚举值，无法区分"迁移默认值"与"用户真实选择"，否则会产生用户无法消除的提示。
+- `name` 与 `student_id` 的比较**忽略大小写**：迁移数据中同时存在 `B24040525` 与 `b24040525` 两种形式。
+- 判空口径与 `PUT /user/profile` 完全一致（含 NBSP、U+3000 等 Unicode 空白），因此不会出现"提示已完成但提交被拒"或反之的死循环。
+
+管理侧可见性见 §6.1（`needs_completion` 筛选）与 §6.2。
+
+---
 
 ### 3.1 获取当前用户信息
 
@@ -667,6 +701,8 @@ GET /user/profile
   "student_id": "B2404****",
   "college": "计算机学院、软件学院、网络空间安全学院",
   "major": "软件工程",
+  "profile_needs_completion": false,
+  "incomplete_fields": [],
   "profile": {
     "nickname": "张三",
     "department": "software",
@@ -774,6 +810,8 @@ PUT /user/profile
     "student_id": "B2404****",
     "college": "计算机学院、软件学院、网络空间安全学院",
     "major": "软件工程",
+    "profile_needs_completion": false,
+    "incomplete_fields": [],
     "profile": { ... },
     "identities": [ ... ],
     "created_at": "2026-05-28T12:00:00Z",
@@ -1589,10 +1627,13 @@ GET /admin/users
 | `department` | 筛选部门：software / media |
 | `student_id` | 筛选学号 |
 | `keyword` | 搜索关键词（姓名/学号/邮箱模糊匹配，大小写不敏感；`%`、`_`、`\` 按字面量处理，不作通配符） |
+| `needs_completion` | 筛选资料待补全账号（§3.0）：`true` 只列出待补全的，`false` 只列出已完整的，不传则不筛选 |
 
 **说明**：不带 `state` 筛选时列表包含已注销用户（`state = is_deleted`），否则无法找到并恢复它们。
 
-**错误码**：`40000`（分页参数非法 / `role`、`state`、`department` 取值非法）、`40100`、`40300`。
+`needs_completion` 只接受 `true` / `false` 字面量，其他值返回 `40000` 而非按 `false` 处理——`needs_completion=ture` 若被静默当作 `false`，会列出与调用者意图完全相反的结果且看不出错。该筛选用于清理旧库迁移遗留数据，配合响应里的 `incomplete_fields` 可直接看出每个账号缺哪些字段。
+
+**错误码**：`40000`（分页参数非法 / `role`、`state`、`department`、`needs_completion` 取值非法）、`40100`、`40300`。
 
 **Response** `200`:
 
@@ -1612,6 +1653,8 @@ GET /admin/users
       "phone_number": "13800138000",
       "qq_number": "1234567890",
       "department": "software",
+      "profile_needs_completion": false,
+      "incomplete_fields": [],
       "created_at": "2026-05-28T12:00:00Z",
       "updated_at": "2026-05-28T12:00:00Z"
     }
@@ -1651,6 +1694,8 @@ GET /admin/users/:id
   "email_type": "njupt_email",
   "phone_number": "13800138000",
   "qq_number": "1234567890",
+  "profile_needs_completion": false,
+  "incomplete_fields": [],
   "profile": { ... },
   "identities": [ ... ],
   "created_at": "2026-05-28T12:00:00Z",
@@ -1681,7 +1726,9 @@ PUT /admin/users/:id
   "login_email": "b2404****@njupt.edu.cn",
   "role": "member",
   "state": "on_sast",
-  "email_type": "njupt_email"
+  "email_type": "njupt_email",
+  "profile_needs_completion": false,
+  "incomplete_fields": []
 }
 ```
 
@@ -1793,6 +1840,8 @@ GET /admin/users/batch?ids=1,2,3
       "email_type": "njupt_email",
       "phone_number": "13800138000",
       "qq_number": "1234567890",
+      "profile_needs_completion": false,
+      "incomplete_fields": [],
       "profile": { ... },
       "identities": [ ... ],
       "created_at": "2026-05-28T12:00:00Z",
