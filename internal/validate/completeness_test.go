@@ -87,7 +87,9 @@ func TestIncompleteProfileFields(t *testing.T) {
 			want: []string{"phone_number", "qq_number", "major"},
 		},
 		{
-			name: "only the name is a student ID", userName: "B24040003",
+			// The name equals the student ID, and the comparison is case-insensitive.
+			// The lowercase form is what the import produced for some rows.
+			name: "only the name is a student ID", userName: "b24040003",
 			phoneNumber: "13800000003", qqNumber: "10003", major: "通信工程", studentID: "B24040003",
 			want: []string{"name"},
 		},
