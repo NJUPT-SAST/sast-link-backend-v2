@@ -29,10 +29,11 @@ func (s Service) ListUsers(ctx context.Context, input ListUsersInput) (*ListUser
 	}
 	page, pageSize := normalizePaging(input.Page, input.PageSize, defaultUserPageSize)
 	filter := repository.AdminUserFilter{
-		StudentID: input.StudentID,
-		Keyword:   input.Keyword,
-		Limit:     pageSize,
-		Offset:    (page - 1) * pageSize,
+		StudentID:       input.StudentID,
+		Keyword:         input.Keyword,
+		NeedsCompletion: input.NeedsCompletion,
+		Limit:           pageSize,
+		Offset:          (page - 1) * pageSize,
 	}
 	if input.Role != "" {
 		role := model.UserRole(input.Role)

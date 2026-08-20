@@ -19,14 +19,24 @@ func (h Handler) ListUsers(c *gin.Context) {
 		response.Error(c, badRequest())
 		return
 	}
+	// Tri-state: absent means "no filter", so the default list is unchanged. An
+	// unrecognized value is a 400 rather than false, since needs_completion=ture
+	// would otherwise list the healthy accounts — the opposite of the backlog the
+	// caller asked for — and look like it worked.
+	needsCompletion, err := parseOptionalBool(c.Query("needs_completion"))
+	if err != nil {
+		response.Error(c, badRequest())
+		return
+	}
 	result, err := h.Users.ListUsers(c.Request.Context(), adminuser.ListUsersInput{
-		Page:       page,
-		PageSize:   pageSize,
-		Role:       c.Query("role"),
-		State:      c.Query("state"),
-		Department: c.Query("department"),
-		StudentID:  c.Query("student_id"),
-		Keyword:    c.Query("keyword"),
+		Page:            page,
+		PageSize:        pageSize,
+		Role:            c.Query("role"),
+		State:           c.Query("state"),
+		Department:      c.Query("department"),
+		StudentID:       c.Query("student_id"),
+		Keyword:         c.Query("keyword"),
+		NeedsCompletion: needsCompletion,
 	})
 	if err != nil {
 		response.Error(c, mapUserServiceError(err))

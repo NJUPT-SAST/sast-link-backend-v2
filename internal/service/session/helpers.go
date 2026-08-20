@@ -20,6 +20,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 type issuedPair struct {
@@ -216,9 +217,17 @@ func profileDTO(user *model.User) UserProfileDTO {
 		StudentID:   user.StudentID,
 		College:     string(user.College),
 		Major:       user.Major,
-		Identities:  make([]IdentityDTO, 0, len(user.Identities)),
-		CreatedAt:   user.CreatedAt,
-		UpdatedAt:   user.UpdatedAt,
+		// The flag comes from the row (PostgreSQL computes it), while the field list
+		// is derived here. The two are kept in lockstep by
+		// TestGeneratedFlagMatchesIncompleteFields rather than by one deriving the
+		// other, so a drift between V010 and internal/validate fails a test instead
+		// of quietly producing a prompt with no fields named.
+		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
+		IncompleteFields: validate.IncompleteProfileFields(
+			user.Name, user.PhoneNumber, user.QQNumber, user.Major, user.StudentID),
+		Identities: make([]IdentityDTO, 0, len(user.Identities)),
+		CreatedAt:  user.CreatedAt,
+		UpdatedAt:  user.UpdatedAt,
 	}
 	if user.Profile != nil {
 		dto.Profile = &ProfileDetailDTO{

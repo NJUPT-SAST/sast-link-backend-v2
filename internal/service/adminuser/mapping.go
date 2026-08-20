@@ -19,8 +19,16 @@ func userListItem(row repository.AdminUserRow) UserListItem {
 		QQNumber:    row.QQNumber,
 		College:     string(row.College),
 		Major:       row.Major,
-		CreatedAt:   row.CreatedAt,
-		UpdatedAt:   row.UpdatedAt,
+
+		// The flag is the row's own generated value; the field list is derived from
+		// the same columns through the shared rule, so the console shows exactly
+		// what the user's own completion page would.
+		ProfileNeedsCompletion: row.ProfileNeedsCompletion,
+		IncompleteFields: incompleteFields(
+			row.Name, row.PhoneNumber, row.QQNumber, row.Major, row.StudentID),
+
+		CreatedAt: row.CreatedAt,
+		UpdatedAt: row.UpdatedAt,
 	}
 	if row.Department != nil {
 		department := string(*row.Department)
@@ -42,9 +50,14 @@ func userDetail(user *model.User) UserDetail {
 		StudentID:   user.StudentID,
 		College:     string(user.College),
 		Major:       user.Major,
-		Identities:  make([]IdentityDetail, 0, len(user.Identities)),
-		CreatedAt:   user.CreatedAt,
-		UpdatedAt:   user.UpdatedAt,
+
+		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
+		IncompleteFields: incompleteFields(
+			user.Name, user.PhoneNumber, user.QQNumber, user.Major, user.StudentID),
+
+		Identities: make([]IdentityDetail, 0, len(user.Identities)),
+		CreatedAt:  user.CreatedAt,
+		UpdatedAt:  user.UpdatedAt,
 	}
 	if user.Profile != nil {
 		detail.Profile = &ProfileDetail{
@@ -110,4 +123,18 @@ func normalizePaging(page, pageSize, defaultSize int) (int, int) {
 		pageSize = validate.MaxPageSize
 	}
 	return page, pageSize
+}
+
+// incompleteFields names the required fields an account still has to fill in,
+// normalizing nil to an empty slice so the JSON field is always an array.
+//
+// It delegates to internal/validate rather than re-deriving the rule: a second
+// copy that is even slightly different would show the console one set of missing
+// fields while the user's own completion page shows another.
+func incompleteFields(name, phoneNumber, qqNumber, major, studentID string) []string {
+	fields := validate.IncompleteProfileFields(name, phoneNumber, qqNumber, major, studentID)
+	if fields == nil {
+		return []string{}
+	}
+	return fields
 }

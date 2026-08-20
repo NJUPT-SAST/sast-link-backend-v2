@@ -17,20 +17,26 @@ var errInvalidQueryParameter = errors.New("query parameter is not valid")
 // serializing model.User, which carries the password hash: a response type with no
 // such field cannot leak it no matter how the model changes later.
 type adminUserDTO struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	StudentID   string    `json:"student_id"`
-	LoginEmail  string    `json:"login_email"`
-	Role        string    `json:"role"`
-	State       string    `json:"state"`
-	EmailType   string    `json:"email_type"`
-	PhoneNumber string    `json:"phone_number"`
-	QQNumber    string    `json:"qq_number"`
-	College     string    `json:"college"`
-	Major       string    `json:"major"`
-	Department  *string   `json:"department"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          int64   `json:"id"`
+	Name        string  `json:"name"`
+	StudentID   string  `json:"student_id"`
+	LoginEmail  string  `json:"login_email"`
+	Role        string  `json:"role"`
+	State       string  `json:"state"`
+	EmailType   string  `json:"email_type"`
+	PhoneNumber string  `json:"phone_number"`
+	QQNumber    string  `json:"qq_number"`
+	College     string  `json:"college"`
+	Major       string  `json:"major"`
+	Department  *string `json:"department"`
+	// ProfileNeedsCompletion marks an account still carrying values imported from
+	// the previous database, and IncompleteFields names them. Both let the console
+	// show and work through the backlog; combine with ?needs_completion=true to
+	// list only those accounts.
+	ProfileNeedsCompletion bool      `json:"profile_needs_completion"`
+	IncompleteFields       []string  `json:"incomplete_fields"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
 }
 
 type adminUserListResponse struct {
@@ -63,21 +69,24 @@ type batchRoleUpdateResponse struct {
 // userDetailDTO is one full user record. Same reasoning as adminUserDTO, plus the
 // profile and identity halves.
 type userDetailDTO struct {
-	ID          int64             `json:"id"`
-	Name        string            `json:"name"`
-	LoginEmail  string            `json:"login_email"`
-	Role        string            `json:"role"`
-	State       string            `json:"state"`
-	EmailType   string            `json:"email_type"`
-	PhoneNumber string            `json:"phone_number"`
-	QQNumber    string            `json:"qq_number"`
-	StudentID   string            `json:"student_id"`
-	College     string            `json:"college"`
-	Major       string            `json:"major"`
-	Profile     *userProfileDTO   `json:"profile"`
-	Identities  []userIdentityDTO `json:"identities"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	LoginEmail  string `json:"login_email"`
+	Role        string `json:"role"`
+	State       string `json:"state"`
+	EmailType   string `json:"email_type"`
+	PhoneNumber string `json:"phone_number"`
+	QQNumber    string `json:"qq_number"`
+	StudentID   string `json:"student_id"`
+	College     string `json:"college"`
+	Major       string `json:"major"`
+	// See adminUserDTO.
+	ProfileNeedsCompletion bool              `json:"profile_needs_completion"`
+	IncompleteFields       []string          `json:"incomplete_fields"`
+	Profile                *userProfileDTO   `json:"profile"`
+	Identities             []userIdentityDTO `json:"identities"`
+	CreatedAt              time.Time         `json:"created_at"`
+	UpdatedAt              time.Time         `json:"updated_at"`
 }
 
 type userProfileDTO struct {
@@ -150,8 +159,12 @@ func mapAdminUser(user adminuser.UserListItem) adminUserDTO {
 		College:     user.College,
 		Major:       user.Major,
 		Department:  user.Department,
-		CreatedAt:   user.CreatedAt,
-		UpdatedAt:   user.UpdatedAt,
+
+		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
+		IncompleteFields:       user.IncompleteFields,
+
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
 	}
 }
 
@@ -168,9 +181,13 @@ func mapUserDetail(detail adminuser.UserDetail) userDetailDTO {
 		StudentID:   detail.StudentID,
 		College:     detail.College,
 		Major:       detail.Major,
-		Identities:  make([]userIdentityDTO, 0, len(detail.Identities)),
-		CreatedAt:   detail.CreatedAt,
-		UpdatedAt:   detail.UpdatedAt,
+
+		ProfileNeedsCompletion: detail.ProfileNeedsCompletion,
+		IncompleteFields:       detail.IncompleteFields,
+
+		Identities: make([]userIdentityDTO, 0, len(detail.Identities)),
+		CreatedAt:  detail.CreatedAt,
+		UpdatedAt:  detail.UpdatedAt,
 	}
 	if detail.Profile != nil {
 		dto.Profile = &userProfileDTO{

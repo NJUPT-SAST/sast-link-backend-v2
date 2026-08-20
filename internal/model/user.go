@@ -19,8 +19,18 @@ type User struct {
 	College      College `gorm:"type:college_enum;not null;default:(-)"`
 	Major        string
 	TokenVersion int
-	Profile      *Profile   `gorm:"foreignKey:UserID"`
-	Identities   []Identity `gorm:"foreignKey:UserID"`
+	// ProfileNeedsCompletion is V010's generated column: TRUE while a required
+	// field is blank or name still duplicates student_id, which is how accounts
+	// imported from the previous database arrived. It is a display hint that lets
+	// the frontend route those users to a completion page, never an authorization
+	// input.
+	//
+	// The `->` tag makes it read-only. PostgreSQL rejects any INSERT or UPDATE
+	// naming a generated column, so without it every Create and Save on this
+	// struct would fail once GORM included the field in its column list.
+	ProfileNeedsCompletion bool       `gorm:"->"`
+	Profile                *Profile   `gorm:"foreignKey:UserID"`
+	Identities             []Identity `gorm:"foreignKey:UserID"`
 }
 
 // TableName returns the exact V001 table name for User.
