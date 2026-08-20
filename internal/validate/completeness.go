@@ -36,7 +36,7 @@ func IsBlank(value string) bool {
 //
 //   - a blank required banner field (name, phone_number, qq_number, major),
 //     which NOT NULL never excluded because the columns have no DEFAULT (or, for
-//     major, DEFAULT '')
+//     major, an empty-string DEFAULT)
 //   - a name equal to the student ID, which the previous database's import used
 //     as a placeholder
 //

@@ -638,7 +638,7 @@ POST /oauth/exchange-code
     "email_type": "njupt_email",
     "created_at": "2026-05-28T12:00:00Z",
     "profile_needs_completion": true,
-    "incomplete_fields": ["name", "phone_number", "major"]
+    "incomplete_fields": ["name", "phone_number", "qq_number", "major"]
   }
 }
 ```
@@ -1726,9 +1726,7 @@ PUT /admin/users/:id
   "login_email": "b2404****@njupt.edu.cn",
   "role": "member",
   "state": "on_sast",
-  "email_type": "njupt_email",
-  "profile_needs_completion": false,
-  "incomplete_fields": []
+  "email_type": "njupt_email"
 }
 ```
 
