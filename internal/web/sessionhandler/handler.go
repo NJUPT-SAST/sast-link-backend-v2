@@ -169,24 +169,35 @@ type authUserDTO struct {
 	State      string    `json:"state"`
 	EmailType  string    `json:"email_type"`
 	CreatedAt  time.Time `json:"created_at"`
+	// ProfileNeedsCompletion lets a client route an account imported from the
+	// previous database to the profile-completion page right after it signs in,
+	// without a second request. IncompleteFields names the offending fields using
+	// the JSON names of PUT /user/profile. Both are display hints: no endpoint
+	// refuses a request on account of them.
+	ProfileNeedsCompletion bool     `json:"profile_needs_completion"`
+	IncompleteFields       []string `json:"incomplete_fields"`
 }
 
 type profileDTO struct {
-	ID          int64             `json:"id"`
-	Name        string            `json:"name"`
-	LoginEmail  string            `json:"login_email"`
-	Role        string            `json:"role"`
-	State       string            `json:"state"`
-	EmailType   string            `json:"email_type"`
-	PhoneNumber string            `json:"phone_number"`
-	QQNumber    string            `json:"qq_number"`
-	StudentID   string            `json:"student_id"`
-	College     string            `json:"college"`
-	Major       string            `json:"major"`
-	Profile     *profileDetailDTO `json:"profile"`
-	Identities  []identityDTO     `json:"identities"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	LoginEmail  string `json:"login_email"`
+	Role        string `json:"role"`
+	State       string `json:"state"`
+	EmailType   string `json:"email_type"`
+	PhoneNumber string `json:"phone_number"`
+	QQNumber    string `json:"qq_number"`
+	StudentID   string `json:"student_id"`
+	College     string `json:"college"`
+	Major       string `json:"major"`
+	// See authUserDTO: the completion page reads these to decide which controls
+	// to highlight, and they flip to false/empty as soon as the fields are filled.
+	ProfileNeedsCompletion bool              `json:"profile_needs_completion"`
+	IncompleteFields       []string          `json:"incomplete_fields"`
+	Profile                *profileDetailDTO `json:"profile"`
+	Identities             []identityDTO     `json:"identities"`
+	CreatedAt              time.Time         `json:"created_at"`
+	UpdatedAt              time.Time         `json:"updated_at"`
 }
 
 type profileDetailDTO struct {

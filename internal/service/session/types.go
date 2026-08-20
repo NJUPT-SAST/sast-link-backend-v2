@@ -566,10 +566,18 @@ type UserProfileDTO struct {
 	StudentID   string
 	College     string
 	Major       string
-	Profile     *ProfileDetailDTO
-	Identities  []IdentityDTO
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// ProfileNeedsCompletion mirrors V010's generated column: the account still
+	// holds values imported from the previous database that no current write path
+	// would accept. IncompleteFields names them, using the JSON field names of
+	// PUT /user/profile so a client can map each one onto the control that fixes
+	// it. Both are display hints for routing to a completion page and are never
+	// an authorization input.
+	ProfileNeedsCompletion bool
+	IncompleteFields       []string
+	Profile                *ProfileDetailDTO
+	Identities             []IdentityDTO
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 type ProfileDetailDTO struct {

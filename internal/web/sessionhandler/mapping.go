@@ -174,6 +174,9 @@ func mapAuthUser(input session.UserProfileDTO) authUserDTO {
 		State:      input.State,
 		EmailType:  input.EmailType,
 		CreatedAt:  input.CreatedAt,
+
+		ProfileNeedsCompletion: input.ProfileNeedsCompletion,
+		IncompleteFields:       incompleteFields(input.IncompleteFields),
 	}
 }
 
@@ -190,9 +193,13 @@ func mapProfile(input session.UserProfileDTO) profileDTO {
 		StudentID:   input.StudentID,
 		College:     input.College,
 		Major:       input.Major,
-		Identities:  make([]identityDTO, 0, len(input.Identities)),
-		CreatedAt:   input.CreatedAt,
-		UpdatedAt:   input.UpdatedAt,
+
+		ProfileNeedsCompletion: input.ProfileNeedsCompletion,
+		IncompleteFields:       incompleteFields(input.IncompleteFields),
+
+		Identities: make([]identityDTO, 0, len(input.Identities)),
+		CreatedAt:  input.CreatedAt,
+		UpdatedAt:  input.UpdatedAt,
 	}
 	if input.Profile != nil {
 		output.Profile = &profileDetailDTO{
@@ -223,4 +230,15 @@ func mapIdentity(input session.IdentityDTO) identityDTO {
 		CreatedAt:      input.CreatedAt,
 		UpdatedAt:      input.UpdatedAt,
 	}
+}
+
+// incompleteFields normalizes a nil slice to an empty one so the JSON field is
+// always an array. A client reading response.data.incomplete_fields.length must
+// not have to special-case null, and "no fields" is the common case: every
+// healthy account returns it.
+func incompleteFields(fields []string) []string {
+	if fields == nil {
+		return []string{}
+	}
+	return fields
 }
