@@ -36,7 +36,6 @@ curl http://127.0.0.1:8080/health
 - **Standard auth protocol**: OAuth 2.1 / OIDC for third-party apps to integrate login, token refresh, and user info
 - **Account security**: argon2id password hashing, Ed25519 token signing, revoke all sessions on password change
 - **Self-service**: profile management, third-party account binding, authorized-apps management, device management, avatar upload
-- **Legacy data completion**: accounts imported from the previous database carry a `profile_needs_completion` flag plus the list of fields still missing, so the frontend can guide those users through filling them in; it is a display hint only and refuses no request
 - **Admin console**: user management, OAuth client configuration, audit logs, console overview stats
 - **Operations**: PostgreSQL 16 + Redis 8, one-command Compose startup, built-in health check
 
