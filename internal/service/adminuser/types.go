@@ -84,6 +84,11 @@ type ListUsersInput struct {
 	Department string
 	StudentID  string
 	Keyword    string
+	// NeedsCompletion filters on the migration-debris flag. Nil applies no
+	// filter, so the default list is unchanged; a pointer makes "show me the
+	// backlog" and "show me the healthy accounts" both expressible, which a bare
+	// bool could not do.
+	NeedsCompletion *bool
 }
 
 // ListUsersResult is one page of the user list.
@@ -108,8 +113,13 @@ type UserListItem struct {
 	College     string
 	Major       string
 	Department  *string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// ProfileNeedsCompletion marks an account still carrying values imported from
+	// the previous database. IncompleteFields names them so the console can show
+	// what is missing without re-deriving the rule.
+	ProfileNeedsCompletion bool
+	IncompleteFields       []string
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 // UpdateUserInput is a partial administrative edit. A nil field is left
@@ -261,10 +271,13 @@ type UserDetail struct {
 	StudentID   string
 	College     string
 	Major       string
-	Profile     *ProfileDetail
-	Identities  []IdentityDetail
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// See UserListItem.
+	ProfileNeedsCompletion bool
+	IncompleteFields       []string
+	Profile                *ProfileDetail
+	Identities             []IdentityDetail
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 // ProfileDetail is the display-card half of a user record.

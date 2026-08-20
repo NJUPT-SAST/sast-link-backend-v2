@@ -43,8 +43,13 @@ type AdminUserFilter struct {
 	StudentID  string
 	// Keyword matches name, student_id or login_email case-insensitively.
 	Keyword string
-	Limit   int
-	Offset  int
+	// NeedsCompletion filters on V010's generated flag: true lists only the
+	// accounts still carrying migration debris, false only the healthy ones, nil
+	// applies no filter. This is what makes the backlog reviewable, so an
+	// administrator can work through it instead of guessing at its size.
+	NeedsCompletion *bool
+	Limit           int
+	Offset          int
 }
 
 // AdminUserRow is one row of the administrative user list.
@@ -65,8 +70,11 @@ type AdminUserRow struct {
 	College     model.College     `gorm:"column:college"`
 	Major       string            `gorm:"column:major"`
 	Department  *model.Department `gorm:"column:department"`
-	CreatedAt   time.Time         `gorm:"column:created_at"`
-	UpdatedAt   time.Time         `gorm:"column:updated_at"`
+	// ProfileNeedsCompletion is V010's generated column, surfaced so the console
+	// list can mark the affected accounts without a second query.
+	ProfileNeedsCompletion bool      `gorm:"column:profile_needs_completion"`
+	CreatedAt              time.Time `gorm:"column:created_at"`
+	UpdatedAt              time.Time `gorm:"column:updated_at"`
 }
 
 // ListAdminUsers returns a filtered page of users plus the total matching count.
@@ -108,7 +116,8 @@ func (r *UserRepository) ListAdminUsers(
 	err := r.adminUserQuery(ctx, filter).
 		Select(`"user".id`, `"user".name`, `"user".student_id`, `"user".login_email`,
 			`"user".role`, `"user".state`, `"user".email_type`, `"user".phone_number`,
-			`"user".qq_number`, `"user".college`, `"user".major`, `"user".created_at`,
+			`"user".qq_number`, `"user".college`, `"user".major`,
+			`"user".profile_needs_completion`, `"user".created_at`,
 			`"user".updated_at`, "profile.department").
 		Order(`"user".id`).
 		Limit(filter.Limit).
@@ -220,6 +229,11 @@ func (r *UserRepository) adminUserQuery(ctx context.Context, filter AdminUserFil
 	}
 	if filter.StudentID != "" {
 		query = query.Where(`"user".student_id = ?`, filter.StudentID)
+	}
+	if filter.NeedsCompletion != nil {
+		// V010's partial index covers the true case, which is the one an
+		// administrator working through the backlog actually asks for.
+		query = query.Where(`"user".profile_needs_completion = ?`, *filter.NeedsCompletion)
 	}
 	if filter.Keyword != "" {
 		pattern := "%" + escapeLikePattern(filter.Keyword) + "%"
