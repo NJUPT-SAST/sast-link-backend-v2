@@ -299,7 +299,7 @@ Body: { "password": "current_password" }
 
 **纯软提示**：不拒绝任何请求，不参与任何鉴权判断；重定向到补全页由前端自行决定。用户通过 `PUT /user/profile` 补齐字段后，生成列自动翻转为 `false`，无独立的「确认已补全」接口。
 
-**判定边界**：`name` / `phone_number` / `qq_number` / `major` 四个可自助补的 NOT NULL 资料字段一视同仁，为空即触发提示——旧库无 `qq_number` 字段，迁移账号此列全空，老用户首次登录会被要求补全一次，这正是引导式补全的目的，且不依赖过时的历史 dump 观测。不包含 `college`（`'其他'` 是合法枚举值，无法区分迁移默认与真实选择，且持有该默认值的行必同时存在其他空白字段，已被覆盖）；`student_id` / `login_email` / `password` 为标识或凭据，不在资料补全范畴。管理后台 `GET /admin/users?needs_completion=true|false` 可筛选并跟进。
+**判定边界**：`name` / `phone_number` / `qq_number` / `major` 四个可自助补的 NOT NULL 资料字段一视同仁，为空即触发提示——旧库无 `qq_number` 字段，迁移账号此列全空，老用户首次登录会被要求补全一次，这正是引导式补全的目的。不包含 `college`（`'其他'` 是合法枚举值，无法区分迁移默认与真实选择，且持有该默认值的行必同时存在其他空白字段，已被覆盖）；`student_id` / `login_email` / `password` 为标识或凭据，不在资料补全范畴。管理后台 `GET /admin/users?needs_completion=true|false` 可筛选并跟进。
 
 #### 头像上传
 
