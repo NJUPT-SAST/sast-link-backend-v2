@@ -92,6 +92,7 @@ CREATE TABLE "user" (
     profile_needs_completion BOOLEAN GENERATED ALWAYS AS (
         sl_profile_is_blank(name)
         OR sl_profile_is_blank(phone_number)
+        OR sl_profile_is_blank(qq_number)
         OR sl_profile_is_blank(major)
         OR lower(btrim(name)) = lower(btrim(student_id))
     ) STORED
@@ -119,8 +120,8 @@ CREATE TABLE "user" (
 
 ### profile_needs_completion（V010）
 
-旧数据库迁移过来的账号，部分必填字段带着当前写入路径不会接受的值：`name` / `phone_number` / `major`
-为空白，或 `name` 被填成了 `student_id`。这两种形态都会被现有输入层拒绝
+旧数据库迁移过来的账号，部分必填字段带着当前写入路径不会接受的值：`name` / `phone_number` / `qq_number` / `major`
+为空白，或 `name` 被填成了 `student_id`。这些形态都会被现有输入层拒绝
 （`internal/service/session/profile.go`、`internal/service/adminuser/validate.go`），所以是纯存量
 遗留，不是仍在产生的问题。该列把这个事实暴露给前端，用于引导用户补全。
 
@@ -133,8 +134,10 @@ CREATE TABLE "user" (
 数据质量问题升级为拒绝服务。生成列没有这种耦合：它是本行值的纯函数，用户补齐字段后自动
 翻回 `false`，且 PostgreSQL 拒绝任何直接写入（应用侧对应 `gorm:"->"` 只读标签）。
 
-**为什么不含 `qq_number`**：旧库没有这个字段，全量迁移账号均为空，纳入会使所有用户永久亮灯，
-提示丧失信号意义。收集该字段与修复迁移遗留是两件事。
+**为什么包含 `qq_number`**：`name` / `phone_number` / `qq_number` / `major` 四个可自助补的
+NOT NULL 资料字段行为一致。旧库没有该字段，迁移账号此列全空，所以老用户首次登录被要求补全一次——
+这正是引导式补全的目的。历史 dump 只是迁移时刻的快照（那时此列 817 行全空），生产库中用户此后
+可能已自行补充，不能以过时观测作为排除依据。
 
 **为什么不含 `college`**：`'其他'` 是合法的 `college_enum` 成员，行内没有任何信息能区分
 「迁移填了默认值」与「用户真的选了其他」，判脏会产生用户无法诚实消除的提示。这一排除是零代价的：

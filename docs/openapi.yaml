@@ -3132,10 +3132,10 @@ components:
           type: array
           items:
             type: string
-            enum: [name, phone_number, major]
+            enum: [name, phone_number, qq_number, major]
           description: >-
             待补全的字段名，为 PUT /user/profile 的请求字段名。无待补全时为空数组而非 null。
-            不包含 qq_number（旧库无此字段，全量账号为空）与 college（'其他' 是合法选项）。
+            不包含 college（'其他' 是合法选项）。
     Profile:
       type: object
       properties:
@@ -3258,7 +3258,7 @@ components:
           type: array
           items:
             type: string
-            enum: [name, phone_number, major]
+            enum: [name, phone_number, qq_number, major]
           description: 待补全的字段名。无待补全时为空数组而非 null。
         created_at:
           type: string
@@ -3712,7 +3712,7 @@ components:
           type: array
           items:
             type: string
-            enum: [name, phone_number, major]
+            enum: [name, phone_number, qq_number, major]
           description: 待补全的字段名。无待补全时为空数组而非 null。
         profile:
           allOf:
