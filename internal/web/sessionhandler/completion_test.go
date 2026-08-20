@@ -32,7 +32,7 @@ func TestLoginCarriesProfileCompletionFlag(t *testing.T) {
 			State:                  "njupter",
 			StudentID:              "B24040525",
 			ProfileNeedsCompletion: true,
-			IncompleteFields:       []string{"name", "phone_number", "major"},
+			IncompleteFields:       []string{"name", "phone_number", "qq_number", "major"},
 		},
 	}}
 	router := gin.New()
@@ -55,7 +55,7 @@ func TestLoginCarriesProfileCompletionFlag(t *testing.T) {
 	if !ok {
 		t.Fatalf("incomplete_fields = %#v, want an array", user["incomplete_fields"])
 	}
-	if len(fields) != 3 || fields[0] != "name" || fields[1] != "phone_number" || fields[2] != "major" {
+	if len(fields) != 4 || fields[0] != "name" || fields[1] != "phone_number" || fields[2] != "qq_number" || fields[3] != "major" {
 		t.Fatalf("incomplete_fields = %#v", fields)
 	}
 }
@@ -107,7 +107,7 @@ func TestProfileCarriesCompletionFlag(t *testing.T) {
 			ID: 42, Name: "李四", LoginEmail: "b24040002@njupt.edu.cn",
 			Role: "freshman", State: "njupter", StudentID: "B24040002",
 			ProfileNeedsCompletion: true,
-			IncompleteFields:       []string{"phone_number", "major"},
+			IncompleteFields:       []string{"phone_number", "qq_number", "major"},
 		},
 	}}
 	router := gin.New()
@@ -125,7 +125,7 @@ func TestProfileCarriesCompletionFlag(t *testing.T) {
 		t.Fatalf("profile_needs_completion = %#v, want true", data["profile_needs_completion"])
 	}
 	fields := data["incomplete_fields"].([]any)
-	if len(fields) != 2 || fields[0] != "phone_number" || fields[1] != "major" {
+	if len(fields) != 3 || fields[0] != "phone_number" || fields[1] != "qq_number" || fields[2] != "major" {
 		t.Fatalf("incomplete_fields = %#v", fields)
 	}
 }

@@ -25,7 +25,7 @@ func userListItem(row repository.AdminUserRow) UserListItem {
 		// what the user's own completion page would.
 		ProfileNeedsCompletion: row.ProfileNeedsCompletion,
 		IncompleteFields: incompleteFields(
-			row.Name, row.PhoneNumber, row.Major, row.StudentID),
+			row.Name, row.PhoneNumber, row.QQNumber, row.Major, row.StudentID),
 
 		CreatedAt: row.CreatedAt,
 		UpdatedAt: row.UpdatedAt,
@@ -53,7 +53,7 @@ func userDetail(user *model.User) UserDetail {
 
 		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
 		IncompleteFields: incompleteFields(
-			user.Name, user.PhoneNumber, user.Major, user.StudentID),
+			user.Name, user.PhoneNumber, user.QQNumber, user.Major, user.StudentID),
 
 		Identities: make([]IdentityDetail, 0, len(user.Identities)),
 		CreatedAt:  user.CreatedAt,
@@ -131,8 +131,8 @@ func normalizePaging(page, pageSize, defaultSize int) (int, int) {
 // It delegates to internal/validate rather than re-deriving the rule: a second
 // copy that is even slightly different would show the console one set of missing
 // fields while the user's own completion page shows another.
-func incompleteFields(name, phoneNumber, major, studentID string) []string {
-	fields := validate.IncompleteProfileFields(name, phoneNumber, major, studentID)
+func incompleteFields(name, phoneNumber, qqNumber, major, studentID string) []string {
+	fields := validate.IncompleteProfileFields(name, phoneNumber, qqNumber, major, studentID)
 	if fields == nil {
 		return []string{}
 	}

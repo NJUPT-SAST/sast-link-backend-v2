@@ -57,9 +57,9 @@ func TestExchangeCodeCarriesProfileCompletionFlag(t *testing.T) {
 	if !ok {
 		t.Fatalf("incomplete_fields = %#v, want an array", user["incomplete_fields"])
 	}
-	// name is reported because it duplicates the student ID, not because it is
-	// blank; phone_number and major are blank.
-	if len(fields) != 3 || fields[0] != "name" || fields[1] != "phone_number" || fields[2] != "major" {
+	// Name duplicates the student ID; phone_number, qq_number and major are
+	// blank - the fully dirty legacy shape.
+	if len(fields) != 4 || fields[0] != "name" || fields[1] != "phone_number" || fields[2] != "qq_number" || fields[3] != "major" {
 		t.Fatalf("incomplete_fields = %#v", fields)
 	}
 }
@@ -73,7 +73,7 @@ func TestExchangeCodeReportsEmptyArrayForCompleteProfile(t *testing.T) {
 		User: &model.User{
 			ID: 7, Name: "张三", LoginEmail: "pt@sast.fun",
 			Role: model.UserRoleMember, State: model.UserStateOnSAST,
-			StudentID: "B24040001", PhoneNumber: "13800000000", Major: "软件工程",
+			StudentID: "B24040001", PhoneNumber: "13800000000", QQNumber: "10001", Major: "软件工程",
 			ProfileNeedsCompletion: false,
 		},
 	}}

@@ -8,6 +8,7 @@ import "strings"
 const (
 	FieldName        = "name"
 	FieldPhoneNumber = "phone_number"
+	FieldQQNumber    = "qq_number"
 	FieldMajor       = "major"
 )
 
@@ -33,31 +34,38 @@ func IsBlank(value string) bool {
 //
 // Two shapes of legacy debris are reported, matching V010's generated column:
 //
-//   - a blank required field, which NOT NULL never excluded because the columns
-//     have no DEFAULT (or, for major, DEFAULT ”)
+//   - a blank required banner field (name, phone_number, qq_number, major),
+//     which NOT NULL never excluded because the columns have no DEFAULT (or, for
+//     major, DEFAULT '')
 //   - a name equal to the student ID, which the previous database's import used
 //     as a placeholder
+//
+// Every NOT NULL banner field the user can fill in through PUT /user/profile is
+// treated alike. qq_number is included even though the import left it empty for
+// every row: the import reflects the previous database, not today's production,
+// and a first login prompting to collect the field once is the point of the
+// guided completion. college is not reported: '其他' is a valid choice and
+// nothing distinguishes an import default from a deliberate selection, so it
+// would raise a prompt the user cannot honestly clear. student_id, login_email
+// and password are identifiers or credentials rather than profile fields, so
+// they are out of scope here.
 //
 // The name/studentID comparison is case-insensitive because the imported rows
 // hold both 'B24040525' and 'b24040525' against the same student ID, and a
 // case-sensitive test would pass the lowercase half.
 //
-// qq_number is not reported. It is empty for every imported account because the
-// previous database had no such field, so reporting it would mark the entire
-// table incomplete forever and make the signal useless. college is not reported
-// either: '其他' is a valid choice and nothing distinguishes an import default
-// from a deliberate selection, so it would raise a prompt the user cannot
-// honestly clear.
-//
 // A nil return means the account is complete. Callers must treat this as a
 // display hint only - it is never an authorization input.
-func IncompleteProfileFields(name, phoneNumber, major, studentID string) []string {
+func IncompleteProfileFields(name, phoneNumber, qqNumber, major, studentID string) []string {
 	var fields []string
 	if IsBlank(name) || strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(studentID)) {
 		fields = append(fields, FieldName)
 	}
 	if IsBlank(phoneNumber) {
 		fields = append(fields, FieldPhoneNumber)
+	}
+	if IsBlank(qqNumber) {
+		fields = append(fields, FieldQQNumber)
 	}
 	if IsBlank(major) {
 		fields = append(fields, FieldMajor)

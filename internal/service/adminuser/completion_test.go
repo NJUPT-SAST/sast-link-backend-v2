@@ -52,17 +52,17 @@ func TestListUsersReportsIncompleteFields(t *testing.T) {
 	h.users.listRows = []repository.AdminUserRow{
 		{
 			// The dominant legacy shape: name filled in with the student ID, blank
-			// phone and major.
+			// phone, qq and major.
 			ID: 5, Name: "B24040525", StudentID: "B24040525",
 			LoginEmail: "b24040525@njupt.edu.cn",
 			Role:       model.UserRoleFreshman, State: model.UserStateNJUPTer,
-			PhoneNumber: "", Major: "", ProfileNeedsCompletion: true,
+			PhoneNumber: "", QQNumber: "", Major: "", ProfileNeedsCompletion: true,
 		},
 		{
 			ID: 6, Name: "张三", StudentID: "B24040001",
 			LoginEmail: "b24040001@njupt.edu.cn",
 			Role:       model.UserRoleMember, State: model.UserStateOnSAST,
-			PhoneNumber: "13800000000", Major: "软件工程", ProfileNeedsCompletion: false,
+			PhoneNumber: "13800000000", QQNumber: "10001", Major: "软件工程", ProfileNeedsCompletion: false,
 		},
 	}
 	h.users.listTotal = 2
@@ -74,7 +74,7 @@ func TestListUsersReportsIncompleteFields(t *testing.T) {
 	if !result.Users[0].ProfileNeedsCompletion {
 		t.Fatal("first row ProfileNeedsCompletion = false, want true")
 	}
-	want := []string{"name", "phone_number", "major"}
+	want := []string{"name", "phone_number", "qq_number", "major"}
 	if !reflect.DeepEqual(result.Users[0].IncompleteFields, want) {
 		t.Fatalf("first row IncompleteFields = %v, want %v", result.Users[0].IncompleteFields, want)
 	}

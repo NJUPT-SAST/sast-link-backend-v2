@@ -224,7 +224,7 @@ func profileDTO(user *model.User) UserProfileDTO {
 		// of quietly producing a prompt with no fields named.
 		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
 		IncompleteFields: validate.IncompleteProfileFields(
-			user.Name, user.PhoneNumber, user.Major, user.StudentID),
+			user.Name, user.PhoneNumber, user.QQNumber, user.Major, user.StudentID),
 		Identities: make([]IdentityDTO, 0, len(user.Identities)),
 		CreatedAt:  user.CreatedAt,
 		UpdatedAt:  user.UpdatedAt,

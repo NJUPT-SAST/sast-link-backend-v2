@@ -26,12 +26,15 @@
 -- maintained boolean would, it flips back to false by itself as soon as the user
 -- completes the fields, and PostgreSQL refuses any attempt to write it directly.
 --
--- qq_number is deliberately absent. It is empty for every imported row because
--- the previous database had no such field, so including it would light the flag
--- for the entire table forever and leave the signal meaningless. Collecting it
--- is a separate concern from repairing migration debris.
+-- qq_number is included for the same reason as phone_number: every NOT NULL
+-- banner field the user can fill in through PUT /user/profile (name, phone,
+-- qq, major) is treated alike. The import left it empty for every row because
+-- the previous database had no such field, so a first login will prompt to
+-- collect it once. That is the whole point of the guided completion, and an
+-- early dump is not a reliable measure of what production holds today (users
+-- may have added values since).
 --
--- college is deliberately absent as well. '其他' is a legitimate college_enum
+-- college is deliberately absent. '其他' is a legitimate college_enum
 -- member, and nothing in the row distinguishes "the import defaulted to it" from
 -- "the user really chose it", so treating it as debris would raise a prompt that
 -- the affected user has no honest way to clear. It costs nothing to leave out:
@@ -72,6 +75,7 @@ ALTER TABLE "user"
     GENERATED ALWAYS AS (
         sl_profile_is_blank(name)
         OR sl_profile_is_blank(phone_number)
+        OR sl_profile_is_blank(qq_number)
         OR sl_profile_is_blank(major)
         OR lower(btrim(name)) = lower(btrim(student_id))
     ) STORED;

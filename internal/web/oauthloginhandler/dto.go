@@ -61,7 +61,7 @@ func mapUser(user *model.User) authUserDTO {
 		return authUserDTO{}
 	}
 	fields := validate.IncompleteProfileFields(
-		user.Name, user.PhoneNumber, user.Major, user.StudentID)
+		user.Name, user.PhoneNumber, user.QQNumber, user.Major, user.StudentID)
 	if fields == nil {
 		// Always an array in JSON, so a client can read .length unconditionally.
 		fields = []string{}
