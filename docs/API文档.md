@@ -2186,7 +2186,9 @@ GET /admin/stats
       "by_role": { "freshman": 300, "member": 900, "lecturer": 250, "admin": 50 },
       "by_state": { "njupter": 400, "on_sast": 900, "retired_sast": 150, "is_deleted": 50 },
       "by_department": { "software": 400, "media": 300 },
-      "no_department": 800
+      "no_department": 800,
+      "incomplete_by_role": { "freshman": 120, "member": 30 },
+      "incomplete_by_state": { "njupter": 110 }
     },
     "clients": {
       "total": 10,
@@ -2204,6 +2206,10 @@ GET /admin/stats
 - `users` 为账户聚合，枚举见附录 A。本仓软删除是状态位而非 `deleted_at` 列，因此口径为：**`total` / `by_role` / `by_department` / `no_department` 均只统计未注销账户**（`state ≠ is_deleted`），避免「账户总数」被已注销账户虚增；`by_state` 保留全部状态，`is_deleted` 作为独立 bucket 可见注销数。
   - `by_role` / `by_state` 按 `user` 表分组统计（`by_state` 含 `is_deleted`，其余两个维度不含）
   - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
+  - `incomplete_by_role` / `incomplete_by_state` 是资料未补全（`profile_needs_completion = true`，见 V010 生成列）账户的分组计数，供控制台概览把迁移残留账户单独归为「未补全」扇区：
+    - `incomplete_by_role`：未补全**且**角色 ∉ {`lecturer`, `admin`} 的未注销账户，按角色分组（讲师 / 管理员视为组织内成员，不列为待跟进对象）
+    - `incomplete_by_state`：未补全**且**状态 = `njupter` 的未注销账户，按状态分组（`on_sast` / `retired_sast` 同理不列入）
+    - 两者都是 `by_role` / `by_state` 的**子集**，而非独立桶——前端渲染时从对应真实桶里减去再合并成一个扇区，故分母（`total`）不变、桶内此消彼长守恒
 - `clients` 含全部注册（停用的也在内）：`total` 为注册总数，`active` 为 `is_active = true` 的数量
 - `audit.recent` 为最近 5 条审计日志（与 §6.11 同一排序 `created_at DESC`），条目结构同 §6.11；该路读取失败时记 WARN 日志并返回空列表（best-effort），不影响其余两路
 - `users` 或 `clients` 聚合失败返回 `500`，不复用缓存——概览数据即时性优先

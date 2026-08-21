@@ -3057,6 +3057,21 @@ components:
         no_department:
           type: integer
           description: 没有 profile 行或部门未设的未注销用户数
+        incomplete_by_role:
+          type: object
+          description: |
+            资料未补全（profile_needs_completion = true）且角色 ∉ {lecturer, admin}
+            的未注销账户，按角色分组。是 by_role 的子集而非独立桶：前端从对应真实桶
+            减去后合并成一个「未补全」扇区，total 不变。
+          additionalProperties:
+            type: integer
+        incomplete_by_state:
+          type: object
+          description: |
+            资料未补全且状态 = njupter（在校学生）的未注销账户，按状态分组。
+            同为 by_state 的子集，语义与 incomplete_by_role 对称。
+          additionalProperties:
+            type: integer
     EmailType:
       type: string
       enum:
