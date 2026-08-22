@@ -144,6 +144,15 @@ type UserStats struct {
 	// NoDepartment counts users whose profile has no department (freshman /
 	// njupter before recruitment, or a missing profile row).
 	NoDepartment int64 `json:"no_department"`
+	// IncompleteByRole counts live accounts still flagged by V010 as needing
+	// profile completion whose role is not lecturer or admin, grouped by role.
+	// The frontend subtracts these from ByRole and folds them into a single
+	// "未补全" bucket so an incomplete account is not double-counted.
+	IncompleteByRole map[model.UserRole]int64 `json:"incomplete_by_role"`
+	// IncompleteByState counts live accounts still flagged incomplete whose state
+	// is the in-school student state (njupter), grouped by state. The frontend
+	// subtracts these from ByState into the "未补全" bucket.
+	IncompleteByState map[model.UserState]int64 `json:"incomplete_by_state"`
 }
 
 // liveUser predicates every non-deleted-account count: a soft-deleted row still
@@ -159,6 +168,8 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	stats.ByRole = make(map[model.UserRole]int64)
 	stats.ByState = make(map[model.UserState]int64)
 	stats.ByDepartment = make(map[model.Department]int64)
+	stats.IncompleteByRole = make(map[model.UserRole]int64)
+	stats.IncompleteByState = make(map[model.UserState]int64)
 
 	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
 		Count(&stats.Total).Error; err != nil {
@@ -188,6 +199,33 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	}
 	for _, row := range rows {
 		stats.ByState[model.UserState(row.Group)] = row.Count
+	}
+
+	rows = rows[:0]
+	// IncompleteByRole: only live accounts still flagged incomplete whose role is
+	// neither lecturer nor admin. Grouped by role so the frontend can subtract each
+	// role's incomplete count from its own true bucket before folding them into the
+	// "未补全" slice (an incomplete account must not appear in both).
+	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{}).
+		Where(`profile_needs_completion = true AND role NOT IN (?, ?)`,
+			model.UserRoleLecturer, model.UserRoleAdmin)).
+		Select(`role AS "group", COUNT(*) AS count`).Group("role").Scan(&rows).Error; err != nil {
+		return stats, fmt.Errorf("count users by role (incomplete): %w", err)
+	}
+	for _, row := range rows {
+		stats.IncompleteByRole[model.UserRole(row.Group)] = row.Count
+	}
+
+	rows = rows[:0]
+	// IncompleteByState: only live accounts still flagged incomplete in the
+	// in-school student state (njupter). Grouped by state for symmetry.
+	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{}).
+		Where(`profile_needs_completion = true AND state = ?`, model.UserStateNJUPTer)).
+		Select(`state AS "group", COUNT(*) AS count`).Group("state").Scan(&rows).Error; err != nil {
+		return stats, fmt.Errorf("count users by state (incomplete): %w", err)
+	}
+	for _, row := range rows {
+		stats.IncompleteByState[model.UserState(row.Group)] = row.Count
 	}
 
 	rows = rows[:0]

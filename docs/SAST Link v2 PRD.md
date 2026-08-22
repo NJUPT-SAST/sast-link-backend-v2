@@ -452,7 +452,7 @@ Payload: {
 | `/admin/oauth-clients` | POST | admin | admin:write | 注册新客户端（第三方返回 client_secret，第一方不返回） |
 | `/admin/oauth-clients/:id` | PUT | admin | admin:write | 更新客户端（名称/回调地址/授权模式/scope/启用状态；`client_id`/`client_secret`/`id`/`client_type` 不可改）。收窄 scope 或新授予能力 scope 会撤销该客户端存量 token，扩大 scope 不会（见 §4.12） |
 | `/admin/audit-logs` | GET | admin | admin:read | 分页查询，支持按 user_id / action / resource / success / actor_client_id / 时间范围 筛选；响应含 best-effort 的 `user_name` 显示名 |
-| `/admin/stats` | GET | admin | admin:read | 概览统计：账户聚合（total / by_role / by_state / by_department / no_department）+ 客户端数 + 最近审计 |
+| `/admin/stats` | GET | admin | admin:read | 概览统计：账户聚合（total / by_role / by_state / by_department / no_department / incomplete_by_role / incomplete_by_state）+ 客户端数 + 最近审计 |
 
 **管理面**：`/admin/*` 是管理本服务数据的端点组，只有携带 admin scope 的 token 且主体为 admin 角色时可达——admin scope 仅 `third_party`（机密客户端）可持有（§4.10）。角色门与 scope 门互不蕴含，缺任一均 `403`：角色门回答「这个用户是否被允许」（角色读数据库行，降权下一请求生效），scope 门回答「这个凭证是否被授权」——内置控制台 token 豁免 scope 门，其上限即角色门。「管理 scope」列中 `admin:read` 处 `admin:write` 亦可通行（写蕴含读）。
 

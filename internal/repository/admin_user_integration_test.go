@@ -739,3 +739,108 @@ func TestAdminUserDemoteAndSoftDeleteDoNotDeadlock(t *testing.T) {
 		}
 	}
 }
+
+// TestUserRepositoryStatsIncompleteBuckets checks the overview's "未补全" slices:
+// IncompleteByRole groups unfinished (V010-flagged) live accounts whose role is
+// neither lecturer nor admin by role, and IncompleteByState groups unfinished
+// live accounts in the in-school student state by state. Both must exclude
+// soft-deleted accounts, and a finished account must never appear in either.
+func TestUserRepositoryStatsIncompleteBuckets(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+
+	// unfinished freshman (blank major => V010 flags it) - counts in both slices
+	unfinishedFreshman := testUser("inc-001@njupt.edu.cn")
+	unfinishedFreshman.Name = "未补全新生"
+	unfinishedFreshman.Role = model.UserRoleFreshman
+	unfinishedFreshman.State = model.UserStateNJUPTer
+	if err := users.CreateWithProfile(context.Background(), unfinishedFreshman,
+		&model.Profile{}); err != nil {
+		t.Fatalf("seed unfinished freshman: %v", err)
+	}
+
+	// unfinished member (blank major) - counts in incomplete_by_role only
+	unfinishedMember := testUser("inc-002@njupt.edu.cn")
+	unfinishedMember.Name = "未补全成员"
+	unfinishedMember.Role = model.UserRoleMember
+	unfinishedMember.State = model.UserStateOnSAST
+	if err := users.CreateWithProfile(context.Background(), unfinishedMember,
+		&model.Profile{}); err != nil {
+		t.Fatalf("seed unfinished member: %v", err)
+	}
+
+	// unfinished lecturer - excluded from incomplete_by_role, and not njupter so
+	// excluded from incomplete_by_state
+	unfinishedLecturer := testUser("inc-003@njupt.edu.cn")
+	unfinishedLecturer.Name = "未补全讲师"
+	unfinishedLecturer.Role = model.UserRoleLecturer
+	unfinishedLecturer.State = model.UserStateOnSAST
+	if err := users.CreateWithProfile(context.Background(), unfinishedLecturer,
+		&model.Profile{}); err != nil {
+		t.Fatalf("seed unfinished lecturer: %v", err)
+	}
+
+	// unfinished admin - excluded from incomplete_by_role
+	unfinishedAdmin := testUser("inc-004@njupt.edu.cn")
+	unfinishedAdmin.Name = "未补全管理员"
+	unfinishedAdmin.Role = model.UserRoleAdmin
+	unfinishedAdmin.State = model.UserStateOnSAST
+	if err := users.CreateWithProfile(context.Background(), unfinishedAdmin,
+		&model.Profile{}); err != nil {
+		t.Fatalf("seed unfinished admin: %v", err)
+	}
+
+	// finished njupter (explicit major) - must not appear in either slice
+	finishedStudent := testUser("inc-005@njupt.edu.cn")
+	finishedStudent.Name = "已补全校生"
+	finishedStudent.Role = model.UserRoleFreshman
+	finishedStudent.State = model.UserStateNJUPTer
+	finishedStudent.Major = "软件工程"
+	if err := users.CreateWithProfile(context.Background(), finishedStudent,
+		&model.Profile{}); err != nil {
+		t.Fatalf("seed finished student: %v", err)
+	}
+
+	// unfinished deleted - excluded from both (live only)
+	unfinishedDeleted := testUser("inc-006@njupt.edu.cn")
+	unfinishedDeleted.Name = "未补全已注销"
+	unfinishedDeleted.Role = model.UserRoleMember
+	unfinishedDeleted.State = model.UserStateDeleted
+	if err := users.CreateWithProfile(context.Background(), unfinishedDeleted,
+		&model.Profile{}); err != nil {
+		t.Fatalf("seed unfinished deleted: %v", err)
+	}
+
+	stats, err := users.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+
+	// incomplete_by_role: unfinished freshman (1) + unfinished member (1); the
+	// unfinished lecturer / admin / deleted / finished accounts must stay out.
+	if got := stats.IncompleteByRole[model.UserRoleFreshman]; got != 1 {
+		t.Errorf("IncompleteByRole[freshman] = %d, want 1", got)
+	}
+	if got := stats.IncompleteByRole[model.UserRoleMember]; got != 1 {
+		t.Errorf("IncompleteByRole[member] = %d, want 1", got)
+	}
+	if got := stats.IncompleteByRole[model.UserRoleLecturer]; got != 0 {
+		t.Errorf("IncompleteByRole[lecturer] = %d, want 0", got)
+	}
+	if got := stats.IncompleteByRole[model.UserRoleAdmin]; got != 0 {
+		t.Errorf("IncompleteByRole[admin] = %d, want 0", got)
+	}
+
+	// incomplete_by_state: only unfinished in-school freshmen, grouped by state.
+	// The njupter unfinished freshman counts; the unfinished member/lecturer/
+	// admin (on_sast) and deleted account do not.
+	if got := stats.IncompleteByState[model.UserStateNJUPTer]; got != 1 {
+		t.Errorf("IncompleteByState[njupter] = %d, want 1", got)
+	}
+	if got := stats.IncompleteByState[model.UserStateOnSAST]; got != 0 {
+		t.Errorf("IncompleteByState[on_sast] = %d, want 0", got)
+	}
+	if got := stats.IncompleteByState[model.UserStateDeleted]; got != 0 {
+		t.Errorf("IncompleteByState[is_deleted] = %d, want 0", got)
+	}
+}
