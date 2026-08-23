@@ -2316,6 +2316,28 @@ func TestResetPasswordResolvesBoundOtherMail(t *testing.T) {
 	}
 }
 
+// A deleted account must not be allowed to reset its password, even when the
+// identifier resolves through a bound other_mail identity that is still in the
+// identities table.
+func TestResetPasswordRejectsDeletedAccount(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	user := users.byID[42]
+	user.State = model.UserStateDeleted
+	users.byLogin["member@example.com"] = user
+
+	resetPurpose := string(mailer.VerificationPurposeResetPassword)
+	if err := codes.SaveVerificationCode(context.Background(), resetPurpose, "member@example.com", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+
+	_, err := service.ResetPassword(context.Background(), ResetPasswordInput{
+		Email: "member@example.com", Code: "123456", Password: "brand-new-password",
+	})
+	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
+}
+
 func TestResetPasswordRejectsUnchangedPassword(t *testing.T) {
 	service := newRegisterService(t)
 	users := service.Users.(*fakeUsers)

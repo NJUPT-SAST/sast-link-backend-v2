@@ -834,6 +834,11 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	if err != nil {
 		return nil, newError(ErrInternal, "查询账号失败", err)
 	}
+	if user.State == model.UserStateDeleted {
+		// A deleted account's other_mail identity can still resolve here; do not let
+		// the reset flow proceed or reveal that the address ever belonged to anyone.
+		return nil, newError(ErrUserDeleted, "用户已注销", nil)
+	}
 	// Distinguish "differs from the old password" from "could not check": a
 	// cancelled verification returns non-nil too, which would otherwise be read as
 	// a successful difference check.
