@@ -274,9 +274,8 @@ func fieldRequiredMessage(field string) string { return field + " 不能为空" 
 func fieldTooLongMessage(field string) string  { return field + " 长度超出限制" }
 func fieldInvalidMessage(field string) string  { return field + " 含非法字符" }
 
-// validatedCreate is the outcome of checking a CreateUserInput. Unlike
-// validatedUpdate there are no nil-or-value fields: every account created here
-// fixes all of its V001 values, with the optional inputs resolved to defaults.
+// validatedCreate holds the normalized CreateUserInput. Optional fields are
+// resolved to their defaults; there are no nil-or-unchanged semantics.
 type validatedCreate struct {
 	name          string
 	phoneNumber   string
@@ -290,14 +289,10 @@ type validatedCreate struct {
 	personalEmail *string
 }
 
-// validateCreate checks a full account provision.
-//
-// The four "user" columns that identify or describe the member are required —
-// an account cannot be created with an empty name or student ID, the same rule
-// validateUpdate applies to editing them. major is the one bounded column V001
-// seeds empty and an administrator may leave blank. role defaults to member and
-// state to retired_sast, matching the population this endpoint exists for:
-// graduated members for whom no SAST or student email works any longer.
+// validateCreate checks a full account provision. name, phone_number, qq_number,
+// student_id and login_email are required; major may stay empty. role defaults
+// to member and state to retired_sast, the usual case for graduated members
+// whose school or SAST email is no longer reachable.
 func validateCreate(input CreateUserInput) (validatedCreate, error) {
 	var result validatedCreate
 
@@ -366,9 +361,8 @@ func validateCreate(input CreateUserInput) (validatedCreate, error) {
 			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 格式非法", nil)
 		}
 		if email == result.loginEmail {
-			// V005 would raise on the identity insert; refusing the contradiction up
-			// front names the mistake instead of surfacing a DB constraint error. The
-			// comparison is exact because personal_email is lowered like login_email.
+			// Reject before the identity insert so the caller gets a clear input error
+			// rather than a DB constraint. Both emails are lowercased, so compare exactly.
 			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 不能与 login_email 相同", nil)
 		}
 		result.personalEmail = &email

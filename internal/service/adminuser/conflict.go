@@ -16,13 +16,12 @@ import (
 const (
 	userLoginEmailConstraint = "user_login_email_key"
 	userStudentIDConstraint  = "user_student_id_key"
-	// V005 raises these two from triggers with SQLSTATE unique_violation, so they
-	// arrive here like any other duplicate. ck_user_login_email_not_identity fires
-	// when a login email would take an address already bound as an other_mail
-	// identity; ck_identities_provider_id_not_login_email is the mirror, fired when
-	// an identity insert claims an address already serving as somebody's login
-	// email — the exact shape an admin provisioning can produce when its personal
-	// email pre-check races a registration for the same address.
+	// V005 raises both triggers as SQLSTATE unique_violation.
+	// ck_user_login_email_not_identity fires when a login email would take an
+	// address already bound as other_mail. ck_identities_provider_id_not_login_email
+	// is the mirror: an identity insert claims an address already used as a login
+	// email. This is the race an admin provisioning can hit when its personal email
+	// pre-check loses to a concurrent registration.
 	userLoginEmailIsIdentityConstraint        = "ck_user_login_email_not_identity"
 	identityProviderIDNotLoginEmailConstraint = "ck_identities_provider_id_not_login_email"
 	// identities' own uniqueness guard. The console pre-checks the personal email

@@ -193,7 +193,7 @@ func TestCreateUserMapsStudentIDCollision(t *testing.T) {
 	assertMappedTo(t, err, KindConflict, errcode.CodeStudentIDOccupied)
 }
 
-// V005's mirror trigger fires when the admin-vouched personal email races a
+// V005's mirror trigger fires when the personal email bound by an admin races a
 // registration for an address that is already somebody's login email. It names
 // the same outcome as the login-email constraint: an occupied mailbox.
 func TestCreateUserMapsIdentityNotLoginEmailCollision(t *testing.T) {

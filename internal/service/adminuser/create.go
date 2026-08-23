@@ -8,17 +8,13 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
 
-// initialPasswordBytes is the entropy behind the generated first password.
-// 24 random bytes encoded as raw base64url produce a 32-character credential of
-// mixed case, digits and URL-safe symbols — beyond practical guessing even if a
-// leaked hash sample were to constrain the salt. Nobody, including the
-// administrator, knows or chooses it except for the single response that
-// carries it.
+// initialPasswordBytes is the length of the random buffer used for the first
+// password. 24 bytes of raw base64url output 32 characters; the plaintext is
+// returned once in CreateUserResult and not stored anywhere else.
 const initialPasswordBytes = 24
 
-// generateInitialPassword returns a fresh unguessable first password. base64url
-// keeps it free of characters a frontend would need to escape or a user would
-// misread while being relayed out of band.
+// generateInitialPassword returns a new random password encoded with raw
+// base64url so it needs no URL escaping and is easy to read.
 func generateInitialPassword() (string, error) {
 	buffer := make([]byte, initialPasswordBytes)
 	if _, err := rand.Read(buffer); err != nil {
@@ -27,13 +23,10 @@ func generateInitialPassword() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
-// CreateUser provisions a fresh account, optionally binding a personal email as
-// an other_mail login identity inside the same transaction.
-//
-// The initial password is generated rather than taken from the request: the
-// member is not present to type one, and a credential the administrator chooses
-// is a credential only one person chose. The plaintext leaves in
-// CreateUserResult and is never persisted or audited.
+// CreateUser creates an account and optionally binds a personal email as an
+// other_mail identity in the same transaction. The initial password is generated
+// because the member is not present to enter one; the plaintext is returned in
+// CreateUserResult and never persisted or audited.
 func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*CreateUserResult, error) {
 	validated, err := validateCreate(input)
 	if err != nil {
@@ -43,12 +36,9 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 
 	var boundEmail *string
 	if validated.personalEmail != nil {
-		// A bound personal email is both a login handle (FindAuthUserByLoginIdentifier
-		// already resolves other_mail identities) and the account's password-reset
-		// channel once bound, so it must not already serve another account. The
-		// pre-check maps a collision to ErrEmailOccupied before the unique indexes —
-		// and V005, which forbids an address doubling as somebody's login email —
-		// race it into a constraint error.
+		// A bound personal email can be used as a login handle and as a password-reset
+		// target, so it must not already belong to another account. The pre-check
+		// returns ErrEmailOccupied before the unique indexes and V005 trigger can race.
 		boundEmail = validated.personalEmail
 		occupied, existsErr := s.Users.ExistsAsEmailAnywhere(ctx, *validated.personalEmail)
 		if existsErr != nil {
@@ -88,8 +78,8 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 		Major:        validated.major,
 		PasswordHash: hash,
 	}
-	// An admin-vouched binding mirrors the self-service bind path, whose identity
-	// row carries no identity_data — provider_id already holds the email.
+	// The admin binding follows the same shape as self-service: identity_data is
+	// empty because provider_id stores the email.
 	var identity *model.Identity
 	if boundEmail != nil {
 		identity = &model.Identity{
@@ -120,9 +110,8 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 	}, nil
 }
 
-// attemptedCreateDetail names what a failed provision was trying to create. An
-// identifier only — the plaintext initial password never enters the audit trail,
-// and the response is the only place it exists.
+// attemptedCreateDetail records the identifiers from a failed provision. It
+// never includes the initial password.
 func attemptedCreateDetail(input CreateUserInput) map[string]any {
 	detail := map[string]any{"login_email": input.LoginEmail}
 	if input.PersonalEmail != nil {
@@ -131,10 +120,9 @@ func attemptedCreateDetail(input CreateUserInput) map[string]any {
 	return detail
 }
 
-// auditCreate records a provisioning attempt, success or failure. A failed
-// provision has no account to name, so TargetUserID stays 0 and the detail
-// names the login email that was attempted (an identifier, never a credential)
-// so an attempted collision stays attributable.
+// auditCreate records a provisioning attempt. On failure the account does not
+// exist yet, so TargetUserID is 0 and the detail records the attempted login
+// email.
 func (s Service) auditCreate(
 	ctx context.Context,
 	input CreateUserInput,

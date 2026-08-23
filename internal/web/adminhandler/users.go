@@ -54,14 +54,12 @@ func (h Handler) ListUsers(c *gin.Context) {
 	})
 }
 
-// createUserRequest is the full-provision body of POST /admin/users.
+// createUserRequest is the body of POST /admin/users.
 //
-// Fields optional at creation default rather than being left alone — a brand-new
-// account has no previous value to keep: college defaults to "其他", major to ”,
-// role to member, state to retired_sast. personal_email, when present, is bound
-// as an other_mail login identity inside the same transaction, vouched for by the
-// administrator in place of the email verification the self-service flow would
-// perform.
+// Optional fields default instead of staying unchanged because a new account has
+// no prior value. college defaults to "其他", major to "", role to member, state
+// to retired_sast. personal_email, when set, is bound as an other_mail identity
+// in the same transaction without the email verification of self-service binding.
 type createUserRequest struct {
 	Name          string  `json:"name"`
 	PhoneNumber   string  `json:"phone_number"`
@@ -75,17 +73,16 @@ type createUserRequest struct {
 	State         *string `json:"state"`
 }
 
-// createdUserDTO is the one response that carries the initial password. The
-// plaintext exists nowhere else, so this is the single place the administrator
-// can catch it to relay to the member out of band.
+// createdUserDTO returns the initial password. The plaintext is not stored, so
+// the administrator must copy it from this response to pass to the member.
 type createdUserDTO struct {
 	ID              int64  `json:"id"`
 	LoginEmail      string `json:"login_email"`
 	InitialPassword string `json:"initial_password"`
 }
 
-// CreateUser provisions a fresh account. When personal_email is supplied, the
-// address is bound as an other_mail login identity in the same transaction.
+// CreateUser creates an account. When personal_email is set, it binds the
+// address as an other_mail identity in the same transaction.
 func (h Handler) CreateUser(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {

@@ -20,9 +20,9 @@ const (
 
 type ForgotPasswordUsers interface {
 	// FindAuthUserByLoginIdentifier returns the scalar columns without preloads;
-	// the worker only needs to confirm the account exists and read its ID. It
-	// resolves a login email or an other_mail identity, so a member whose only
-	// reachable address is a bound personal email can still reset their password.
+	// the worker only needs the account ID. It accepts a login email or an
+	// other_mail identity so password reset works for accounts with only a bound
+	// personal email.
 	FindAuthUserByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error)
 }
 

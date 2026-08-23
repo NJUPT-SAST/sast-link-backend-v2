@@ -628,8 +628,8 @@ func TestUserRepositoryUpdatePasswordAndRevokeSessionsReportsMissingUser(t *test
 	}
 }
 
-// A provisioning transaction writes the user, its profile and the admin-vouched
-// other_mail binding in one commit, with each row linked to the same user id. Both
+// A provisioning transaction writes the user, its profile, and an other_mail
+// binding in one commit, with each row linked to the same user id. Both
 // identifiers are then resolvable for login: the login email and the bound address.
 func TestUserRepositoryCreateAdminUserBindsOtherMailAtomically(t *testing.T) {
 	database := setupDatabase(t)

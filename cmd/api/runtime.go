@@ -193,9 +193,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	})
 	forgotPasswords := sessionworker.NewForgotPassword(users, store, emailer, audit)
 
-	// One argon2id derivation pool serves every hashing path — session and admin
-	// account provisioning alike — so their configured parameters cannot drift
-	// apart and a single semaphore bounds process-wide CPU spent on KDF work.
+	// Share one argon2id pool across all KDF work so session and admin provisioning
+	// use the same parameters and share a single CPU semaphore.
 	passwordHasher := auth.PasswordHasher{
 		Semaphore:     make(chan struct{}, cfg.Argon2Concurrency),
 		Argon2Time:    cfg.Argon2Time,

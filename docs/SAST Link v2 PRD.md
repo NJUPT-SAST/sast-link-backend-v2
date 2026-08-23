@@ -442,7 +442,7 @@ Payload: {
 | 端点 | 方法 | 角色 | 委派 scope | 说明 |
 | ------ | ------ | ------ | ------ | ------ |
 | `/admin/users` | GET | admin / lecturer | admin:read | 分页列表，支持按 role / state / department / student_id / keyword 筛选 |
-| `/admin/users` | POST | admin | admin:write | 创建账号（管理员建号）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证——该邮箱随即成为登录标识与密码重置通道，见 §4.13 邮箱身份）；role / state 缺省 member / retired_sast；系统生成强随机初始密码仅响应返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
+| `/admin/users` | POST | admin | admin:write | 创建账号（管理员建号）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份，无需邮箱验证；绑定后可用于登录和密码重置（见 §4.13）；role / state 缺省 member / retired_sast；系统生成随机初始密码，仅在响应中返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
 | `/admin/users/:id` | GET | admin / lecturer | admin:read | 用户详情（含 profile + identities） |
 | `/admin/users/:id` | PUT | admin | admin:write | 更新用户信息（含 role / state / email_type） |
 | `/admin/users/:id` | DELETE | admin | admin:write | 软删除（state → is_deleted），级联撤销所有 token |

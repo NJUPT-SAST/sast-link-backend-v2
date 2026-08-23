@@ -62,18 +62,13 @@ func (r *UserRepository) CreateWithProfile(
 	})
 }
 
-// CreateAdminUser creates an account, its profile and an optional other_mail
-// login identity in one PostgreSQL transaction, without minting a token pair.
+// CreateAdminUser creates an account, its profile, and an optional other_mail
+// identity in one transaction, without issuing a token pair.
 //
-// The pair is the difference from CreateRegistrationWithIdentity: a
-// registration mints the session the new user walks away with, while an
-// administrative provisioning has no subject present to receive one, and
-// handing the administrator a freshly signed token for the new account would
-// conflate their action with the account owner's. The identity joins the same
-// transaction for the same reason a registration-time binding does — an
-// account that logs in through its bound email must never be committed without
-// the binding that makes that possible. A nil identity is the plain provision
-// path.
+// Unlike CreateRegistrationWithIdentity, provisioning has no present subject to
+// receive a session, so the caller should not get a signed token for the new
+// account. The identity is included in the same transaction so the bound email
+// works for login immediately; nil means no binding.
 func (r *UserRepository) CreateAdminUser(
 	ctx context.Context,
 	user *model.User,
