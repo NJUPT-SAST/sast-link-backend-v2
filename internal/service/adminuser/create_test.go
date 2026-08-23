@@ -166,6 +166,9 @@ func TestCreateUserFailsWhenPersonalEmailOccupied(t *testing.T) {
 	if !bytes.Contains([]byte(entry.Detail), []byte(`"login_email":"b24040525@njupt.edu.cn"`)) {
 		t.Fatalf("failure audit detail = %s, want the attempted login email named", entry.Detail)
 	}
+	if !bytes.Contains([]byte(entry.Detail), []byte(`"attempted_personal_email":"zhangsan@qq.com"`)) {
+		t.Fatalf("failure audit detail = %s, want the attempted personal email named", entry.Detail)
+	}
 }
 
 // A duplicate from the racing transaction names the colliding column the same

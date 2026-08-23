@@ -124,7 +124,11 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 // identifier only — the plaintext initial password never enters the audit trail,
 // and the response is the only place it exists.
 func attemptedCreateDetail(input CreateUserInput) map[string]any {
-	return map[string]any{"login_email": input.LoginEmail}
+	detail := map[string]any{"login_email": input.LoginEmail}
+	if input.PersonalEmail != nil {
+		detail["attempted_personal_email"] = *input.PersonalEmail
+	}
+	return detail
 }
 
 // auditCreate records a provisioning attempt, success or failure. A failed
