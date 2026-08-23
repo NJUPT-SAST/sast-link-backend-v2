@@ -54,6 +54,76 @@ func (h Handler) ListUsers(c *gin.Context) {
 	})
 }
 
+// createUserRequest is the full-provision body of POST /admin/users.
+//
+// Fields optional at creation default rather than being left alone — a brand-new
+// account has no previous value to keep: college defaults to "其他", major to ”,
+// role to member, state to retired_sast. personal_email, when present, is bound
+// as an other_mail login identity inside the same transaction, vouched for by the
+// administrator in place of the email verification the self-service flow would
+// perform.
+type createUserRequest struct {
+	Name          string  `json:"name"`
+	PhoneNumber   string  `json:"phone_number"`
+	QQNumber      string  `json:"qq_number"`
+	StudentID     string  `json:"student_id"`
+	Major         *string `json:"major"`
+	College       *string `json:"college"`
+	LoginEmail    string  `json:"login_email"`
+	PersonalEmail *string `json:"personal_email"`
+	Role          *string `json:"role"`
+	State         *string `json:"state"`
+}
+
+// createdUserDTO is the one response that carries the initial password. The
+// plaintext exists nowhere else, so this is the single place the administrator
+// can catch it to relay to the member out of band.
+type createdUserDTO struct {
+	ID              int64  `json:"id"`
+	LoginEmail      string `json:"login_email"`
+	InitialPassword string `json:"initial_password"`
+}
+
+// CreateUser provisions a fresh account. When personal_email is supplied, the
+// address is bound as an other_mail login identity in the same transaction.
+func (h Handler) CreateUser(c *gin.Context) {
+	principal, ok := middleware.PrincipalFrom(c)
+	if !ok {
+		response.Error(c, internalError())
+		return
+	}
+	var req createUserRequest
+	if err := decodeStrictJSON(c, &req); err != nil {
+		response.Error(c, badRequest())
+		return
+	}
+	result, err := h.Users.CreateUser(c.Request.Context(), adminuser.CreateUserInput{
+		Name:          req.Name,
+		PhoneNumber:   req.PhoneNumber,
+		QQNumber:      req.QQNumber,
+		StudentID:     req.StudentID,
+		Major:         req.Major,
+		College:       req.College,
+		LoginEmail:    req.LoginEmail,
+		PersonalEmail: req.PersonalEmail,
+		Role:          req.Role,
+		State:         req.State,
+		AdminUserID:   principal.UserID,
+		ActorClientID: principal.ClientID,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
+	})
+	if err != nil {
+		response.Error(c, mapUserServiceError(err))
+		return
+	}
+	response.Ok(c, createdUserDTO{
+		ID:              result.UserID,
+		LoginEmail:      result.LoginEmail,
+		InitialPassword: result.InitialPassword,
+	})
+}
+
 // GetUser returns one account with its profile and bindings.
 func (h Handler) GetUser(c *gin.Context) {
 	userID, ok := web.ParsePositiveID(c.Param("id"))

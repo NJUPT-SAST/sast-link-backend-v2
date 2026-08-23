@@ -19,9 +19,11 @@ const (
 )
 
 type ForgotPasswordUsers interface {
-	// FindAuthUserByLoginEmail returns the scalar columns without preloads; the
-	// worker only needs to confirm the account exists and read its ID.
-	FindAuthUserByLoginEmail(ctx context.Context, email string) (*model.User, error)
+	// FindAuthUserByLoginIdentifier returns the scalar columns without preloads;
+	// the worker only needs to confirm the account exists and read its ID. It
+	// resolves a login email or an other_mail identity, so a member whose only
+	// reachable address is a bound personal email can still reset their password.
+	FindAuthUserByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error)
 }
 
 type ForgotPasswordCodes interface {
@@ -76,7 +78,7 @@ func (w *ForgotPassword) Run(ctx context.Context) error {
 }
 
 func (w *ForgotPassword) process(ctx context.Context, job session.ForgotPasswordJob) {
-	user, err := w.Users.FindAuthUserByLoginEmail(ctx, job.Email)
+	user, err := w.Users.FindAuthUserByLoginIdentifier(ctx, job.Email)
 	if errors.Is(err, repository.ErrNotFound) {
 		return
 	}

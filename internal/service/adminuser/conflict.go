@@ -16,10 +16,19 @@ import (
 const (
 	userLoginEmailConstraint = "user_login_email_key"
 	userStudentIDConstraint  = "user_student_id_key"
-	// V005 raises this from a trigger with SQLSTATE unique_violation, so it arrives
-	// here like any other duplicate. It fires when a login email would take an
-	// address already bound as an other_mail identity — including on another account.
-	userLoginEmailIsIdentityConstraint = "ck_user_login_email_not_identity"
+	// V005 raises these two from triggers with SQLSTATE unique_violation, so they
+	// arrive here like any other duplicate. ck_user_login_email_not_identity fires
+	// when a login email would take an address already bound as an other_mail
+	// identity; ck_identities_provider_id_not_login_email is the mirror, fired when
+	// an identity insert claims an address already serving as somebody's login
+	// email — the exact shape an admin provisioning can produce when its personal
+	// email pre-check races a registration for the same address.
+	userLoginEmailIsIdentityConstraint        = "ck_user_login_email_not_identity"
+	identityProviderIDNotLoginEmailConstraint = "ck_identities_provider_id_not_login_email"
+	// identities' own uniqueness guard. The console pre-checks the personal email
+	// with ExistsAsEmailAnywhere before creating, so this only lands after a race;
+	// it still needs a name, not a logged "unmapped" 500.
+	identityProviderProviderIDConstraint = "uq_identities_provider_provider_id"
 )
 
 // mapUniqueViolation names the colliding column, falling back to internalMessage
@@ -32,7 +41,8 @@ const (
 // visible.
 func (s Service) mapUniqueViolation(ctx context.Context, err error, internalMessage string) error {
 	switch constraint := duplicateConstraint(err); constraint {
-	case userLoginEmailConstraint, userLoginEmailIsIdentityConstraint:
+	case userLoginEmailConstraint, userLoginEmailIsIdentityConstraint,
+		identityProviderIDNotLoginEmailConstraint, identityProviderProviderIDConstraint:
 		return newError(ErrEmailOccupied, "邮箱已被占用", err)
 	case userStudentIDConstraint:
 		return newError(ErrStudentIDOccupied, "学号已被占用", err)

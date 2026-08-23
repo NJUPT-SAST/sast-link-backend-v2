@@ -17,19 +17,15 @@ type forgotUsers struct {
 	err   error
 }
 
-func (f forgotUsers) FindByLoginEmail(_ context.Context, email string) (*model.User, error) {
+func (f forgotUsers) FindAuthUserByLoginIdentifier(_ context.Context, identifier string) (*model.User, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	user, ok := f.users[email]
+	user, ok := f.users[identifier]
 	if !ok {
 		return nil, repository.ErrNotFound
 	}
 	return user, nil
-}
-
-func (f forgotUsers) FindAuthUserByLoginEmail(_ context.Context, email string) (*model.User, error) {
-	return f.FindByLoginEmail(context.Background(), email)
 }
 
 type forgotCodes struct {
@@ -89,6 +85,22 @@ func TestForgotPasswordIgnoresUnknownAccount(t *testing.T) {
 	worker.process(context.Background(), session.ForgotPasswordJob{Email: "nobody@njupt.edu.cn"})
 	if codes.email != "" || emailer.to != "" {
 		t.Fatalf("unknown account produced code/mail: %+v %+v", codes, emailer)
+	}
+}
+
+// A member whose only reachable address is a bound other_mail identity resets
+// through that address: the worker resolves the identifier to the account and
+// delivers the code where the member can read it.
+func TestForgotPasswordResolvesBoundOtherMail(t *testing.T) {
+	codes := &forgotCodes{}
+	emailer := &forgotMailer{}
+	worker := NewForgotPassword(forgotUsers{users: map[string]*model.User{"member@example.com": {ID: 42}}}, codes, emailer, nil)
+	worker.process(context.Background(), session.ForgotPasswordJob{Email: "member@example.com"})
+	if codes.email != "member@example.com" || len(codes.code) != 6 {
+		t.Fatalf("saved code = %+v, want a reset code delivered to the bound address", codes)
+	}
+	if emailer.to != "member@example.com" {
+		t.Fatalf("mail to = %q, want the bound address the member submitted", emailer.to)
 	}
 }
 

@@ -62,6 +62,51 @@ func (r *UserRepository) CreateWithProfile(
 	})
 }
 
+// CreateAdminUser creates an account, its profile and an optional other_mail
+// login identity in one PostgreSQL transaction, without minting a token pair.
+//
+// The pair is the difference from CreateRegistrationWithIdentity: a
+// registration mints the session the new user walks away with, while an
+// administrative provisioning has no subject present to receive one, and
+// handing the administrator a freshly signed token for the new account would
+// conflate their action with the account owner's. The identity joins the same
+// transaction for the same reason a registration-time binding does — an
+// account that logs in through its bound email must never be committed without
+// the binding that makes that possible. A nil identity is the plain provision
+// path.
+func (r *UserRepository) CreateAdminUser(
+	ctx context.Context,
+	user *model.User,
+	profile *model.Profile,
+	identity *model.Identity,
+) error {
+	if user == nil {
+		return fmt.Errorf("%w: user is nil", ErrInvalidArgument)
+	}
+	if profile == nil {
+		return fmt.Errorf("%w: profile is nil", ErrInvalidArgument)
+	}
+
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Create(user).Error; err != nil {
+			return fmt.Errorf("create admin user: %w", err)
+		}
+		profile.UserID = user.ID
+		if err := transaction.Create(profile).Error; err != nil {
+			return fmt.Errorf("create admin profile: %w", err)
+		}
+		if identity != nil {
+			// The owner row does not exist until the INSERT above; take the ID from
+			// the persisted user rather than trusting a caller-computed one.
+			identity.UserID = user.ID
+			if err := transaction.Create(identity).Error; err != nil {
+				return fmt.Errorf("create admin user identity: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
 // CreateRegistration creates an account, its profile and its initial session in
 // one PostgreSQL transaction. The factory runs after user.ID is assigned so the
 // signed token subject and token metadata refer to the persisted account.

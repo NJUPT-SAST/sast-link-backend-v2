@@ -26,6 +26,10 @@ type Service struct {
 	Blacklist TokenBlacklist
 	Devices   DeviceStore
 	Clock     Clock
+	// Passwords derives the hashed initial password for a provisioned account. It
+	// is the one write path that outright cannot omit a credential rewrite — the
+	// V001 password column is NOT NULL and no previous hash exists to fall back on.
+	Passwords auth.PasswordHasher
 	// ConsoleClientID is the built-in first-party client, recorded as the actor when
 	// a request carries no azp.
 	//

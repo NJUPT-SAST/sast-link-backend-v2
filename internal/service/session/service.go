@@ -827,12 +827,12 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	if err := s.verifyCode(ctx, string(mailer.VerificationPurposeResetPassword), email, input.Code); err != nil {
 		return nil, err
 	}
-	user, err := s.Users.FindAuthUserByLoginEmail(ctx, email)
+	user, err := s.Users.FindAuthUserByLoginIdentifier(ctx, email)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrUnknownIdentifier, "登录邮箱不存在", nil)
+		return nil, newError(ErrUnknownIdentifier, "邮箱不存在", nil)
 	}
 	if err != nil {
-		return nil, newError(ErrInternal, "查询登录邮箱失败", err)
+		return nil, newError(ErrInternal, "查询账号失败", err)
 	}
 	// Distinguish "differs from the old password" from "could not check": a
 	// cancelled verification returns non-nil too, which would otherwise be read as
@@ -864,7 +864,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 			slog.WarnContext(ctx, "remove all devices on password reset failed", "user_id", user.ID, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &user.ID, "reset_password", "session", nil, nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
+	if auditErr := s.audit(ctx, &user.ID, "reset_password", "session", nil, nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"email": email}); auditErr != nil {
 		slog.Error("audit reset password", "user_id", user.ID, "error", auditErr)
 	}
 	return &ResetPasswordResult{Email: email}, nil

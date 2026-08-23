@@ -2288,6 +2288,34 @@ func TestResetPasswordConsumesCodeAndRevokesSessions(t *testing.T) {
 	}
 }
 
+// A member whose login email is dead (its inbox no longer exists) can still
+// reset through a bound other_mail identity: the identifier resolves to the
+// account and the code reaches the address they actually read.
+func TestResetPasswordResolvesBoundOtherMail(t *testing.T) {
+	service := newRegisterService(t)
+	users := service.Users.(*fakeUsers)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+	// The repository's FindAuthUserByLoginIdentifier resolves a bound other_mail
+	// email through the identities join; the fake mirrors that by keying the
+	// identifier map with the address.
+	user := users.byID[42]
+	users.byLogin["member@example.com"] = user
+	resetPurpose := string(mailer.VerificationPurposeResetPassword)
+	if err := codes.SaveVerificationCode(context.Background(), resetPurpose, "member@example.com", "123456", time.Minute); err != nil {
+		t.Fatalf("save code: %v", err)
+	}
+
+	_, err := service.ResetPassword(context.Background(), ResetPasswordInput{
+		Email: "member@example.com", Code: "123456", Password: "brand-new-password",
+	})
+	if err != nil {
+		t.Fatalf("ResetPassword via bound email returned error: %v", err)
+	}
+	if service.Passwords.VerifyPassword(context.Background(), "brand-new-password", user.PasswordHash) != nil {
+		t.Fatal("new password does not verify against the stored hash")
+	}
+}
+
 func TestResetPasswordRejectsUnchangedPassword(t *testing.T) {
 	service := newRegisterService(t)
 	users := service.Users.(*fakeUsers)

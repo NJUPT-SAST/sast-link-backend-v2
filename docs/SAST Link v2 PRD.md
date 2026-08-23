@@ -31,7 +31,7 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 
 | 模块 | 功能 | 角色要求 |
 | ------ | ------ | ---------- |
-| 用户管理 | 用户列表（分页/筛选/搜索）、查看详情、编辑信息、软删除、恢复已注销用户 | admin / lecturer（只读）；admin（写） |
+| 用户管理 | 用户列表（分页/筛选/搜索）、查看详情、编辑信息、创建账号（可直绑个人邮箱为登录身份）、软删除、恢复已注销用户 | admin / lecturer（只读）；admin（写） |
 | OAuth 客户端管理 | 注册/查看/更新/停用 OAuth 客户端 | admin |
 | 审计日志 | 分页查询，按用户/操作/时间/成功状态筛选 | admin |
 | 限流与防刷 | 全局 + 按端点 + 按 IP 的多级限流中间件 | — |
@@ -442,6 +442,7 @@ Payload: {
 | 端点 | 方法 | 角色 | 委派 scope | 说明 |
 | ------ | ------ | ------ | ------ | ------ |
 | `/admin/users` | GET | admin / lecturer | admin:read | 分页列表，支持按 role / state / department / student_id / keyword 筛选 |
+| `/admin/users` | POST | admin | admin:write | 创建账号（管理员建号）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证——该邮箱随即成为登录标识与密码重置通道，见 §4.13 邮箱身份）；role / state 缺省 member / retired_sast；系统生成强随机初始密码仅响应返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
 | `/admin/users/:id` | GET | admin / lecturer | admin:read | 用户详情（含 profile + identities） |
 | `/admin/users/:id` | PUT | admin | admin:write | 更新用户信息（含 role / state / email_type） |
 | `/admin/users/:id` | DELETE | admin | admin:write | 软删除（state → is_deleted），级联撤销所有 token |
@@ -546,7 +547,7 @@ Payload: {
 | `oauth_unbind` | `{"provider": "github" \| "lark" \| "other_mail", "provider_id": "xxx"}` |
 | `update_profile` | `{"changed_fields": ["name", "phone_number", ...]}` |
 | `upload_avatar` | `{"avatar_url": "https://..."}` |
-| 用户管理（`admin_user_update` / `admin_user_delete` / `admin_user_restore`） | `{"target_user_id": 123, ...}` |
+| 用户管理（`admin_user_create` / `admin_user_update` / `admin_user_delete` / `admin_user_restore`） | `{"target_user_id": 123, ...}`（创建账号的 detail 另记 `login_email` / `role` / `state`，绑定个人邮箱时记 `bound_email`） |
 | 客户端注册（`admin_oauth_client_create`） | `{"client_name": "string", "client_type": "third_party", "admin_scope": true}`（`admin_scope` 仅在提交含 admin scope 时出现） |
 | 客户端更新（`admin_oauth_client_update`） | `{"changed_fields": [...], "is_active": bool, "revoked_tokens": 3, "admin_scope_granted": ["admin:write"], "admin_scope_revoked": true, "scopes_removed": [...]}`（后四项按发生情况出现） |
 
@@ -805,4 +806,5 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [ ] 个人卡片端点（`GET /card/:id`）—— 曾实现后下线：顺序 ID 的公开 URL 可枚举全站成员名单。重开需 owner-only + 不可枚举标识（见 §4.14），handler / service / repository 代码保留待重设计
 - [x] 设备管理（`GET /user/devices` / `DELETE /user/devices/:id`；device_id 复用 token family_id；Redis ZSET + Hash，5 台淘汰、30d TTL；登录/注册登记、刷新 last_seen、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备归属校验 fail-closed；按用户限流；审计 `logout_device`）
 - [x] 迁移资料补全标志（V010 `profile_needs_completion` 生成列，软提示；登录/注册/第三方登录/资料响应带标志与待补全字段；管理台筛选跟进；SQL/Go 判定口径一致性测试）
+- [x] 管理员建号 `POST /admin/users`（严格新建，可选直绑 `other_mail` 个人邮箱为登录身份；系统生成一次性初始密码仅响应返回一次；审计 `admin_user_create`）与忘记/重置密码开放给已绑定个人邮箱（worker 与 reset 均按登录标识解析账号，验证码发到提交邮箱）
 - [ ] 测试、联调、上线

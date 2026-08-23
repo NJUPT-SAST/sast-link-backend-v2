@@ -42,6 +42,10 @@ type fakeUsers struct {
 	restoreInput   adminuser.TargetUserInput
 	statsResult    repository.UserStats
 	statsErr       error
+	createResult   *adminuser.CreateUserResult
+	createErr      error
+	createInput    adminuser.CreateUserInput
+	createCalls    int
 }
 
 func (f *fakeUsers) ListUsers(
@@ -127,6 +131,23 @@ func (f *fakeUsers) Stats(_ context.Context) (repository.UserStats, error) {
 		return repository.UserStats{}, f.statsErr
 	}
 	return f.statsResult, nil
+}
+
+func (f *fakeUsers) CreateUser(
+	_ context.Context,
+	input adminuser.CreateUserInput,
+) (*adminuser.CreateUserResult, error) {
+	f.createCalls++
+	f.createInput = input
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	if f.createResult == nil {
+		return &adminuser.CreateUserResult{
+			UserID: 3001, LoginEmail: input.LoginEmail, InitialPassword: "secret",
+		}, nil
+	}
+	return f.createResult, nil
 }
 
 type fakeAuditLogs struct {
@@ -403,6 +424,90 @@ func TestDeleteAndRestoreUserPassPrincipal(t *testing.T) {
 	}
 }
 
+// A provisioning call forwards the body and principal and returns the one-time
+// initial password in the response where the administrator can catch it.
+func TestCreateUserPassesPrincipalAndFields(t *testing.T) {
+	users := &fakeUsers{}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodPost, "/admin/users", "application/json",
+		`{"name":"张三","student_id":"B24040525","phone_number":"13800138000",
+		  "qq_number":"12345","login_email":"b24040525@njupt.edu.cn",
+		  "personal_email":"zhangsan@qq.com","role":"member","state":"retired_sast"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	input := users.createInput
+	if input.Name != "张三" || input.StudentID != "B24040525" || input.LoginEmail != "b24040525@njupt.edu.cn" {
+		t.Fatalf("provision fields = %+v, want them passed through", input)
+	}
+	if input.PersonalEmail == nil || *input.PersonalEmail != "zhangsan@qq.com" {
+		t.Fatalf("personal_email = %v, want zhangsan@qq.com", input.PersonalEmail)
+	}
+	if input.Role == nil || *input.Role != "member" || input.State == nil || *input.State != "retired_sast" {
+		t.Fatalf("role/state = %v/%v, want member/retired_sast", input.Role, input.State)
+	}
+	if input.AdminUserID != testHandlerAdminID {
+		t.Fatalf("admin id = %d, want %d", input.AdminUserID, testHandlerAdminID)
+	}
+	var payload struct {
+		ID              int64  `json:"id"`
+		LoginEmail      string `json:"login_email"`
+		InitialPassword string `json:"initial_password"`
+	}
+	decodeData(t, recorder, &payload)
+	if payload.ID != 3001 || payload.InitialPassword != "secret" || payload.LoginEmail != "b24040525@njupt.edu.cn" {
+		t.Fatalf("response = %+v, want the provisioned id and the initial password", payload)
+	}
+}
+
+// The strict decoder protects the provisioning body the same way it protects the
+// edit one: an attempt to set a field the endpoint does not define is refused.
+func TestCreateUserRejectsUnknownFields(t *testing.T) {
+	for _, body := range []string{
+		`{"name":"X","student_id":"b1","phone_number":"1","qq_number":"1",
+		  "login_email":"x@njupt.edu.cn","password":"hunter2"}`,
+		`{"name":"X","student_id":"b1","phone_number":"1","qq_number":"1",
+		  "login_email":"x@njupt.edu.cn","email_type":"njupt_email"}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			users := &fakeUsers{}
+			router := newUserRouter(t, users, nil)
+
+			recorder := doRequest(t, router, http.MethodPost, "/admin/users", "application/json", body)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for %s", recorder.Code, body)
+			}
+			if users.createCalls != 0 {
+				t.Fatalf("create calls = %d, want the request refused before the service", users.createCalls)
+			}
+		})
+	}
+}
+
+// A collision on the primary email or student ID surfaces as 409 with the
+// column-naming code, exactly as an update collision does.
+func TestCreateUserMapsConflict(t *testing.T) {
+	users := &fakeUsers{createErr: &adminuser.Error{
+		Kind: adminuser.KindConflict, Code: errcode.CodeEmailAlreadyRegistered, Message: "邮箱已被占用",
+	}}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodPost, "/admin/users", "application/json",
+		`{"name":"X","student_id":"b1","phone_number":"1","qq_number":"1",
+		  "login_email":"x@njupt.edu.cn"}`)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", recorder.Code)
+	}
+	var body envelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if body.Code != errcode.CodeEmailAlreadyRegistered {
+		t.Fatalf("code = %d, want CodeEmailAlreadyRegistered", body.Code)
+	}
+}
+
 // Each service error kind maps to the status its meaning calls for. A protected
 // refusal in particular must not read as a role problem, and a state conflict must
 // not read as a bad request.
@@ -559,6 +664,7 @@ func TestUserWritesWithoutPrincipalAreInternalErrors(t *testing.T) {
 	RegisterRoutes(r, Handler{Users: &fakeUsers{}}, testGates(allow))
 
 	for _, testCase := range []struct{ method, path, body string }{
+		{http.MethodPost, "/admin/users", `{"name":"X","student_id":"b1","phone_number":"1","qq_number":"1","login_email":"x@njupt.edu.cn"}`},
 		{http.MethodPut, "/admin/users/5", `{"name":"X"}`},
 		{http.MethodDelete, "/admin/users/5", ""},
 		{http.MethodPut, "/admin/users/5/restore", ""},

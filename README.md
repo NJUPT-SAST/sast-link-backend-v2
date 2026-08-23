@@ -32,11 +32,11 @@ curl http://127.0.0.1:8080/health
 
 ## Features
 
-- **Login & accounts**: password login, two-step email registration, password reset, GitHub and Feishu sign-in
+- **Login & accounts**: password login, two-step email registration, password reset through the login email or a bound personal mailbox, GitHub and Feishu sign-in
 - **Standard auth protocol**: OAuth 2.1 / OIDC for third-party apps to integrate login, token refresh, and user info
 - **Account security**: argon2id password hashing, Ed25519 token signing, revoke all sessions on password change
 - **Self-service**: profile management, third-party account binding, authorized-apps management, device management, avatar upload
-- **Admin console**: user management, OAuth client configuration, audit logs, console overview stats
+- **Admin console**: user management (list/detail/edit/provision, soft-delete/restore, batch role change; provisioning can bind a personal email as the login identity for members whose school email no longer works), OAuth client configuration, audit logs, console overview stats
 - **Operations**: PostgreSQL 16 + Redis 8, one-command Compose startup, built-in health check
 
 ## Documentation

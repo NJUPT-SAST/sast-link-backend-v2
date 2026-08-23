@@ -273,3 +273,130 @@ func validEmailType(emailType model.EmailType) bool {
 func fieldRequiredMessage(field string) string { return field + " 不能为空" }
 func fieldTooLongMessage(field string) string  { return field + " 长度超出限制" }
 func fieldInvalidMessage(field string) string  { return field + " 含非法字符" }
+
+// validatedCreate is the outcome of checking a CreateUserInput. Unlike
+// validatedUpdate there are no nil-or-value fields: every account created here
+// fixes all of its V001 values, with the optional inputs resolved to defaults.
+type validatedCreate struct {
+	name          string
+	phoneNumber   string
+	qqNumber      string
+	studentID     string
+	major         string
+	college       model.College
+	loginEmail    string
+	role          model.UserRole
+	state         model.UserState
+	personalEmail *string
+}
+
+// validateCreate checks a full account provision.
+//
+// The four "user" columns that identify or describe the member are required —
+// an account cannot be created with an empty name or student ID, the same rule
+// validateUpdate applies to editing them. major is the one bounded column V001
+// seeds empty and an administrator may leave blank. role defaults to member and
+// state to retired_sast, matching the population this endpoint exists for:
+// graduated members for whom no SAST or student email works any longer.
+func validateCreate(input CreateUserInput) (validatedCreate, error) {
+	var result validatedCreate
+
+	required := []struct {
+		field  string
+		value  string
+		limit  int
+		target *string
+	}{
+		{"name", strings.TrimSpace(input.Name), validate.MaxNameLength, &result.name},
+		{"phone_number", strings.TrimSpace(input.PhoneNumber), validate.MaxPhoneNumberLength, &result.phoneNumber},
+		{"qq_number", strings.TrimSpace(input.QQNumber), validate.MaxQQNumberLength, &result.qqNumber},
+		{"student_id", strings.TrimSpace(input.StudentID), validate.MaxStudentIDLength, &result.studentID},
+	}
+	for _, field := range required {
+		if field.value == "" {
+			return validatedCreate{}, newError(ErrInvalidInput, fieldRequiredMessage(field.field), nil)
+		}
+		if utf8.RuneCountInString(field.value) > field.limit {
+			return validatedCreate{}, newError(ErrInvalidInput, fieldTooLongMessage(field.field), nil)
+		}
+		if validate.HasControlCharacter(field.value) {
+			return validatedCreate{}, newError(ErrInvalidInput, fieldInvalidMessage(field.field), nil)
+		}
+		*field.target = field.value
+	}
+
+	major := ""
+	if input.Major != nil {
+		major = strings.TrimSpace(*input.Major)
+		if utf8.RuneCountInString(major) > validate.MaxMajorLength {
+			return validatedCreate{}, newError(ErrInvalidInput, fieldTooLongMessage("major"), nil)
+		}
+		if validate.HasControlCharacter(major) {
+			return validatedCreate{}, newError(ErrInvalidInput, fieldInvalidMessage("major"), nil)
+		}
+	}
+	result.major = major
+
+	college := model.CollegeOther
+	if input.College != nil {
+		college = model.College(strings.TrimSpace(*input.College))
+		if !college.Valid() {
+			return validatedCreate{}, newError(ErrInvalidInput, "college 取值非法", nil)
+		}
+	}
+	result.college = college
+
+	loginEmail, err := validateLoginEmail(&input.LoginEmail)
+	if err != nil {
+		// validateLoginEmail answers nil for a nil input; the required strings have
+		// no such presence, so re-state the empty case with the field's own message.
+		return validatedCreate{}, err
+	}
+	result.loginEmail = *loginEmail
+
+	if input.PersonalEmail != nil {
+		email := strings.ToLower(strings.TrimSpace(*input.PersonalEmail))
+		if email == "" {
+			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 不能为空", nil)
+		}
+		if utf8.RuneCountInString(email) > validate.MaxLoginEmailLength {
+			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 长度超出限制", nil)
+		}
+		if !validate.EmailFormat(email) {
+			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 格式非法", nil)
+		}
+		if email == result.loginEmail {
+			// V005 would raise on the identity insert; refusing the contradiction up
+			// front names the mistake instead of surfacing a DB constraint error. The
+			// comparison is exact because personal_email is lowered like login_email.
+			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 不能与 login_email 相同", nil)
+		}
+		result.personalEmail = &email
+	}
+
+	role := model.UserRoleMember
+	if input.Role != nil {
+		role = model.UserRole(strings.TrimSpace(*input.Role))
+		if !validRole(role) {
+			return validatedCreate{}, newError(ErrInvalidInput, "role 取值非法", nil)
+		}
+	}
+	result.role = role
+
+	state := model.UserStateRetiredSAST
+	if input.State != nil {
+		state = model.UserState(strings.TrimSpace(*input.State))
+		if !validState(state) {
+			return validatedCreate{}, newError(ErrInvalidInput, "state 取值非法", nil)
+		}
+		// A closed account has no sessions by construction; creating one already
+		// closed would skip every revocation path those transitions carry.
+		if state == model.UserStateDeleted {
+			return validatedCreate{}, newError(ErrStateConflict,
+				"新建账号不能直接处于已注销状态", nil)
+		}
+	}
+	result.state = state
+
+	return result, nil
+}

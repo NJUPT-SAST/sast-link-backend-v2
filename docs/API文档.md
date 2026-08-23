@@ -498,6 +498,8 @@ POST /auth/forgot-password/send-code
 
 **说明**: 对格式合法且未触发限流的邮箱，接口总是返回同一结果。响应不表示账号存在，也不表示邮件已经送达。服务端把请求放入有界内存队列；worker 只为已注册邮箱生成并发送验证码。队列满、进程重启或邮件依赖失败时任务可能丢失，用户可在限流窗口后重试。
 
+`login_email` 可以是账号的主登录邮箱，也可以是**已绑定为该账号 `other_mail` 身份的个人邮箱**（例如管理员建号时直绑的邮箱，见 §6.2.1）——worker 按登录标识解析账号，验证码发到本次提交的这个地址。对主登录邮箱早已不可用的毕业成员，这是自助重置密码的关键通道。
+
 **错误码**: 400xx（参数错误）、429xx（频率限制）
 
 ---
@@ -526,7 +528,7 @@ POST /auth/reset-password
 }
 ```
 
-**说明**: 新密码最短 8 位。若新密码与旧密码相同，返回 42202。
+**说明**: 新密码最短 8 位。若新密码与旧密码相同，返回 42202。`login_email` 字段与发送验证码一致，也接受已绑定的 `other_mail` 个人邮箱身份（§1.8）。
 
 改密与重置密码在同一事务内完成三件事：写入新密码哈希、`token_version + 1`、撤销该用户全部活跃 Access / Refresh Token。同时**作废该用户尚未兑换的 OAuth 授权码**——授权码是一张还没花出去的凭证，Token 端点签发时会现读用户行上的 `token_version`，因此一张跨过重置动作的授权码兑换出来的会话会带着**新的** `token_version`，中间件照单全收。若只撤销 token 而放着授权码不管，就在「因怀疑被入侵而重置密码」这个最要紧的场景里留下一个恰好等于授权码 TTL 宽度的窗口。
 
@@ -1705,6 +1707,67 @@ GET /admin/users/:id
 
 ---
 
+### 6.2.1 创建用户（管理员建号）
+
+```
+POST /admin/users
+```
+
+为无法自助注册的人员兜底建号的入口——典型场景是已毕业成员：没有 sast.fun 邮箱、学生邮箱也已不可用，注册的登录邮箱域白名单（§1.6/1.7）把他们挡在门外。管理员在此建号，主 `login_email` 填其学生邮箱（招募时仍唯一可用），并**可选**把其仍可读的个人邮箱在同一事务内直绑为 `other_mail` 登录身份。
+
+**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
+
+**Request**:
+
+```json
+{
+  "name": "张三",
+  "student_id": "B24040525",
+  "phone_number": "13800138000",
+  "qq_number": "12345",
+  "login_email": "b24040525@njupt.edu.cn",
+  "major": "软件工程",
+  "college": "计算机学院、软件学院、网络空间安全学院",
+  "personal_email": "zhangsan@qq.com",
+  "role": "member",
+  "state": "retired_sast"
+}
+```
+
+| 字段 | 必填 | 说明 |
+| ------ | ---- | ------ |
+| `name` | ✓ | 姓名（≤255 字） |
+| `student_id` | ✓ | 学号（≤50 字，全库唯一） |
+| `phone_number` | ✓ | 手机号（≤20 字） |
+| `qq_number` | ✓ | QQ 号（≤20 字） |
+| `login_email` | ✓ | 主登录邮箱，仅接受注册白名单域名（`@njupt.edu.cn` / `sast.fun`），全库唯一；`email_type` 由服务端按域名派生，无需也不可自行指定 |
+| `major` | – | 专业（≤50 字），缺省空串 |
+| `college` | – | 学院（college_enum 枚举），缺省「其他」 |
+| `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），该地址随即成为账号的一个登录标识与密码重置通道（§1.8/1.9）。不可与 `login_email` 相同，且不得已被其他账号占用（作为主登录邮箱或已绑身份） |
+| `role` | – | freshman / member / lecturer / admin，缺省 member |
+| `state` | – | njupter / on_sast / retired_sast，缺省 retired_sast；不接受 `is_deleted`（新建即注销无意义，返回 `42200`） |
+
+**Response** `200`:
+
+```json
+{
+  "id": 2001,
+  "login_email": "b24040525@njupt.edu.cn",
+  "initial_password": "<system-generated-initial-password>"
+}
+```
+
+`initial_password`：系统生成的强随机初始密码，**仅此响应返回一次**——不落库、不入审计。管理员需线下转达给成员；成员首次可凭 `login_email`（或绑定后的 `personal_email`）+ 初始密码登录，随后经「修改密码」或「忘记密码」更换。
+
+**说明**:
+- 全程走 `admin_user_create` 审计，detail 记录 `login_email` / `role` / `state`，绑定个人邮箱时再记 `bound_email`；失败同样留痕（`success = false` + 对应 `err_code`）。
+- 严格新建：同一 `login_email` / `student_id` 重复建号因唯一约束返回 `409`，服务端不静默复用旧账号；存量账号的补充绑定不归本接口管。
+- 只建账号与绑定，**不签发任何 token**：亲临现场的是管理员，不是成员本人；初始会话由成员首次登录时建立。
+
+**错误码**: `40000`（必填缺失 / 格式 / 域白名单 / 枚举非法、`personal_email` 与 `login_email` 相同）、`40901`（主邮箱或绑定邮箱已被占用）、`40902`（学号已被占用）、`42200`（`state` 为 `is_deleted`）、`40100`、`40300`。
+
+---
+
 ### 6.3 更新用户
 
 ```
@@ -2125,13 +2188,13 @@ GET /admin/audit-logs
 
 **说明**：时间参数必须带时区偏移（如 `2026-07-01T00:00:00Z`），不带偏移返回 `400` —— `created_at` 是 `timestamptz`，擅自按 UTC 解释会使窗口偏移数小时。`end_time` 早于 `start_time` 返回 `400`。排序为 `created_at DESC, id DESC`（`id` 用于同一时刻内的稳定分页）。
 
-管理端写操作在审计日志中的 `action` 为 `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值——`redirect_uris` 列表冗长，事后要问的是「管理员改了哪些属性、是否切断了现有会话」。委派管理能力的变化是唯一的例外，会额外记录取值：`admin_scope_granted`（本次授予的 admin scope 列表）、`admin_scope_revoked`（布尔）与 `scopes_removed`（被移除的 scope 列表）。事后复盘一次管理事件的起点正是「这个客户端不再持有哪些 scope」，而这个问题无法从字段名加一份事后快照推出。
+管理端写操作在审计日志中的 `action` 为 `admin_user_create` / `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值——`redirect_uris` 列表冗长，事后要问的是「管理员改了哪些属性、是否切断了现有会话」。委派管理能力的变化是唯一的例外，会额外记录取值：`admin_scope_granted`（本次授予的 admin scope 列表）、`admin_scope_revoked`（布尔）与 `scopes_removed`（被移除的 scope 列表）。事后复盘一次管理事件的起点正是「这个客户端不再持有哪些 scope」，而这个问题无法从字段名加一份事后快照推出。
 
 `user_name` 是展示字段：随查询取回对应用户显示名，best-effort。软删除（`state = is_deleted`）的行仍在表里，名字照常返回；仅当用户行被物理删除、或显示名回查失败时为 `null`，此时前端应回退显示 `user_id`。
 
 `actor_client_id` 记录**执行**该操作的 OAuth 客户端（行为主体，而非被操作对象——后者在 `resource_id`）。控制台操作记录内置客户端 id，委派调用记录该第三方客户端的 `client_id`，两者据此可区分「管理员亲自操作」与「工具代其操作」。
 
-目前写入该字段的是管理端五个 action、OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`，以及 `/user` 自助面的 `logout` / `change_password` / `update_profile` / `upload_avatar` / `oauth_bind` / `oauth_unbind` / `bind_email_send_code` / `logout_device`（`user:*` 第三方 token 执行时记其 `azp`，控制台会话显式记内置客户端 id）。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
+目前写入该字段的是管理端六个 action、OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`，以及 `/user` 自助面的 `logout` / `change_password` / `update_profile` / `upload_avatar` / `oauth_bind` / `oauth_unbind` / `bind_email_send_code` / `logout_device`（`user:*` 第三方 token 执行时记其 `azp`，控制台会话显式记内置客户端 id）。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
 
 **错误码**：`40000`（参数格式非法 / 时间窗口倒置）、`40100`、`40300`。
 
