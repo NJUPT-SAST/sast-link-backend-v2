@@ -27,6 +27,7 @@ type UserService interface {
 	ListUsers(ctx context.Context, input adminuser.ListUsersInput) (*adminuser.ListUsersResult, error)
 	GetUser(ctx context.Context, userID int64) (*adminuser.UserDetail, error)
 	GetUsersByIDs(ctx context.Context, input adminuser.GetUsersByIDsInput) ([]adminuser.UserDetail, error)
+	CreateUser(ctx context.Context, input adminuser.CreateUserInput) (*adminuser.CreateUserResult, error)
 	UpdateUser(ctx context.Context, input adminuser.UpdateUserInput) (*adminuser.UpdateUserResult, error)
 	UpdateUserRoles(ctx context.Context, input adminuser.UpdateUserRolesInput) (*adminuser.UpdateUserRolesResult, error)
 	DeleteUser(ctx context.Context, input adminuser.TargetUserInput) error
@@ -110,6 +111,8 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	// GetUser — which is what the 404-on-non-numeric rule intends anyway.
 	admin.GET("/users/batch", g.RequireReadScope, g.RequireReader, h.GetUsersByIDs)
 	admin.GET("/users/:id", g.RequireReadScope, g.RequireReader, h.GetUser)
+	// POST /admin/users creates an account; it needs write scope and admin role.
+	admin.POST("/users", g.RequireWriteScope, g.RequireAdmin, h.CreateUser)
 	admin.PUT("/users", g.RequireWriteScope, g.RequireAdmin, h.UpdateUsersRole)
 	admin.PUT("/users/:id", g.RequireWriteScope, g.RequireAdmin, h.UpdateUser)
 	admin.DELETE("/users/:id", g.RequireWriteScope, g.RequireAdmin, h.DeleteUser)

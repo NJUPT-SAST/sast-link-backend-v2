@@ -193,6 +193,15 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	})
 	forgotPasswords := sessionworker.NewForgotPassword(users, store, emailer, audit)
 
+	// Share one argon2id pool across all KDF work so session and admin provisioning
+	// use the same parameters and share a single CPU semaphore.
+	passwordHasher := auth.PasswordHasher{
+		Semaphore:     make(chan struct{}, cfg.Argon2Concurrency),
+		Argon2Time:    cfg.Argon2Time,
+		Argon2Memory:  cfg.Argon2Memory,
+		Argon2Threads: cfg.Argon2Threads,
+	}
+
 	service := session.Service{
 		Users:            users,
 		Clients:          clients,
@@ -224,14 +233,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		InternalClientID:  cfg.InternalOAuthClientID,
 		JWT:               jwtManager,
 		RefreshTokens:     refreshManager,
-		Passwords: auth.PasswordHasher{
-			Semaphore:     make(chan struct{}, cfg.Argon2Concurrency),
-			Argon2Time:    cfg.Argon2Time,
-			Argon2Memory:  cfg.Argon2Memory,
-			Argon2Threads: cfg.Argon2Threads,
-		},
-		AccessTTL:  cfg.JWTAccessTokenExpiry,
-		RefreshTTL: cfg.JWTRefreshTokenExpiry,
+		Passwords:         passwordHasher,
+		AccessTTL:         cfg.JWTAccessTokenExpiry,
+		RefreshTTL:        cfg.JWTRefreshTokenExpiry,
 	}
 	authenticator := middleware.Authenticator{
 		JWT: jwtManager,
@@ -400,6 +404,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		// the authenticator pins to and adminclient uses as ProtectedClientID, so the
 		// three cannot name different clients for the same console.
 		ConsoleClientID: cfg.InternalOAuthClientID,
+		Passwords:       passwordHasher,
 	}
 
 	adminClientService := adminclient.Service{

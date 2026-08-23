@@ -627,3 +627,103 @@ func TestUserRepositoryUpdatePasswordAndRevokeSessionsReportsMissingUser(t *test
 		t.Fatalf("UpdatePasswordAndRevokeSessions(missing) error = %v, want ErrNotFound", err)
 	}
 }
+
+// A provisioning transaction writes the user, its profile, and an other_mail
+// binding in one commit, with each row linked to the same user id. Both
+// identifiers are then resolvable for login: the login email and the bound address.
+func TestUserRepositoryCreateAdminUserBindsOtherMailAtomically(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+
+	user := testUser("admin-created@njupt.edu.cn")
+	profile := &model.Profile{}
+	identity := &model.Identity{
+		Provider:   model.LoginMethodOtherMail,
+		ProviderID: "member@example.com",
+	}
+	if err := userRepository.CreateAdminUser(context.Background(), user, profile, identity); err != nil {
+		t.Fatalf("CreateAdminUser() error = %v", err)
+	}
+	if user.ID == 0 || profile.UserID != user.ID || identity.UserID != user.ID {
+		t.Fatalf("linked ids = user %d profile %d identity %d, want profile and identity to follow the user",
+			user.ID, profile.UserID, identity.UserID)
+	}
+	for identifier, wantID := range map[string]int64{
+		user.LoginEmail: user.ID, "member@example.com": user.ID,
+	} {
+		found, err := userRepository.FindAuthUserByLoginIdentifier(context.Background(), identifier)
+		if err != nil {
+			t.Fatalf("FindAuthUserByLoginIdentifier(%q) error = %v", identifier, err)
+		}
+		if found.ID != wantID {
+			t.Fatalf("identifier %q -> user %d, want %d", identifier, found.ID, wantID)
+		}
+	}
+	var identityCount int64
+	if err := database.Model(&model.Identity{}).
+		Where("provider = ? AND provider_id = ?", model.LoginMethodOtherMail, "member@example.com").
+		Count(&identityCount).Error; err != nil {
+		t.Fatalf("count identities: %v", err)
+	}
+	if identityCount != 1 {
+		t.Fatalf("identity count = %d, want 1", identityCount)
+	}
+}
+
+// Provisioning without a binding leaves the account with no identities: a plain
+// provision is exactly the user + profile rows and nothing else.
+func TestUserRepositoryCreateAdminUserWithoutIdentity(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+
+	user := testUser("admin-plain@njupt.edu.cn")
+	if err := userRepository.CreateAdminUser(context.Background(), user, &model.Profile{}, nil); err != nil {
+		t.Fatalf("CreateAdminUser() error = %v", err)
+	}
+	if user.ID == 0 {
+		t.Fatal("no user id assigned on a plain provision")
+	}
+	var identityCount int64
+	if err := database.Model(&model.Identity{}).Where("user_id = ?", user.ID).Count(&identityCount).Error; err != nil {
+		t.Fatalf("count identities: %v", err)
+	}
+	if identityCount != 0 {
+		t.Fatalf("identity count = %d, want 0 without a binding", identityCount)
+	}
+}
+
+// V005 forbids an address serving as somebody's login email from also becoming an
+// other_mail binding. The trigger aborting the identity insert must roll the whole
+// provisioning transaction back: no user row and no profile for the attempted account.
+func TestUserRepositoryCreateAdminUserRollsBackOnV005(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+
+	existing := createUserWithProfile(t, userRepository, "occupant@njupt.edu.cn")
+	user := testUser("admin-v005@njupt.edu.cn")
+	profile := &model.Profile{}
+	identity := &model.Identity{
+		Provider:   model.LoginMethodOtherMail,
+		ProviderID: existing.LoginEmail,
+	}
+	if err := userRepository.CreateAdminUser(context.Background(), user, profile, identity); err == nil {
+		t.Fatal("CreateAdminUser() with a login_email identity collision error = nil")
+	}
+	var userCount, profileCount, identityCount int64
+	if err := database.Model(&model.User{}).
+		Where("login_email = ?", "admin-v005@njupt.edu.cn").Count(&userCount).Error; err != nil {
+		t.Fatalf("count user rollback: %v", err)
+	}
+	if err := database.Model(&model.Profile{}).Where("user_id = ?", user.ID).Count(&profileCount).Error; err != nil {
+		t.Fatalf("count profile rollback: %v", err)
+	}
+	if err := database.Model(&model.Identity{}).
+		Where("provider = ? AND provider_id = ?", model.LoginMethodOtherMail, existing.LoginEmail).
+		Count(&identityCount).Error; err != nil {
+		t.Fatalf("count identity rollback: %v", err)
+	}
+	if userCount != 0 || profileCount != 0 || identityCount != 0 {
+		t.Fatalf("rollback counts = user %d profile %d identity %d, want 0/0/0",
+			userCount, profileCount, identityCount)
+	}
+}

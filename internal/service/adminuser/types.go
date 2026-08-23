@@ -13,6 +13,7 @@ import (
 const (
 	auditResourceUser = "user"
 
+	actionCreateUser  = "admin_user_create"
 	actionUpdateUser  = "admin_user_update"
 	actionDeleteUser  = "admin_user_delete"
 	actionRestoreUser = "admin_user_restore"
@@ -50,6 +51,13 @@ type UserRepository interface {
 	Stats(ctx context.Context) (repository.UserStats, error)
 	// NamesByIDs returns display names for the given user ids.
 	NamesByIDs(ctx context.Context, ids []int64) (map[int64]string, error)
+	// CreateAdminUser creates an account, its profile, and an optional other_mail
+	// identity in one transaction, without issuing a token pair.
+	CreateAdminUser(ctx context.Context, user *model.User, profile *model.Profile, identity *model.Identity) error
+	// ExistsAsEmailAnywhere reports whether email is already a login email or an
+	// other_mail binding on some account, so the console can refuse a personal
+	// email up front instead of racing the unique indexes and V005 trigger.
+	ExistsAsEmailAnywhere(ctx context.Context, email string) (bool, error)
 }
 
 // AuditLogRepository records and queries audit events.
@@ -307,4 +315,38 @@ type IdentityDetail struct {
 	TokenExpiresAt *time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+}
+
+// CreateUserInput creates an account with all fields set at once. Unlike
+// UpdateUserInput, omitted optional fields keep their defaults
+// (college "其他", major "", role member) instead of being left unchanged.
+// Required fields are plain values; optional fields use pointers.
+// PersonalEmail, when set, is bound as an other_mail identity in the same
+// transaction without the email verification that self-service binding does.
+type CreateUserInput struct {
+	Name          string
+	PhoneNumber   string
+	QQNumber      string
+	StudentID     string
+	LoginEmail    string
+	Major         *string
+	College       *string
+	Role          *string
+	State         *string
+	PersonalEmail *string
+	// AdminUserID is the authenticated administrator, for the audit trail.
+	AdminUserID int64
+	// ActorClientID is the azp of the token that authorized the call. Empty means a
+	// console session, which the audit records as ConsoleClientID.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
+}
+
+// CreateUserResult returns the created account and the one-time initial
+// password. The plaintext is not stored or included in audit detail.
+type CreateUserResult struct {
+	UserID          int64
+	LoginEmail      string
+	InitialPassword string
 }

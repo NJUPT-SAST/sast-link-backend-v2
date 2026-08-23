@@ -16,10 +16,18 @@ import (
 const (
 	userLoginEmailConstraint = "user_login_email_key"
 	userStudentIDConstraint  = "user_student_id_key"
-	// V005 raises this from a trigger with SQLSTATE unique_violation, so it arrives
-	// here like any other duplicate. It fires when a login email would take an
-	// address already bound as an other_mail identity — including on another account.
-	userLoginEmailIsIdentityConstraint = "ck_user_login_email_not_identity"
+	// V005 raises both triggers as SQLSTATE unique_violation.
+	// ck_user_login_email_not_identity fires when a login email would take an
+	// address already bound as other_mail. ck_identities_provider_id_not_login_email
+	// is the mirror: an identity insert claims an address already used as a login
+	// email. This is the race an admin provisioning can hit when its personal email
+	// pre-check loses to a concurrent registration.
+	userLoginEmailIsIdentityConstraint        = "ck_user_login_email_not_identity"
+	identityProviderIDNotLoginEmailConstraint = "ck_identities_provider_id_not_login_email"
+	// identities' own uniqueness guard. The console pre-checks the personal email
+	// with ExistsAsEmailAnywhere before creating, so this only lands after a race;
+	// it still needs a name, not a logged "unmapped" 500.
+	identityProviderProviderIDConstraint = "uq_identities_provider_provider_id"
 )
 
 // mapUniqueViolation names the colliding column, falling back to internalMessage
@@ -32,7 +40,8 @@ const (
 // visible.
 func (s Service) mapUniqueViolation(ctx context.Context, err error, internalMessage string) error {
 	switch constraint := duplicateConstraint(err); constraint {
-	case userLoginEmailConstraint, userLoginEmailIsIdentityConstraint:
+	case userLoginEmailConstraint, userLoginEmailIsIdentityConstraint,
+		identityProviderIDNotLoginEmailConstraint, identityProviderProviderIDConstraint:
 		return newError(ErrEmailOccupied, "邮箱已被占用", err)
 	case userStudentIDConstraint:
 		return newError(ErrStudentIDOccupied, "学号已被占用", err)

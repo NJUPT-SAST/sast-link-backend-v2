@@ -2139,6 +2139,50 @@ paths:
           description: 无权限（403xx）
       security:
         - bearerAuth: []
+    post:
+      summary: 创建用户（管理员建号）
+      deprecated: false
+      description: |
+        需 admin 角色。委派调用需 `admin:write` scope。
+        为无法自助注册的人员建号，例如已毕业成员（没有 sast.fun 邮箱且
+        学生邮箱已不可用）。login_email 仅接受注册白名单域名
+        （@njupt.edu.cn / sast.fun），email_type 由服务端按域名派生；
+        可选的 personal_email 在同一事务内直绑为 other_mail 登录身份，
+        无需邮箱验证，绑定后可用于登录和密码重置，不可与 login_email
+        相同，也不得已被其他账号占用。
+        系统生成随机初始密码，仅在本次响应中返回，不落库也不入审计。
+        严格新建：login_email / student_id 撞唯一约束返回 409，不静默复用旧账号。
+      operationId: adminCreateUser
+      tags:
+        - Admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminCreateUserRequest"
+      responses:
+        "200":
+          description: 建号成功，返回新账号 id、login_email 与仅此一次的 initial_password。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminCreateUserResponse"
+          headers: {}
+        "400":
+          $ref: "#/components/responses/BadRequest"
+          description: 必填缺失 / 格式 / 域白名单 / 枚举非法，或 personal_email 与 login_email 相同（400xx / 42200）
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 无权限（403xx）
+        "409":
+          $ref: "#/components/responses/Conflict"
+          description: 主邮箱 / 绑定邮箱 / 学号已被占用（40901 / 40902）
+      security:
+        - bearerAuth: []
     put:
       summary: 批量修改用户角色
       deprecated: false
@@ -3958,6 +4002,92 @@ components:
               type: integer
               description: 每页条数
               example: 20
+    AdminCreateUserRequest:
+      type: object
+      description: 管理员建号请求（POST /admin/users）
+      required:
+        - name
+        - phone_number
+        - qq_number
+        - student_id
+        - login_email
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          description: 姓名
+          example: 张三
+        phone_number:
+          type: string
+          maxLength: 20
+          description: 手机号
+          example: "13800138000"
+        qq_number:
+          type: string
+          maxLength: 20
+          description: QQ 号
+          example: "12345"
+        student_id:
+          type: string
+          maxLength: 50
+          description: 学号（全库唯一）
+          example: B24040525
+        login_email:
+          type: string
+          format: email
+          description: |
+            主登录邮箱，仅接受注册白名单域名（@njupt.edu.cn / sast.fun），全库唯一；
+            email_type 由服务端按域名派生，不可自指定。
+          example: b24040525@njupt.edu.cn
+        major:
+          type: string
+          maxLength: 50
+          default: ""
+          description: 专业，缺省空串
+        college:
+          $ref: "#/components/schemas/College"
+          description: 学院，缺省「其他」
+        personal_email:
+          type: string
+          format: email
+          description: |
+            可选。同一事务内直绑为 other_mail 登录身份，无需邮箱验证，
+            绑定后可用于登录和密码重置。不可与 login_email 相同，
+            也不得已被其他账号占用（作为主登录邮箱或已绑身份）。
+          example: zhangsan@qq.com
+        role:
+          $ref: "#/components/schemas/UserRole"
+          description: 缺省 member
+        state:
+          $ref: "#/components/schemas/UserState"
+          description: 缺省 retired_sast，不接受 is_deleted
+    AdminCreateUserResponse:
+      type: object
+      description: 管理员建号响应
+      properties:
+        code:
+          type: integer
+          description: 业务状态码
+          example: 0
+        message:
+          type: string
+          description: 可读描述信息
+          example: ok
+        data:
+          type: object
+          properties:
+            id:
+              type: integer
+              description: 新账号用户 ID
+              example: 2001
+            login_email:
+              type: string
+              format: email
+              description: 主登录邮箱
+              example: b24040525@njupt.edu.cn
+            initial_password:
+              type: string
+              description: 系统生成的随机初始密码，仅在本次响应中返回，不落库也不入审计
     BatchUsersResponse:
       type: object
       description: 批量查询用户响应（GET /admin/users/batch）

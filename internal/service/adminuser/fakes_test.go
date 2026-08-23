@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -39,6 +40,13 @@ type fakeUsers struct {
 	deleteErr      error
 	restoreErr     error
 	restoredUserID int64
+
+	createCalls     int
+	createdUser     *model.User
+	createdIdentity *model.Identity
+	createErr       error
+	existsEmails    map[string]bool
+	existsErr       error
 }
 
 func (f *fakeUsers) ListAdminUsers(
@@ -128,6 +136,28 @@ func (f *fakeUsers) NamesByIDs(_ context.Context, _ []int64) (map[int64]string, 
 	return map[int64]string{}, nil
 }
 
+func (f *fakeUsers) CreateAdminUser(_ context.Context, user *model.User, _ *model.Profile, identity *model.Identity) error {
+	f.createCalls++
+	if f.createErr != nil {
+		return f.createErr
+	}
+	// The repository assigns the id inside its transaction; the fake does the same
+	// so the service can read it back for the result and audit target.
+	if user.ID == 0 {
+		user.ID = 2001
+	}
+	f.createdUser = user
+	f.createdIdentity = identity
+	return nil
+}
+
+func (f *fakeUsers) ExistsAsEmailAnywhere(_ context.Context, email string) (bool, error) {
+	if f.existsErr != nil {
+		return false, f.existsErr
+	}
+	return f.existsEmails[email], nil
+}
+
 type fakeAudit struct {
 	entries   []*model.AuditLog
 	listed    repository.AuditLogFilter
@@ -198,6 +228,9 @@ func newHarness(t *testing.T) *harness {
 			Devices:         devices,
 			Clock:           testClock{value: testNow},
 			ConsoleClientID: testConsoleClientID,
+			// Light argon2id params keep provisioning tests fast; the parameters are
+			// a wiring concern, not a service-logic one.
+			Passwords: auth.PasswordHasher{Argon2Time: 1, Argon2Memory: 8192, Argon2Threads: 1},
 		},
 		users:     users,
 		audit:     auditLog,

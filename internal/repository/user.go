@@ -62,6 +62,46 @@ func (r *UserRepository) CreateWithProfile(
 	})
 }
 
+// CreateAdminUser creates an account, its profile, and an optional other_mail
+// identity in one transaction, without issuing a token pair.
+//
+// Unlike CreateRegistrationWithIdentity, provisioning has no present subject to
+// receive a session, so the caller should not get a signed token for the new
+// account. The identity is included in the same transaction so the bound email
+// works for login immediately; nil means no binding.
+func (r *UserRepository) CreateAdminUser(
+	ctx context.Context,
+	user *model.User,
+	profile *model.Profile,
+	identity *model.Identity,
+) error {
+	if user == nil {
+		return fmt.Errorf("%w: user is nil", ErrInvalidArgument)
+	}
+	if profile == nil {
+		return fmt.Errorf("%w: profile is nil", ErrInvalidArgument)
+	}
+
+	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := transaction.Create(user).Error; err != nil {
+			return fmt.Errorf("create admin user: %w", err)
+		}
+		profile.UserID = user.ID
+		if err := transaction.Create(profile).Error; err != nil {
+			return fmt.Errorf("create admin profile: %w", err)
+		}
+		if identity != nil {
+			// The owner row does not exist until the INSERT above; take the ID from
+			// the persisted user rather than trusting a caller-computed one.
+			identity.UserID = user.ID
+			if err := transaction.Create(identity).Error; err != nil {
+				return fmt.Errorf("create admin user identity: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
 // CreateRegistration creates an account, its profile and its initial session in
 // one PostgreSQL transaction. The factory runs after user.ID is assigned so the
 // signed token subject and token metadata refer to the persisted account.
