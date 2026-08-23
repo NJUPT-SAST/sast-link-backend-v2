@@ -547,7 +547,7 @@ Payload: {
 | `oauth_unbind` | `{"provider": "github" \| "lark" \| "other_mail", "provider_id": "xxx"}` |
 | `update_profile` | `{"changed_fields": ["name", "phone_number", ...]}` |
 | `upload_avatar` | `{"avatar_url": "https://..."}` |
-| 用户管理（`admin_user_create` / `admin_user_update` / `admin_user_delete` / `admin_user_restore`） | `{"target_user_id": 123, ...}`（创建账号的 detail 另记 `login_email` / `role` / `state`，绑定个人邮箱时记 `bound_email`） |
+| 用户管理（`admin_user_create` / `admin_user_update` / `admin_user_delete` / `admin_user_restore`） | `{"target_user_id": 123, ...}`（`admin_user_create` 成功时另记 `login_email` / `role` / `state`，绑定个人邮箱时记 `bound_email`；失败时记 `login_email` 与 `attempted_personal_email`） |
 | 客户端注册（`admin_oauth_client_create`） | `{"client_name": "string", "client_type": "third_party", "admin_scope": true}`（`admin_scope` 仅在提交含 admin scope 时出现） |
 | 客户端更新（`admin_oauth_client_update`） | `{"changed_fields": [...], "is_active": bool, "revoked_tokens": 3, "admin_scope_granted": ["admin:write"], "admin_scope_revoked": true, "scopes_removed": [...]}`（后四项按发生情况出现） |
 

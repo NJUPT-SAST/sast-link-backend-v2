@@ -532,7 +532,7 @@ POST /auth/reset-password
 
 改密与重置密码在同一事务内完成三件事：写入新密码哈希、`token_version + 1`、撤销该用户全部活跃 Access / Refresh Token。同时**作废该用户尚未兑换的 OAuth 授权码**——授权码是一张还没花出去的凭证，Token 端点签发时会现读用户行上的 `token_version`，因此一张跨过重置动作的授权码兑换出来的会话会带着**新的** `token_version`，中间件照单全收。若只撤销 token 而放着授权码不管，就在「因怀疑被入侵而重置密码」这个最要紧的场景里留下一个恰好等于授权码 TTL 宽度的窗口。
 
-**错误码**: 400xx（参数错误）、40106（邮箱不存在）、42201（密码长度不足）、42202（新旧密码相同）
+**错误码**: 400xx（参数错误）、40106（邮箱不存在）、40301（账号已注销）、42201（密码长度不足）、42202（新旧密码相同）
 
 ---
 
@@ -1760,7 +1760,7 @@ POST /admin/users
 `initial_password`：系统生成的强随机初始密码，**仅此响应返回一次**——不落库、不入审计。管理员需线下转达给成员；成员首次可凭 `login_email`（或绑定后的 `personal_email`）+ 初始密码登录，随后经「修改密码」或「忘记密码」更换。
 
 **说明**:
-- 全程走 `admin_user_create` 审计，detail 记录 `login_email` / `role` / `state`，绑定个人邮箱时再记 `bound_email`；失败同样留痕（`success = false` + 对应 `err_code`）。
+- 全程走 `admin_user_create` 审计。成功时 detail 记录 `login_email` / `role` / `state`，绑定个人邮箱再记 `bound_email`；失败时 detail 记录 `login_email`，若提交了 `personal_email` 则另记 `attempted_personal_email`，并带 `success = false` 与对应 `err_code`。
 - 严格新建：同一 `login_email` / `student_id` 重复建号因唯一约束返回 `409`，服务端不静默复用旧账号；存量账号的补充绑定不归本接口管。
 - 只建账号与绑定，**不签发任何 token**：亲临现场的是管理员，不是成员本人；初始会话由成员首次登录时建立。
 
