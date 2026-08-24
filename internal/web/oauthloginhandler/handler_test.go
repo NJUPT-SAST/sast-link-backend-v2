@@ -264,6 +264,63 @@ func TestCallbackFailureRedirectsToErrorPage(t *testing.T) {
 	}
 }
 
+// A refused authorization code and an expired state share KindInvalidState and
+// code 40000, so the generic per-Kind string cannot describe both. The service
+// marks the specific one for display, and it must reach the error page intact:
+// this is exactly the case that read as "state 无效或已过期" while the state was
+// valid.
+func TestCallbackFailureCarriesTheDisplayMessageOverTheKindDefault(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:    oauthlogin.KindInvalidState,
+		Code:    errcode.CodeBadRequest,
+		Message: "第三方授权码无效或已过期，请重新登录",
+		Display: true,
+	}}
+	router := newTestRouter(Handler{
+		Service:       service,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=c&state=s", nil))
+
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := location.Query().Get("error_description"); got != "第三方授权码无效或已过期，请重新登录" {
+		t.Fatalf("error_description = %q, want the service's own message", got)
+	}
+}
+
+// The inverse: a message naming an internal step is not marked for display and
+// must be replaced by the generic string, so a dependency name never reaches a
+// browser.
+func TestCallbackFailureHidesInternalMessages(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:    oauthlogin.KindDependencyUnavailable,
+		Code:    errcode.CodeDependencyUnavailable,
+		Message: "读取 OAuth state 失败",
+	}}
+	router := newTestRouter(Handler{
+		Service:       service,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=c&state=s", nil))
+
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := location.Query().Get("error_description"); got != "依赖服务暂不可用，请稍后重试" {
+		t.Fatalf("error_description = %q, want the generic per-Kind string", got)
+	}
+}
+
 func TestCallbackFailureFallsBackToEnvelopeWithoutErrorPage(t *testing.T) {
 	service := &fakeService{callbackErr: &oauthlogin.Error{
 		Kind: oauthlogin.KindInvalidState,

@@ -12,6 +12,24 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/provider"
 )
 
+// assertDisplayMessage checks that an error carries a user-facing message
+// containing want. It is the guard against a message that only reads correctly
+// in a log being handed to a browser, and against a genuinely user-facing one
+// being replaced by its Kind's generic default.
+func assertDisplayMessage(t *testing.T, err error, want string) {
+	t.Helper()
+	var typed *Error
+	if !errors.As(err, &typed) {
+		t.Fatalf("error = %v, want an *oauthlogin.Error", err)
+	}
+	if !typed.Display {
+		t.Fatalf("message %q is not marked for display", typed.Message)
+	}
+	if !strings.Contains(typed.Message, want) {
+		t.Fatalf("message = %q, want it to contain %q", typed.Message, want)
+	}
+}
+
 func assertKind(t *testing.T, err error, wantKind Kind, wantCode int) {
 	t.Helper()
 	var typed *Error
@@ -277,6 +295,67 @@ func TestCallbackMapsInvalidGrantToRestartableFailure(t *testing.T) {
 	})
 	// The user's browser carried a stale code; that is a restart, not a 502.
 	assertKind(t, err, KindInvalidState, errcode.CodeBadRequest)
+	// It shares its Kind with a genuinely expired state, so the message must be
+	// user-facing: the state here was valid and correctly bound to the browser,
+	// and telling the user otherwise sends them hunting the wrong fault.
+	assertDisplayMessage(t, err, "第三方授权码")
+}
+
+// A provider that accepts the connection and then stalls past the client's I/O
+// timeout is a retry, and must not be reported as an expired state.
+func TestCallbackMapsProviderTimeoutToRestartableFailure(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.GitHub.err = context.DeadlineExceeded
+	state, stateDigest := authorizedState(t, service)
+
+	_, err := service.Callback(context.Background(), CallbackInput{
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
+		State:       state,
+		StateCookie: stateDigest,
+	})
+	assertKind(t, err, KindInvalidState, errcode.CodeBadRequest)
+	assertDisplayMessage(t, err, "超时")
+}
+
+// A caller that disconnects mid-exchange is not a provider outage and not the
+// user's problem to restart, so it keeps the internal (non-display) message.
+func TestCallbackMapsCallerCancellationToDependencyFailure(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.GitHub.err = context.Canceled
+	state, stateDigest := authorizedState(t, service)
+
+	_, err := service.Callback(context.Background(), CallbackInput{
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
+		State:       state,
+		StateCookie: stateDigest,
+	})
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	var typed *Error
+	if errors.As(err, &typed) && typed.Display {
+		t.Fatal("a client disconnect must not surface its internal message to the user")
+	}
+}
+
+// Every failure that reaches the state store keeps its internal message private:
+// "读取 OAuth state 失败" names a dependency, not something to show a browser.
+func TestStateStoreFailureKeepsItsMessageInternal(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.States.readErr = errors.New("redis down")
+	state, stateDigest := authorizedState(t, service)
+
+	_, err := service.Callback(context.Background(), CallbackInput{
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
+		State:       state,
+		StateCookie: stateDigest,
+	})
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	var typed *Error
+	if errors.As(err, &typed) && typed.Display {
+		t.Fatalf("internal message %q must not be marked for display", typed.Message)
+	}
 }
 
 func TestCallbackMapsProviderOutageToBadGatewayKind(t *testing.T) {

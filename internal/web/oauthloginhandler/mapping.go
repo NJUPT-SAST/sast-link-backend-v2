@@ -3,6 +3,7 @@ package oauthloginhandler
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauthlogin"
@@ -63,6 +64,15 @@ func mapServiceError(err error) error {
 	default:
 		message = "服务器内部错误"
 		status = http.StatusInternalServerError
+	}
+
+	// Last, so it wins over both tables above. A service outcome that opted in
+	// wrote a message the per-Kind default would state incorrectly — a refused
+	// authorization code is not an expired state, even though they share a Kind
+	// and a code. Only messages the service marked as user-facing get here; the
+	// internal ones ("保存 OAuth state 失败") keep their generic replacement.
+	if serviceErr.Display && strings.TrimSpace(serviceErr.Message) != "" {
+		message = serviceErr.Message
 	}
 
 	code := serviceErr.Code
