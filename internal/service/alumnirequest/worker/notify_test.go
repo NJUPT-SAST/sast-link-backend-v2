@@ -115,7 +115,7 @@ func TestEnqueueIsNonBlockingAndBounded(t *testing.T) {
 	t.Parallel()
 
 	worker := alumnirequestworker.New(&fakeRequests{}, &fakeMailer{},
-		"https://link.sast.fun/v2/reset", "link@sast.fun")
+		"https://link.sast.fun/reset", "link@sast.fun")
 
 	// Nothing is consuming, so the queue fills and then refuses. It must refuse
 	// rather than block: the caller is finishing an HTTP request whose review has
@@ -166,7 +166,7 @@ func TestProcessCountsTheAttemptBeforeSending(t *testing.T) {
 	requests := &fakeRequests{}
 	sent := make(chan struct{})
 	emailer := &fakeMailer{onCalled: func() { close(sent) }}
-	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/reset", "link@sast.fun")
 	stop := runWorker(t, worker)
 	defer stop()
 
@@ -193,7 +193,7 @@ func TestProcessMarksNotifiedOnlyAfterASuccessfulSend(t *testing.T) {
 
 	requests := &fakeRequests{}
 	emailer := &fakeMailer{}
-	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/reset", "link@sast.fun")
 	stop := runWorker(t, worker)
 	defer stop()
 
@@ -211,7 +211,7 @@ func TestProcessMarksNotifiedOnlyAfterASuccessfulSend(t *testing.T) {
 	// The reset URL comes from configuration, not from the job: the applicant needs
 	// a working link and a job-supplied one would be attacker-influenced input on an
 	// email the service sends.
-	if emailer.resultAt(0).ResetURL != "https://link.sast.fun/v2/reset" {
+	if emailer.resultAt(0).ResetURL != "https://link.sast.fun/reset" {
 		t.Fatalf("reset url = %q, want the configured one", emailer.resultAt(0).ResetURL)
 	}
 }
@@ -223,7 +223,7 @@ func TestProcessLeavesNotifiedUnsetWhenTheSendFails(t *testing.T) {
 
 	requests := &fakeRequests{}
 	emailer := &fakeMailer{err: errors.New("smtp refused")}
-	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/reset", "link@sast.fun")
 	stop := runWorker(t, worker)
 	defer stop()
 
@@ -246,7 +246,7 @@ func TestProcessStillSendsWhenTheCounterWriteFails(t *testing.T) {
 
 	requests := &fakeRequests{markErr: errors.New("db down")}
 	emailer := &fakeMailer{}
-	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/reset", "link@sast.fun")
 	stop := runWorker(t, worker)
 	defer stop()
 
@@ -263,7 +263,7 @@ func TestProcessPassesTheRejectionReasonThrough(t *testing.T) {
 
 	requests := &fakeRequests{}
 	emailer := &fakeMailer{}
-	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/reset", "link@sast.fun")
 	stop := runWorker(t, worker)
 	defer stop()
 

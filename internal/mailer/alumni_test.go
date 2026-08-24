@@ -14,7 +14,7 @@ func approvedData() alumniResultData {
 		},
 		Name:         "张三",
 		Approved:     true,
-		ResetURL:     "https://link.sast.fun/v2/reset",
+		ResetURL:     "https://link.sast.fun/reset",
 		SupportEmail: "link@sast.fun",
 	}
 }
@@ -47,7 +47,7 @@ func TestRenderAlumniResultHTMLApproved(t *testing.T) {
 		"张三 你好",
 		"个人邮箱",
 		"原学号邮箱已无法用于收信",
-		"https://link.sast.fun/v2/reset",
+		"https://link.sast.fun/reset",
 		"© 2026 NJUPT SAST",
 		// Shared chrome: the layout is the same one the verification email uses.
 		"https://link.sast.fun/icon.svg",
@@ -88,7 +88,7 @@ func TestRenderAlumniResultHTMLRejected(t *testing.T) {
 // render as an empty email in any client that prefers text.
 func TestRenderAlumniResultText(t *testing.T) {
 	approved := renderAlumniResultText(approvedData())
-	for _, want := range []string{"张三", "已通过", "https://link.sast.fun/v2/reset", "个人邮箱"} {
+	for _, want := range []string{"张三", "已通过", "https://link.sast.fun/reset", "个人邮箱"} {
 		if !strings.Contains(approved, want) {
 			t.Errorf("approved text missing %q", want)
 		}
