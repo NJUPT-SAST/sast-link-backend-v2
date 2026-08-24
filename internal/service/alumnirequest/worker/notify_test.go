@@ -1,0 +1,299 @@
+package alumnirequestworker_test
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest"
+	alumnirequestworker "github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest/worker"
+)
+
+// fakeRequests records the delivery-state writes in order, which is what makes the
+// count-before-send guarantee assertable.
+type fakeRequests struct {
+	mu       sync.Mutex
+	calls    []string
+	attempts int
+	notified int
+	markErr  error
+}
+
+func (f *fakeRequests) MarkNotifyAttempt(_ context.Context, _ int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "attempt")
+	f.attempts++
+	return f.markErr
+}
+
+func (f *fakeRequests) MarkNotified(_ context.Context, _ int64, _ time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "notified")
+	f.notified++
+	return nil
+}
+
+func (f *fakeRequests) sequence() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+func (f *fakeRequests) attemptCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts
+}
+
+func (f *fakeRequests) notifiedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.notified
+}
+
+// fakeMailer records what was sent and can fail on demand.
+type fakeMailer struct {
+	mu       sync.Mutex
+	sent     []mailer.AlumniResult
+	to       []string
+	err      error
+	onCalled func()
+}
+
+func (f *fakeMailer) SendAlumniRequestResult(_ context.Context, to string, result mailer.AlumniResult) error {
+	f.mu.Lock()
+	f.sent = append(f.sent, result)
+	f.to = append(f.to, to)
+	f.mu.Unlock()
+	if f.onCalled != nil {
+		f.onCalled()
+	}
+	return f.err
+}
+
+func (f *fakeMailer) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sent)
+}
+
+func (f *fakeMailer) resultAt(i int) mailer.AlumniResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sent[i]
+}
+
+func (f *fakeMailer) recipientAt(i int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.to[i]
+}
+
+// runWorker starts the consumer and returns a stop function.
+func runWorker(t *testing.T, worker *alumnirequestworker.Notifier) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := worker.Run(ctx); err != nil {
+			t.Errorf("Run() error = %v", err)
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func TestEnqueueIsNonBlockingAndBounded(t *testing.T) {
+	t.Parallel()
+
+	worker := alumnirequestworker.New(&fakeRequests{}, &fakeMailer{},
+		"https://link.sast.fun/v2/reset", "link@sast.fun")
+
+	// Nothing is consuming, so the queue fills and then refuses. It must refuse
+	// rather than block: the caller is finishing an HTTP request whose review has
+	// already committed.
+	accepted := 0
+	for i := range 200 {
+		if worker.EnqueueAlumniNotification(alumnirequest.NotificationJob{RequestID: int64(i)}) {
+			accepted++
+		}
+	}
+	if accepted == 0 {
+		t.Fatal("no jobs were accepted")
+	}
+	if accepted == 200 {
+		t.Fatal("every job was accepted; the queue is not bounded")
+	}
+}
+
+// A nil worker is what a deployment without the worker wired would hand the
+// service. It has to answer false rather than panic, so notify_enqueued reports the
+// truth.
+func TestEnqueueOnANilWorkerReportsFalse(t *testing.T) {
+	t.Parallel()
+
+	var worker *alumnirequestworker.Notifier
+	if worker.EnqueueAlumniNotification(alumnirequest.NotificationJob{RequestID: 1}) {
+		t.Fatal("a nil worker accepted a job")
+	}
+}
+
+func TestRunRequiresItsDependencies(t *testing.T) {
+	t.Parallel()
+
+	// A queue with no mailer cannot deliver anything, and silently consuming jobs
+	// would drop the applicant's only instruction to set a password.
+	worker := alumnirequestworker.New(&fakeRequests{}, nil, "https://x/reset", "s@x")
+	if err := worker.Run(context.Background()); err == nil {
+		t.Fatal("Run() with no mailer error = nil, want a refusal")
+	}
+}
+
+// The attempt is counted before the send. A process killed mid-send then leaves
+// notify_attempts incremented with notified_at NULL, which reads as "tried, not
+// confirmed" - the truth. Counting afterwards would discard the evidence.
+func TestProcessCountsTheAttemptBeforeSending(t *testing.T) {
+	t.Parallel()
+
+	requests := &fakeRequests{}
+	sent := make(chan struct{})
+	emailer := &fakeMailer{onCalled: func() { close(sent) }}
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	stop := runWorker(t, worker)
+	defer stop()
+
+	if !worker.EnqueueAlumniNotification(alumnirequest.NotificationJob{
+		RequestID: 7, Recipient: "zhangsan@example.com", Name: "张三", Approved: true,
+	}) {
+		t.Fatal("the job was not accepted")
+	}
+	select {
+	case <-sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the mailer was never called")
+	}
+
+	// At the moment the mailer ran, the attempt was already recorded.
+	sequence := requests.sequence()
+	if len(sequence) == 0 || sequence[0] != "attempt" {
+		t.Fatalf("write sequence = %v, want the attempt counted first", sequence)
+	}
+}
+
+func TestProcessMarksNotifiedOnlyAfterASuccessfulSend(t *testing.T) {
+	t.Parallel()
+
+	requests := &fakeRequests{}
+	emailer := &fakeMailer{}
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	stop := runWorker(t, worker)
+	defer stop()
+
+	worker.EnqueueAlumniNotification(alumnirequest.NotificationJob{
+		RequestID: 7, Recipient: "zhangsan@example.com", Name: "张三", Approved: true,
+	})
+	waitFor(t, func() bool { return requests.notifiedCount() == 1 })
+
+	if got := requests.sequence(); len(got) != 2 || got[0] != "attempt" || got[1] != "notified" {
+		t.Fatalf("write sequence = %v, want attempt then notified", got)
+	}
+	if emailer.recipientAt(0) != "zhangsan@example.com" {
+		t.Fatalf("recipient = %q, want the personal email", emailer.recipientAt(0))
+	}
+	// The reset URL comes from configuration, not from the job: the applicant needs
+	// a working link and a job-supplied one would be attacker-influenced input on an
+	// email the service sends.
+	if emailer.resultAt(0).ResetURL != "https://link.sast.fun/v2/reset" {
+		t.Fatalf("reset url = %q, want the configured one", emailer.resultAt(0).ResetURL)
+	}
+}
+
+// A failed send must leave notified_at unset, which is exactly what the console's
+// backlog filter looks for.
+func TestProcessLeavesNotifiedUnsetWhenTheSendFails(t *testing.T) {
+	t.Parallel()
+
+	requests := &fakeRequests{}
+	emailer := &fakeMailer{err: errors.New("smtp refused")}
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	stop := runWorker(t, worker)
+	defer stop()
+
+	worker.EnqueueAlumniNotification(alumnirequest.NotificationJob{
+		RequestID: 7, Recipient: "zhangsan@example.com", Name: "张三", Approved: true,
+	})
+	waitFor(t, func() bool { return requests.attemptCount() == 1 })
+	// Give the worker room to have made a further write if it were going to.
+	time.Sleep(100 * time.Millisecond)
+
+	if requests.notifiedCount() != 0 {
+		t.Fatal("notified_at was written despite a failed send")
+	}
+}
+
+// Failing to count the attempt must not stop the email the applicant is waiting
+// for: the counter is diagnostics, the email is the product.
+func TestProcessStillSendsWhenTheCounterWriteFails(t *testing.T) {
+	t.Parallel()
+
+	requests := &fakeRequests{markErr: errors.New("db down")}
+	emailer := &fakeMailer{}
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	stop := runWorker(t, worker)
+	defer stop()
+
+	worker.EnqueueAlumniNotification(alumnirequest.NotificationJob{
+		RequestID: 7, Recipient: "zhangsan@example.com", Name: "张三", Approved: true,
+	})
+	waitFor(t, func() bool { return emailer.count() == 1 })
+}
+
+// A rejection carries the reason through to the mailer, which refuses to send
+// without one.
+func TestProcessPassesTheRejectionReasonThrough(t *testing.T) {
+	t.Parallel()
+
+	requests := &fakeRequests{}
+	emailer := &fakeMailer{}
+	worker := alumnirequestworker.New(requests, emailer, "https://link.sast.fun/v2/reset", "link@sast.fun")
+	stop := runWorker(t, worker)
+	defer stop()
+
+	worker.EnqueueAlumniNotification(alumnirequest.NotificationJob{
+		RequestID: 7, Recipient: "zhangsan@example.com", Name: "张三",
+		Approved: false, RejectReason: "学号与姓名不匹配",
+	})
+	waitFor(t, func() bool { return emailer.count() == 1 })
+
+	result := emailer.resultAt(0)
+	if result.Approved {
+		t.Fatal("Approved = true for a rejection")
+	}
+	if result.RejectReason != "学号与姓名不匹配" {
+		t.Fatalf("reason = %q, want the reviewer's reason", result.RejectReason)
+	}
+	if result.SupportEmail != "link@sast.fun" {
+		t.Fatalf("support email = %q, want the configured one", result.SupportEmail)
+	}
+}
+
+// waitFor polls a condition, failing the test if it never holds.
+func waitFor(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition was never met")
+}

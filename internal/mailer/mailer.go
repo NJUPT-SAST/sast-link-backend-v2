@@ -71,12 +71,14 @@ func (m *Mailer) SendVerificationCode(ctx context.Context, to, code string, purp
 		return err
 	}
 	data := verificationEmailData{
-		Subject:    subject,
-		Title:      title,
+		layoutData: layoutData{
+			Subject: subject,
+			Title:   title,
+			Year:    time.Now().Year(),
+		},
 		Action:     action,
 		Code:       code,
 		TTLMinutes: 5,
-		Year:       time.Now().Year(),
 	}
 	htmlBody, err := renderVerificationHTML(data)
 	if err != nil {

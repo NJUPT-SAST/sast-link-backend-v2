@@ -8,12 +8,14 @@ import (
 
 func testVerificationData() verificationEmailData {
 	return verificationEmailData{
-		Subject:    "SAST Link 绑定邮箱验证码",
-		Title:      "绑定邮箱验证码",
+		layoutData: layoutData{
+			Subject: "SAST Link 绑定邮箱验证码",
+			Title:   "绑定邮箱验证码",
+			Year:    2026,
+		},
 		Action:     "绑定此邮箱到 SAST Link 账号",
 		Code:       "377769",
 		TTLMinutes: 5,
-		Year:       2026,
 	}
 }
 
