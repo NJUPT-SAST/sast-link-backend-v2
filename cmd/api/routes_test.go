@@ -11,6 +11,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/alumnihandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
@@ -230,5 +231,123 @@ func TestReaderRolesAreAdminAndLecturer(t *testing.T) {
 		if adminhandler.ReaderRoles[index] != role {
 			t.Fatalf("ReaderRoles = %v, want %v", adminhandler.ReaderRoles, want)
 		}
+	}
+}
+
+// The console account-request routes carry the same two-dimensional gating as the
+// rest of /admin: reading the queue is open to the roles that may read the user
+// directory, acting on a ticket is admin-only.
+func TestAlumniConsoleRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	var order []string
+	step := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) { order = append(order, name); c.Next() }
+	}
+	rejectingStep := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			order = append(order, name)
+			c.AbortWithStatus(http.StatusForbidden)
+		}
+	}
+	alumnihandler.RegisterRoutes(router, alumnihandler.Handler{}, alumnihandler.Gates{
+		RequireAuth:       step("auth"),
+		RequireReadScope:  step("read-scope"),
+		RequireWriteScope: step("write-scope"),
+		RequireAdmin:      rejectingStep("admin"),
+		RequireReader:     rejectingStep("reader"),
+	})
+
+	for _, route := range []struct {
+		method, path, scopeGate, roleGate string
+	}{
+		{http.MethodGet, "/admin/alumni-requests", "read-scope", "reader"},
+		{http.MethodGet, "/admin/alumni-requests/5", "read-scope", "reader"},
+		{http.MethodPost, "/admin/alumni-requests/5/approve", "write-scope", "admin"},
+		{http.MethodPost, "/admin/alumni-requests/5/reject", "write-scope", "admin"},
+		{http.MethodPost, "/admin/alumni-requests/5/resend-notification", "write-scope", "admin"},
+	} {
+		order = nil
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequestWithContext(
+			context.Background(), route.method, route.path, nil))
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("%s %s: status = %d, want the role gate to reject",
+				route.method, route.path, recorder.Code)
+		}
+		want := []string{"auth", route.scopeGate, route.roleGate}
+		if !slices.Equal(order, want) {
+			t.Fatalf("%s %s: middleware order = %v, want %v",
+				route.method, route.path, order, want)
+		}
+	}
+}
+
+// The submission endpoint must NOT sit behind the admin gates: the applicants have
+// no account by definition. Its protection is the service's Turnstile check and
+// rate limiter, so a gate here would make the intake unreachable — the failure this
+// asserts against is someone "fixing" the ungated route by mounting it inside the
+// group.
+func TestAlumniSubmitRouteIsPublic(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	rejecting := func(c *gin.Context) { c.AbortWithStatus(http.StatusForbidden) }
+	alumnihandler.RegisterRoutes(router, alumnihandler.Handler{}, alumnihandler.Gates{
+		RequireAuth:       rejecting,
+		RequireReadScope:  rejecting,
+		RequireWriteScope: rejecting,
+		RequireAdmin:      rejecting,
+		RequireReader:     rejecting,
+	})
+
+	recorder := httptest.NewRecorder()
+	// No body and a nil service, so this cannot reach a successful submission; the
+	// assertion is only that the gates did not reject it.
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(
+		context.Background(), http.MethodPost, "/alumni-requests", nil))
+	if recorder.Code == http.StatusForbidden {
+		t.Fatal("POST /alumni-requests was rejected by an admin gate; the intake would be unreachable")
+	}
+}
+
+// Same reasoning as the admin gates: a nil gate must fail at boot rather than
+// panic on the first request to a live console endpoint.
+func TestRegisterAlumniRoutesRejectsIncompleteGates(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	passthrough := func(c *gin.Context) { c.Next() }
+	full := alumnihandler.Gates{
+		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
+		RequireAdmin: passthrough, RequireReader: passthrough,
+	}
+	for name, mutate := range map[string]func(*alumnihandler.Gates){
+		"auth":        func(g *alumnihandler.Gates) { g.RequireAuth = nil },
+		"read scope":  func(g *alumnihandler.Gates) { g.RequireReadScope = nil },
+		"write scope": func(g *alumnihandler.Gates) { g.RequireWriteScope = nil },
+		"admin role":  func(g *alumnihandler.Gates) { g.RequireAdmin = nil },
+		"reader role": func(g *alumnihandler.Gates) { g.RequireReader = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			gates := full
+			mutate(&gates)
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("RegisterRoutes() with a nil %s gate did not panic", name)
+				}
+			}()
+			alumnihandler.RegisterRoutes(gin.New(), alumnihandler.Handler{}, gates)
+		})
+	}
+}
+
+// The write role must be admin, and the read roles exactly admin and lecturer. The
+// route test above only checks which gate ran, not which roles it admits, so a
+// drift that added member to ReaderRoles would open the queue invisibly.
+func TestAlumniHandlerRolesMatchTheAdminSurface(t *testing.T) {
+	if alumnihandler.AdminRole != model.UserRoleAdmin {
+		t.Fatalf("AdminRole = %q, want admin", alumnihandler.AdminRole)
+	}
+	want := []model.UserRole{model.UserRoleAdmin, model.UserRoleLecturer}
+	if !slices.Equal(alumnihandler.ReaderRoles, want) {
+		t.Fatalf("ReaderRoles = %v, want %v", alumnihandler.ReaderRoles, want)
 	}
 }

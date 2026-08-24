@@ -31,6 +31,12 @@ type RetentionStore interface {
 	DeleteExpiredAccessTokens(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
 	DeleteRevokedRefreshTokens(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
 	DeleteExpiredAuditLogs(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+	// DeleteExpiredAlumniRequests removes tickets reviewed before cutoff. Only
+	// approved and rejected ones: a pending ticket is never swept, however old,
+	// because the handling target is a statement in the UI rather than a rule the
+	// backend enforces, and deleting an unreviewed application would lose someone's
+	// request instead of expiring it.
+	DeleteExpiredAlumniRequests(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
 }
 
 // Retention deletes expired OAuth metadata and aged-out audit logs.
@@ -48,6 +54,10 @@ type Retention struct {
 	AccessTokenAge   time.Duration
 	RefreshTokenAge  time.Duration
 	AuditLogAge      time.Duration
+	// AlumniRequestAge is measured from reviewed_at, not created_at: the clock on a
+	// ticket's retention starts when it was decided, and an unreviewed one has no
+	// start.
+	AlumniRequestAge time.Duration
 	Clock            auth.Clock
 }
 
@@ -109,6 +119,7 @@ func (w Retention) sweep(ctx context.Context) {
 		{"oauth_access_tokens", w.AccessTokenAge, w.Store.DeleteExpiredAccessTokens},
 		{"oauth_refresh_tokens", w.RefreshTokenAge, w.Store.DeleteRevokedRefreshTokens},
 		{"audit_logs", w.AuditLogAge, w.Store.DeleteExpiredAuditLogs},
+		{"alumni_requests", w.AlumniRequestAge, w.Store.DeleteExpiredAlumniRequests},
 	} {
 		if ctx.Err() != nil {
 			return
@@ -155,7 +166,8 @@ func (w Retention) validate() error {
 	if w.Store == nil {
 		return fmt.Errorf("retention worker requires a store")
 	}
-	if w.AuthorizationAge <= 0 || w.AccessTokenAge <= 0 || w.RefreshTokenAge <= 0 || w.AuditLogAge <= 0 {
+	if w.AuthorizationAge <= 0 || w.AccessTokenAge <= 0 || w.RefreshTokenAge <= 0 ||
+		w.AuditLogAge <= 0 || w.AlumniRequestAge <= 0 {
 		return fmt.Errorf("retention worker requires positive retention windows")
 	}
 	if w.Interval < 0 || w.BatchSize < 0 {

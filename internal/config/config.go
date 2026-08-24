@@ -322,6 +322,20 @@ type Config struct {
 	// 300s, so waiting long buys nothing a retry would not.
 	TurnstileTimeout time.Duration `env:"TURNSTILE_TIMEOUT" envDefault:"5s"`
 
+	// AlumniResetURL is the password-reset page an approved applicant is sent to.
+	//
+	// Configured rather than derived from the job, because it is the one actionable
+	// instruction in an email this service sends: taking it from per-request data
+	// would make an outbound link depend on input the submitter influenced.
+	AlumniResetURL string `env:"ALUMNI_RESET_URL"`
+	// AlumniSupportEmail is the appeal channel quoted in a rejection.
+	AlumniSupportEmail string `env:"ALUMNI_SUPPORT_EMAIL" envDefault:"link@sast.fun"`
+	// RateLimitAlumniRequestRPM and its window bound submissions per IP and per
+	// student ID. Deliberately tight: this is an anonymous write, and a legitimate
+	// applicant submits once.
+	RateLimitAlumniRequestRPM    int           `env:"RATE_LIMIT_ALUMNI_REQUEST_RPM" envDefault:"5"`
+	RateLimitAlumniRequestWindow time.Duration `env:"RATE_LIMIT_ALUMNI_REQUEST_WINDOW" envDefault:"1h"`
+
 	// SMTPHost has no default: a "localhost" fallback would let a deployment
 	// that forgot SMTP_HOST start cleanly and only fail when a user registers.
 	SMTPHost   string `env:"SMTP_HOST"`
@@ -614,6 +628,10 @@ func (c *Config) ValidateAPIAuth() error {
 	// keep config free of internal dependencies, as the rest of this file is.
 	case strings.ContainsFunc(c.TurnstileAction, func(r rune) bool { return !strconv.IsPrint(r) }):
 		return fmt.Errorf("TURNSTILE_ACTION must not contain control characters")
+	case c.RateLimitAlumniRequestRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_ALUMNI_REQUEST_RPM must be positive")
+	case c.RateLimitAlumniRequestWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_ALUMNI_REQUEST_WINDOW must be at least 1s")
 	// SMTP backs registration, password reset and email binding. Validating it
 	// at boot turns a missing value into a startup failure instead of a runtime
 	// "邮件发送失败" on the first user who tries to register.
