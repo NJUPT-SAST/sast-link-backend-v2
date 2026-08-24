@@ -917,7 +917,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/StandardEnvelope"
         "429":
-          $ref: "#/components/responses/RateLimited"
+          $ref: "#/components/responses/TooManyRequests"
           description: 请求过于频繁（42900）
         "500":
           $ref: "#/components/responses/InternalError"
@@ -3001,6 +3001,442 @@ paths:
           headers: {}
       security:
         - bearerAuth: []
+  /alumni-requests:
+    post:
+      summary: 提交校友建号申请（免登录）
+      deprecated: false
+      description: |
+        已毕业成员没有 @sast.fun 邮箱、学生邮箱也已停用，注册白名单会阻止其自助
+        注册。本端点收下结构化工单，由管理员在控制台审批建号。身份核验始终人工。
+
+        本服务唯一的未认证写端点，由 Cloudflare Turnstile 人机校验加双维度限流
+        （按 IP、按学号）把守。
+
+        校验顺序是刻意的：字段校验先于人机校验。Turnstile token 一次性且仅 300
+        秒有效，若先验 token 再校字段，申请人每改一个错字都要重新完成一次人机
+        验证。字段规则本就公开在前端，前置不新增泄露面；真正的泄露面是邮箱与
+        学号的占用查询，它们留在人机校验之后。
+
+        major 必填、name 不能等于 student_id，均比 POST /admin/users 更严：这
+        两项正是 V010 生成列判定资料残缺的两种形态，放宽会让审批建出的新号一
+        登录就被赶去资料补全页。
+      operationId: submitAlumniRequest
+      tags:
+        - AlumniRequest
+      parameters: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlumniRequestSubmit"
+      responses:
+        "200":
+          description: 已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id:
+                            type: integer
+                            format: int64
+                            description: 工单 ID。响应只回这一个字段，不透露账号存在性。
+          headers: {}
+        "400":
+          description: |
+            参数错误（40000）、邮箱域名不允许（40020）、
+            人机校验未通过（40021 —— 重新完成验证后可重试）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "409":
+          description: |
+            邮箱已被占用（40901）、学号已被占用（40902）、
+            该学号已有待审申请（40906 —— 已驳回的不占名额，可修正后重新提交）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+          description: 提交过于频繁（42900），按 IP 与按学号双维度限流
+        "503":
+          description: |
+            申请通道暂不可用（50301）。与 40021 含义相反：校验根本没能进行
+            （未配置密钥或 siteverify 不可达），重做验证无意义，客户端应隐藏
+            申请入口。未认证写端点在校验不可用时拒绝而非放行。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security: []
+  /admin/alumni-requests:
+    get:
+      summary: 建号申请列表
+      deprecated: false
+      description: |
+        审批队列。读取开放给 admin 与 lecturer，与用户列表一致；审批仅 admin。
+
+        不返回提交者 IP：它留在库里用于滥用追溯与限流取证，审批用不到，把一个
+        可关联到具体个人的网络标识复制到读接口上只是扩大暴露面。
+      operationId: listAlumniRequests
+      tags:
+        - AlumniRequest
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/AlumniRequestStatus"
+          description: 状态筛选。无法识别的取值返回 400，不静默忽略。
+        - name: notified
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: |
+            按通知投递状态筛选。false 配合 status 非 pending 就是
+            「已处理但未通知」的积压视图。仅接受 true/false。
+        - name: keyword
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+          description: 匹配姓名、学号、两个邮箱。
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: 申请列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          requests:
+                            type: array
+                            description: 恒为数组，空队列是 [] 而非 null。
+                            items:
+                              $ref: "#/components/schemas/AlumniRequest"
+                          total:
+                            type: integer
+                            format: int64
+                          page:
+                            type: integer
+                          page_size:
+                            type: integer
+          headers: {}
+        "400":
+          description: 参数错误（40000），含无法识别的 status 或 notified
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 无权限（403xx）
+      security:
+        - bearerAuth: []
+  /admin/alumni-requests/{id}:
+    get:
+      summary: 建号申请详情
+      deprecated: false
+      description: 字段结构同列表项。id 非正整数或不存在均返回 40403。
+      operationId: getAlumniRequest
+      tags:
+        - AlumniRequest
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: 申请详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AlumniRequest"
+          headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 无权限（403xx）
+        "404":
+          description: 申请不存在（40403）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security:
+        - bearerAuth: []
+  /admin/alumni-requests/{id}/approve:
+    post:
+      summary: 通过建号申请
+      deprecated: false
+      description: |
+        锁工单行（SELECT ... FOR UPDATE）、建号、回写审批结果，三者同一事务。任
+        一步失败整体回滚，工单留 pending，管理员可改字段重试。按钮被双击时第二
+        个请求读到已是 approved，返回 42204 而不会重复建号。
+
+        角色与状态用后端默认（member / retired_sast），工单无法请求角色。
+
+        不返回初始密码：系统生成的密码在审批时哈希后即丢弃，校友通过 /reset 自
+        助设置，填写邮箱时用其第三方邮箱。通知邮件里也不含密码。
+      operationId: approveAlumniRequest
+      tags:
+        - AlumniRequest
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: 已建号
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          user_id:
+                            type: integer
+                            format: int64
+                          login_email:
+                            type: string
+                            format: email
+                          notify_enqueued:
+                            type: boolean
+                            description: |
+                              通知是否进入队列，与 notified_at 的「是否送达」是
+                              两件事。false 时应调用重发端点；审批本身已提交，
+                              不会因为一封邮件没排上队而失败。
+          headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 无权限（403xx）
+        "404":
+          description: 申请不存在（40403）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "409":
+          description: |
+            提交后到审批之间被他人抢注（40901 邮箱、40902 学号）。属竞态：工单
+            提交时已做占用预检。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "422":
+          description: 申请已被处理（42204）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security:
+        - bearerAuth: []
+  /admin/alumni-requests/{id}/reject:
+    post:
+      summary: 驳回建号申请
+      deprecated: false
+      description: |
+        reject_reason 必填：它会进入驳回通知邮件，是校友唯一的修正依据。
+
+        驳回后该学号不再占用待审名额，校友可修正后重新提交。
+      operationId: rejectAlumniRequest
+      tags:
+        - AlumniRequest
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - reject_reason
+              properties:
+                reject_reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+      responses:
+        "200":
+          description: 已驳回
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AlumniNotifyResult"
+          headers: {}
+        "400":
+          description: reject_reason 缺失或超长（40000）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 无权限（403xx）
+        "404":
+          description: 申请不存在（40403）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "422":
+          description: 申请已被处理（42204）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security:
+        - bearerAuth: []
+  /admin/alumni-requests/{id}/resend-notification:
+    post:
+      summary: 重发结果通知
+      deprecated: false
+      description: |
+        投递链路是有界队列加 SMTP，两者都可能在审批已提交之后失败。通过邮件是校
+        友唯一的「去设置密码」指引，丢了等于建号白做，所以提供手动补发。
+
+        notified_at 已非空时也允许重发：管理员提出补发说明他掌握系统不知道的信
+        息（通常是校友根本没收到）。工单仍为 pending 时返回 42200，没有结果可
+        通知。
+      operationId: resendAlumniRequestNotification
+      tags:
+        - AlumniRequest
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: 已重新入队
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StandardEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AlumniNotifyResult"
+          headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 无权限（403xx）
+        "404":
+          description: 申请不存在（40403）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+        "422":
+          description: 申请尚未处理，无结果可通知（42200）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
+      security:
+        - bearerAuth: []
   /health:
     get:
       summary: 健康检查
@@ -3074,6 +3510,175 @@ components:
         - software
         - media
       description: 部门 — software（软件部）/ media（媒体部）
+    AlumniRequestStatus:
+      type: string
+      enum:
+        - pending
+        - approved
+        - rejected
+      description: |
+        建号申请状态 — pending（待审）/ approved（已通过）/ rejected（已驳回）。
+        同一学号同时只允许一条 pending；已驳回的不占名额，可修正后重新提交。
+    AlumniRequestSubmit:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - student_id
+        - login_email
+        - personal_email
+        - phone_number
+        - qq_number
+        - major
+        - join_year
+        - captcha_token
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          description: |
+            不能与 student_id 相同（大小写与空白归一后比较）。学号占位是上一代
+            数据库导入留下的形态，也是 V010 生成列判定资料残缺的两种形态之一。
+          example: 张三
+        student_id:
+          type: string
+          maxLength: 50
+          example: B20040525
+        login_email:
+          type: string
+          format: email
+          maxLength: 255
+          description: |
+            原学号邮箱，将成为账号的登录身份。仍限 @njupt.edu.cn / @sast.fun：
+            V001 触发器 auto_set_email_type 依赖该域名派生 email_type。
+          example: b20040525@njupt.edu.cn
+        personal_email:
+          type: string
+          format: email
+          maxLength: 255
+          description: |
+            可正常收信的第三方邮箱。审批通过后在同一事务内直绑为 other_mail 登
+            录身份，也是结果通知与自助改密的收件地址。不能与 login_email 相同：
+            V005 的两个触发器禁止同一地址既是 login_email 又是 other_mail 身份。
+          example: zhangsan@qq.com
+        phone_number:
+          type: string
+          maxLength: 20
+          example: "13800138000"
+        qq_number:
+          type: string
+          maxLength: 20
+          example: "12345"
+        college:
+          $ref: "#/components/schemas/College"
+        major:
+          type: string
+          maxLength: 50
+          minLength: 1
+          description: |
+            必填，比 POST /admin/users 更严（后者允许为空）。空白 major 是 V010
+            生成列判定资料残缺的另一种形态，放宽会让审批建出的新号一登录就被赶
+            去资料补全页——为了校友从未被要求填写的字段。
+          example: 软件工程
+        join_year:
+          type: string
+          maxLength: 32
+          description: 入部年份
+          example: "2020"
+        department_note:
+          type: string
+          maxLength: 255
+          description: 所属部门备注
+          example: 技术部
+        note:
+          type: string
+          maxLength: 1000
+          description: 补充说明
+        captcha_token:
+          type: string
+          maxLength: 2048
+          description: Cloudflare Turnstile 组件产出的 token，一次性且仅 300 秒有效
+    AlumniRequest:
+      type: object
+      description: |
+        建号申请工单。不含提交者 IP：它留在库里用于滥用追溯与限流取证，审批用不
+        到，把一个可关联到具体个人的网络标识复制到读接口上只是扩大暴露面。
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        student_id:
+          type: string
+        login_email:
+          type: string
+          format: email
+        personal_email:
+          type: string
+          format: email
+        phone_number:
+          type: string
+        qq_number:
+          type: string
+        college:
+          $ref: "#/components/schemas/College"
+        major:
+          type: string
+        join_year:
+          type: string
+        department_note:
+          type: string
+        note:
+          type: string
+        status:
+          $ref: "#/components/schemas/AlumniRequestStatus"
+        reject_reason:
+          type: string
+          description: 驳回原因，会进入驳回通知邮件；非驳回状态为空字符串
+        created_user_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            审批通过后建出的账号 ID。账号被注销后回落为 null（外键
+            ON DELETE SET NULL），工单历史仍保留。
+        reviewed_by:
+          type: integer
+          format: int64
+          nullable: true
+        reviewed_at:
+          type: string
+          format: date-time
+          nullable: true
+        notified_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            结果邮件确认送达的时间。null 表示尚未送达，配合 notified=false 与非
+            pending 状态就是「已处理但未通知」的积压视图。
+        notify_attempts:
+          type: integer
+          description: |
+            投递尝试次数，在每次发信之前递增。进程在发信中途被杀时它已增而
+            notified_at 仍为 null，读作「试过但未确认」——这正是真实状态；
+            事后才递增会丢掉尝试痕迹。
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AlumniNotifyResult:
+      type: object
+      properties:
+        notify_enqueued:
+          type: boolean
+          description: |
+            通知是否进入队列，与 notified_at 的「是否送达」是两件事。队列满时为
+            false，此时应调用重发端点；审批本身已提交，不会因为一封邮件没排上队
+            而失败。
     UserStats:
       type: object
       description: 账户聚合统计（admin 概览）

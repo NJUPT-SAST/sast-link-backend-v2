@@ -273,6 +273,12 @@ func pendingTicket() *model.AlumniRequest {
 }
 
 // validSubmit is an input that passes every field rule.
+//
+// The captcha token is a challenge response, not a credential: it authenticates
+// nothing and is spent once. gosec's G101 pattern-matches the field name, hence
+// the exclusion.
+//
+//nolint:gosec // G101 false positive: a Turnstile response is not a secret.
 func validSubmit() SubmitInput {
 	return SubmitInput{
 		Name:          "张三",

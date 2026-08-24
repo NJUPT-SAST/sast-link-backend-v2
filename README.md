@@ -36,7 +36,8 @@ curl http://127.0.0.1:8080/health
 - **Standard auth protocol**: OAuth 2.1 / OIDC for third-party apps to integrate login, token refresh, and user info
 - **Account security**: argon2id password hashing, Ed25519 token signing, revoke all sessions on password change
 - **Self-service**: profile management, third-party account binding, authorized-apps management, device management, avatar upload
-- **Admin console**: user management (list, detail, edit, provision, soft-delete/restore, batch role change); provisioning can bind a personal email as the login identity when the school mailbox is no longer usable; OAuth client configuration, audit logs, console overview stats
+- **Admin console**: user management (list, detail, edit, provision, soft-delete/restore, batch role change); provisioning can bind a personal email as the login identity when the school mailbox is no longer usable; alumni account-request review queue; OAuth client configuration, audit logs, console overview stats
+- **Alumni intake**: graduated members whose school mailbox no longer receives the registration code submit a request instead of registering; a Turnstile-guarded public form feeds a console review queue, and approval provisions the account and emails the applicant. Identity verification stays human
 - **Operations**: PostgreSQL 16 + Redis 8, one-command Compose startup, built-in health check
 
 ## Documentation

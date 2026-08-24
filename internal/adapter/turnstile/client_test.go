@@ -217,9 +217,12 @@ func TestVerifyOnlyChecksActionWhenConfigured(t *testing.T) {
 func TestVerifyTimesOutAsUnavailable(t *testing.T) {
 	t.Parallel()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// net.ListenConfig rather than net.Listen: the linter requires a
+	// context-carrying listen, and the context also bounds the bind itself.
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("net.Listen() error = %v", err)
+		t.Fatalf("Listen() error = %v", err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	go func() {
