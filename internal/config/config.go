@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -294,6 +295,32 @@ type Config struct {
 	// minAuditLogRetention sanity floor — audit history here is operational, not
 	// compliance-bound.
 	RetentionAuditLogAge time.Duration `env:"RETENTION_AUDIT_LOG_AGE" envDefault:"2160h"`
+	// RetentionAlumniRequestAge is how long a reviewed account-request ticket is
+	// kept, measured from reviewed_at. Defaults to 180 days.
+	//
+	// Only approved and rejected tickets are ever swept. A pending one is kept
+	// indefinitely: the three-day handling target is a statement in the UI, not a
+	// rule the backend enforces, and deleting an unreviewed application would lose
+	// someone's request rather than expire it.
+	RetentionAlumniRequestAge time.Duration `env:"RETENTION_ALUMNI_REQUEST_AGE" envDefault:"4320h"`
+
+	// TurnstileSecret enables the human-verification check in front of the one
+	// unauthenticated write endpoint, POST /alumni-requests.
+	//
+	// No default and not part of ValidateAPIAuth's fail-fast set, for the same
+	// reason SMTPHost and the STORAGE_* group are optional: a deployment that does
+	// not run the alumni intake should start cleanly. Empty does not mean "skip the
+	// check" — the endpoint answers 50301 and refuses every submission, because an
+	// anonymous write path with the challenge switched off has only the rate limiter
+	// left. Clients read that code as "hide the entry point".
+	TurnstileSecret string `env:"TURNSTILE_SECRET"`
+	// TurnstileAction must match the action the widget was rendered with. Without
+	// it, any token minted under the same secret is spendable here, including one
+	// harvested from a different form on the same site.
+	TurnstileAction string `env:"TURNSTILE_ACTION" envDefault:"alumni_request"`
+	// TurnstileTimeout bounds one siteverify round trip. A challenge token lives
+	// 300s, so waiting long buys nothing a retry would not.
+	TurnstileTimeout time.Duration `env:"TURNSTILE_TIMEOUT" envDefault:"5s"`
 
 	// SMTPHost has no default: a "localhost" fallback would let a deployment
 	// that forgot SMTP_HOST start cleanly and only fail when a user registers.
@@ -577,6 +604,16 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RETENTION_REFRESH_TOKEN_AGE must be positive")
 	case c.RetentionAuditLogAge < minAuditLogRetention:
 		return fmt.Errorf("RETENTION_AUDIT_LOG_AGE must be at least %s", minAuditLogRetention)
+	case c.RetentionAlumniRequestAge <= 0:
+		return fmt.Errorf("RETENTION_ALUMNI_REQUEST_AGE must be positive")
+	case c.TurnstileTimeout <= 0:
+		return fmt.Errorf("TURNSTILE_TIMEOUT must be positive")
+	// The action is compared against a value Cloudflare echoes back, so a control
+	// character here would silently never match and disable the intake with no
+	// visible cause. Checked with strconv.IsPrint rather than internal/validate to
+	// keep config free of internal dependencies, as the rest of this file is.
+	case strings.ContainsFunc(c.TurnstileAction, func(r rune) bool { return !strconv.IsPrint(r) }):
+		return fmt.Errorf("TURNSTILE_ACTION must not contain control characters")
 	// SMTP backs registration, password reset and email binding. Validating it
 	// at boot turns a missing value into a startup failure instead of a runtime
 	// "邮件发送失败" on the first user who tries to register.
