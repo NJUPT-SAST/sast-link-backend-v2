@@ -102,17 +102,21 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 		if field.value == nil {
 			continue
 		}
-		trimmed := strings.TrimSpace(*field.value)
 		// major defaults to '' in V001 and is the one bounded column an administrator
-		// may legitimately blank out; the rest identify the account.
-		if trimmed == "" && field.field != "major" {
-			return validatedUpdate{}, newError(ErrInvalidInput, fieldRequiredMessage(field.field), nil)
+		// may legitimately blank out; the rest identify the account. That is exactly the
+		// Required/Optional split, so the two helpers carry it rather than a field-name
+		// comparison inside a shared branch.
+		var (
+			trimmed string
+			refused *validate.FieldError
+		)
+		if field.field == "major" {
+			trimmed, refused = validate.OptionalField(field.field, *field.value, field.limit)
+		} else {
+			trimmed, refused = validate.RequiredField(field.field, *field.value, field.limit)
 		}
-		if utf8.RuneCountInString(trimmed) > field.limit {
-			return validatedUpdate{}, newError(ErrInvalidInput, fieldTooLongMessage(field.field), nil)
-		}
-		if validate.HasControlCharacter(trimmed) {
-			return validatedUpdate{}, newError(ErrInvalidInput, fieldInvalidMessage(field.field), nil)
+		if refused != nil {
+			return validatedUpdate{}, fieldError(refused)
 		}
 		value := trimmed
 		*field.target = &value
@@ -274,6 +278,24 @@ func fieldRequiredMessage(field string) string { return field + " 不能为空" 
 func fieldTooLongMessage(field string) string  { return field + " 长度超出限制" }
 func fieldInvalidMessage(field string) string  { return field + " 含非法字符" }
 
+// fieldError maps a validate.FieldError onto this service's invalid-input error.
+//
+// The rule lives in internal/validate because the alumni account-request flow
+// applies the same one, but the wording stays here: that flow is anonymous and
+// must not answer with copy written for the console. An unrecognized reason
+// falls through to the invalid-character message rather than being dropped,
+// since returning nil would let a refused value continue as if it had passed.
+func fieldError(refused *validate.FieldError) error {
+	switch refused.Reason {
+	case validate.ReasonRequired:
+		return newError(ErrInvalidInput, fieldRequiredMessage(refused.Field), nil)
+	case validate.ReasonTooLong:
+		return newError(ErrInvalidInput, fieldTooLongMessage(refused.Field), nil)
+	default:
+		return newError(ErrInvalidInput, fieldInvalidMessage(refused.Field), nil)
+	}
+}
+
 // validatedCreate holds the normalized CreateUserInput. Optional fields are
 // resolved to their defaults; there are no nil-or-unchanged semantics.
 type validatedCreate struct {
@@ -302,33 +324,29 @@ func validateCreate(input CreateUserInput) (validatedCreate, error) {
 		limit  int
 		target *string
 	}{
-		{"name", strings.TrimSpace(input.Name), validate.MaxNameLength, &result.name},
-		{"phone_number", strings.TrimSpace(input.PhoneNumber), validate.MaxPhoneNumberLength, &result.phoneNumber},
-		{"qq_number", strings.TrimSpace(input.QQNumber), validate.MaxQQNumberLength, &result.qqNumber},
-		{"student_id", strings.TrimSpace(input.StudentID), validate.MaxStudentIDLength, &result.studentID},
+		{"name", input.Name, validate.MaxNameLength, &result.name},
+		{"phone_number", input.PhoneNumber, validate.MaxPhoneNumberLength, &result.phoneNumber},
+		{"qq_number", input.QQNumber, validate.MaxQQNumberLength, &result.qqNumber},
+		{"student_id", input.StudentID, validate.MaxStudentIDLength, &result.studentID},
 	}
 	for _, field := range required {
-		if field.value == "" {
-			return validatedCreate{}, newError(ErrInvalidInput, fieldRequiredMessage(field.field), nil)
+		value, refused := validate.RequiredField(field.field, field.value, field.limit)
+		if refused != nil {
+			return validatedCreate{}, fieldError(refused)
 		}
-		if utf8.RuneCountInString(field.value) > field.limit {
-			return validatedCreate{}, newError(ErrInvalidInput, fieldTooLongMessage(field.field), nil)
-		}
-		if validate.HasControlCharacter(field.value) {
-			return validatedCreate{}, newError(ErrInvalidInput, fieldInvalidMessage(field.field), nil)
-		}
-		*field.target = field.value
+		*field.target = value
 	}
 
 	major := ""
 	if input.Major != nil {
-		major = strings.TrimSpace(*input.Major)
-		if utf8.RuneCountInString(major) > validate.MaxMajorLength {
-			return validatedCreate{}, newError(ErrInvalidInput, fieldTooLongMessage("major"), nil)
+		// major is the one provisioning field the console may leave empty, so it goes
+		// through OptionalField. The alumni ticket flow requires it instead, because a
+		// blank major is what V010's generated column flags as incomplete.
+		validated, refused := validate.OptionalField("major", *input.Major, validate.MaxMajorLength)
+		if refused != nil {
+			return validatedCreate{}, fieldError(refused)
 		}
-		if validate.HasControlCharacter(major) {
-			return validatedCreate{}, newError(ErrInvalidInput, fieldInvalidMessage("major"), nil)
-		}
+		major = validated
 	}
 	result.major = major
 

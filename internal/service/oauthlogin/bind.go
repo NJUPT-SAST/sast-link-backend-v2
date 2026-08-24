@@ -5,9 +5,6 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/jackc/pgerrcode"
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -150,14 +147,11 @@ const (
 )
 
 // duplicateConstraint returns the violated unique constraint's name, or "" when
-// err is not a unique violation. PostgreSQL leaves ColumnName empty for index
-// violations, so the constraint name is the only reliable discriminator.
+// err is not a unique violation. Thin wrapper over the repository helper so the
+// classification exists once; the mapping onto this service's error type stays
+// local.
 func duplicateConstraint(err error) string {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != pgerrcode.UniqueViolation {
-		return ""
-	}
-	return pgErr.ConstraintName
+	return repository.DuplicateConstraint(err)
 }
 
 func (s Service) auditBind(
