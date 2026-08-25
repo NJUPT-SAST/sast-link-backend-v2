@@ -321,7 +321,7 @@ func decodeOptionalStrictJSON(c *gin.Context, destination any) error {
 	if err != nil {
 		return err
 	}
-	if len(strings.TrimSpace(string(body))) == 0 {
+	if len(body) == 0 {
 		return nil
 	}
 	if err := requireJSONContentType(c); err != nil {

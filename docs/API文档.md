@@ -1631,7 +1631,7 @@ GET /admin/users
 
 | 参数 | 说明 |
 | ------ | ------ |
-| `page` | 页码，默认 1 |
+| `page` | 页码，默认 1，最小 1，最大 2^30（超出范围或溢出返回 `40000`） |
 | `page_size` | 每页条数，默认 20，最大 100 |
 | `role` | 筛选角色：freshman / member / lecturer / admin |
 | `state` | 筛选状态：on_sast / retired_sast / njupter / is_deleted |
@@ -2185,7 +2185,7 @@ GET /admin/audit-logs
 
 | 参数 | 说明 |
 | ------ | ------ |
-| `page` | 页码，默认 1 |
+| `page` | 页码，默认 1，最小 1，最大 2^30（超出范围或溢出返回 `40000`） |
 | `page_size` | 每页条数，默认 50，最大 100 |
 | `user_id` | 按用户筛选（正整数） |
 | `action` | 按操作类型筛选（精确匹配） |
@@ -2386,7 +2386,7 @@ GET /admin/alumni-requests?status=&notified=&keyword=&page=&page_size=
 | `status` | `pending` / `approved` / `rejected`；其他取值返回 `40000`，不静默忽略 |
 | `notified` | `true` / `false`，按通知投递状态筛选；其他取值返回 `40000` |
 | `keyword` | 匹配姓名、学号、两个邮箱，≤ 255 字符 |
-| `page` / `page_size` | `page_size` 上限 100，缺省 20；超上限或非法页码返回 `40000` |
+| `page` / `page_size` | `page` 最小 1，最大 2^30；`page_size` 上限 100，缺省 20；超上限或非法页码返回 `40000` |
 
 **Response** `200`:
 

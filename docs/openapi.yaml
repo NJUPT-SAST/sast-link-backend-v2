@@ -2061,11 +2061,13 @@ paths:
       parameters:
         - name: page
           in: query
-          description: 页码，默认 1
+          description: 页码，默认 1，最小 1，最大 1073741824（超出范围返回 400）
           required: false
           schema:
             type: integer
             default: 1
+            minimum: 1
+            maximum: 1073741824
         - name: page_size
           in: query
           description: 每页条数，默认 20，最大 100（超出上限返回 400）
@@ -2855,11 +2857,13 @@ paths:
       parameters:
         - name: page
           in: query
-          description: 页码，默认 1
+          description: 页码，默认 1，最小 1，最大 1073741824（超出范围返回 400）
           required: false
           schema:
             type: integer
             default: 1
+            minimum: 1
+            maximum: 1073741824
         - name: page_size
           in: query
           description: 每页条数，默认 50，最大 100（超出上限返回 400）
@@ -3116,10 +3120,12 @@ paths:
           description: 匹配姓名、学号、两个邮箱。
         - name: page
           in: query
+          description: 页码，默认 1，最小 1，最大 1073741824（超出范围返回 400）
           required: false
           schema:
             type: integer
             minimum: 1
+            maximum: 1073741824
             default: 1
         - name: page_size
           in: query

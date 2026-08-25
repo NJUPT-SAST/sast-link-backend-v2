@@ -369,6 +369,7 @@ func TestReviewActionsRejectUnexpectedBodies(t *testing.T) {
 		{"approve unknown field", "/admin/alumni-requests/5/approve", `{"extra":1}`, "application/json"},
 		{"approve trailing value", "/admin/alumni-requests/5/approve", `{} {}`, "application/json"},
 		{"approve non-empty object", "/admin/alumni-requests/5/approve", `{"foo":"bar"}`, "application/json"},
+		{"approve whitespace body with text content type", "/admin/alumni-requests/5/approve", "   ", "text/plain"},
 		{"approve text body", "/admin/alumni-requests/5/approve", "ok", "text/plain"},
 		{"approve no content type", "/admin/alumni-requests/5/approve", `{}`, ""},
 		{"resend unknown field", "/admin/alumni-requests/5/resend-notification", `{"extra":1}`, "application/json"},
