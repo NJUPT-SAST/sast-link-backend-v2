@@ -378,10 +378,10 @@ func TestCallbackCancellationRejectsForgedAndCrossProviderStates(t *testing.T) {
 	// the GitHub provider client, and a cross-provider replay needs no Lark
 	// client to exist.
 	crossState := "os_cross_provider_state"
-	if err := service.States.SaveOAuthState(context.Background(), crossState,
+	if saveErr := service.States.SaveOAuthState(context.Background(), crossState,
 		StatePayload{Provider: model.LoginMethodLark, Redirect: "https://link.sast.fun/lark-route"},
-		time.Minute); err != nil {
-		t.Fatalf("save lark state: %v", err)
+		time.Minute); saveErr != nil {
+		t.Fatalf("save lark state: %v", saveErr)
 	}
 	crossResult, err := service.Callback(context.Background(), CallbackInput{
 		Provider:      model.LoginMethodGitHub,
