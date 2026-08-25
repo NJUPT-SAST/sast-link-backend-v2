@@ -101,8 +101,8 @@ jobs:
       # and every pipeline has to be guarded explicitly.
       #
       # Pinned by version rather than @latest: a new actionlint release adding a
-      # rule would otherwise fail unrelated pull requests with no change on our
-      # side. shellcheck is preinstalled on ubuntu-latest runners.
+      # rule would otherwise fail unrelated pull requests that made no change.
+      # shellcheck is preinstalled on ubuntu-latest runners.
       - name: actionlint
         run: |
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7

@@ -92,7 +92,7 @@ jobs:
   #
   # This relies on ci.yml running on `push: main`, not only on pull requests:
   # without a run keyed to the merged commit's SHA there is nothing to find and
-  # every deploy would wait out the timeout. Both changes ship together.
+  # every deploy would wait out the timeout.
   verify:
     name: verify CI
     runs-on: ubuntu-latest
@@ -231,15 +231,14 @@ jobs:
             # Authenticate to TCR on every run rather than relying on a one-time
             # manual `docker login`. Docker reads the INVOKING user's
             # ~/.docker/config.json, so a credential stored for root does nothing
-            # for this deploy user — that mismatch is what made the first run fail
-            # with "unauthorized" even though the push had succeeded. Logging in
+            # for this deploy user. Logging in
             # here keeps the server's required state to "the SSH key works", with
             # no undocumented on-disk credential to recreate when an account is
             # rebuilt. The private repository is deliberate: the image needs no
             # secrets to run, but there is no reason to publish build output.
             #
             # The trap drops the credential on EVERY exit path, not just the happy
-            # one — four of the paths below exit 1, and without this the token
+            # one — six of the paths below exit 1, and without this the token
             # would be left at rest in the deploy user's home after any failure.
             trap 'docker logout "${{ env.TCR_HOST }}" >/dev/null 2>&1 || true' EXIT
             echo "${TCR_PASSWORD}" \

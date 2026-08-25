@@ -110,7 +110,7 @@ clear_limits() {
             "${REDIS_PREFIX}:ratelimit:%3A%3A1:login"
 }
 
-# 清掉登录限流计数：一轮里登好几次，不清会撞 5/min 上限。IPv6 回环 key 是编码过的。
+# 清掉登录限流计数：一轮里登好几次，不清会撞登录限流上限。IPv6 回环 key 是编码过的。
 clear_login_limits() {
   redis_del "${REDIS_PREFIX}:ratelimit:127.0.0.1:login" \
             "${REDIS_PREFIX}:ratelimit:%3A%3A1:login"

@@ -27,7 +27,7 @@
 -- the actor and the subject.
 --
 -- No index yet. The query this anticipates is "everything this client did", but
--- cardinality is currently about one delegated client, idx_audit_logs_action_created_at
+-- cardinality is currently about one delegated client, idx_audit_logs_action_created
 -- already narrows the common filters, and the table is capped at 90 days of rows. Add
 -- one when the filter is actually in use at volume, justified by an EXPLAIN.
 ALTER TABLE audit_logs ADD COLUMN actor_client_id VARCHAR(255);
