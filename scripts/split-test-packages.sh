@@ -21,9 +21,16 @@ esac
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# Exact import string, quoted: a subpackage such as testutil/redis (if one ever
-# appears) imports a different string and must be judged on its own merits.
-import_pattern='"github.com/NJUPT-SAST/sast-link-backend-v2/internal/testutil"'
+# Exact import strings. The testutil pattern is quoted so a subpackage such
+# as testutil/redis (if one ever appears) imports a different string and is
+# judged on its own merits. The testcontainers pattern deliberately has no
+# trailing quote: github.com/testcontainers/testcontainers-go is a prefix of
+# its own submodules (…/modules/postgres), so one pattern covers the module
+# and every submodule. It is the escape hatch for a test file that imports
+# testcontainers directly instead of going through the testutil wrapper —
+# such a package still needs Docker and must land in the integration batch.
+testutil_pattern='"github.com/NJUPT-SAST/sast-link-backend-v2/internal/testutil"'
+testcontainers_pattern='github.com/testcontainers/testcontainers-go'
 
 selected=0
 for pkg in $(go list ./...); do
@@ -31,7 +38,7 @@ for pkg in $(go list ./...); do
   needs_docker=0
   for f in "$dir"/*_test.go; do
     [ -e "$f" ] || continue
-    if grep -qF "$import_pattern" "$f"; then
+    if grep -qF "$testutil_pattern" "$f" || grep -qF "$testcontainers_pattern" "$f"; then
       needs_docker=1
       break
     fi
