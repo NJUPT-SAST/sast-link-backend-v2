@@ -1142,8 +1142,8 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 }
 
 // verifyCode checks a submitted email code. The store keeps the code alive
-// through a bounded number of wrong guesses, so a mistyped digit no longer burns
-// it — a wrong guess used to delete the valid code, which let anyone who knew an
+// through a bounded number of wrong guesses — a mistyped digit must not burn it,
+// because a wrong guess that deleted the code would let anyone who knows an
 // address invalidate its code at will. Once the budget is spent the store drops
 // the code and the caller sees the expired outcome.
 func (s Service) verifyCode(ctx context.Context, purpose, email, code string) error {

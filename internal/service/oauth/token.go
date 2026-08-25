@@ -50,9 +50,8 @@ func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, err
 func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput) (*TokenResult, error) {
 	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
 	if err != nil {
-		// Client-authentication failures previously left no audit row — a
-		// client_secret sweep against the token endpoint was indistinguishable
-		// from silence.
+		// Audit client-authentication failures too — a client_secret sweep against
+		// the token endpoint must not be indistinguishable from silence.
 		s.auditToken(ctx, nil, input.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeUnauthenticated, "client_auth_failed")
 		return nil, err
 	}

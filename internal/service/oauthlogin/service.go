@@ -158,10 +158,10 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
 	result, err := s.callback(ctx, input)
 	if err != nil {
-		// Failed callbacks were previously silent in the audit trail — exactly
-		// the events an incident review wants when someone drives a stolen or
-		// replayed state at the endpoint. The success legs audit themselves with
-		// the resolved user and provider identity.
+		// Audit failed callbacks too — they are exactly the events an incident
+		// review wants when someone drives a stolen or replayed state at the
+		// endpoint. The success legs audit themselves with the resolved user and
+		// provider identity.
 		s.auditLogin(ctx, nil, input, false, auditErrorCode(err), "")
 		return nil, err
 	}
