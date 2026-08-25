@@ -234,6 +234,44 @@ func TestCallbackPreservesExistingRedirectQuery(t *testing.T) {
 	}
 }
 
+// The user declining on the provider's page must land on the frontend callback
+// page with error=access_denied — that page renders its own "已取消登录" state
+// instead of treating the decline as a failure on the error page.
+func TestCallbackCancellationRedirectsToFrontendCallbackPage(t *testing.T) {
+	service := &fakeService{callbackResult: &oauthlogin.CallbackResult{
+		Cancelled: true,
+		Provider:  "github",
+		Redirect:  "https://link.sast.fun/oauth/callback",
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?error=access_denied&state=s", nil))
+
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 to the frontend callback page", recorder.Code)
+	}
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if location.Query().Get("error") != "access_denied" {
+		t.Fatalf("error = %q, want access_denied", location.Query().Get("error"))
+	}
+	if location.Query().Get("provider") != "github" {
+		t.Fatalf("provider = %q, want github", location.Query().Get("provider"))
+	}
+	if !strings.HasPrefix(location.String(), "https://link.sast.fun/oauth/callback") {
+		t.Fatalf("Location = %q, want the frontend callback page", location)
+	}
+	// The provider error string is forwarded to the service so it can tell a
+	// cancellation apart from a parameter failure.
+	if service.callbackInput.ProviderError != "access_denied" {
+		t.Fatalf("ProviderError = %q, want access_denied", service.callbackInput.ProviderError)
+	}
+}
+
 func TestCallbackFailureRedirectsToErrorPage(t *testing.T) {
 	service := &fakeService{callbackErr: &oauthlogin.Error{
 		Kind:    oauthlogin.KindForbidden,

@@ -301,6 +301,72 @@ func TestCallbackMapsInvalidGrantToRestartableFailure(t *testing.T) {
 	assertDisplayMessage(t, err, "第三方授权码")
 }
 
+// Cancelling on the provider's page is a result, not an error: the callback
+// must come back as a cancellation that keeps the frontend's "已取消登录" page,
+// not as a parameter failure. The state is consumed on the way out.
+func TestCallbackTreatsAccessDeniedAsCancellation(t *testing.T) {
+	service, doubles := newTestService(t)
+	state, _ := authorizedState(t, service)
+
+	result, err := service.Callback(context.Background(), CallbackInput{
+		Provider:      model.LoginMethodGitHub,
+		State:         state,
+		ProviderError: "access_denied",
+	})
+	if err != nil {
+		t.Fatalf("Callback: %v", err)
+	}
+	if !result.Cancelled {
+		t.Fatal("Cancelled = false, want the cancellation branch")
+	}
+	if result.Redirect != "https://link.sast.fun/callback" {
+		t.Fatalf("Redirect = %q, want the stored/default redirect", result.Redirect)
+	}
+	if result.Provider != "github" {
+		t.Fatalf("Provider = %q, want github", result.Provider)
+	}
+	// One authorization round trip ends with the cancellation: a later replayed
+	// callback must find the state gone.
+	if _, found, _ := doubles.States.ConsumeOAuthState(context.Background(), state); found {
+		t.Fatal("state was not consumed by the cancellation")
+	}
+	// No code was presented, so the provider exchange must never run.
+	if doubles.GitHub.calls != 0 {
+		t.Fatalf("provider exchange ran %d times for a cancellation", doubles.GitHub.calls)
+	}
+}
+
+// A cancellation without a usable state (expired, spent, or absent) still lands
+// on the frontend callback page via the default redirect.
+func TestCallbackCancellationWithoutStateFallsBackToDefaultRedirect(t *testing.T) {
+	service, _ := newTestService(t)
+
+	result, err := service.Callback(context.Background(), CallbackInput{
+		Provider:      model.LoginMethodGitHub,
+		ProviderError: "access_denied",
+	})
+	if err != nil {
+		t.Fatalf("Callback: %v", err)
+	}
+	if !result.Cancelled || result.Redirect != "https://link.sast.fun/callback" {
+		t.Fatalf("Cancelled = %v, Redirect = %q, want cancellation on the default redirect",
+			result.Cancelled, result.Redirect)
+	}
+}
+
+// Only access_denied means a user action. Any other provider error string must
+// not be treated as a cancellation — the callback is then judged on its
+// code/state alone, and a missing code is still a parameter failure.
+func TestCallbackIgnoresNonAccessDeniedProviderErrors(t *testing.T) {
+	service, _ := newTestService(t)
+
+	_, err := service.Callback(context.Background(), CallbackInput{
+		Provider:      model.LoginMethodGitHub,
+		ProviderError: "temporarily_unavailable",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+}
+
 // A provider that accepts the connection and then stalls past the client's I/O
 // timeout is a retry, and must not be reported as an expired state.
 func TestCallbackMapsProviderTimeoutToRestartableFailure(t *testing.T) {
