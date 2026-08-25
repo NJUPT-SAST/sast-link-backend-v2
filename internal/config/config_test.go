@@ -37,6 +37,11 @@ func setConfigEnv(t *testing.T, dbUser, dbPassword, dbName string) {
 	t.Setenv("SMTP_PORT", "587")
 	t.Setenv("SMTP_FROM", "noreply@example.test")
 	t.Setenv("OAUTH_CONSENT_URL", "https://link.example.test/oauth/consent")
+	// The tests that exercise Turnstile validation set these explicitly; every other
+	// test assumes they are absent so ValidateAPIAuth() does not fail on a stray
+	// external TURNSTILE_SECRET without a matching action.
+	t.Setenv("TURNSTILE_SECRET", "")
+	t.Setenv("TURNSTILE_ACTION", "")
 }
 
 // Retention windows bound how long dead rows survive, but two of them are floors
@@ -811,5 +816,45 @@ func TestLoadRejectsSchemeInStorageEndpoint(t *testing.T) {
 	}
 	if err = cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), "bare host") {
 		t.Fatalf("ValidateAPIAuth() error = %v, want endpoint scheme rejection", err)
+	}
+}
+
+// Turnstile is optional, but turning it on without an action is a silent
+// misconfiguration: siteverify will echo an empty action and the intake will
+// reject every token.
+func TestValidateAPIAuthRequiresTurnstileActionWithSecret(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		secret        string
+		action        string
+		wantErr       bool
+		wantSubstring string
+	}{
+		{"disabled", "", "", false, ""},
+		{"disabled with action ignored", "", "alumni-request", false, ""},
+		{"enabled", "secret-key", "alumni-request", false, ""},
+		{"secret without action", "secret-key", "", true, "TURNSTILE_ACTION must be non-empty"},
+		{"secret with whitespace action", "secret-key", "   ", true, "TURNSTILE_ACTION must be non-empty"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("TURNSTILE_SECRET", test.secret)
+			t.Setenv("TURNSTILE_ACTION", test.action)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), test.wantSubstring) {
+					t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.wantSubstring)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateAPIAuth() error = %v, want nil", err)
+			}
+		})
 	}
 }

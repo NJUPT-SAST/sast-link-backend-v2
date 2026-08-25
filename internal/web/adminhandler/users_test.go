@@ -229,6 +229,7 @@ func TestListUsersPassesQueryParameters(t *testing.T) {
 func TestListUsersRejectsUnparsablePaging(t *testing.T) {
 	for _, query := range []string{
 		"page=abc", "page=0", "page=-1", "page_size=abc", "page_size=0",
+		"page_size=101",
 		"page=4611686018427387905", "page=9223372036854775807",
 		"page=92233720368547760", "page=9223372036854775808",
 	} {

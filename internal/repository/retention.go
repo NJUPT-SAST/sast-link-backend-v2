@@ -207,3 +207,25 @@ func (r *RetentionRepository) deleteBatch(
 	}
 	return result.RowsAffected, nil
 }
+
+// DeleteExpiredAlumniRequests removes account-request tickets reviewed before
+// cutoff.
+//
+// Only approved and rejected tickets are swept, and the window is measured from
+// reviewed_at rather than created_at. A pending ticket is never deleted however
+// old it is: the three-day handling target is a statement in the UI, not a rule
+// the backend enforces, and dropping an unreviewed application would lose
+// someone's request rather than expire it. That is also why reviewed_at IS NOT
+// NULL is part of the predicate and not merely implied by the status - a row with
+// a verdict but no timestamp would otherwise be swept against a cutoff it has no
+// value to compare with.
+func (r *RetentionRepository) DeleteExpiredAlumniRequests(
+	ctx context.Context,
+	cutoff time.Time,
+	batchSize int,
+) (int64, error) {
+	return r.deleteBatch(ctx, cutoff, batchSize, "reviewed alumni requests",
+		&model.AlumniRequest{}, "alumni_requests",
+		"status <> ? AND reviewed_at IS NOT NULL AND reviewed_at < ?",
+		model.AlumniRequestStatusPending, cutoff)
+}
