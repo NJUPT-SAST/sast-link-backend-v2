@@ -169,17 +169,46 @@ func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackRe
 }
 
 func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
+	client, err := s.providerClient(input.Provider)
+	if err != nil {
+		return nil, err
+	}
+
+	// Cancelling on the provider's page is a third outcome, not a failure:
+	// GitHub and Lark bounce back with error=access_denied and no code. It
+	// skips the code/state demands and the login-CSRF digest binding on
+	// purpose — no credential is issued here, so a callback lured onto a
+	// cancellation link can show at worst the "已取消登录" page. The state is
+	// still consumed when present: one authorization round trip ends with the
+	// cancellation, and a later replayed callback finds nothing.
+	if input.ProviderError == "access_denied" {
+		redirect := s.DefaultRedirect
+		if input.State != "" {
+			payload, found, consumeErr := s.States.ConsumeOAuthState(ctx, input.State)
+			if consumeErr != nil {
+				return nil, newError(ErrDependencyUnavailable, "读取 OAuth state 失败", consumeErr)
+			}
+			// The stored redirect is never empty (resolveRedirect substitutes the
+			// default at authorize time), but a spent or forged state reports
+			// not-found and falls back to the default. A state issued for the
+			// other provider is likewise not adopted: it has no redirect worth
+			// honoring here.
+			if found && payload.Provider == input.Provider && payload.Redirect != "" {
+				redirect = payload.Redirect
+			}
+		}
+		return &CallbackResult{
+			Cancelled: true,
+			Provider:  string(input.Provider),
+			Redirect:  redirect,
+		}, nil
+	}
 	if input.Code == "" {
 		return nil, newError(ErrInvalidInput, "code 不能为空", nil)
 	}
 	if input.State == "" {
 		return nil, newError(ErrStateInvalid, "state 不能为空", nil)
 	}
-	client, err := s.providerClient(input.Provider)
-	if err != nil {
-		return nil, err
-	}
-
 	// The state is consumed before the provider is called, so a replayed
 	// callback cannot even reach the exchange.
 	statePayload, found, err := s.States.ConsumeOAuthState(ctx, input.State)

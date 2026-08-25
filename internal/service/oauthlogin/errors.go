@@ -43,6 +43,16 @@ type Error struct {
 	Kind    Kind
 	Code    int
 	Message string
+	// Display marks Message as written for the end user, so the HTTP layer
+	// surfaces it instead of the generic per-Kind string.
+	//
+	// Off by default on purpose: most messages here name an internal step ("保存
+	// OAuth state 失败") and describe which dependency broke, which is a log
+	// line, not something to hand a browser. Only outcomes the user can act on
+	// differently from their Kind's default set it — otherwise a caller cannot
+	// tell "GitHub refused your authorization code" apart from "your state
+	// expired", because both are one Kind and one code.
+	Display bool
 	// RetryAfter carries the limiter's remaining window so the HTTP layer can
 	// emit a Retry-After header.
 	RetryAfter time.Duration
@@ -108,9 +118,18 @@ var (
 	ErrDependencyUnavailable = &Error{Kind: KindDependencyUnavailable, Code: errcode.CodeDependencyUnavailable}
 )
 
-// newError returns a contextual error that matches its sentinel via Kind.
+// newError returns a contextual error that matches its sentinel via Kind. The
+// message stays internal; the HTTP layer answers with the per-Kind default.
 func newError(sentinel *Error, message string, cause error) *Error {
 	return &Error{Kind: sentinel.Kind, Code: sentinel.Code, Message: message, Err: cause}
+}
+
+// newDisplayError is newError for a message the user is meant to read, for an
+// outcome its Kind's default string would describe wrongly.
+func newDisplayError(sentinel *Error, message string, cause error) *Error {
+	err := newError(sentinel, message, cause)
+	err.Display = true
+	return err
 }
 
 // withRetryAfter sets RetryAfter on a freshly built *Error. It is a no-op for

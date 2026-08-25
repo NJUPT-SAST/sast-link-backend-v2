@@ -234,6 +234,44 @@ func TestCallbackPreservesExistingRedirectQuery(t *testing.T) {
 	}
 }
 
+// The user declining on the provider's page must land on the frontend callback
+// page with error=access_denied — that page renders its own "已取消登录" state
+// instead of treating the decline as a failure on the error page.
+func TestCallbackCancellationRedirectsToFrontendCallbackPage(t *testing.T) {
+	service := &fakeService{callbackResult: &oauthlogin.CallbackResult{
+		Cancelled: true,
+		Provider:  "github",
+		Redirect:  "https://link.sast.fun/oauth/callback",
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?error=access_denied&state=s", nil))
+
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 to the frontend callback page", recorder.Code)
+	}
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if location.Query().Get("error") != "access_denied" {
+		t.Fatalf("error = %q, want access_denied", location.Query().Get("error"))
+	}
+	if location.Query().Get("provider") != "github" {
+		t.Fatalf("provider = %q, want github", location.Query().Get("provider"))
+	}
+	if !strings.HasPrefix(location.String(), "https://link.sast.fun/oauth/callback") {
+		t.Fatalf("Location = %q, want the frontend callback page", location)
+	}
+	// The provider error string is forwarded to the service so it can tell a
+	// cancellation apart from a parameter failure.
+	if service.callbackInput.ProviderError != "access_denied" {
+		t.Fatalf("ProviderError = %q, want access_denied", service.callbackInput.ProviderError)
+	}
+}
+
 func TestCallbackFailureRedirectsToErrorPage(t *testing.T) {
 	service := &fakeService{callbackErr: &oauthlogin.Error{
 		Kind:    oauthlogin.KindForbidden,
@@ -261,6 +299,63 @@ func TestCallbackFailureRedirectsToErrorPage(t *testing.T) {
 	}
 	if !strings.HasPrefix(location.String(), "https://link.sast.fun/oauth/error") {
 		t.Fatalf("Location = %q, want the configured error page", location)
+	}
+}
+
+// A refused authorization code and an expired state share KindInvalidState and
+// code 40000, so the generic per-Kind string cannot describe both. The service
+// marks the specific one for display, and it must reach the error page intact:
+// this is exactly the case that read as "state 无效或已过期" while the state was
+// valid.
+func TestCallbackFailureCarriesTheDisplayMessageOverTheKindDefault(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:    oauthlogin.KindInvalidState,
+		Code:    errcode.CodeBadRequest,
+		Message: "第三方授权码无效或已过期",
+		Display: true,
+	}}
+	router := newTestRouter(Handler{
+		Service:       service,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=c&state=s", nil))
+
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := location.Query().Get("error_description"); got != "第三方授权码无效或已过期" {
+		t.Fatalf("error_description = %q, want the service's own message", got)
+	}
+}
+
+// The inverse: a message naming an internal step is not marked for display and
+// must be replaced by the generic string, so a dependency name never reaches a
+// browser.
+func TestCallbackFailureHidesInternalMessages(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:    oauthlogin.KindDependencyUnavailable,
+		Code:    errcode.CodeDependencyUnavailable,
+		Message: "读取 OAuth state 失败",
+	}}
+	router := newTestRouter(Handler{
+		Service:       service,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=c&state=s", nil))
+
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := location.Query().Get("error_description"); got != "依赖服务暂不可用" {
+		t.Fatalf("error_description = %q, want the generic per-Kind string", got)
 	}
 }
 

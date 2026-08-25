@@ -191,6 +191,11 @@ type CallbackInput struct {
 	State     string
 	ClientIP  string
 	UserAgent string
+	// ProviderError is the OAuth error parameter the provider bounced back
+	// with (GitHub and Lark send error=access_denied when the user cancels).
+	// Any other value is ignored and the callback is judged on its code/state
+	// alone, so a provider failure string cannot be mistaken for a user action.
+	ProviderError string
 	// StateCookie is the state cookie the browser sent back; Callback verifies
 	// it against the state's digest. Empty means the cookie is missing (or the
 	// deployment does not write it), which refuses the callback for any state
@@ -198,11 +203,12 @@ type CallbackInput struct {
 	StateCookie string
 }
 
-// CallbackResult is one of two branches, distinguished by which field is set.
+// CallbackResult is one of three outcomes, distinguished by which field is set.
 //
 // A bound account yields LoginCode; an unbound one yields RegistrationState
-// plus the profile hints the frontend prefills. Both carry Redirect so the
-// handler knows where to send the browser.
+// plus the profile hints the frontend prefills; a cancellation yields neither
+// and only carries Provider + Redirect back to the "已取消登录" page. All carry
+// Redirect so the handler knows where to send the browser.
 type CallbackResult struct {
 	Bound bool
 
@@ -216,6 +222,10 @@ type CallbackResult struct {
 	Provider    string
 	DisplayName string
 	AvatarURL   string
+
+	// Cancelled reports the user declined the authorization on the provider's
+	// page. Not an error: no credentials exist and the state is consumed.
+	Cancelled bool
 
 	Redirect string
 }

@@ -128,12 +128,13 @@ func (h Handler) authorize(name model.LoginMethod) gin.HandlerFunc {
 func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		result, err := h.Service.Callback(c.Request.Context(), oauthlogin.CallbackInput{
-			Provider:    name,
-			Code:        c.Query("code"),
-			State:       c.Query("state"),
-			ClientIP:    c.ClientIP(),
-			UserAgent:   c.Request.UserAgent(),
-			StateCookie: h.readStateCookie(c),
+			Provider:      name,
+			Code:          c.Query("code"),
+			State:         c.Query("state"),
+			ProviderError: c.Query("error"),
+			ClientIP:      c.ClientIP(),
+			UserAgent:     c.Request.UserAgent(),
+			StateCookie:   h.readStateCookie(c),
 		})
 		if err != nil {
 			// The state is consumed either way; the cookie pairing it is spent too.
@@ -161,7 +162,14 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 		}
 
 		query := target.Query()
-		if result.Bound {
+		if result.Cancelled {
+			// The user declined on the provider's page. The frontend callback
+			// page reads error=access_denied and renders its own "已取消登录"
+			// state — a cancellation is not something the error page should
+			// dress up as a failure.
+			query.Set("error", "access_denied")
+			query.Set("provider", result.Provider)
+		} else if result.Bound {
 			query.Set("code", result.LoginCode)
 		} else {
 			// The registration branch carries the parked state plus display
