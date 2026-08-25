@@ -354,6 +354,71 @@ func TestCallbackCancellationWithoutStateFallsBackToDefaultRedirect(t *testing.T
 	}
 }
 
+// Even a forged state must not carry a redirect the attacker invented: a
+// cancellation presenting a state this deployment never issued falls back to
+// the default, and a state issued for the other provider is not adopted either.
+func TestCallbackCancellationRejectsForgedAndCrossProviderStates(t *testing.T) {
+	service, _ := newTestService(t)
+
+	result, err := service.Callback(context.Background(), CallbackInput{
+		Provider:      model.LoginMethodGitHub,
+		State:         "os_forged_state_never_issued",
+		ProviderError: "access_denied",
+	})
+	if err != nil {
+		t.Fatalf("forged state: %v", err)
+	}
+	if !result.Cancelled || result.Redirect != "https://link.sast.fun/callback" {
+		t.Fatalf("forged state: Cancelled = %v, Redirect = %q, want default", result.Cancelled, result.Redirect)
+	}
+
+	// A GitHub callback presenting a state issued for Lark: the stored redirect
+	// must not be honored, though the cancellation still lands somewhere safe.
+	// Save the state directly through the store — the test service only enables
+	// the GitHub provider client, and a cross-provider replay needs no Lark
+	// client to exist.
+	crossState := "os_cross_provider_state"
+	if err := service.States.SaveOAuthState(context.Background(), crossState,
+		StatePayload{Provider: model.LoginMethodLark, Redirect: "https://link.sast.fun/lark-route"},
+		time.Minute); err != nil {
+		t.Fatalf("save lark state: %v", err)
+	}
+	crossResult, err := service.Callback(context.Background(), CallbackInput{
+		Provider:      model.LoginMethodGitHub,
+		State:         crossState,
+		ProviderError: "access_denied",
+	})
+	if err != nil {
+		t.Fatalf("cross-provider state: %v", err)
+	}
+	if !crossResult.Cancelled || crossResult.Redirect != "https://link.sast.fun/callback" {
+		t.Fatalf("cross-provider: Cancelled = %v, Redirect = %q, want default", crossResult.Cancelled, crossResult.Redirect)
+	}
+}
+
+// access_denied short-circuits even when a code is present: the decline ends
+// the round trip and the provider exchange must never run.
+func TestCallbackCancellationWithCodeStillSkipsTheExchange(t *testing.T) {
+	service, doubles := newTestService(t)
+	state, _ := authorizedState(t, service)
+
+	result, err := service.Callback(context.Background(), CallbackInput{
+		Provider:      model.LoginMethodGitHub,
+		Code:          "provider-code-issued-before-cancel",
+		State:         state,
+		ProviderError: "access_denied",
+	})
+	if err != nil {
+		t.Fatalf("Callback: %v", err)
+	}
+	if !result.Cancelled {
+		t.Fatal("Cancelled = false, want the cancellation branch to win over the code")
+	}
+	if doubles.GitHub.calls != 0 {
+		t.Fatalf("provider exchange ran %d times for a cancellation carrying a code", doubles.GitHub.calls)
+	}
+}
+
 // Only access_denied means a user action. Any other provider error string must
 // not be treated as a cancellation — the callback is then judged on its
 // code/state alone, and a missing code is still a parameter failure.

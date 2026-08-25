@@ -185,8 +185,10 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 			}
 			// The stored redirect is never empty (resolveRedirect substitutes the
 			// default at authorize time), but a spent or forged state reports
-			// not-found and falls back to the default.
-			if found && payload.Redirect != "" {
+			// not-found and falls back to the default. A state issued for the
+			// other provider is likewise not adopted: it has no redirect worth
+			// honoring here.
+			if found && payload.Provider == input.Provider && payload.Redirect != "" {
 				redirect = payload.Redirect
 			}
 		}
