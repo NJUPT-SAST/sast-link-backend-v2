@@ -25,9 +25,9 @@ import (
 const stubWidgetKey = "stub-widget-value"
 
 // newClientAgainst points a verifier at a stub siteverify. The production URL is
-// a package constant, so the stub is reached by overriding the transport rather
-// than the address: that keeps the request-building path (form encoding, content
-// type, method) under test instead of bypassed.
+// a package constant, so the stub is reached by overriding the client's endpoint:
+// that keeps the request-building path (form encoding, content type, method)
+// under test instead of bypassed.
 func newClientAgainst(t *testing.T, handler http.HandlerFunc, cfg turnstile.Config) *turnstile.Client {
 	t.Helper()
 	server := httptest.NewServer(handler)

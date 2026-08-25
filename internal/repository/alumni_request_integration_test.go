@@ -263,9 +263,9 @@ func TestAlumniRequestCompletenessAndConcurrency(t *testing.T) {
 	database := setupDatabase(t)
 	requests := repository.NewAlumniRequest(database)
 
-	// PLAN's key criterion: the provisioned account must clear V010's generated
-	// column, or the applicant is sent to a completion page on first login for fields
-	// they were never asked for.
+	// The provisioned account must clear V010's generated column, or the applicant
+	// is sent to a completion page on first login for fields they were never asked
+	// for.
 	t.Run("ApprovalProducesACompleteProfile", func(t *testing.T) {
 		ctx := context.Background()
 

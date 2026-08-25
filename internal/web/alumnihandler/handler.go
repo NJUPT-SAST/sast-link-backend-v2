@@ -1,6 +1,6 @@
 // Package alumnihandler exposes the alumni account-request endpoints over HTTP.
 //
-// One anonymous endpoint and four console ones. The anonymous one is the only
+// One anonymous endpoint and five console ones. The anonymous one is the only
 // unauthenticated write in the service, which is why its human-verification check
 // is not optional and its request body is decoded strictly.
 package alumnihandler
