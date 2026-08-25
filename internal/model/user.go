@@ -20,10 +20,9 @@ type User struct {
 	Major        string
 	TokenVersion int
 	// ProfileNeedsCompletion is V010's generated column: TRUE while a required
-	// field is blank or name still duplicates student_id, which is how accounts
-	// imported from the previous database arrived. It is a display hint that lets
-	// the frontend route those users to a completion page, never an authorization
-	// input.
+	// field is blank or name still duplicates student_id — the debris shapes a
+	// legacy import leaves behind. It is a display hint that lets the frontend
+	// route those users to a completion page, never an authorization input.
 	//
 	// The `->` tag makes it read-only. PostgreSQL rejects any INSERT or UPDATE
 	// naming a generated column, so without it every Create and Save on this

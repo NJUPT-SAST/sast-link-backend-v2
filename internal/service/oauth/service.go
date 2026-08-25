@@ -263,14 +263,8 @@ func (s Service) revokeFamilyErr(ctx context.Context, familyID string) error {
 	return nil
 }
 
-// audit records an OAuth audit event. Failures on this detached path are logged,
-// never returned: losing an audit row must not fail an otherwise valid
-// authorization. The in-transaction audits (authorization-code grant and refresh
-// rotation) are the deliberate exception — they ride the token transaction and a
-// failure there fails the operation.
 // buildAuditEntry materialises the shared oauth audit fields, so the synchronous
 // s.audit path and the same-transaction token-rotation audit cannot drift.
-// buildAuditEntry assembles an audit row.
 //
 // actorClientID is passed separately from resourceID rather than aliased onto it.
 // On the client-addressed endpoints (authorize / token / revoke) the two are the
@@ -325,7 +319,11 @@ func (s Service) buildAuditEntry(
 }
 
 // audit records an OAuth event whose subject and actor are the same client, which
-// is every client-addressed endpoint. Use auditAs when they differ.
+// is every client-addressed endpoint. Failures on this detached path are logged,
+// never returned: losing an audit row must not fail an otherwise valid
+// authorization. The in-transaction audits (authorization-code grant and refresh
+// rotation) are the deliberate exception — they ride the token transaction and a
+// failure there fails the operation. Use auditAs when they differ.
 func (s Service) audit(
 	ctx context.Context,
 	userID *int64,

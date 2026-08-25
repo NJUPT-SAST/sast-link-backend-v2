@@ -17,7 +17,8 @@ const maxOutboxDeliveryErrorLength = 1024
 
 // TokenBlacklistOutboxRepository coordinates durable revocation deliveries: the
 // rows ride the revoking transaction and the worker invalidates auth-state cache
-// entries (the name is legacy — the delivery target is no longer a blacklist).
+// entries. The "blacklist" in the name is a legacy naming artifact: the delivery
+// target is the auth-state cache, not a blacklist.
 type TokenBlacklistOutboxRepository struct {
 	database *gorm.DB
 }

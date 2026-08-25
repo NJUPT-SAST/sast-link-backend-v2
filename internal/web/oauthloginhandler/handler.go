@@ -45,9 +45,10 @@ type Handler struct {
 	// that don't exercise the cookie flow.
 	Cookies *middleware.SessionCookie
 	// StateCookie writes the login-CSRF state cookie at authorize time and reads
-	// it back at callback time. Nil disables the defense — tests that predate it
-	// or deployments that never wired it would fail every third-party login
-	// closed, so wiring it in runtime.go is mandatory for production.
+	// it back at callback time. Nil is not a valid production configuration: the
+	// handler then never writes or reads a state cookie, and the service refuses
+	// every third-party callback for a missing one — wiring it in runtime.go is
+	// mandatory.
 	StateCookie *middleware.SessionCookie
 }
 

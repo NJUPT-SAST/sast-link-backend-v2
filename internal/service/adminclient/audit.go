@@ -104,10 +104,8 @@ func (s Service) auditUpdate(
 	if input.IsActive != nil {
 		changed = append(changed, "is_active")
 	}
-	// grant_types and scopes were missing here while they were the two fields an
-	// administrator could not meaningfully change. They now carry delegated
-	// administration, so an audit row that omitted them would lose exactly the events
-	// worth reviewing.
+	// grant_types and scopes carry delegated administration, so an audit row
+	// that omitted them would lose exactly the events worth reviewing.
 	if input.GrantTypes != nil {
 		changed = append(changed, "grant_types")
 	}

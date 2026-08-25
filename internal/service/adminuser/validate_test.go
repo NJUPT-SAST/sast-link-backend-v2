@@ -83,7 +83,7 @@ func TestValidateLoginEmailNormalizesCase(t *testing.T) {
 }
 
 // The "user" columns are NOT NULL, so a blank identity field is a rejection rather
-// than a clear. major defaults to ” in V001 and is the one an administrator may
+// than a clear. major defaults to an empty string in V001 and is the one an administrator may
 // legitimately blank.
 func TestValidateUpdateRejectsBlankRequiredFields(t *testing.T) {
 	for _, field := range []struct {

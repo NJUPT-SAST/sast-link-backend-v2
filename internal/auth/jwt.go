@@ -34,8 +34,8 @@ type JWTKeyPair struct {
 // binding endpoints, which is account takeover. AZP is what the internal
 // middleware pins so only the built-in client's tokens are accepted there.
 //
-// Omitted (empty) means a first-party session token, so tokens signed before this
-// claim existed keep working; those are only ever issued to the built-in client.
+// Omitted (empty) means a first-party session token: only the built-in client
+// is ever issued one, and an azp-less token keeps verifying as first-party.
 type TokenClaims struct {
 	Role         string `json:"role"`
 	State        string `json:"state"`

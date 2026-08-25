@@ -38,8 +38,8 @@ func (h Handler) Card(c *gin.Context) {
 		return
 	}
 	// PRD §10.1 exempts the card endpoint from the standard envelope: the payload
-	// is returned as-is so static consumers (homepage friend links, the OIDC
-	// profile claim target) can read it without unwrapping.
+	// is returned as-is so static consumers (homepage friend links) can read it
+	// without unwrapping.
 	c.JSON(http.StatusOK, cardDTO{
 		ID:         result.Card.ID,
 		Nickname:   result.Card.Nickname,

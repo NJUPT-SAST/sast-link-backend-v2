@@ -303,8 +303,8 @@ func (a Authenticator) applyScopedPolicy(
 	if strings.TrimSpace(a.InternalClientID) == "" {
 		return Principal{}, backendError()
 	}
-	// An absent azp is a first-party session token predating the claim; those are
-	// only ever issued to the built-in client.
+	// An absent azp identifies a first-party session token; only the built-in
+	// client ever mints a token without an azp.
 	if principal.ClientID == "" || principal.ClientID == a.InternalClientID {
 		return principal, nil
 	}
@@ -371,8 +371,8 @@ func (a Authenticator) requireInternalClient(principal Principal) error {
 	if strings.TrimSpace(a.InternalClientID) == "" {
 		return backendError()
 	}
-	// An absent azp means a first-party session token predating the claim; those are
-	// only ever issued to the built-in client.
+	// An absent azp identifies a first-party session token; only the built-in
+	// client ever mints a token without an azp.
 	if principal.ClientID != "" && principal.ClientID != a.InternalClientID {
 		return authBusinessError(http.StatusForbidden, errcode.CodeForbidden,
 			"该 Access Token 由第三方客户端签发，不可用于内部接口")
@@ -428,10 +428,10 @@ func (a Authenticator) authenticateClaims(ctx context.Context, claims *auth.Toke
 	}
 	// The auth-state cache (Redis, short TTL) lets authenticated requests skip the
 	// per-request DB query: on a hit the cached state is the DB-authoritative
-	// answer, on a miss the database is read and the cache populated. The
-	// revocation paths delete the cache entry, so a revoked token cannot be
-	// admitted by a stale cache. Fail-open: a cache error degrades to the
-	// database, exactly like the old blacklist fast-reject it replaces.
+	// answer, on a miss the database is read and the cache populated. Revocation
+	// paths write a short-lived tombstone, and the cache's SET NX fill refuses to
+	// overwrite it, so a revoked token cannot be admitted by a stale cache.
+	// Fail-open: a cache error degrades to the database rather than rejecting.
 	state, err := a.authState(ctx, claims.ID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")

@@ -37,8 +37,7 @@ type AuthStateInvalidator interface {
 // TokenBlacklist delivers durable JWT revocations from the outbox to the
 // auth-state cache: every revoked JTI's cached state is deleted so the
 // middleware cannot admit a token whose DB row says revoked. The outbox rows are
-// still keyed by token ID; only the Redis delivery target changed from the old
-// JTI blacklist key to the auth-state cache.
+// keyed by token ID, and delivery targets the auth-state cache.
 type TokenBlacklist struct {
 	Outbox          TokenBlacklistOutbox
 	AuthState       AuthStateInvalidator

@@ -48,9 +48,9 @@ func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) 
 	if input.Password == "" {
 		return nil, newError(ErrInvalidInput, "password 不能为空", nil)
 	}
-	// Throttled before the password check, so repeated wrong-password attempts
-	// consume the budget too. The old cooldown was claimed only after the password
-	// verified, which meant it did nothing against guessing.
+	// Throttle before the password check: repeated wrong-password attempts must
+	// consume the budget too, and a cooldown claimed only after the password
+	// verifies does nothing against guessing.
 	//
 	// Deliberately rate limiting rather than reusing Failures (LoginFailureStore):
 	// its keys are shared with password login, so guessing here would lock the

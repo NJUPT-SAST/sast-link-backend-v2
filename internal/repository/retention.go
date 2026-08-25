@@ -133,12 +133,12 @@ func (r *RetentionRepository) DeleteExpiredAccessTokens(
 // DeleteRevokedRefreshTokens removes refresh tokens that expired before cutoff,
 // covering two shapes:
 //
-//   - rotated-away rows (revoked_at set, sequence > 0), the historic sweep;
+//   - rotated-away rows (revoked_at set, sequence > 0);
 //   - every row of a family that is entirely dead — no member is unrevoked and
 //     still valid, so the family can never rotate again. That includes the
-//     sequence-0 origin row a single login left behind when the user never came
-//     back: it was never revoked, so the old `revoked_at IS NOT NULL` predicate
-//     missed it and the table grew by one row per historical login.
+//     sequence-0 origin row a single login leaves behind when the user never
+//     comes back: the origin row is never revoked, so only the family-death
+//     branch removes it — without it, the table grows by one row per login.
 //
 // The origin row of a live family is still preserved: the refresh flow reads it to
 // set an ID Token's auth_time, and a family that keeps rotating outlives the

@@ -181,8 +181,8 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, newError(ErrInternal, "签发 Token Pair 失败", err)
 	}
 	// The success audit rides the token transaction (one fsync), consistent with
-	// the refresh grant and the session login; a build failure falls back to the
-	// synchronous audit.
+	// the refresh grant and the session login; a build failure logs and drops the
+	// row — there is no synchronous fallback for the success path.
 	var codeAudit *model.AuditLog
 	if s.Audit != nil {
 		resourceID := client.ClientID

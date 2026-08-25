@@ -772,7 +772,6 @@ func TestLoadAcceptsFullStorageConfiguration(t *testing.T) {
 	if !cfg.StorageConfigured() {
 		t.Fatal("StorageConfigured() = false, want true with full STORAGE_*")
 	}
-	// Content review is on by default (fail-closed), per the PLAN decision.
 	if !cfg.StorageAuditEnabled {
 		t.Fatal("StorageAuditEnabled = false, want true by default")
 	}

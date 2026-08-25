@@ -46,9 +46,9 @@ func (s Service) Discovery() map[string]any {
 		// a user who signed in days ago and authorizes today gets today's timestamp. That
 		// overstates how recently they authenticated, which is the one thing the claim
 		// exists to report. Advertising it would invite a relying party to depend on it;
-		// omitting an optional claim is honest, publishing a wrong one is not. Restore this
-		// entry together with a real authentication timestamp — see the note on
-		// signIDToken's authTime parameter.
+		// omitting an optional claim is honest, publishing a wrong one is not.
+		// TODO(auth_time): persisting a real authentication timestamp at login would let
+		// this entry be advertised — see the note on signIDToken's authTime parameter.
 		// role is this provider's own claim, not an OIDC one, advertised here because a
 		// relying party has no other way to discover it. It rides the profile scope.
 		"claims_supported": []string{

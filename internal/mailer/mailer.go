@@ -32,8 +32,8 @@ type Config struct {
 	// MaxConcurrent caps simultaneous SMTP sends. Each send dials a fresh TCP
 	// connection and performs a TLS handshake, so an unbounded burst (e.g. a
 	// verification-code storm) exhausts file descriptors and SMTP server
-	// connections. Requests beyond the cap queue until a slot frees.
-	// Non-positive values keep the previous unbounded behavior.
+	// connections. Requests beyond the cap queue until a slot frees; a
+	// non-positive value disables the cap, leaving sends unbounded.
 	MaxConcurrent int
 }
 

@@ -97,8 +97,9 @@ func TestDiscoveryClaimsMatchIssuedClaims(t *testing.T) {
 	// auth_time is issued but not advertised: the value available today is the consent
 	// instant rather than the authentication instant, which overstates how recently the
 	// user authenticated. Advertising it would invite a relying party to depend on a
-	// value this service cannot yet produce correctly. Remove the exception once a real
-	// authentication timestamp exists — see signIDToken.
+	// value this service cannot yet produce correctly.
+	// TODO(auth_time): remove the exception once a real authentication timestamp
+	// exists — see signIDToken.
 	withheld := map[string]bool{"auth_time": true}
 
 	for _, claim := range claims {

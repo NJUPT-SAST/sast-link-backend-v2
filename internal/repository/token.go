@@ -388,8 +388,8 @@ func (r *TokenRepository) rotateRefreshToken(
 		// like a true replay cuts a family: the client must re-authorize rather than
 		// keep refreshing a delegation that should have expired. Only reachable when
 		// the presented token is still valid (the ExpiresAt check above) yet older
-		// than the family cap — a family minted before the cap shipped, or any future
-		// path that mints past it. In-window families never trigger it, because the
+		// than the family cap — a family whose origin predates the cap's
+		// max-lifetime window, or any future path that mints past it. In-window families never trigger it, because the
 		// clamp below keeps every rotated expiry inside the cap.
 		if maxLifetime > 0 && !originCreatedAt.Add(maxLifetime).After(rotationTime) {
 			if _, revokeErr := revokeFamilyInTransaction(transaction, familyID, rotationTime); revokeErr != nil {

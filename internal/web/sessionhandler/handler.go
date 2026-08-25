@@ -110,9 +110,9 @@ type refreshRequest struct {
 }
 
 type logoutRequest struct {
-	// Accepted for contract compatibility (the frontend sends an empty object
-	// now); the service revokes the authenticated access token's own family, so
-	// the refresh token is no longer consulted.
+	// Accepted for contract compatibility (the frontend sends an empty object);
+	// the service revokes the authenticated access token's own family, so the
+	// body refresh token is never consulted.
 	RefreshToken string `json:"refresh_token"`
 }
 
@@ -273,12 +273,12 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	r.POST("/auth/register", h.Register)
 	r.POST("/auth/forgot-password/send-code", h.ForgotPasswordSendCode)
 	r.POST("/auth/reset-password", h.ResetPassword)
-	// The card endpoint is temporarily disabled pending a privacy redesign. Its
-	// sequential-ID public URL lets anyone enumerate the full member roster, which
-	// is no longer acceptable; it will be reworked (owner-only + non-enumerable
-	// identifier), not re-enabled as-is. The handler/service/repository code stays
-	// in place pending that redesign, and the OIDC profile claim has been removed
-	// so no client can read the card projection through it either.
+	// The card endpoint is suspended pending a privacy redesign: a public URL
+	// keyed by sequential IDs would let anyone enumerate the full member roster.
+	// It will be reworked (owner-only + non-enumerable identifier), not re-enabled
+	// as-is. The handler/service/repository code stays in place pending that
+	// redesign, and no OIDC profile claim points at a card URL, so no client can
+	// read the card projection through it either.
 	// r.GET("/card/:id", h.Card)
 
 	// Every protected route names a scope gate explicitly. A new route that names
