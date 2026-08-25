@@ -114,10 +114,10 @@ CI 中所有测试均携带：
 示例：
 
 ```
-feat(auth): 实现 PBKDF2-SHA512 密码哈希
-fix(token): 通过 family_id 检测 refresh token 重放
-docs(readme): 补充本地开发环境搭建说明
-chore(deps): 升级 golang.org/x/crypto 至 v0.35.0
+feat(auth): implement PBKDF2-SHA512 password hashing
+fix(token): detect refresh token replay via family_id
+docs(readme): add local development environment setup notes
+chore(deps): upgrade golang.org/x/crypto to v0.35.0
 ```
 
 保持提交原子化——每次提交只包含一个逻辑变更。如需修正上一个提交，使用 rebase 而非追加"修复笔误"类提交。
