@@ -39,7 +39,7 @@ func mapServiceError(err error) error {
 	case oauthlogin.KindInvalidInput, oauthlogin.KindInvalidState:
 		status = http.StatusBadRequest
 	case oauthlogin.KindRateLimited:
-		message = "请求过于频繁，请稍后重试"
+		message = "请求过于频繁"
 		status = http.StatusTooManyRequests
 	case oauthlogin.KindInvalidToken:
 		status = http.StatusUnauthorized
@@ -53,10 +53,10 @@ func mapServiceError(err error) error {
 		// 502, not 503: this service is healthy and the request was well formed,
 		// but an upstream it depends on answered badly. A 503 would suggest
 		// retrying here helps, when the fix is on GitHub's or Lark's side.
-		message = "第三方服务暂时不可用，请稍后重试"
+		message = "第三方服务暂时不可用"
 		status = http.StatusBadGateway
 	case oauthlogin.KindDependencyUnavailable:
-		message = "依赖服务暂不可用，请稍后重试"
+		message = "依赖服务暂不可用"
 		status = http.StatusServiceUnavailable
 	case oauthlogin.KindInternal:
 		message = "服务器内部错误"
@@ -115,9 +115,9 @@ func defaultMessage(kind oauthlogin.Kind) string {
 	case oauthlogin.KindInvalidInput:
 		return "请求参数错误"
 	case oauthlogin.KindRateLimited:
-		return "请求过于频繁，请稍后重试"
+		return "请求过于频繁"
 	case oauthlogin.KindInvalidState:
-		return "state 无效或已过期，请重新登录"
+		return "state 无效或已过期"
 	case oauthlogin.KindInvalidToken:
 		return "login_code 无效或已过期"
 	case oauthlogin.KindUserDeleted:
@@ -129,9 +129,9 @@ func defaultMessage(kind oauthlogin.Kind) string {
 	case oauthlogin.KindNotFound:
 		return "资源不存在"
 	case oauthlogin.KindProviderUnavailable:
-		return "第三方服务暂时不可用，请稍后重试"
+		return "第三方服务暂时不可用"
 	case oauthlogin.KindDependencyUnavailable:
-		return "依赖服务暂不可用，请稍后重试"
+		return "依赖服务暂不可用"
 	default:
 		return "服务器内部错误"
 	}

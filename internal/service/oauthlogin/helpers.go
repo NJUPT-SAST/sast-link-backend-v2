@@ -78,9 +78,9 @@ func (s Service) resolveRedirect(requested string) (string, error) {
 //
 // The two restart-the-login outcomes carry display messages: they share
 // KindInvalidState with a genuinely expired state, and the default string for
-// that Kind ("state 无效或已过期，请重新登录") sends someone whose authorization
-// code GitHub refused, or whose exchange timed out, looking for a fault in a
-// state that was in fact valid and correctly bound to their browser.
+// that Kind ("state 无效或已过期") sends someone whose authorization code
+// GitHub refused, or whose exchange timed out, looking for a fault in a state
+// that was in fact valid and correctly bound to their browser.
 func providerError(err error) error {
 	switch {
 	case errors.Is(err, provider.ErrForeignTenant):
@@ -88,14 +88,14 @@ func providerError(err error) error {
 	case errors.Is(err, provider.ErrInvalidGrant):
 		// The only input the user controls is the code their browser carried, so
 		// this is a restart-the-login outcome, not a server fault.
-		return newDisplayError(ErrStateInvalid, "第三方授权码无效或已过期，请重新登录", err)
+		return newDisplayError(ErrStateInvalid, "第三方授权码无效或已过期", err)
 	case errors.Is(err, context.DeadlineExceeded):
 		// The provider accepted the connection and then did not answer within
 		// httpIOTimeout. Reported as a restartable failure rather than an outage
 		// because a single slow round trip is not evidence GitHub or Lark is
 		// down, but the message must say so — nothing about the user's state was
 		// wrong, and retrying is exactly the right advice.
-		return newDisplayError(ErrStateInvalid, "连接第三方登录服务超时，请重试", err)
+		return newDisplayError(ErrStateInvalid, "连接第三方登录服务超时", err)
 	case errors.Is(err, context.Canceled):
 		// The caller went away mid-exchange. Reporting a provider outage would
 		// blame GitHub or Lark for a client disconnect.

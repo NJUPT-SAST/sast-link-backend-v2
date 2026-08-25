@@ -273,7 +273,7 @@ func TestCallbackFailureCarriesTheDisplayMessageOverTheKindDefault(t *testing.T)
 	service := &fakeService{callbackErr: &oauthlogin.Error{
 		Kind:    oauthlogin.KindInvalidState,
 		Code:    errcode.CodeBadRequest,
-		Message: "第三方授权码无效或已过期，请重新登录",
+		Message: "第三方授权码无效或已过期",
 		Display: true,
 	}}
 	router := newTestRouter(Handler{
@@ -289,7 +289,7 @@ func TestCallbackFailureCarriesTheDisplayMessageOverTheKindDefault(t *testing.T)
 	if err != nil {
 		t.Fatalf("parse Location: %v", err)
 	}
-	if got := location.Query().Get("error_description"); got != "第三方授权码无效或已过期，请重新登录" {
+	if got := location.Query().Get("error_description"); got != "第三方授权码无效或已过期" {
 		t.Fatalf("error_description = %q, want the service's own message", got)
 	}
 }
@@ -316,7 +316,7 @@ func TestCallbackFailureHidesInternalMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse Location: %v", err)
 	}
-	if got := location.Query().Get("error_description"); got != "依赖服务暂不可用，请稍后重试" {
+	if got := location.Query().Get("error_description"); got != "依赖服务暂不可用" {
 		t.Fatalf("error_description = %q, want the generic per-Kind string", got)
 	}
 }
