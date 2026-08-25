@@ -37,6 +37,11 @@ func setConfigEnv(t *testing.T, dbUser, dbPassword, dbName string) {
 	t.Setenv("SMTP_PORT", "587")
 	t.Setenv("SMTP_FROM", "noreply@example.test")
 	t.Setenv("OAUTH_CONSENT_URL", "https://link.example.test/oauth/consent")
+	// The tests that exercise Turnstile validation set these explicitly; every other
+	// test assumes they are absent so ValidateAPIAuth() does not fail on a stray
+	// external TURNSTILE_SECRET without a matching action.
+	t.Setenv("TURNSTILE_SECRET", "")
+	t.Setenv("TURNSTILE_ACTION", "")
 }
 
 // Retention windows bound how long dead rows survive, but two of them are floors
