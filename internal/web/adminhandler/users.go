@@ -14,7 +14,7 @@ import (
 
 // ListUsers returns a filtered page of accounts.
 func (h Handler) ListUsers(c *gin.Context) {
-	page, pageSize, err := parsePaging(c)
+	page, pageSize, err := web.ParsePaging(c)
 	if err != nil {
 		response.Error(c, badRequest())
 		return

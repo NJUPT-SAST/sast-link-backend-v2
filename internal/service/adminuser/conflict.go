@@ -2,11 +2,9 @@ package adminuser
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 
-	"github.com/jackc/pgerrcode"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
 // PostgreSQL's unique-index names for the "user" table. It carries two unique
@@ -55,12 +53,10 @@ func (s Service) mapUniqueViolation(ctx context.Context, err error, internalMess
 }
 
 // duplicateConstraint returns the violated unique constraint's name, or "" when
-// err is not a unique violation. PostgreSQL leaves ColumnName empty for index
-// violations, so the constraint name is the only reliable discriminator.
+// err is not a unique violation. Thin wrapper over the repository helper so the
+// classification exists once; the mapping from a name onto this service's error
+// type stays local, because the same collision reads differently to an
+// administrator than it does to a user binding their own account.
 func duplicateConstraint(err error) string {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != pgerrcode.UniqueViolation {
-		return ""
-	}
-	return pgErr.ConstraintName
+	return repository.DuplicateConstraint(err)
 }

@@ -67,6 +67,13 @@ CREATE TYPE college_enum AS ENUM (
     '波特兰学院',
     '其他'
 );
+
+-- 校友建号申请状态（V011）
+CREATE TYPE alumni_request_status_enum AS ENUM (
+    'pending',    -- 待审
+    'approved',   -- 已通过（已建号）
+    'rejected'    -- 已驳回（不占待审名额，可修正后重新提交）
+);
 ```
 
 ## user 用户表
@@ -456,6 +463,142 @@ CREATE INDEX idx_oauth_authorizations_user_client
 
 > 此表无 `updated_at`。生命周期为"创建 → 标记已用"。已使用 + 已过期的 code 由 API 内 retention worker 统一清理；V006 增设全量 `expires_at` 索引 `idx_oauth_authorizations_expires_at_all`，过期行按索引定位，无需 seq scan
 
+## alumni_requests 校友建号申请
+
+V011 新增。已毕业成员没有 `@sast.fun` 邮箱、学生邮箱也已停用，注册白名单（`login_email`
+域名限制 + V001 触发器 `auto_set_email_type`）会阻止其自助注册；管理员建号能解决，但校友
+侧没有入口去「请求建号」。此表就是那个入口：结构化工单，管理员在控制台审批，同一事务内
+建号并写入审批结果。
+
+**身份核验始终是人工的。** 工单化自动的是转录劳动，不是核验责任——学号加姓名在毕业生群体
+里不是秘密，且 SMTP 发件人可伪造，任何「收到邮件即自动通过」的设计等于给任意人开号能力。
+这也是邮件解析方案被否的原因（`internal/mailer` 只有出站 SMTP，无 IMAP/inbound）。
+
+```sql
+CREATE TYPE alumni_request_status_enum AS ENUM ('pending', 'approved', 'rejected');
+
+CREATE TABLE alumni_requests (
+    id              BIGSERIAL PRIMARY KEY,
+    name            TEXT NOT NULL,
+    student_id      TEXT NOT NULL,
+    login_email     TEXT NOT NULL,
+    personal_email  TEXT NOT NULL,
+    phone_number    TEXT NOT NULL,
+    qq_number       TEXT NOT NULL,
+    college         college_enum NOT NULL DEFAULT '其他',
+    major           TEXT NOT NULL,
+    join_year       TEXT NOT NULL,
+    department_note TEXT NOT NULL DEFAULT '',
+    note            TEXT NOT NULL DEFAULT '',
+    status          alumni_request_status_enum NOT NULL DEFAULT 'pending',
+    reject_reason   TEXT NOT NULL DEFAULT '',
+    created_user_id BIGINT REFERENCES "user"(id) ON DELETE SET NULL,
+    reviewed_by     BIGINT REFERENCES "user"(id) ON DELETE SET NULL,
+    reviewed_at     TIMESTAMPTZ,
+    notified_at     TIMESTAMPTZ,
+    notify_attempts INT NOT NULL DEFAULT 0,
+    client_ip       TEXT NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX uq_alumni_requests_pending_student
+    ON alumni_requests (lower(btrim(student_id))) WHERE status = 'pending';
+
+CREATE INDEX idx_alumni_requests_status_created
+    ON alumni_requests (status, created_at DESC);
+
+CREATE INDEX idx_alumni_requests_pending_notification
+    ON alumni_requests (id) WHERE status <> 'pending' AND notified_at IS NULL;
+
+CREATE TRIGGER trg_alumni_requests_updated_at
+    BEFORE UPDATE ON alumni_requests FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+```
+
+### 两个邮箱
+
+| 列 | 角色 |
+|----|------|
+| `login_email` | 原学号邮箱，审批后成为账号的登录身份。**仍限 `@njupt.edu.cn` / `@sast.fun`**——V001 触发器 `auto_set_email_type` 依赖该域名派生 `email_type`，放宽白名单会让写入在数据库层抛裸异常 |
+| `personal_email` | 可正常收信的第三方邮箱，审批后在同一事务内直绑为 `other_mail` 身份。**结果通知与自助改密都发往这里**，不是 `login_email`——后者正是那个已停用的学生邮箱，发过去等于不发 |
+
+两者不能相同：V005 的 `forbid_login_email_as_identity` / `forbid_identity_as_login_email`
+禁止同一地址既是 `login_email` 又是 `other_mail` 身份。服务层在提交时就用
+`ExistsAsEmailAnywhere` 预检两个地址，让申请人当场知道冲突，而不是等到审批时——那时人已经
+走了，管理员拿着一张改不动的工单。
+
+`personal_email` **不加唯一约束**：占位判定的权威在 `user` / `identities` 两表，工单表再存
+一份判据只会漂移。
+
+### 列宽与 V010
+
+字段用 `TEXT` 而非 `VARCHAR(n)`：长度规则在 `internal/validate` 的常量里，两条建号路径共读
+同一份，schema 再写一份就多一处 ALTER TABLE 必须找到的副本。但**服务层必须按 V001 列宽校验
+那些将被拷进 `user` 表的字段**（`name` 255 / `phone_number` 20 / `qq_number` 20 /
+`student_id` 50 / `major` 50 / `login_email` 255），否则工单会收下一个审批时必定失败的值。
+
+服务层还有两条**比管理员建号更严**的规则，都来自 V010 的生成列
+[`profile_needs_completion`](#user-用户表)：
+
+- `major` 必填（管理员建号允许为空）
+- `name` 不能等于 `student_id`（大小写与空白归一后比较，复用 `validate.IncompleteProfileFields`
+  而非本地重写，以保证与 SQL 判据同源）
+
+放宽任一条，审批建出的新号一登录就被前端赶去资料补全页——为了校友从未被要求填写的字段。
+集成测试对这条判据做了正反两向断言：通过的工单建出的账号 `profile_needs_completion` 必须
+为 false，而 `major` 为空的工单建出的必须为 true（否则第一条断言是空转）。
+
+### 唯一索引为何是部分的
+
+`uq_alumni_requests_pending_student` 只约束 `status = 'pending'`：同一学号同时只允许一条
+待审申请（防重复刷屏），但**已驳回的不占名额**——修正信息后重新提交是这个流程的核心前提。
+
+索引键是 `lower(btrim(student_id))`，因为上一代数据库的导入同时产出了 `B24040525` 与
+`b24040525`，大小写敏感的索引会漏掉一半。
+
+### 审批事务
+
+审批是**一个事务**做三件事：锁工单行（`SELECT ... FOR UPDATE`）→ 建号 → 回写审批结果。
+拆开会产生两种都很糟的中间态：
+
+- 账号已建、工单仍 pending：邀请第二次审批，而重试会撞上第一次插入的学号唯一索引——管理员
+  看到「学号已被占用」，占用者正是系统自己刚建的账号
+- 工单已判、账号没建：校友拿着一封通过邮件，去登录一个不存在的账号
+
+行锁是控制台按钮被双击时的保障：第二个事务阻塞到第一个提交，然后读到 `status = 'approved'`，
+返回 42204 而不是再建一次。事务体在 repository 层（`createAdminUserInTransaction` 从
+`CreateAdminUser` 抽出后复用），服务层传入映射回调——本仓库 `internal/service` 零 gorm
+import，把事务交给服务层会破掉分层。
+
+任一步失败整体回滚，工单留 `pending`，管理员可改字段重试。
+
+### 通知投递状态
+
+| 列 | 语义 |
+|----|------|
+| `notify_attempts` | 每次投递**之前**递增 |
+| `notified_at` | 仅在 SMTP 接受后写入 |
+
+顺序是刻意的：进程在发信中途被杀时，`notify_attempts` 已增而 `notified_at` 仍为 NULL，读作
+「试过但未确认送达」——这正是真实状态。事后才递增会丢掉尝试痕迹，控制台会把这条工单显示成
+从未处理过。
+
+`idx_alumni_requests_pending_notification` 是部分索引，只收「已处理但未通知」的行：健康工单
+的 `notified_at` 非空，永不进索引。控制台按 `notified=false` 查的就是这份积压。
+
+通知状态之所以入库而不是只靠 channel 与日志：通过邮件是校友唯一的「去 `/reset` 设置密码」
+指引，丢了等于建号白做，而队列长度与 slog 都不可查询。配套有手动重发端点。
+
+### 其他约定
+
+- `created_user_id` / `reviewed_by` 用 `ON DELETE SET NULL`：账号被注销后工单历史仍需保留
+- `client_ip` **不出现在任何响应里**：留作滥用追溯与限流取证，审批工单用不到它，把一个可
+  关联到具体个人的网络标识复制到读接口上只是扩大暴露面
+- `updated_at` 复用 V001 的 `update_updated_at_column()`，不新建函数；`down` 迁移**不得**
+  drop 它——那是 V001 的，还有四张表在用
+- `college` 直接复用 `college_enum`，不新造枚举
+
 ## oauth_grants 授权记录
 
 V009 新增。记录用户在同意页**授权过哪些应用**（consent history），是「已授权应用」列表
@@ -840,6 +983,7 @@ oauth_authorizations.family_id
 | `oauth_access_tokens` | 已过期元数据 | `expires_at` + 24h | 远宽于默认 1h 的 access token TTL，且校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的配置。原因：中间件对「JTI 不存在」与「已撤销」返回同一个 401，若在 JWT 仍处于 `exp` 内时删掉元数据，仅仅过期的 token 会被呈现为已撤销——客户端读到的是被强制登出，而不是该去刷新。JWT 校验器没有 leeway 可依赖，这些行又很小，窗口宽一点很便宜 |
 | `oauth_refresh_tokens` | 已撤销且 `sequence > 0`；或整个 family 已死（无任何未撤销且未过期的成员） | `expires_at` + 24h | 两个分支：轮换掉的行（`revoked_at` 已设）由 V001 的部分索引服务；死族分支还包括从未旋转的 sequence-0 行（`revoked_at IS NULL`），其外层 `expires_at` 谓词由 **V008** 的 `idx_oauth_refresh_tokens_expires_at_live` 服务，族内探测用 `family_id` 索引。**必须保留每个存活 family 的 sequence-0 行**：`FindFamilyOriginCreatedAt` 靠它给 ID Token 的 `auth_time` 定时间，而该行从首次轮换起就带有 `revoked_at`。只要 family 还在轮换，它会活得比自己的 `expires_at` 更久；删掉会让刷新流程撤销整个 family 并返回 500——即用户被强制登出。每个 family 长期留一行，是换取 `auth_time` 准确的成本 |
 | `audit_logs` | 超过保留期 | `created_at` + 90d | 90 天（PRD §9）是**默认值**：审计日志在这里属运维用途而非合规强制，可调大以保留更多历史，也可收紧至 30 天下限；低于下限启动时拒绝，避免误配到「事故排查时相关记录已被删」的程度 |
+| `alumni_requests` | 已审批（approved/rejected）且超过保留期 | `reviewed_at` + 180d | **pending 永不清理**，无论多久：三天处理时限只是前端文案，后端不做硬限制，删掉一条未审的申请是丢掉某人的请求而不是让它过期。窗口从 `reviewed_at` 起算而非 `created_at`——保留期的钟在「被决定」时才开始走，未审的没有起点。谓词显式带 `reviewed_at IS NOT NULL`：有状态但无时间戳的行否则会被拿去和一个它无值可比的 cutoff 比较。部分索引 `idx_alumni_requests_pending_notification` 服务的是通知积压视图，不是本清理 |
 
 `oauth_grants` 不在此列，且**刻意永不清理**：授权记录是长效 consent history（当前态，历史
 审计在 `audit_logs`），不是一次性凭据。把它加进这张表会重新制造 V009 之前「已授权应用列表
@@ -855,7 +999,7 @@ oauth_authorizations.family_id
 
 ### 建表顺序
 
-1. 枚举类型（7 个 CREATE TYPE）
+1. 枚举类型（8 个 CREATE TYPE，含 V011 的 alumni_request_status_enum）
 
 2. 三个工具函数
 
@@ -880,6 +1024,8 @@ oauth_authorizations.family_id
 12. `oauth_grants` 表（V009，FK → user, oauth_clients）
 
 12.1 `sl_profile_is_blank()` 函数与 `"user".profile_needs_completion` 生成列（V010，生成列依赖该函数，顺序不可反；`down` 时先删列再删函数）
+
+12.2 `alumni_requests` 表（V011，FK → user ×2，均 ON DELETE SET NULL；复用 V001 的 `update_updated_at_column()`，`down` 时不得 drop 该函数）
 
 13. 所有索引
 

@@ -83,23 +83,45 @@ func (r *UserRepository) CreateAdminUser(
 	}
 
 	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		if err := transaction.Create(user).Error; err != nil {
-			return fmt.Errorf("create admin user: %w", err)
-		}
-		profile.UserID = user.ID
-		if err := transaction.Create(profile).Error; err != nil {
-			return fmt.Errorf("create admin profile: %w", err)
-		}
-		if identity != nil {
-			// The owner row does not exist until the INSERT above; take the ID from
-			// the persisted user rather than trusting a caller-computed one.
-			identity.UserID = user.ID
-			if err := transaction.Create(identity).Error; err != nil {
-				return fmt.Errorf("create admin user identity: %w", err)
-			}
-		}
-		return nil
+		return createAdminUserInTransaction(transaction, user, profile, identity)
 	})
+}
+
+// createAdminUserInTransaction appends an account, its profile and an optional
+// other_mail identity to an existing transaction.
+//
+// Extracted from CreateAdminUser because approving an alumni account request has
+// to provision the account and write the ticket's verdict in one transaction: a
+// committed account with a still-pending ticket would let a reviewer approve
+// again, and the retry would collide with the student ID it just inserted.
+//
+// The transaction is opened by the repository rather than passed in from a
+// service. Services in this codebase never hold a *gorm.DB - handing them one to
+// share would put transaction lifetime in the layer that is supposed to be
+// unaware of it. This mirrors createTokenPairInTransaction and
+// revokeFamilyInTransaction, which exist for the same reason.
+func createAdminUserInTransaction(
+	transaction *gorm.DB,
+	user *model.User,
+	profile *model.Profile,
+	identity *model.Identity,
+) error {
+	if err := transaction.Create(user).Error; err != nil {
+		return fmt.Errorf("create admin user: %w", err)
+	}
+	profile.UserID = user.ID
+	if err := transaction.Create(profile).Error; err != nil {
+		return fmt.Errorf("create admin profile: %w", err)
+	}
+	if identity != nil {
+		// The owner row does not exist until the INSERT above; take the ID from
+		// the persisted user rather than trusting a caller-computed one.
+		identity.UserID = user.ID
+		if err := transaction.Create(identity).Error; err != nil {
+			return fmt.Errorf("create admin user identity: %w", err)
+		}
+	}
+	return nil
 }
 
 // CreateRegistration creates an account, its profile and its initial session in

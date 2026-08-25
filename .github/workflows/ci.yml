@@ -52,7 +52,11 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Wider than the go test -timeout below, so the job's own ceiling is not what
+    # kills a run that is merely slow. When the two are close, a timeout gives no
+    # test output at all — the runner cancels the step and the panic dump that
+    # names the stuck test never gets written.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -66,7 +70,20 @@ jobs:
         # -race/-cover on the same package is a known source of linker
         # "fingerprint mismatch" flake; tests don't need profile-guided
         # optimization (it only shapes the production binary).
-        run: go test -race -shuffle=on -pgo=off -coverprofile=coverage.out -covermode=atomic ./...
+        #
+        # -timeout 25m raises go test's per-package default of 10 minutes.
+        # internal/repository provisions a PostgreSQL container per test through
+        # Testcontainers and is already past that default on a developer machine;
+        # the integration suites in internal/migration and the handler packages
+        # are the same shape. A default-timeout failure is especially misleading
+        # here: the panic reports "test timed out" with no `--- FAIL` line, so it
+        # reads as a hung test rather than as a package that needed more wall
+        # clock than Go allows by default.
+        #
+        # This is a ceiling, not a budget. If a package genuinely deadlocks, the
+        # dump still arrives — 15 minutes later than before, but with the
+        # goroutine trace that identifies it.
+        run: go test -race -shuffle=on -pgo=off -timeout 25m -coverprofile=coverage.out -covermode=atomic ./...
 
   build:
     name: build

@@ -2,26 +2,10 @@ package adminuser
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
-
-// initialPasswordBytes is the length of the random buffer used for the first
-// password. 24 bytes of raw base64url output 32 characters; the plaintext is
-// returned once in CreateUserResult and not stored anywhere else.
-const initialPasswordBytes = 24
-
-// generateInitialPassword returns a new random password encoded with raw
-// base64url so it needs no URL escaping and is easy to read.
-func generateInitialPassword() (string, error) {
-	buffer := make([]byte, initialPasswordBytes)
-	if _, err := rand.Read(buffer); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buffer), nil
-}
 
 // CreateUser creates an account and optionally binds a personal email as an
 // other_mail identity in the same transaction. The initial password is generated
@@ -53,7 +37,7 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 		}
 	}
 
-	password, err := generateInitialPassword()
+	password, err := auth.GenerateInitialPassword()
 	if err != nil {
 		internalErr := newError(ErrInternal, "生成初始密码失败", err)
 		s.auditCreate(ctx, input, 0, false, errorCode(internalErr), attemptedCreateDetail(input))

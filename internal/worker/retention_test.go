@@ -126,6 +126,10 @@ func (s *fakeRetentionStore) DeleteExpiredAuditLogs(_ context.Context, cutoff ti
 	return s.del("audit_logs", cutoff, batchSize)
 }
 
+func (s *fakeRetentionStore) DeleteExpiredAlumniRequests(_ context.Context, cutoff time.Time, batchSize int) (int64, error) {
+	return s.del("alumni_requests", cutoff, batchSize)
+}
+
 func testRetention(store RetentionStore, now time.Time) Retention {
 	return Retention{
 		Store:            store,
@@ -135,6 +139,7 @@ func testRetention(store RetentionStore, now time.Time) Retention {
 		AccessTokenAge:   24 * time.Hour,
 		RefreshTokenAge:  48 * time.Hour,
 		AuditLogAge:      90 * 24 * time.Hour,
+		AlumniRequestAge: 180 * 24 * time.Hour,
 		Clock:            fixedClock{value: now},
 	}
 }
@@ -151,6 +156,7 @@ func TestRetentionSweepUsesPerTableCutoffs(t *testing.T) {
 		"oauth_access_tokens":  now.Add(-24 * time.Hour),
 		"oauth_refresh_tokens": now.Add(-48 * time.Hour),
 		"audit_logs":           now.Add(-90 * 24 * time.Hour),
+		"alumni_requests":      now.Add(-180 * 24 * time.Hour),
 	}
 	calls := store.snapshot()
 	if len(calls) != len(want) {

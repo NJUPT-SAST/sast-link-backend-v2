@@ -83,15 +83,23 @@ CI 中的 lint job 必须在合入前通过。建议推送前本地先跑，避�
 ```powershell
 # 全量测试（竞态检测 + 覆盖率）
 # -flag=value 必须加引号：PowerShell 会在 = 处切开，go test 会把 .out 当包路径
-go test -race -shuffle=on "-coverprofile=coverage.out" "-covermode=atomic" ./...
+go test -race -shuffle=on -timeout 25m "-coverprofile=coverage.out" "-covermode=atomic" ./...
 
 # 单包测试
 go test -race -shuffle=on ./path/to/package -run TestName
+
+# 只跑集成测试较重的包时，同样要放宽超时
+go test -race -timeout 25m ./internal/repository/
 ```
 
 CI 中所有测试均携带：
 - `-race` — 数据竞争检测。本项目 token 刷新、设备管理、限流等均为并发场景，此项不可省略
 - `-shuffle=on` — 随机化测试执行顺序，暴露测试间隐式依赖
+- `-timeout 25m` — 抬高 `go test` **每包默认 10 分钟**的上限。`internal/repository` 通过 Testcontainers 为每个用例起一个 PostgreSQL 容器，已超过该默认值；`internal/migration` 与几个 handler 包同理。这类失败极具误导性：报的是 `panic: test timed out`，**没有任何 `--- FAIL: TestXxx` 行**，看起来像某条测试挂死，实际只是整包耗时超过 Go 的默认允许。判断方法——只有 `test timed out` 而无 `--- FAIL` 行时，先怀疑超时而非断言失败
+
+> 写新集成测试时请**共用一个 database**（一个 `setupDatabase` + 多个 `t.Run` 子测试），
+> 不要每个用例起一个容器。共用后断言不能再数全表行数：改为按本子测试独有的标记过滤，
+> 或断言「哪些行存活」而非「删了几行」。
 
 本地执行 `-race` 需要启用 CGO 并安装可用的 C compiler；完整 integration tests 还要求 Docker provider 健康。Windows 环境不满足这些前置条件时，可在具备 Docker socket 与 C toolchain 的 Linux/WSL 环境执行，但不能用非 race 测试代替合入验证。
 

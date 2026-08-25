@@ -15,6 +15,13 @@ const (
 	// other limiter; a dedicated 40012 is never emitted for the same reason as the
 	// two codes above.
 	CodeEmailDomainNotAllowed = 40020 // 邮箱域名不允许
+	// CodeCaptchaFailed is a human-verification failure on an unauthenticated write
+	// endpoint: a missing or malformed Turnstile token, a token the siteverify API
+	// rejects, or one issued for a different action. It is distinct from
+	// CodeAlumniRequestUnavailable, which reports that the check could not be
+	// performed at all - telling a submitter they failed a challenge when the channel
+	// is simply misconfigured sends them to re-solve a widget forever.
+	CodeCaptchaFailed = 40021 // 人机校验未通过
 
 	CodeUnauthenticated       = 40100 // 未登录
 	CodeAccessTokenExpired    = 40101 // Access Token 已过期
@@ -39,6 +46,11 @@ const (
 	CodeNotFound       = 40400 // 资源不存在
 	CodeUserNotFound   = 40401 // 用户不存在
 	CodeClientNotFound = 40402 // OAuth 客户端不存在
+	// CodeAlumniRequestNotFound is a review action naming an account-request ticket
+	// that does not exist. Separate from CodeUserNotFound because the console's
+	// ticket queue and its user list are different resources, and a reviewer needs to
+	// know which one the id failed to match.
+	CodeAlumniRequestNotFound = 40403 // 建号申请不存在
 
 	CodeConflict               = 40900 // 资源已存在
 	CodeEmailAlreadyRegistered = 40901 // 邮箱已被注册
@@ -46,11 +58,28 @@ const (
 	CodeIdentityOccupied       = 40903 // 第三方账号已被其他用户绑定
 	CodeIdentityAlreadyBound   = 40904 // 该类型账号已绑定
 	CodeIdentityLimitReached   = 40905 // 第三方邮箱绑定数量已达上限
+	// CodeAlumniRequestPending reports the partial unique index on alumni_requests:
+	// one student ID may hold at most one ticket awaiting review. A resubmission
+	// after a rejection is allowed, so this is not "you already applied" but "your
+	// application is still open".
+	//
+	// An occupied email on that flow deliberately reuses CodeEmailAlreadyRegistered
+	// (40901) rather than taking a code of its own: the outcome a client must handle
+	// is identical, and errcode's rule is that the constant set is exactly what
+	// clients can observe - two codes for one observable outcome is drift waiting to
+	// happen.
+	CodeAlumniRequestPending = 40906 // 该学号已有待审申请
 
 	CodeValidationFailed  = 42200 // 业务校验失败
 	CodePasswordTooShort  = 42201 // 密码长度不足
 	CodePasswordUnchanged = 42202 // 新旧密码相同
 	CodeAvatarRejected    = 42203 // 头像未通过内容审核
+	// CodeAlumniRequestReviewed is a second review of a ticket that already carries a
+	// verdict. 422 rather than 409: the ticket exists and the request is well formed,
+	// the transition is what is refused. It is what a double-clicked approve button
+	// sees, which is why the approval transaction locks the row rather than trusting
+	// a prior read.
+	CodeAlumniRequestReviewed = 42204 // 申请已被处理
 
 	CodeRateLimited = 42900 // 请求过于频繁
 
@@ -59,4 +88,11 @@ const (
 	CodeObjectUploadFailed    = 50002 // 对象存储上传失败
 	CodeDatabaseFailed        = 50003 // 数据库错误
 	CodeDependencyUnavailable = 50300 // 依赖服务暂不可用
+	// CodeAlumniRequestUnavailable means the account-request channel cannot accept a
+	// submission because its human-verification dependency is absent or unreachable:
+	// no Turnstile secret configured, or siteverify timing out. The endpoint refuses
+	// rather than admitting the request unverified - an unauthenticated write path
+	// with the challenge switched off has only the rate limiter left. Clients use it
+	// to hide the entry point instead of offering a form that cannot succeed.
+	CodeAlumniRequestUnavailable = 50301 // 申请通道暂不可用
 )

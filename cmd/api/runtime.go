@@ -4,15 +4,18 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	cosadapter "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/cos"
+	alumniredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/alumni"
 	oauthredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/oauth"
 	oauthloginredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/oauthlogin"
 	sessionredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/session"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/turnstile"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
@@ -24,12 +27,15 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminclient"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest"
+	alumnirequestworker "github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest/worker"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauthlogin"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	sessionworker "github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session/worker"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/alumnihandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
@@ -42,6 +48,7 @@ type sessionRuntime struct {
 	OAuth      oauthhandler.Handler
 	OAuthLogin oauthloginhandler.Handler
 	Admin      adminhandler.Handler
+	Alumni     alumnihandler.Handler
 	Auth       middleware.Authenticator
 	Workers    []backgroundWorker
 }
@@ -407,6 +414,44 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Passwords:       passwordHasher,
 	}
 
+	// The account-request intake. Its captcha verifier is never nil: without a
+	// configured secret the composition root injects one that refuses everything,
+	// because a nil dependency has to be guarded at each call site and the failure
+	// mode of a missed guard is an unverified anonymous write.
+	var captchaVerifier alumnirequest.CaptchaVerifier = turnstile.Unavailable{}
+	if strings.TrimSpace(cfg.TurnstileSecret) != "" {
+		verifier, err := turnstile.New(turnstile.Config{
+			Secret:         cfg.TurnstileSecret,
+			ExpectedAction: cfg.TurnstileAction,
+			Timeout:        cfg.TurnstileTimeout,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("construct Turnstile verifier: %w", err)
+		}
+		captchaVerifier = verifier
+	}
+	alumniRequests := repository.NewAlumniRequest(database)
+	alumniNotifier := alumnirequestworker.New(alumniRequests, emailer,
+		cfg.AlumniResetURL, cfg.AlumniSupportEmail)
+	alumniService := alumnirequest.Service{
+		Requests:  alumniRequests,
+		Users:     users,
+		Audit:     audit,
+		Passwords: passwordHasher,
+		Captcha:   captchaVerifier,
+		Limiter: alumniredis.EndpointLimiter{
+			Limiter: internalredis.FixedWindowLimiter{
+				Client: rdb,
+				Keys:   keys,
+				Limit:  cfg.RateLimitAlumniRequestRPM,
+				Window: cfg.RateLimitAlumniRequestWindow,
+			},
+		},
+		SubmitRateLimit: cfg.RateLimitAlumniRequestRPM,
+		Notifier:        alumniNotifier,
+		ConsoleClientID: cfg.InternalOAuthClientID,
+	}
+
 	adminClientService := adminclient.Service{
 		Clients:   clients,
 		Blacklist: oauthredis.BlacklistStore{Store: store},
@@ -462,10 +507,12 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Users:     adminUserService,
 			AuditLogs: adminUserService,
 		},
-		Auth: authenticator,
+		Alumni: alumnihandler.Handler{Requests: alumniService},
+		Auth:   authenticator,
 		Workers: []backgroundWorker{
 			sessionworker.TokenBlacklist{Outbox: outbox, AuthState: blacklist},
 			forgotPasswords,
+			alumniNotifier,
 			worker.Retention{
 				Store:            repository.NewRetention(database),
 				Interval:         cfg.RetentionInterval,
@@ -474,6 +521,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 				AccessTokenAge:   cfg.RetentionAccessTokenAge,
 				RefreshTokenAge:  cfg.RetentionRefreshTokenAge,
 				AuditLogAge:      cfg.RetentionAuditLogAge,
+				AlumniRequestAge: cfg.RetentionAlumniRequestAge,
 			},
 		},
 	}, nil

@@ -21,6 +21,7 @@ import (
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/alumnihandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
@@ -114,6 +115,17 @@ func run() error {
 		RequireWriteScope: runtime.Auth.RequireDelegatedScope(adminhandler.WriteScopes...),
 		RequireAdmin:      runtime.Auth.RequireRole(adminhandler.AdminRole),
 		RequireReader:     runtime.Auth.RequireRole(adminhandler.ReaderRoles...),
+	})
+	// The account-request routes mount their own /admin group behind the same gates.
+	// POST /alumni-requests is deliberately outside it: the applicants are people who
+	// have no account by definition, so its protection is the service's Turnstile
+	// check and rate limiter rather than a middleware.
+	alumnihandler.RegisterRoutes(router, runtime.Alumni, alumnihandler.Gates{
+		RequireAuth:       runtime.Auth.RequireAdminAuth(),
+		RequireReadScope:  runtime.Auth.RequireDelegatedScope(alumnihandler.ReadScopes...),
+		RequireWriteScope: runtime.Auth.RequireDelegatedScope(alumnihandler.WriteScopes...),
+		RequireAdmin:      runtime.Auth.RequireRole(alumnihandler.AdminRole),
+		RequireReader:     runtime.Auth.RequireRole(alumnihandler.ReaderRoles...),
 	})
 
 	slog.Info("server starting", slog.String("port", cfg.AppPort))
