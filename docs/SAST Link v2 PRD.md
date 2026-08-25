@@ -150,7 +150,7 @@ GET /oauth/lark/callback?code=...&state=...
 2. 302 重定向至注册补全页 `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=xxx&name=xxx&avatar=xxx`
 3. 用户在注册补全页完成注册，`POST /auth/register` 时传入 `registration_state` + `oauth_state`（两者均从回调重定向的 URL 取）
 
-   > 实现修正：`oauth_state` 由回调一并下发，而非「前端在跳转链中保留」。发起登录的页面在跳转到 provider 时已被卸载，回调是一次全新的顶层导航，前端没有任何途径仍然持有那个 state（本服务不设 cookie）。这不削弱双重绑定：其目的是让单独泄露的 `registration_state`（被分享的 URL、日志、referrer）不可兑换，而能读到这次回调重定向的攻击者本就同时掌握两个值。
+   > `oauth_state` 由回调一并下发：发起登录的页面在跳转到 provider 时已被卸载，回调是一次全新的顶层导航，前端没有任何途径仍然持有那个 state（本服务不设 cookie）。这不削弱双重绑定：其目的是让单独泄露的 `registration_state`（被分享的 URL、日志、referrer）不可兑换，而能读到这次回调重定向的攻击者本就同时掌握两个值。
 4. 服务端 GetDel 消费 `registration_state`，校验其内的 `oauth_state` 与传入的 `oauth_state` 匹配 → 注册成功 + 自动创建 identities 绑定
 
 **安全约束 — 防账号接管**：

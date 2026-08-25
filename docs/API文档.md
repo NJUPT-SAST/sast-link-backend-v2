@@ -607,7 +607,7 @@ GET /oauth/lark/callback?code=...&state=...
 
 用 OAuth 回调中的一次性 `login_code` 换取 token。
 
-回调本身不返回 Token：它是一个到前端的 302，Token 出现在查询串里会进入浏览器历史与 `Referer` 头，因此改为投递一次性 `login_code`（60s），由本端点兑换。本端点**不需要**登录态——兑换 code 正是取得会话的方式。
+回调本身不返回 Token：它是一个到前端的 302，Token 出现在查询串里会进入浏览器历史与 `Referer` 头，因此投递一次性 `login_code`（60s），由本端点兑换。本端点**不需要**登录态——兑换 code 正是取得会话的方式。
 
 `login_code` 为 GetDel 一次性消费，并发兑换同一 code 只有一个成功。账号状态在兑换时**重新校验**：code 有 60s 寿命，这期间被注销的账号不得凭它取得会话，返回 `40301`。
 
@@ -2029,7 +2029,7 @@ POST /admin/oauth-clients
 **说明**:
 
 - `first_party` 不返回 `client_secret`：它是公开客户端，仅靠 PKCE。PKCE 对 `third_party` 同样强制，两者的差别只是后者还需再带 `client_secret`。
-- `scopes` 对两类客户端一律生效：注册 `["openid"]` 的客户端请求 `profile` 会被 `/oauth/authorize` 拒绝，需要新增 scope 就得改注册（留下 `update_oauth_client` 审计行）。第一方曾被豁免此校验，已移除。
+- `scopes` 对两类客户端一律生效：注册 `["openid"]` 的客户端请求 `profile` 会被 `/oauth/authorize` 拒绝，需要新增 scope 就得改注册（留下 `update_oauth_client` 审计行）。
   - 其他边界：`client_id` 由服务端随机生成，无法冒充内置客户端；`first_party` token 的 `azp` 不等于 `INTERNAL_OAUTH_CLIENT_ID`，因此**打不到内部接口**（`/user/*`、`/auth/*`）；同意页展示的是服务端暂存的 scope，不是同意 URL 里的值。
 - `client_secret` 只在本次响应中出现一次，服务端仅存哈希，事后无法再取回。丢失只能重新注册客户端。
 - `client_id` 由服务端生成，请求中不接受该字段。传入 `client_id`、`client_secret` 或 `id` 会返回 `400`，而非被忽略。
