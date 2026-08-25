@@ -81,10 +81,9 @@ func run() error {
 		return fmt.Errorf("create router: %w", err)
 	}
 	// pprof is fail-closed: exposed only in an explicit development environment
-	// or when PPROF_ENABLED is set. The old `!= "production"` gate left it open
-	// whenever APP_ENV was unset (the default), letting an unauthenticated caller
-	// trigger CPU sampling or dump goroutine stacks on a production box that
-	// merely forgot the env var.
+	// or when PPROF_ENABLED is set. An unset APP_ENV (the default) never enables
+	// it, so a production box that merely forgot its configuration cannot be
+	// CPU-sampled or stack-dumped by an unauthenticated caller.
 	if cfg.AppEnv == "development" || cfg.EnablePprof {
 		registerProfiling(router)
 	}

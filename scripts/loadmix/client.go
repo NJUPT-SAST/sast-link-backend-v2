@@ -12,9 +12,6 @@ import (
 	"time"
 )
 
-// apiClient is a keep-alive HTTP client for the SAST Link API. Connection reuse
-// matters: per-request TCP setup at thousands of requests a second would throttle
-// the driver, not the service under test.
 // apiError carries the HTTP status of a non-2xx response so the driver can count
 // 429 (rate limit) separately from 401 (auth) in its error report.
 type apiError struct {
@@ -28,6 +25,9 @@ func httpError(status int, data []byte) *apiError {
 	return &apiError{Status: status, Body: truncate(data)}
 }
 
+// apiClient is a keep-alive HTTP client for the SAST Link API. Connection reuse
+// matters: per-request TCP setup at thousands of requests a second would throttle
+// the driver, not the service under test.
 type apiClient struct {
 	base string
 	http *http.Client

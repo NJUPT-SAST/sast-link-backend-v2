@@ -239,9 +239,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	}
 	authenticator := middleware.Authenticator{
 		JWT: jwtManager,
-		// The auth-state cache replaces the old per-request blacklist GET + DB query:
-		// authenticated requests serve their revocation/role state from Redis for a
-		// short TTL, and the revocation paths delete the entry. Fail-open to the DB.
+		// The auth-state cache serves revocation/role state from Redis for a short
+		// TTL on the common path; the revocation paths delete the entry, and a
+		// cache miss or error falls back to the authoritative DB check (fail-open).
 		Tokens:         tokens,
 		AuthStateCache: store,
 		AuthStateTTL:   cfg.AuthStateCacheTTL,
