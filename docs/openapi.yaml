@@ -2068,7 +2068,7 @@ paths:
             default: 1
         - name: page_size
           in: query
-          description: 每页条数，默认 20，最大 100（超出按 100 截断）
+          description: 每页条数，默认 20，最大 100（超出上限返回 400）
           required: false
           schema:
             type: integer
@@ -2862,7 +2862,7 @@ paths:
             default: 1
         - name: page_size
           in: query
-          description: 每页条数，默认 50，最大 100（超出按 100 截断）
+          description: 每页条数，默认 50，最大 100（超出上限返回 400）
           required: false
           schema:
             type: integer
@@ -3123,6 +3123,7 @@ paths:
             default: 1
         - name: page_size
           in: query
+          description: 每页条数，默认 20，最大 100（超出上限返回 400）
           required: false
           schema:
             type: integer
@@ -3238,6 +3239,7 @@ paths:
             format: int64
       requestBody:
         required: false
+        description: 空请求体或空对象。不允许额外字段或 trailing JSON。
         content:
           application/json:
             schema:
@@ -3397,6 +3399,7 @@ paths:
             format: int64
       requestBody:
         required: false
+        description: 空请求体或空对象。不允许额外字段或 trailing JSON。
         content:
           application/json:
             schema:

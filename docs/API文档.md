@@ -1592,7 +1592,7 @@ DELETE /oauth/grants/:client_id
 >
 > 1. **`PUT /admin/users/:id` 不接受 `state: is_deleted`**，返回 `422`。注销必须走 `DELETE`，恢复必须走 `PUT .../restore` —— 只有这两条路径会在同一事务内撤销该用户的全部 Token。若允许 PUT 直接置为 `is_deleted`，会留下「账号已注销但 Refresh Token 仍可换新 Access Token」的窗口。对已注销用户执行 PUT 同样返回 `422`，需先恢复。
 > 2. **`email_type` 只能与 `login_email` 一同提交，且必须与其域名一致**，否则返回 `400`。V001 触发器 `auto_set_email_type` 仅在 `login_email` 出现在 UPDATE 列中时才重算该字段，单独提交 `email_type` 会写入与邮箱域名矛盾的值。
-> 3. **`page_size` 上限统一为 100**（含 `/admin/audit-logs`，契约未定上限）。超出上限按 100 截断，不报错。`page` / `page_size` 传非正整数或非数字返回 `400`，不静默回落默认值。`page` 另有上限 2^30：偏移量由 `page × page_size` 算出，`page` 过大时该乘积会整数溢出，`4611686018427387905` 恰好绕回 0，会在回显所请求页码的同时返回第一页——溢出按 `400` 拒绝而非截断，避免答非所问。
+> 3. **`page_size` 上限统一为 100**（含 `/admin/audit-logs` 与 `/admin/alumni-requests`）。超出上限返回 `400`，不截断——静默截断会让调用方拿到的 `page_size` 与请求值对不上。`page` / `page_size` 传非正整数或非数字同样返回 `400`，不静默回落默认值。`page` 另有上限 2^30：偏移量由 `page × page_size` 算出，`page` 过大时该乘积会整数溢出，`4611686018427387905` 会绕回 0，结果回显了请求的页码却返回第一页；溢出按 `400` 拒绝，而不是截断。
 > 4. **`keyword` 长度上限 255**（所匹配列的最宽列宽）。超长返回 `400`：该参数会展开为三个无法走索引的 `ILIKE` 加一次全表 `COUNT(*)`，且本组端点未接入限流。
 > 5. **批量接口单次上限**：`GET /admin/users/batch` 的 `ids` 最多 100 个、`PUT /admin/users` 的 `ids` 最多 500 个，超出返回 `400`（不截断——静默截断会让调用方拿到的结果无法与其输入对齐）。
 >
@@ -2386,7 +2386,7 @@ GET /admin/alumni-requests?status=&notified=&keyword=&page=&page_size=
 | `status` | `pending` / `approved` / `rejected`；其他取值返回 `40000`，不静默忽略 |
 | `notified` | `true` / `false`，按通知投递状态筛选；其他取值返回 `40000` |
 | `keyword` | 匹配姓名、学号、两个邮箱，≤ 255 字符 |
-| `page` / `page_size` | `page_size` 上限 100，缺省 20 |
+| `page` / `page_size` | `page_size` 上限 100，缺省 20；超上限或非法页码返回 `40000` |
 
 **Response** `200`:
 
@@ -2454,7 +2454,7 @@ POST /admin/alumni-requests/:id/approve
 
 **Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
 
-**Request**: `{}`（角色与状态用后端默认：`member` / `retired_sast`，工单无法请求角色）
+**Request**: 空 body 或 `{}`（角色与状态用后端默认：`member` / `retired_sast`，工单无法请求角色）。body 带字段、有 trailing JSON，或 Content-Type 不是 `application/json`，返回 `40000`。
 
 **Response** `200`:
 
@@ -2508,7 +2508,7 @@ POST /admin/alumni-requests/:id/resend-notification
 
 **Headers**: 同 §6.13.4
 
-**Request**: `{}`
+**Request**: 空 body 或 `{}`。body 带字段、有 trailing JSON，或 Content-Type 不是 `application/json`，返回 `40000`。
 
 **Response** `200`: `{ "code": 0, "message": "ok", "data": { "notify_enqueued": true } }`
 

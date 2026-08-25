@@ -123,9 +123,16 @@ func newRouter(service *stubService) *gin.Engine {
 
 func doJSON(t *testing.T, router *gin.Engine, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return doRequest(t, router, method, path, body, "application/json")
+}
+
+func doRequest(t *testing.T, router *gin.Engine, method, path, body, contentType string) *httptest.ResponseRecorder {
+	t.Helper()
 	request := httptest.NewRequestWithContext(context.Background(), method, path,
 		bytes.NewBufferString(body))
-	request.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
+	}
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 	return recorder
@@ -283,6 +290,26 @@ func TestListForwardsFilters(t *testing.T) {
 	}
 }
 
+// A page_size above the contract maximum or an unparseable page must be rejected
+// rather than silently adjusted, so the caller knows the request failed.
+func TestListRejectsOutOfBoundsPaging(t *testing.T) {
+	t.Parallel()
+
+	for _, query := range []string{
+		"page_size=101",
+		"page=abc", "page=0", "page=-1", "page_size=abc", "page_size=0",
+		"page=4611686018427387905",
+	} {
+		t.Run(query, func(t *testing.T) {
+			recorder := doJSON(t, newRouter(&stubService{}), http.MethodGet,
+				"/admin/alumni-requests?"+query, "")
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for %q", recorder.Code, query)
+			}
+		})
+	}
+}
+
 // A mistyped notified=ture must not be read as false: that would return the
 // opposite of what was asked and look like an empty backlog.
 func TestListRejectsAnUnparseableNotifiedFilter(t *testing.T) {
@@ -324,6 +351,66 @@ func TestApproveTakesTheReviewerFromThePrincipal(t *testing.T) {
 	}
 	if service.reviewInput.RequestID != 5 {
 		t.Fatalf("request id = %d, want 5", service.reviewInput.RequestID)
+	}
+}
+
+// Approve and resend-notification accept only an empty body or an empty JSON
+// object. Anything else — unknown fields, trailing values, a non-JSON content
+// type, or a non-empty object — is a bad request.
+func TestReviewActionsRejectUnexpectedBodies(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		path        string
+		body        string
+		contentType string
+	}{
+		{"approve unknown field", "/admin/alumni-requests/5/approve", `{"extra":1}`, "application/json"},
+		{"approve trailing value", "/admin/alumni-requests/5/approve", `{} {}`, "application/json"},
+		{"approve non-empty object", "/admin/alumni-requests/5/approve", `{"foo":"bar"}`, "application/json"},
+		{"approve text body", "/admin/alumni-requests/5/approve", "ok", "text/plain"},
+		{"approve no content type", "/admin/alumni-requests/5/approve", `{}`, ""},
+		{"resend unknown field", "/admin/alumni-requests/5/resend-notification", `{"extra":1}`, "application/json"},
+		{"resend trailing value", "/admin/alumni-requests/5/resend-notification", `{} {}`, "application/json"},
+		{"reject unknown field", "/admin/alumni-requests/5/reject", `{"extra":1}`, "application/json"},
+		{"reject trailing value", "/admin/alumni-requests/5/reject", `{} {}`, "application/json"},
+		{"reject text body", "/admin/alumni-requests/5/reject", "ok", "text/plain"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := doRequest(t, newRouter(&stubService{}), http.MethodPost,
+				tc.path, tc.body, tc.contentType)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (%s)", recorder.Code, recorder.Body)
+			}
+		})
+	}
+}
+
+// An empty body and an empty object must both be accepted for actions that carry
+// no fields. A missing Content-Type with an empty body is also fine.
+func TestReviewActionsAcceptEmptyBodies(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{
+		"/admin/alumni-requests/5/approve",
+		"/admin/alumni-requests/5/resend-notification",
+	} {
+		for _, body := range []string{"", `{}`} {
+			recorder := doJSON(t, newRouter(&stubService{}), http.MethodPost, path, body)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("%s with body %q: status = %d, want 200 (%s)",
+					path, body, recorder.Code, recorder.Body)
+			}
+		}
+
+		recorder := doRequest(t, newRouter(&stubService{}), http.MethodPost, path, "", "")
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s with empty body and no Content-Type: status = %d, want 200 (%s)",
+				path, recorder.Code, recorder.Body)
+		}
 	}
 }
 

@@ -6,6 +6,7 @@
 package alumnihandler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 )
@@ -162,9 +164,13 @@ func (h Handler) List(c *gin.Context) {
 	input := alumnirequest.ListInput{
 		Notified: notified,
 		Keyword:  c.Query("keyword"),
-		Page:     parsePositiveInt(c.Query("page")),
-		PageSize: parsePositiveInt(c.Query("page_size")),
 	}
+	page, pageSize, err := web.ParsePaging(c)
+	if err != nil {
+		response.Error(c, badRequest())
+		return
+	}
+	input.Page, input.PageSize = page, pageSize
 	if status := strings.TrimSpace(c.Query("status")); status != "" {
 		input.Status = &status
 	}
@@ -221,6 +227,10 @@ func (h Handler) Approve(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if err := decodeOptionalStrictJSON(c, &emptyRequest{}); err != nil {
+		response.Error(c, badRequest())
+		return
+	}
 	result, err := h.Requests.Approve(c.Request.Context(), input)
 	if err != nil {
 		response.Error(c, mapServiceError(err))
@@ -265,6 +275,10 @@ func (h Handler) ResendNotification(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if err := decodeOptionalStrictJSON(c, &emptyRequest{}); err != nil {
+		response.Error(c, badRequest())
+		return
+	}
 	result, err := h.Requests.ResendNotification(c.Request.Context(), input)
 	if err != nil {
 		response.Error(c, mapServiceError(err))
@@ -295,6 +309,27 @@ func (h Handler) reviewInput(c *gin.Context) (alumnirequest.ReviewInput, bool) {
 	}, true
 }
 
+// emptyRequest is the only accepted object for review actions without fields.
+type emptyRequest struct{}
+
+// decodeOptionalStrictJSON accepts an empty body or a strict JSON object.
+func decodeOptionalStrictJSON(c *gin.Context, destination any) error {
+	if c.Request.Body == nil {
+		return nil
+	}
+	body, err := readJSONBody(c)
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return nil
+	}
+	if err := requireJSONContentType(c); err != nil {
+		return err
+	}
+	return decodeJSONBytes(body, destination)
+}
+
 // parseID reads a positive numeric :id. A non-numeric path segment is a 404
 // rather than a 400: it names no ticket.
 func parseID(c *gin.Context) (int64, bool) {
@@ -303,16 +338,6 @@ func parseID(c *gin.Context) (int64, bool) {
 		return 0, false
 	}
 	return value, true
-}
-
-// parsePositiveInt reads a paging parameter, treating anything unparseable as
-// absent so the service applies its default.
-func parsePositiveInt(raw string) int {
-	value, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || value <= 0 {
-		return 0
-	}
-	return value
 }
 
 // parseOptionalBool accepts only "true" and "false".
@@ -342,12 +367,31 @@ func parseOptionalBool(raw string) (*bool, error) {
 // status, reviewed_by or created_user_id outright instead of quietly ignoring
 // them, so a submitter cannot appear to set a field only the reviewer may write.
 func decodeStrictJSON(c *gin.Context, destination any) error {
+	if err := requireJSONContentType(c); err != nil {
+		return err
+	}
+	body, err := readJSONBody(c)
+	if err != nil {
+		return err
+	}
+	return decodeJSONBytes(body, destination)
+}
+
+func requireJSONContentType(c *gin.Context) error {
 	mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		return errInvalidJSONContentType
 	}
+	return nil
+}
+
+func readJSONBody(c *gin.Context) ([]byte, error) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBodyBytes)
-	decoder := json.NewDecoder(c.Request.Body)
+	return io.ReadAll(c.Request.Body)
+}
+
+func decodeJSONBytes(body []byte, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err

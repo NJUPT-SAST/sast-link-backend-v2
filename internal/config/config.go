@@ -317,7 +317,7 @@ type Config struct {
 	// TurnstileAction must match the action the widget was rendered with. Without
 	// it, any token minted under the same secret is spendable here, including one
 	// harvested from a different form on the same site.
-	TurnstileAction string `env:"TURNSTILE_ACTION" envDefault:"alumni_request"`
+	TurnstileAction string `env:"TURNSTILE_ACTION"`
 	// TurnstileTimeout bounds one siteverify round trip. A challenge token lives
 	// 300s, so waiting long buys nothing a retry would not.
 	TurnstileTimeout time.Duration `env:"TURNSTILE_TIMEOUT" envDefault:"5s"`
@@ -628,6 +628,8 @@ func (c *Config) ValidateAPIAuth() error {
 	// keep config free of internal dependencies, as the rest of this file is.
 	case strings.ContainsFunc(c.TurnstileAction, func(r rune) bool { return !strconv.IsPrint(r) }):
 		return fmt.Errorf("TURNSTILE_ACTION must not contain control characters")
+	case strings.TrimSpace(c.TurnstileSecret) != "" && strings.TrimSpace(c.TurnstileAction) == "":
+		return fmt.Errorf("TURNSTILE_ACTION must be non-empty when TURNSTILE_SECRET is configured")
 	case c.RateLimitAlumniRequestRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_ALUMNI_REQUEST_RPM must be positive")
 	case c.RateLimitAlumniRequestWindow < time.Second:

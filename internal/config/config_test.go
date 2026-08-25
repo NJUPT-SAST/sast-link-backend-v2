@@ -813,3 +813,43 @@ func TestLoadRejectsSchemeInStorageEndpoint(t *testing.T) {
 		t.Fatalf("ValidateAPIAuth() error = %v, want endpoint scheme rejection", err)
 	}
 }
+
+// Turnstile is optional, but turning it on without an action is a silent
+// misconfiguration: siteverify will echo an empty action and the intake will
+// reject every token.
+func TestValidateAPIAuthRequiresTurnstileActionWithSecret(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		secret        string
+		action        string
+		wantErr       bool
+		wantSubstring string
+	}{
+		{"disabled", "", "", false, ""},
+		{"disabled with action ignored", "", "alumni-request", false, ""},
+		{"enabled", "secret-key", "alumni-request", false, ""},
+		{"secret without action", "secret-key", "", true, "TURNSTILE_ACTION must be non-empty"},
+		{"secret with whitespace action", "secret-key", "   ", true, "TURNSTILE_ACTION must be non-empty"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("TURNSTILE_SECRET", test.secret)
+			t.Setenv("TURNSTILE_ACTION", test.action)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), test.wantSubstring) {
+					t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.wantSubstring)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateAPIAuth() error = %v, want nil", err)
+			}
+		})
+	}
+}

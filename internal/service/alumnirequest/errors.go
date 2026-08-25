@@ -79,6 +79,7 @@ func (e *Error) Is(target error) bool {
 // Sentinels for each business outcome.
 var (
 	ErrInvalidInput = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
+	ErrEmailDomain  = &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed}
 	ErrNotFound     = &Error{Kind: KindNotFound, Code: errcode.CodeAlumniRequestNotFound}
 	// ErrEmailOccupied deliberately reuses CodeEmailAlreadyRegistered rather than
 	// taking a code of its own. The outcome a client must handle is identical to the

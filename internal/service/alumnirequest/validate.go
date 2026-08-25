@@ -170,7 +170,7 @@ func validateLoginEmail(raw string) (string, error) {
 		return "", newError(ErrInvalidInput, "login_email 格式非法", nil)
 	}
 	if !validate.IsLoginEmailDomain(email) {
-		return "", newError(ErrInvalidInput, "login_email 必须是学校或社团邮箱", nil)
+		return "", newError(ErrEmailDomain, "login_email 必须是学校或社团邮箱", nil)
 	}
 	return email, nil
 }
