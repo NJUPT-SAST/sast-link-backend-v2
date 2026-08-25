@@ -70,6 +70,9 @@ dist/
 # Claude Code
 .claude/
 
+# pt work directory (plans, todos, gotchas, review notes)
+.pi/
+
 # stray bench/build artifacts from loadmix + cross-compilation
 /api
 /loadmix
