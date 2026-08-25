@@ -304,6 +304,16 @@ func TestCallbackMapsInvalidGrantToRestartableFailure(t *testing.T) {
 // Cancelling on the provider's page is a result, not an error: the callback
 // must come back as a cancellation that keeps the frontend's "已取消登录" page,
 // not as a parameter failure. The state is consumed on the way out.
+func TestCallbackCancellationRejectsDisabledProvider(t *testing.T) {
+	service, _ := newTestService(t)
+
+	_, err := service.Callback(context.Background(), CallbackInput{
+		Provider:      model.LoginMethodLark,
+		ProviderError: "access_denied",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+}
+
 func TestCallbackTreatsAccessDeniedAsCancellation(t *testing.T) {
 	service, doubles := newTestService(t)
 	state, _ := authorizedState(t, service)
