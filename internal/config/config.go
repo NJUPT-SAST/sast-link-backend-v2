@@ -225,13 +225,6 @@ type Config struct {
 	// caller is left nothing to retry with. Fail-open, per PRD §6.0.
 	RateLimitRegisterAttempts int           `env:"RATE_LIMIT_REGISTER_ATTEMPTS" envDefault:"5"`
 	RateLimitRegisterWindow   time.Duration `env:"RATE_LIMIT_REGISTER_WINDOW" envDefault:"5m"`
-	// Throttles GET /card/:id per caller IP: unauthenticated, one DB read per call,
-	// and the path parameter is enumerable, so an uncapped endpoint hands out a
-	// full scrape of every public card. Loose enough that a member wall rendering
-	// dozens of cards does not spend a whole NAT's budget on one visitor; bulk
-	// scraping is left to the proxy cache. Fail-open, per PRD §6.0.
-	RateLimitCardRPM    int           `env:"RATE_LIMIT_CARD_RPM" envDefault:"300"`
-	RateLimitCardWindow time.Duration `env:"RATE_LIMIT_CARD_WINDOW" envDefault:"60s"`
 
 	// Argon2Concurrency caps simultaneous argon2id derivations, queueing a burst at
 	// the hasher instead of saturating every CPU core; it also caps memory, since
@@ -588,10 +581,6 @@ func (c *Config) validateRateLimits() error {
 	// nothing to retry with once the ticket has expired.
 	case c.RateLimitRegisterWindow > registerTicketTTL:
 		return fmt.Errorf("RATE_LIMIT_REGISTER_WINDOW must not exceed the Register-Ticket TTL (%s)", registerTicketTTL)
-	case c.RateLimitCardRPM <= 0:
-		return fmt.Errorf("RATE_LIMIT_CARD_RPM must be positive")
-	case c.RateLimitCardWindow < time.Second:
-		return fmt.Errorf("RATE_LIMIT_CARD_WINDOW must be at least 1s")
 	}
 	return nil
 }

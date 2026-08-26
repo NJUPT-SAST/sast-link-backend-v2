@@ -930,49 +930,6 @@ paths:
                 $ref: "#/components/schemas/StandardEnvelope"
       security:
         - bearerAuth: []
-  /card/{id}:
-    get:
-      summary: 获取个人卡片
-      deprecated: true
-      description: |
-        已下线（路由注释，暂不响应）。顺序 ID 的公开 URL 可枚举全站成员名单，隐私重设计中。
-        重开后为 owner-only + 不可枚举标识，不会原样启用。
-      operationId: cardGetCard
-      tags:
-        - Card
-      parameters:
-        - name: id
-          in: path
-          description: 用户 ID，正整数；非正整数或含非数字字符返回 404
-          required: true
-          example: 12
-          schema:
-            type: integer
-            format: int64
-            minimum: 1
-      responses:
-        "200":
-          description: 个人卡片数据
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CardResponse"
-          headers: {}
-        "404":
-          $ref: "#/components/responses/NotFound"
-          description: 用户不存在或已注销
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-          description: >-
-            请求过于频繁（42900，带 Retry-After）。按调用方 IP 限流，默认 300 次/60s
-            （RATE_LIMIT_CARD_RPM）：本端点无认证且路径参数是连续用户 ID，
-            不限流即等于开放全站公开卡片的抓取。限流在 ID 校验之前生效，
-            因此无效 ID 同样消耗配额——它得到的 404 正是枚举者要读的信号。
-            配额按共享出口 IP 下的成员墙定档，只能减缓而非阻止抓取；
-            公开卡片的批量读取应交由反向代理缓存承担。
-        "500":
-          $ref: "#/components/responses/InternalError"
-      security: []
   /user/identities:
     get:
       summary: 获取绑定列表
@@ -2109,6 +2066,7 @@ paths:
           required: false
           schema:
             type: string
+            maxLength: 255
         - name: needs_completion
           in: query
           description: |
@@ -2280,7 +2238,7 @@ paths:
           in: path
           description: 用户 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       responses:
@@ -2314,7 +2272,7 @@ paths:
           in: path
           description: 用户 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       requestBody:
@@ -2427,7 +2385,7 @@ paths:
           in: path
           description: 用户 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       responses:
@@ -2468,7 +2426,7 @@ paths:
           in: path
           description: 用户 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       responses:
@@ -2652,7 +2610,7 @@ paths:
           in: path
           description: 客户端内部 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       requestBody:
@@ -2762,7 +2720,7 @@ paths:
           in: path
           description: 客户端内部 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       responses:
@@ -4198,7 +4156,6 @@ components:
     #   - /oauth/authorize/consent → SAST Link 自有端点而非 RFC 定义端点，沿用标准信封
     #   - /userinfo → 成功为 OIDC UserInfo claims；错误为 RFC 6750 Bearer Token 格式
     #   - /health → 直接 {status, db, redis}
-    #   - /card/{id} → 已下线（隐私重设计中），暂不响应
     #   - /.well-known/openid-configuration → OIDC Discovery JSON
     #   - /.well-known/jwks.json → JWKS JSON
     StandardEnvelope:
@@ -4902,46 +4859,6 @@ components:
             - ok
             - degraded
           example: ok
-    CardResponse:
-      type: object
-      description: 个人卡片响应（公开端点，不使用标准信封）
-      properties:
-        id:
-          type: integer
-          description: 用户 ID
-          example: 1
-        nickname:
-          type: string
-          nullable: true
-          description: 昵称
-          example: 张三
-        department:
-          allOf:
-            - $ref: "#/components/schemas/Department"
-          nullable: true
-        intro:
-          type: string
-          nullable: true
-          description: 自我介绍
-          example: 自我介绍
-        avatar:
-          type: string
-          nullable: true
-          format: uri
-          description: 头像 URL
-          example: https://cos.example.com/avatar/1.jpg
-        blog_url:
-          type: string
-          nullable: true
-          format: uri
-          description: 个人博客链接
-          example: https://blog.example.com
-        github_url:
-          type: string
-          nullable: true
-          format: uri
-          description: GitHub 主页链接
-          example: https://github.com/example
     OpenIDConfiguration:
       type: object
       description: |

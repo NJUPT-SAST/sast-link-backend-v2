@@ -82,7 +82,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 
 	keys := internalredis.NewKeys(cfg.RedisKeyPrefix)
 	// Every endpoint limiter below shares one skeleton — client, keys,
-	// limit and window — differing only in the quota. Builders keep the 17
+	// limit and window — differing only in the quota. Builders keep the 16
 	// near-identical literals from drifting (audit finding #11).
 	newSessionLimiter := func(limit int, window time.Duration) sessionredis.EndpointLimiter {
 		return sessionredis.EndpointLimiter{
@@ -122,7 +122,6 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	oauthLoginCodes := oauthloginredis.LoginCodeStore{Store: store}
 	unbindLimiter := newSessionLimiter(cfg.RateLimitUnbindRPM, cfg.RateLimitUnbindWindow)
 	registerLimiter := newSessionLimiter(cfg.RateLimitRegisterAttempts, cfg.RateLimitRegisterWindow)
-	cardLimiter := newSessionLimiter(cfg.RateLimitCardRPM, cfg.RateLimitCardWindow)
 	refreshLimiter := newSessionLimiter(cfg.RateLimitRefreshRPM, cfg.RateLimitRefreshWindow)
 	avatarLimiter := newSessionLimiter(cfg.RateLimitUploadAvatarRPM, cfg.RateLimitUploadAvatarWindow)
 	deviceLimiter := newSessionLimiter(cfg.RateLimitDeviceRPM, cfg.RateLimitDeviceWindow)
@@ -185,7 +184,6 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		OAuthRegistration: sessionredis.OAuthRegistrationStore{Store: store},
 		UnbindLimiter:     unbindLimiter,
 		RegisterLimiter:   registerLimiter,
-		CardLimiter:       cardLimiter,
 		AvatarLimiter:     avatarLimiter,
 		RefreshLimiter:    refreshLimiter,
 		AvatarStore:       avatarStore,

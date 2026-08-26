@@ -203,8 +203,9 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if authorization.Nonce != nil {
 		nonce = *authorization.Nonce
 	}
-	// auth_time is the code's creation instant, which in this flow is exactly when
-	// the user confirmed the authorization: Consent creates the row on approval.
+	// auth_time is authorization.CreatedAt, i.e. the consent instant — not the
+	// OIDC-meaning authentication time (signIDToken documents why the claim stays
+	// out of claims_supported).
 	idToken, err := s.signIDToken(ctx, user, client, scopes, nonce, authorization.CreatedAt)
 	if err != nil {
 		// The pair is already persisted, so a signing failure must not leave a live
@@ -310,6 +311,8 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	// A rotation is not a fresh authentication, so auth_time stays the family
 	// origin: the sequence-0 row's creation time, read inside the rotation
 	// transaction. Reading current.CreatedAt would advance it with every rotation.
+	// Like the authorization-code path, this is not the OIDC-meaning auth instant,
+	// and the claim is signed but never advertised in claims_supported.
 	// The success audit rides the rotation transaction; a build failure logs and
 	// drops the row.
 	var refreshAudit *model.AuditLog
@@ -427,10 +430,12 @@ func matchRedirectURI(authorized *string, presented string) error {
 
 // signIDToken builds the ID Token for a granted scope set.
 //
-// authTime is the moment the user approved the authorization, which is NOT what
-// OIDC means by auth_time (when the end user authenticated): nothing records an
-// authentication instant yet, so the value overstates recency. The claim is kept
-// out of claims_supported for that reason — see Discovery.
+// authTime is whichever nearest approximation the grant path has: the
+// authorization code's CreatedAt (code flow) or the refresh family origin's
+// created_at (refresh flow). Neither is what OIDC means by auth_time — when the
+// end user authenticated: nothing records an authentication instant yet, so the
+// value overstates recency. The claim is signed but kept out of claims_supported
+// for that reason — see Discovery.
 func (s Service) signIDToken(
 	ctx context.Context,
 	user *model.User,

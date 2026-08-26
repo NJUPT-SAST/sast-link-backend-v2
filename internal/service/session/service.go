@@ -56,9 +56,6 @@ type Service struct {
 	// RegisterLimiter throttles POST /auth/register, keyed on the
 	// Register-Ticket; every accepted call runs an argon2id derivation.
 	RegisterLimiter EndpointLimiter
-	// CardLimiter throttles the unauthenticated GET /card/:id per caller IP; the
-	// sequential user ID makes an uncapped endpoint a scrape of every public card.
-	CardLimiter EndpointLimiter
 	// RefreshLimiter throttles POST /auth/refresh per caller IP, bounding DB
 	// amplification from an unauthenticated endpoint.
 	RefreshLimiter   EndpointLimiter

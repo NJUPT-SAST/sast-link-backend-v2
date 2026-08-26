@@ -7,7 +7,7 @@
 - **Content-Type**: 标准业务接口使用 `application/json`；OAuth Token/Revoke 使用 `application/x-www-form-urlencoded`
 - **OAuth 2.1**: 授权端点使用 PKCE-S256，第一方应用无需 client_secret
 - **OIDC**: 基于 OAuth 2.1 的 OpenID Connect Provider，scope 含 `openid` 时返回 ID Token
-- **响应格式**: 标准业务接口使用标准化响应信封；OAuth/OIDC/健康检查/公开卡片等协议或直出端点见下方例外列表
+- **响应格式**: 标准业务接口使用标准化响应信封；OAuth/OIDC/健康检查等协议或直出端点见下方例外列表
 
 ---
 
@@ -57,7 +57,7 @@
 `/oauth/authorize/consent` 是 SAST Link 自有端点而非 RFC 定义端点，**使用标准信封**，不在上述例外之列。
 
 - `/health`：直出 `{ "status", "db", "redis" }`。
-- `/card/{id}`：**已下线**（见 §3.4），暂不响应。
+- `/metrics`：直出 Prometheus 文本格式指标，不鉴权（与 `/health` 同类），供监控拉取。
 
 **OAuth 2.1 错误响应示例**：
 
@@ -794,7 +794,7 @@ PUT /user/profile
 - 传 `null` 等同于未传该键（保持不变），**不表示清空**；清空请用空字符串
 - `college` 必须是 `college_enum` 完整枚举值（见附录 A），简称如「计算机学院」会被拒绝
 - `department` 仅接受 `software` / `media` 或空字符串
-- `blog_url` / `github_url` 必须是 http/https 绝对 URL——这两个字段会在公开卡片上渲染为链接，故拒绝 `javascript:`、`data:` 等 scheme
+- `blog_url` / `github_url` 必须是 http/https 绝对 URL——这两个字段会渲染为链接，故拒绝 `javascript:`、`data:` 等 scheme
 - 所有文本字段拒绝控制字符（NUL、CR、LF、Tab 及其他 C0/C1），返回 `40000`；字段内部的空格保留，仅首尾被裁剪
 - 字段长度上限按数据库列宽校验（`name`/`nickname`/`intro`/`email` 255，`phone_number`/`qq_number` 20，`student_id`/`major` 50，两个 URL 512）
 - `email` 为展示邮箱（非登录邮箱），非空时校验格式，不合法返回 `40000`
@@ -858,43 +858,9 @@ PUT /user/avatar
 
 ---
 
-### 3.4 获取个人卡片
+### 3.4 获取个人卡片（已移除）
 
-**已下线**（路由注释，暂不响应）。顺序 ID 的公开 URL 可枚举全站成员名单，隐私重设计中。重开后为 owner-only + 不可枚举标识，不会原样启用。以下为下线前的契约，供重设计参考。
-
-```
-GET /card/:id
-```
-
-> **限流**：按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_CARD_RPM`）。本端点无认证且路径参数是连续的用户 ID，不限流即等于开放全站公开卡片的抓取。限流检查排在 ID 合法性校验**之前**——无效 ID 得到的 `404` 本身就是枚举者要读的信号。
->
-> 配额按「共享出口 IP 下的成员墙」定档：一页渲染数十张卡片，不能让一位访客耗尽整个 NAT 当分钟的额度。这一档只能减缓而非阻止抓取——公开卡片的批量读取应交由反向代理缓存承担，容量防线本就在那一层。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
-
-**Path Parameters**:
-
-| 参数 | 说明 |
-|------|------|
-| `id` | 用户 ID |
-
-**Response** `200`:
-
-```json
-{
-  "id": 1,
-  "nickname": "张三",
-  "department": "software",
-  "intro": "自我介绍",
-  "avatar": "https://cos.example.com/avatar/1.jpg",
-  "blog_url": "https://blog.example.com",
-  "github_url": "https://github.com/example"
-}
-```
-
-**说明**: 返回 `profile` 表中公开字段，用于公开个人主页、homepage 友链展示。用户 ID 不存在或已注销（`state = is_deleted`）时返回 404（`40401`），两者不区分；ID 格式非法（非正整数、含非数字字符）同样返回 `40401`，避免探测哪些 ID 曾经存在。
-
-**错误码**: `40401`（用户不存在、已注销或 ID 格式非法）、`50000`（服务器内部错误）
-
-该端点**不使用**标准响应信封（见 §10.1），字段直接位于顶层。未填写的展示字段返回 `null`；用户无 `profile` 记录时除 `id` 外全部为 `null`。`id` 非正整数或含非数字字符时同样返回 404。
+端点与代码均已删除：顺序 ID 的公开 URL 可枚举全站成员名单，隐私重设计中不再提供 `GET /card/:id`。公开资料中的 `picture`（头像）与 `preferred_username`（昵称）能力由 OIDC 的 `profile` scope 承载，经 `GET /userinfo` 与 ID Token 签出（见 §8.3 / §8.4）。
 
 ---
 

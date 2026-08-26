@@ -41,7 +41,6 @@ type fakeService struct {
 	uploadAvatarResult       *session.UploadAvatarResult
 	listIdentitiesResult     *session.ListIdentitiesResult
 	unbindIdentityResult     *session.UnbindIdentityResult
-	cardResult               *session.CardResult
 	listDevicesResult        *session.ListDevicesResult
 	logoutDeviceResult       *session.LogoutDeviceResult
 	loginErr                 error
@@ -60,7 +59,6 @@ type fakeService struct {
 	uploadAvatarErr          error
 	listIdentitiesErr        error
 	unbindIdentityErr        error
-	cardErr                  error
 	listDevicesErr           error
 	logoutDeviceErr          error
 	loginInput               session.LoginInput
@@ -79,13 +77,11 @@ type fakeService struct {
 	uploadAvatarInput        session.UploadAvatarInput
 	listIdentitiesInput      session.ListIdentitiesInput
 	unbindIdentityInput      session.UnbindIdentityInput
-	cardInput                session.CardInput
 	listDevicesInput         session.ListDevicesInput
 	logoutDeviceInput        session.LogoutDeviceInput
 	updateProfileCalls       int
 	uploadAvatarCalls        int
 	unbindIdentityCalls      int
-	cardCalls                int
 	listDevicesCalls         int
 	logoutDeviceCalls        int
 	loginCalls               int
@@ -1261,12 +1257,6 @@ func normalizeJSON(value any) any {
 	default:
 		return typed
 	}
-}
-
-func (s *fakeService) Card(_ context.Context, input session.CardInput) (*session.CardResult, error) {
-	s.cardCalls++
-	s.cardInput = input
-	return s.cardResult, s.cardErr
 }
 
 func (s *fakeService) ListIdentities(_ context.Context, input session.ListIdentitiesInput) (*session.ListIdentitiesResult, error) {

@@ -40,7 +40,6 @@ type Service interface {
 	UnbindIdentity(ctx context.Context, input session.UnbindIdentityInput) (*session.UnbindIdentityResult, error)
 	ListDevices(ctx context.Context, input session.ListDevicesInput) (*session.ListDevicesResult, error)
 	LogoutDevice(ctx context.Context, input session.LogoutDeviceInput) (*session.LogoutDeviceResult, error)
-	Card(ctx context.Context, input session.CardInput) (*session.CardResult, error)
 }
 
 type Handler struct {
@@ -272,11 +271,6 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	r.POST("/auth/register", h.Register)
 	r.POST("/auth/forgot-password/send-code", h.ForgotPasswordSendCode)
 	r.POST("/auth/reset-password", h.ResetPassword)
-	// The card endpoint is suspended pending a privacy redesign: a public URL
-	// keyed by sequential IDs would let anyone enumerate the full member roster.
-	// The handler/service/repository code stays in place pending that redesign,
-	// and no OIDC profile claim points at a card URL.
-	// r.GET("/card/:id", h.Card)
 
 	// Every protected route names a scope gate explicitly, so a new route that names
 	// none has no scoped-client permission rather than inheriting one. The
@@ -660,6 +654,13 @@ func unauthorized() error {
 
 func internalError() error {
 	return webutil.InternalError()
+}
+
+// notFound builds a 404 for the paths that reject an ID before reaching the
+// service. The code is a parameter so the caller chooses between the generic
+// 40400 and a path-specific code.
+func notFound(code int, message string) error {
+	return webutil.NotFound(code, message)
 }
 
 // setSessionCookie writes the httpOnly session cookie for a freshly issued
