@@ -258,7 +258,7 @@ func TestTouchDeviceResurrectsExpiredRecord(t *testing.T) {
 	if _, err := store.RegisterDevice(ctx, 42, "family-1", "old-ua", "10.0.0.1", now, time.Second, 5); err != nil {
 		t.Fatalf("RegisterDevice returned error: %v", err)
 	}
-	time.Sleep(1100 * time.Millisecond) // let the record expire
+	waitForExpiry(t, client, store.Keys.Device("family-1"))
 
 	daysLater := now.Add(48 * time.Hour)
 	if _, err := store.TouchDevice(ctx, 42, "family-1", "new-ua", "10.0.0.2", daysLater, time.Hour, 5); err != nil {
@@ -309,7 +309,7 @@ func TestTouchDeviceResurrectEvictsOldestWhenAtCap(t *testing.T) {
 	if _, err := store.RegisterDevice(ctx, 42, "family-C", "ua-c", "ip-c", now.Add(2*time.Minute), time.Hour, 2); err != nil {
 		t.Fatalf("RegisterDevice(C) returned error: %v", err)
 	}
-	time.Sleep(1100 * time.Millisecond) // let A expire
+	waitForExpiry(t, client, store.Keys.Device("family-A"))
 
 	// A refreshes: resurrected, and B (oldest) is evicted to hold the cap.
 	resurrected := now.Add(48 * time.Hour)
@@ -390,7 +390,7 @@ func TestTouchDeviceResurrectSweepsPhantomMembers(t *testing.T) {
 	if err := client.Del(ctx, store.Keys.Device("family-B")).Err(); err != nil {
 		t.Fatalf("Del hash: %v", err)
 	}
-	time.Sleep(1100 * time.Millisecond) // let A expire
+	waitForExpiry(t, client, store.Keys.Device("family-A"))
 
 	// A resurrects: the phantom B is swept, so no real device is evicted.
 	evicted, err := store.TouchDevice(ctx, 42, "family-A", "ua", "ip", now.Add(48*time.Hour), time.Hour, 2)
@@ -553,4 +553,20 @@ func TestListDevicesOnMissingSetIsEmpty(t *testing.T) {
 	if len(devices) != 0 {
 		t.Fatalf("devices = %#v, want empty list for a user without devices", devices)
 	}
+}
+
+// waitForExpiry polls until a Redis key reports absent (-2 TTL), so tests that
+// depend on a record expiring do not sleep a fixed interval that races under
+// load or -race (audit finding #18).
+func waitForExpiry(t *testing.T, client Cmdable, key string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ttl, err := client.PTTL(context.Background(), key).Result()
+		if err == nil && ttl < 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("key %q did not expire within 3s", key)
 }

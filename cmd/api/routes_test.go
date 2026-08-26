@@ -35,6 +35,10 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
 		RequireAdmin: passthrough, RequireReader: passthrough,
 	})
+	alumnihandler.RegisterRoutes(router, alumnihandler.Handler{}, alumnihandler.Gates{
+		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
+		RequireAdmin: passthrough, RequireReader: passthrough,
+	})
 
 	registered := make(map[string]bool)
 	for _, route := range router.Routes() {
@@ -47,14 +51,17 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 
 	// Every endpoint this stage is meant to expose.
 	want := []string{
-		http.MethodGet + " /oauth/authorize",
-		http.MethodPost + " /oauth/authorize/consent",
-		http.MethodPost + " /oauth/token",
-		http.MethodPost + " /oauth/revoke",
 		http.MethodGet + " /.well-known/openid-configuration",
 		http.MethodGet + " /.well-known/jwks.json",
+		http.MethodGet + " /oauth/authorize",
+		http.MethodPost + " /oauth/authorize/consent",
+		http.MethodGet + " /oauth/authorize/consent",
+		http.MethodPost + " /oauth/token",
+		http.MethodPost + " /oauth/revoke",
 		http.MethodGet + " /userinfo",
 		http.MethodPost + " /userinfo",
+		http.MethodGet + " /oauth/grants",
+		http.MethodDelete + " /oauth/grants/:client_id",
 		// Third-party login: the two authorize legs, their callbacks, the
 		// login_code exchange, and the two authenticated binding endpoints.
 		http.MethodGet + " /oauth/github",
@@ -64,15 +71,49 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 		http.MethodPost + " /oauth/exchange-code",
 		http.MethodPost + " /user/identities/github",
 		http.MethodPost + " /user/identities/lark",
+		// Session surface: login through registration, password recovery, and the
+		// self-service read/write endpoints.
+		http.MethodPost + " /user/login",
+		http.MethodPost + " /auth/refresh",
+		http.MethodPost + " /auth/register/send-code",
+		http.MethodPost + " /auth/register/verify-code",
+		http.MethodPost + " /auth/register",
+		http.MethodPost + " /auth/forgot-password/send-code",
+		http.MethodPost + " /auth/reset-password",
+		http.MethodPost + " /auth/logout",
+		http.MethodPost + " /auth/change-password",
+		http.MethodGet + " /user/profile",
+		http.MethodPut + " /user/profile",
+		http.MethodPut + " /user/avatar",
+		http.MethodGet + " /user/identities",
+		http.MethodPost + " /user/identities/email",
+		http.MethodPost + " /user/identities/email/verify",
+		http.MethodDelete + " /user/identities/:id",
+		http.MethodGet + " /user/devices",
+		http.MethodDelete + " /user/devices/:id",
+		// Admin console: client registry incl. secret rotation, users incl. the
+		// batch pair and provisioning, audit logs and overview stats.
 		http.MethodGet + " /admin/oauth-clients",
 		http.MethodPost + " /admin/oauth-clients",
 		http.MethodPut + " /admin/oauth-clients/:id",
+		http.MethodDelete + " /admin/oauth-clients/:id",
+		http.MethodPost + " /admin/oauth-clients/:id/rotate-secret",
 		http.MethodGet + " /admin/users",
 		http.MethodGet + " /admin/users/:id",
-		http.MethodPut + " /admin/users/:id",
+		http.MethodPost + " /admin/users",
+		http.MethodPut + " /admin/users",
 		http.MethodDelete + " /admin/users/:id",
 		http.MethodPut + " /admin/users/:id/restore",
+		http.MethodGet + " /admin/users/batch",
 		http.MethodGet + " /admin/audit-logs",
+		http.MethodGet + " /admin/stats",
+		// Alumni intake and its console queue.
+		http.MethodPost + " /alumni-requests",
+		http.MethodGet + " /admin/alumni-requests",
+		http.MethodGet + " /admin/alumni-requests/:id",
+		http.MethodPost + " /admin/alumni-requests/:id/approve",
+		http.MethodPost + " /admin/alumni-requests/:id/reject",
+		http.MethodPost + " /admin/alumni-requests/:id/resend-notification",
 	}
 	for _, route := range want {
 		if !registered[route] {
