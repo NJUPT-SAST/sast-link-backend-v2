@@ -2,6 +2,7 @@ package config
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,10 @@ func setConfigEnv(t *testing.T, dbUser, dbPassword, dbName string) {
 	t.Setenv("SMTP_PORT", "587")
 	t.Setenv("SMTP_FROM", "noreply@example.test")
 	t.Setenv("OAUTH_CONSENT_URL", "https://link.example.test/oauth/consent")
+	// No envDefault exists for this key (the page is environment-specific), so
+	// every test that runs ValidateAPIAuth must supply a test-space URL or the
+	// required check fails first.
+	t.Setenv("ALUMNI_RESET_URL", "https://link.example.test/reset")
 	// The tests that exercise Turnstile validation set these explicitly; every other
 	// test assumes they are absent so ValidateAPIAuth() does not fail on a stray
 	// external TURNSTILE_SECRET without a matching action.
@@ -853,6 +858,42 @@ func TestValidateAPIAuthRequiresTurnstileActionWithSecret(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("ValidateAPIAuth() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// The reset URL an approval email points at has a production default (matching
+// docker-compose and .env.example), and an explicit blank is a boot failure
+// rather than silently undeliverable notices.
+// The reset URL an approval email points at is environment-specific and has no
+// default: a deployment that forgets it must fail at boot, not mail every
+// approved applicant a link that points at the wrong host.
+func TestAlumniResetURLRequiresExplicitValue(t *testing.T) {
+	t.Run("the base test env carries a test-space url", func(t *testing.T) {
+		setConfigEnv(t, "user", "pass", "db")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.AlumniResetURL != "https://link.example.test/reset" {
+			t.Fatalf("AlumniResetURL = %q, want the test-space base value", cfg.AlumniResetURL)
+		}
+	})
+
+	for _, value := range []string{"", "   "} {
+		t.Run("blank is refused at boot: "+strconv.Quote(value), func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("ALUMNI_RESET_URL", value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			// With no envDefault, the empty string survives the parse and the
+			// boot check is what refuses it — missing and blank are one value.
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), "ALUMNI_RESET_URL") {
+				t.Fatalf("ValidateAPIAuth() error = %v, want ALUMNI_RESET_URL validation", err)
 			}
 		})
 	}

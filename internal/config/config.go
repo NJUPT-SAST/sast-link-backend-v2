@@ -294,7 +294,11 @@ type Config struct {
 	//
 	// Configured rather than derived because it is the one actionable instruction
 	// in an email this service sends: taking it from per-request data would let
-	// the submitter influence an outbound link.
+	// the submitter influence an outbound link. Deliberately no default — the
+	// value is environment-specific, and a code default for the production host
+	// would silently point every other deployment's approval notices at
+	// link.sast.fun. A missing value is a boot failure instead, the same
+	// treatment SMTP_HOST gets.
 	AlumniResetURL string `env:"ALUMNI_RESET_URL"`
 	// AlumniSupportEmail is the appeal channel quoted in a rejection.
 	AlumniSupportEmail string `env:"ALUMNI_SUPPORT_EMAIL" envDefault:"link@sast.fun"`
@@ -588,6 +592,14 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_ALUMNI_REQUEST_RPM must be positive")
 	case c.RateLimitAlumniRequestWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_ALUMNI_REQUEST_WINDOW must be at least 1s")
+	// An approve notification is the applicant's only instruction to set a
+	// password; a blank reset URL would let the email out with no usable link.
+	// No default exists (the page is environment-specific), so missing and blank
+	// are the same value and both fail at boot — the same startup-failure
+	// treatment as SMTP, since the failure mode is identical: a runtime
+	// "邮件发送失败" on the first approved ticket.
+	case strings.TrimSpace(c.AlumniResetURL) == "":
+		return fmt.Errorf("ALUMNI_RESET_URL is required")
 	// SMTP backs registration, password reset and email binding. Validating it
 	// at boot turns a missing value into a startup failure instead of a runtime
 	// "邮件发送失败" on the first user who tries to register.
