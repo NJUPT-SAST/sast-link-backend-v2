@@ -256,6 +256,7 @@ func (s Service) ResendNotification(ctx context.Context, input ReviewInput) (*Re
 		Recipient:    request.PersonalEmail,
 		Name:         request.Name,
 		Approved:     request.Status == model.AlumniRequestStatusApproved,
+		Recovered:    request.Intent == model.AlumniRequestIntentRecover,
 		RejectReason: request.RejectReason,
 	})
 	s.auditReview(ctx, input, actionResendNotification, true, 0, map[string]any{

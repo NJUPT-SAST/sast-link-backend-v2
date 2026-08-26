@@ -368,6 +368,10 @@ func TestRunReconcileFailureIsLoggedNotFatal(t *testing.T) {
 	mailer := &fakeMailer{}
 	worker := alumnirequestworker.New(requests, mailer,
 		"https://link.sast.fun/reset", "link@sast.fun")
+	// The callback is set before the worker starts: assigning it afterward races
+	// the send goroutine's read of the field.
+	delivered := make(chan struct{}, 1)
+	mailer.onCalled = func() { delivered <- struct{}{} }
 	stop := runWorker(t, worker)
 
 	if !worker.EnqueueAlumniNotification(alumnirequest.NotificationJob{
@@ -375,8 +379,6 @@ func TestRunReconcileFailureIsLoggedNotFatal(t *testing.T) {
 	}) {
 		t.Fatal("enqueue failed")
 	}
-	delivered := make(chan struct{}, 1)
-	mailer.onCalled = func() { delivered <- struct{}{} }
 	select {
 	case <-delivered:
 	case <-time.After(3 * time.Second):

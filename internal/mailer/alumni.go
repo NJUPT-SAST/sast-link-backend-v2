@@ -48,6 +48,11 @@ func (m *Mailer) SendAlumniRequestResult(ctx context.Context, to string, result 
 		// tells the applicant their account exists and leaves them no way in.
 		return fmt.Errorf("mailer: reset url is required for an approval")
 	}
+	if !result.Approved && result.Recovered {
+		// An impossible pairing from the callers, but the template would render
+		// the restore-access copy with an empty link; refuse it at the type's edge.
+		return fmt.Errorf("mailer: recovered is only valid for an approval")
+	}
 
 	subject, title := alumniResultCopy(result.Approved, result.Recovered)
 	data := alumniResultData{

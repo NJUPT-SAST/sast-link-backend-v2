@@ -363,6 +363,28 @@ func TestResendRepeatsADeliveredNotification(t *testing.T) {
 	}
 }
 
+// A recovery ticket's resend must select the restore-access copy, not the
+// new-account one: the account was never opened by this flow.
+func TestResendRecoveryRepeatsTheRecoveredCopy(t *testing.T) {
+	t.Parallel()
+
+	ticket := pendingTicket()
+	ticket.ID = 15
+	ticket.Status = model.AlumniRequestStatusApproved
+	ticket.Intent = model.AlumniRequestIntentRecover
+	ticket.NotifiedAt = &testNow
+	notifier := &fakeNotifier{}
+	service := newService(&fakeRequests{getResult: ticket}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+	service.Notifier = notifier
+
+	if _, err := service.ResendNotification(context.Background(), reviewInput()); err != nil {
+		t.Fatalf("ResendNotification() error = %v", err)
+	}
+	if len(notifier.jobs) != 1 || !notifier.jobs[0].Recovered {
+		t.Fatalf("jobs = %+v, want one job with Recovered for a recover ticket", notifier.jobs)
+	}
+}
+
 // An unrecognized status filter is refused rather than ignored. Dropping it would
 // answer a filtered query with the unfiltered set, reading as "no pending tickets"
 // when the truth is "you misspelled pending".
