@@ -6,7 +6,7 @@ import (
 	"errors"
 	"image"
 	_ "image/jpeg"
-	_ "image/png"
+	"image/png"
 	"io"
 	"log/slog"
 	"strconv"
@@ -194,7 +194,21 @@ func readAvatar(content io.Reader, declaredSize int64) ([]byte, string, error) {
 	if cfg.Width > maxAvatarDimension || cfg.Height > maxAvatarDimension {
 		return nil, "", newError(ErrInvalidInput, "头像分辨率不能超过 4096×4096", nil)
 	}
-	return data, detected.String(), nil
+	// Re-encode from the decoded pixels so only the real image content survives:
+	// a polyglot trailer (a magic-valid image followed by HTML/JS) is dropped
+	// before the bytes reach storage. The dimension cap bounds the expanded
+	// pixel buffer this costs (4096²×4 = 64MB worst case). Every accepted input
+	// is normalized to PNG, so the stored bytes are independent of the claimed
+	// source format.
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, "", newError(ErrInvalidInput, "头像文件已损坏或不是有效图片", nil)
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, "", newError(ErrInternal, "头像重新编码失败", err)
+	}
+	return buf.Bytes(), "image/png", nil
 }
 
 // avatarKeyFromURL extracts the object key of a previously stored avatar URL:

@@ -444,7 +444,7 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 	if err != nil {
 		return nil, newError(ErrInternal, "生成验证码失败", err)
 	}
-	if err := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeRegister), email, code, verificationTTL); err != nil {
+	if err := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeRegister), validate.StripSubaddress(email), code, verificationTTL); err != nil {
 		return nil, newError(ErrDependencyUnavailable, "保存验证码失败", err)
 	}
 	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeRegister); err != nil {
@@ -884,6 +884,12 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
 	}
+	// Step-up before adding a login method: mirroring UnbindIdentity, the caller
+	// must confirm the current password, so a stolen access token alone cannot
+	// attach an attacker-controlled address and then reset the password.
+	if err := s.requirePassword(ctx, input.UserID, input.Password); err != nil {
+		return nil, err
+	}
 	if _, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, email); findErr == nil {
 		// The conflict response must not reveal who owns the address: a distinct
 		// "already bound to you" error would let any authenticated caller enumerate
@@ -908,7 +914,7 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	if err != nil {
 		return nil, newError(ErrInternal, "生成验证码失败", err)
 	}
-	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeBindEmail), email, code, verificationTTL); saveErr != nil {
+	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeBindEmail), validate.StripSubaddress(email), code, verificationTTL); saveErr != nil {
 		return nil, newError(ErrDependencyUnavailable, "保存验证码失败", saveErr)
 	}
 	ticket, err := generateBindTicket()
@@ -931,6 +937,11 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput) (*BindEmailVerifyResult, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
+	}
+	// Same step-up as BindEmailSendCode, checked before the ticket so a wrong
+	// password does not cost the Bind-Ticket.
+	if err := s.requirePassword(ctx, input.UserID, input.Password); err != nil {
+		return nil, err
 	}
 	ticket := strings.TrimSpace(input.BindTicket)
 	if ticket == "" || input.Code == "" {
@@ -1031,7 +1042,7 @@ func (s Service) checkEndpointLimit(ctx context.Context, limiter EndpointLimiter
 // down.
 func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) error {
 	if s.EmailLimiter != nil {
-		result, err := s.EmailLimiter.Allow(ctx, "send_email", "email:"+email)
+		result, err := s.EmailLimiter.Allow(ctx, "send_email", "email:"+validate.StripSubaddress(email))
 		switch {
 		case err != nil:
 			slog.WarnContext(ctx, "email limiter unavailable, allowing request", "error", err)
@@ -1079,7 +1090,7 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 // because deleting on a wrong guess would let anyone who knows an address
 // invalidate its code at will. Once the budget is spent the store drops the code.
 func (s Service) verifyCode(ctx context.Context, purpose, email, code string) error {
-	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, email, code)
+	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, validate.StripSubaddress(email), code)
 	if err != nil {
 		return newError(ErrDependencyUnavailable, "校验验证码失败", err)
 	}
@@ -1105,7 +1116,7 @@ func (s Service) hashError(ctx context.Context, err error) error {
 // discardCode drops an already-matched code when a later step of the same flow
 // fails, so the spent code cannot be replayed by a retry.
 func (s Service) discardCode(ctx context.Context, purpose, email string) {
-	if err := s.VerificationCode.DiscardVerificationCode(ctx, purpose, email); err != nil {
+	if err := s.VerificationCode.DiscardVerificationCode(ctx, purpose, validate.StripSubaddress(email)); err != nil {
 		slog.WarnContext(ctx, "discard consumed verification code", "purpose", purpose, "error", err)
 	}
 }

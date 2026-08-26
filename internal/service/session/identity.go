@@ -113,3 +113,30 @@ func (s Service) auditUnbind(ctx context.Context, input UnbindIdentityInput, ide
 		slog.Error("audit oauth unbind", "user_id", input.UserID, "identity_id", identity.ID, "error", err)
 	}
 }
+
+// requirePassword steps up a sensitive operation with the current password,
+// sharing UnbindIdentity's guard: an access token on its own must not be able
+// to bind a new login method (BindEmail*), or a stolen token would turn the
+// bind + reset flow into account takeover.
+func (s Service) requirePassword(ctx context.Context, userID int64, password string) error {
+	if password == "" {
+		return newError(ErrInvalidInput, "password 不能为空", nil)
+	}
+	user, err := s.Users.FindAuthUserByID(ctx, userID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return newError(ErrInvalidToken, "身份主体无效", nil)
+	}
+	if err != nil {
+		return newError(ErrInternal, "查询待操作的用户失败", err)
+	}
+	if user.State == model.UserStateDeleted {
+		return newError(ErrUserDeleted, "用户已注销", nil)
+	}
+	if verifyErr := s.Passwords.VerifyPassword(ctx, password, user.PasswordHash); verifyErr != nil {
+		if ctx.Err() != nil {
+			return newError(ErrDependencyUnavailable, "密码校验被中断", verifyErr)
+		}
+		return newError(ErrPasswordInvalid, "密码错误", verifyErr)
+	}
+	return nil
+}

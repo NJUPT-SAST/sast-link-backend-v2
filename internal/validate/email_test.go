@@ -140,3 +140,24 @@ func TestWithinLengthCountsCharactersNotBytes(t *testing.T) {
 		t.Fatal("a value exactly at the limit was rejected")
 	}
 }
+
+// Subaddress aliases must collapse onto the mailbox for key purposes while
+// dots stay untouched (they are not equivalent across providers).
+func TestStripSubaddress(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"foo@gmail.com", "foo@gmail.com"},
+		{"foo+tag@gmail.com", "foo@gmail.com"},
+		{"foo+bar+baz@gmail.com", "foo@gmail.com"},
+		{"a.b+tag@qq.com", "a.b@qq.com"},
+		{"FOO+Tag@GMAIL.COM", "FOO@GMAIL.COM"},
+		{"no-at-sign", "no-at-sign"},
+	}
+	for _, testCase := range cases {
+		if got := StripSubaddress(testCase.in); got != testCase.want {
+			t.Errorf("StripSubaddress(%q) = %q, want %q", testCase.in, got, testCase.want)
+		}
+	}
+}

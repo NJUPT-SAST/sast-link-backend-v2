@@ -3,12 +3,13 @@ package session
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"image"
 	"image/jpeg"
 	"image/png"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -97,26 +98,17 @@ func testImageBytes(t *testing.T, format string) []byte {
 			t.Fatalf("encode test png: %v", err)
 		}
 	case "webp":
-		// Minimal but valid VP8L file: RIFF/WEBP container, 1x1 lossless image.
-		// DecodeConfig only reads the 5-byte VP8L header, so no pixel data is
-		// needed for the config-only path this service exercises.
-		payload := []byte{0x2F, 0x00, 0x00, 0x00, 0x00}
-		chunk := append([]byte("VP8L"), u32le(uint32(len(payload)))...) //nolint:gosec // payload is a 5-byte constant
-		chunk = append(chunk, payload...)
-		file := append([]byte("RIFF"), u32le(uint32(len(chunk)+4))...) //nolint:gosec // chunk is a 13-byte constant
-		file = append(file, []byte("WEBP")...)
-		file = append(file, chunk...)
-		return file
+		// A real, decodable WebP from golang.org/x/image's own testdata; the
+		// re-encode path decodes full pixels, so a header-only fixture would fail.
+		raw, err := os.ReadFile(filepath.Join("testdata", "webp_fixture.webp"))
+		if err != nil {
+			t.Fatalf("read webp fixture: %v", err)
+		}
+		return raw
 	default:
 		t.Fatalf("unknown test format %q", format)
 	}
 	return buf.Bytes()
-}
-
-func u32le(value uint32) []byte {
-	out := make([]byte, 4)
-	binary.LittleEndian.PutUint32(out, value)
-	return out
 }
 
 func TestUploadAvatarStoresObjectAndUpdatesProfile(t *testing.T) {
@@ -164,6 +156,33 @@ func TestUploadAvatarAcceptsAllDocumentedFormats(t *testing.T) {
 		if len(store.uploads) != 1 {
 			t.Fatalf("format %s: uploads = %d, want 1", format, len(store.uploads))
 		}
+	}
+}
+
+// An image with a polyglot trailer (magic-valid image prefix + HTML/JS tail)
+// must be re-encoded to clean pixels before storage, so the tail never reaches
+// the bucket (audit finding #9).
+func TestUploadAvatarStripsPolyglotTrailer(t *testing.T) {
+	service, _, store, _, _ := avatarService(t)
+	imageData := append(testImageBytes(t, "png"), []byte("<script>alert(1)</script>")...)
+
+	if _, err := service.UploadAvatar(context.Background(), UploadAvatarInput{
+		UserID: 42, Content: bytes.NewReader(imageData), Size: int64(len(imageData)),
+	}); err != nil {
+		t.Fatalf("UploadAvatar returned error: %v", err)
+	}
+	if len(store.uploads) != 1 {
+		t.Fatalf("uploads = %d, want 1", len(store.uploads))
+	}
+	var stored []byte
+	for _, data := range store.uploads {
+		stored = data
+	}
+	if bytes.Contains(stored, []byte("<script>")) {
+		t.Fatal("stored avatar still contains the polyglot trailer")
+	}
+	if _, _, err := image.Decode(bytes.NewReader(stored)); err != nil {
+		t.Fatalf("re-encoded avatar does not decode: %v", err)
 	}
 }
 
