@@ -203,9 +203,11 @@ services:
       STORAGE_AUDIT_ENABLED: ${STORAGE_AUDIT_ENABLED:-true}
       RATE_LIMIT_UPLOAD_AVATAR_RPM: ${RATE_LIMIT_UPLOAD_AVATAR_RPM:-10}
       RATE_LIMIT_UPLOAD_AVATAR_WINDOW: ${RATE_LIMIT_UPLOAD_AVATAR_WINDOW:-60s}
-      # Alumni/Turnstile intake: TURNSTILE_SECRET left blank keeps the channel closed (50301); the rest default in internal/config.
+      # Alumni/Turnstile intake: TURNSTILE_SECRET left blank keeps the channel closed (50301);
+      # TURNSTILE_ACTION must be explicit whenever the secret is set (config validation
+      # refuses boot otherwise); TURNSTILE_TIMEOUT defaults in internal/config.
       TURNSTILE_SECRET: ${TURNSTILE_SECRET}
-      TURNSTILE_ACTION: ${TURNSTILE_ACTION:-alumni_request}
+      TURNSTILE_ACTION: ${TURNSTILE_ACTION}
       TURNSTILE_TIMEOUT: ${TURNSTILE_TIMEOUT:-5s}
       ALUMNI_RESET_URL: ${ALUMNI_RESET_URL:-https://link.sast.fun/reset}
       ALUMNI_SUPPORT_EMAIL: ${ALUMNI_SUPPORT_EMAIL:-link@sast.fun}
