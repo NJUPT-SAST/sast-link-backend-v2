@@ -1,21 +1,11 @@
--- A user's primary login email must never appear as an other_mail identity.
--- The service checks this before inserting, but login_email and
--- identities.provider_id are unique only within their own table, so two
--- concurrent transactions (a registration and a bind of the same address) can
--- both pass their pre-flight check and both commit, leaving one address in both
--- tables. FindByLoginIdentifier resolves accounts by email, so that state makes
--- login ownership ambiguous.
+-- A login email must never also be bound as an other_mail identity, or login
+-- ownership becomes ambiguous. Cross-table uniqueness cannot be expressed as a
+-- UNIQUE constraint, so triggers on both sides enforce it, serializing on an
+-- advisory key derived from the address, because a plain BEFORE-row trigger can
+-- let two concurrent inserts slip past.
 --
--- Cross-table uniqueness cannot be expressed as a UNIQUE constraint, so enforce
--- it with triggers on both sides. Note that BEFORE-row triggers read committed
--- data, so a pair of concurrent inserts can still slip past: SELECT ... FOR
--- UPDATE on the counterpart row is not possible when that row does not exist
--- yet. The gap is closed by locking a deterministic advisory key derived from
--- the address, which serializes any two transactions touching the same email.
---
--- Semicolons are escaped as \003B inside the unicode string literals below
--- because the migration runner splits statements on semicolons, matching the
--- convention established in V001.
+-- Semicolons inside the function bodies below are escaped as \003B because the
+-- migration runner splits statements on semicolons (V001 convention).
 
 DO U&'BEGIN
     IF EXISTS (

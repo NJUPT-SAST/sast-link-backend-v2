@@ -23,11 +23,9 @@ var (
 	errTrailingJSONValue      = errors.New("JSON request body contains multiple values")
 )
 
-// clientDTO is one registration on the wire.
-//
-// Written out field by field rather than serializing model.OAuthClient. That model
-// carries the secret hash, and while it is tagged json:"-", a response type with no
-// such field cannot leak it no matter how the model changes later.
+// clientDTO is one registration on the wire. Written out field by field rather
+// than serializing model.OAuthClient, which carries the secret hash: a response
+// type with no such field cannot leak it no matter how the model changes later.
 type clientDTO struct {
 	ID           int64     `json:"id"`
 	ClientID     string    `json:"client_id"`
@@ -42,9 +40,8 @@ type clientDTO struct {
 }
 
 // createdClientDTO is the registration response. It is a distinct type from
-// clientDTO so client_secret exists on exactly one response shape — the one that
-// answers the request that generated it — rather than on every client the list
-// endpoint returns.
+// clientDTO so client_secret exists on exactly the one response that answers the
+// request that generated it.
 type createdClientDTO struct {
 	clientDTO
 	// ClientSecret is present only for a confidential (third_party) client, and only
@@ -102,9 +99,8 @@ func mapServiceError(err error) error {
 	switch serviceErr.Kind {
 	case adminclient.KindInvalidInput:
 		status = http.StatusBadRequest
-		// The service's messages are literals naming which rule was broken, never echoes
-		// of submitted values, so they are safe to return verbatim and are what makes a
-		// rejected registration actionable.
+		// The service's messages are literals naming which rule was broken, never
+		// echoes of submitted values, so they are safe to return verbatim.
 		message = serviceErr.Message
 	case adminclient.KindNotFound:
 		status = http.StatusNotFound
@@ -114,8 +110,8 @@ func mapServiceError(err error) error {
 		message = "OAuth 客户端已存在"
 	case adminclient.KindProtected:
 		// 403 rather than 400: the request is well formed and the administrator is
-		// authorized, but the built-in client is not theirs to disable. The message
-		// names the rule, since a bare "forbidden" would look like a role problem.
+		// authorized, but the built-in client is not theirs to disable; the message
+		// names the rule.
 		status = http.StatusForbidden
 		message = serviceErr.Message
 	case adminclient.KindInternal:
@@ -160,9 +156,9 @@ func decodeStrictJSON(c *gin.Context, destination any) error {
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBodyBytes)
 	decoder := json.NewDecoder(c.Request.Body)
-	// Unknown fields are rejected, which is what makes the immutable properties safe:
-	// a request trying to change client_id / client_secret / client_type / id is
-	// refused outright instead of having those fields quietly ignored.
+	// Unknown fields are rejected, which is what makes the immutable properties
+	// safe: a request trying to change client_id / client_secret / client_type /
+	// id is refused outright instead of silently ignored.
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err

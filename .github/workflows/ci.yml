@@ -3,13 +3,9 @@ name: CI
 on:
   pull_request:
     branches: [main]
-  # main is also built and tested after the merge, not only on the pull request.
-  # Two pull requests can each be green in isolation and still break main
-  # together — a rename that lands beside a new caller, a repository method whose
-  # contract one branch tightened while another added a user of the old shape.
-  # Git merges those cleanly, so no textual conflict appears and no PR run ever
-  # sees the combination. Since a push to main deploys and now also migrates, the
-  # first thing to notice the breakage would otherwise be production traffic.
+  # main is also built and tested after the merge, not only on pull requests: two
+  # PRs green in isolation can still break main together, and a push to main
+  # deploys and migrates — the first notice would otherwise be production traffic.
   push:
     branches: [main]
   workflow_dispatch:
@@ -18,18 +14,15 @@ permissions:
   contents: read
 
 # Keyed by ref, so a pull-request run and the post-merge main run never cancel
-# each other. cancel-in-progress stays on: superseding a push to the same branch
-# is the intended behaviour, and the deploy workflow has its own serial group.
+# each other; cancel-in-progress stays on (a same-branch push supersedes its
+# predecessor, and the deploy workflow has its own serial group).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# No GO_VERSION here on purpose. Every setup-go below reads go-version-file:
-# go.mod, so the toolchain is declared once, in the file the compiler itself
-# obeys. A hardcoded copy per workflow drifts silently: CI would keep testing
-# against the old toolchain while go.mod asked for a newer one, and nothing would
-# report it. The Dockerfile's golang base image is the one remaining copy, and
-# the toolchain job below fails when it disagrees.
+# No GO_VERSION: every setup-go below reads go-version-file: go.mod, so the
+# toolchain is declared once. The Dockerfile's golang base image is the one copy
+# that cannot, and the toolchain job below fails when it disagrees.
 
 jobs:
   lint:
@@ -52,10 +45,8 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
-    # Wider than the go test -timeout below, so the job's own ceiling is not what
-    # kills a run that is merely slow. When the two are close, a timeout gives no
-    # test output at all — the runner cancels the step and the panic dump that
-    # names the stuck test never gets written.
+    # Wider than the go test -timeout below: with the two close, the runner kills
+    # the step and the panic dump that names the stuck test never gets written.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -66,23 +57,13 @@ jobs:
           cache: true
 
       - name: Run tests
-        # -pgo=off: the test build must not pick up cmd/api/default.pgo. PGO +
-        # -race/-cover on the same package is a known source of linker
-        # "fingerprint mismatch" flake; tests don't need profile-guided
-        # optimization (it only shapes the production binary).
+        # -pgo=off: the test build must not pick up cmd/api/default.pgo (PGO +
+        # -race/-cover on the same package is a known linker "fingerprint
+        # mismatch" flake; tests don't need profile-guided optimization).
         #
-        # -timeout 25m raises go test's per-package default of 10 minutes.
-        # internal/repository provisions a PostgreSQL container per test through
-        # Testcontainers and is already past that default on a developer machine;
-        # the integration suites in internal/migration and the handler packages
-        # are the same shape. A default-timeout failure is especially misleading
-        # here: the panic reports "test timed out" with no `--- FAIL` line, so it
-        # reads as a hung test rather than as a package that needed more wall
-        # clock than Go allows by default.
-        #
-        # This is a ceiling, not a budget. If a package genuinely deadlocks, the
-        # dump still arrives — 15 minutes later than before, but with the
-        # goroutine trace that identifies it.
+        # -timeout 25m: integration suites provision a PostgreSQL container per
+        # test through Testcontainers and already exceed go test's 10-minute
+        # default, whose failure reads as a hung test (no `--- FAIL` line).
         run: go test -race -shuffle=on -pgo=off -timeout 25m -coverprofile=coverage.out -covermode=atomic ./...
 
   build:
@@ -109,17 +90,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # deploy.yml carries ~130 lines of shell that runs on the production server
-      # over SSH, where a typo is discovered by a half-finished deploy rather than
-      # by a failing job. actionlint checks the workflow schema and expression
-      # syntax, and shells out to shellcheck for every `run:` block, which is the
-      # part that matters here: the deploy script is POSIX sh (the deploy user's
-      # login shell is not guaranteed to be bash), so it cannot rely on pipefail
-      # and every pipeline has to be guarded explicitly.
-      #
-      # Pinned by version rather than @latest: a new actionlint release adding a
-      # rule would otherwise fail unrelated pull requests that made no change.
-      # shellcheck is preinstalled on ubuntu-latest runners.
+      # actionlint checks the workflow schema and shells out to shellcheck for
+      # every `run:` block — the part that matters, since deploy.yml's ~130 shell
+      # lines run on the production server over SSH, where a typo surfaces as a
+      # half-finished deploy. The deploy script is POSIX sh (the login shell is not
+      # guaranteed bash), so no pipeline may rely on pipefail. Pinned by version:
+      # a new actionlint release would otherwise fail unrelated pull requests.
       - name: actionlint
         run: |
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
@@ -132,14 +108,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # go.mod is the single source of truth for the toolchain: the workflows read
-      # it through go-version-file, and this job holds the one copy that cannot,
-      # the Dockerfile's build stage. They have to agree, because the Dockerfile
-      # is what actually compiles the deployed binaries — a mismatch means CI
-      # tested one toolchain and production runs another, and a Go release that
-      # changes codegen or standard-library behaviour would slip through green
-      # tests. Dependabot's docker updates land the base-image bump on its own, so
-      # this check is what forces go.mod to move with it.
+      # go.mod is the single source of truth; the Dockerfile's build stage is the
+      # one copy that cannot read it, so this job fails when they disagree — a
+      # mismatch means CI tests one toolchain and production runs another, and a
+      # Go release changing codegen or standard-library behaviour would slip
+      # through green tests.
       - name: Dockerfile golang base matches go.mod
         run: |
           go_mod_version=$(awk '/^go / { print $2 }' go.mod)

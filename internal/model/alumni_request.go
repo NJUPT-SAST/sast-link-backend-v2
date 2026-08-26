@@ -11,11 +11,9 @@ const (
 	AlumniRequestStatusRejected AlumniRequestStatus = "rejected"
 )
 
-// Valid reports whether s is a defined alumni_request_status_enum value.
-//
-// Needed for the same reason College.Valid is: an undefined value reaches
-// PostgreSQL as an invalid input for the enum, which surfaces as a 500 naming no
-// field rather than a 400 naming the parameter.
+// Valid reports whether s is a defined alumni_request_status_enum value, so an
+// undefined value fails as a 400 naming the parameter rather than a PostgreSQL
+// enum 500.
 func (s AlumniRequestStatus) Valid() bool {
 	switch s {
 	case AlumniRequestStatusPending, AlumniRequestStatusApproved, AlumniRequestStatusRejected:
@@ -27,12 +25,10 @@ func (s AlumniRequestStatus) Valid() bool {
 
 // AlumniRequest persists one alumni account-request ticket.
 //
-// The ticket carries two addresses because a graduated member's school mailbox is
-// usually the reason they are here: LoginEmail is the original @njupt.edu.cn or
-// @sast.fun address that becomes the account's login identity, and PersonalEmail
-// is a reachable third-party mailbox bound as an other_mail identity. Result
-// notifications go to PersonalEmail - sending them to LoginEmail would deliver
-// them to the dead mailbox.
+// It carries two addresses: LoginEmail is the original @njupt.edu.cn or @sast.fun
+// address that becomes the account's login identity, and PersonalEmail is a
+// reachable third-party mailbox bound as an other_mail identity. Result
+// notifications go only to PersonalEmail — LoginEmail is the dead mailbox.
 type AlumniRequest struct {
 	ID             int64
 	Name           string

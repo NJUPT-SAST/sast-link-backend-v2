@@ -11,18 +11,11 @@ import (
 // student ID.
 const pendingStudentConstraint = "uq_alumni_requests_pending_student"
 
-// Submit records an account-request ticket.
-//
-// Order matters and is not the obvious one. Field validation runs first, before
-// the captcha, because a Turnstile token is single-use and valid for 300 seconds:
-// verifying first would burn the token on a submission that then fails a length
-// check, and the applicant would have to solve the challenge again to fix a typo.
-// The field rules are already published in the frontend, so checking them first
-// discloses nothing.
-//
-// The occupancy queries are the real disclosure surface — they answer "does this
-// email or student ID already have an account" — so they stay behind the captcha
-// and the rate limiter, where an unverified caller cannot reach them.
+// Submit records an account-request ticket. Field validation runs before the
+// captcha, because a Turnstile token is single-use and short-lived: verifying
+// first would burn it on a submission that then fails a length check. The
+// occupancy queries — the real disclosure surface ("does this email or student ID
+// already have an account") — run behind both the captcha and the rate limiter.
 func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, error) {
 	validated, err := validateSubmit(input)
 	if err != nil {
@@ -31,9 +24,8 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 	}
 
 	if s.Captcha == nil {
-		// A nil verifier is a wiring mistake, and the safe reading of it is that no
-		// verification happened. Refusing keeps the invariant that this endpoint never
-		// accepts an unverified submission.
+		// A nil verifier means no verification happened; refusing keeps this endpoint
+		// from ever accepting an unverified submission.
 		unavailable := newError(ErrUnavailable, "申请通道暂不可用，请稍后再试", nil)
 		s.auditSubmit(ctx, input, 0, false, errorCode(unavailable), attemptedSubmitDetail(input))
 		return nil, unavailable
@@ -85,8 +77,7 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 		"login_email":    request.LoginEmail,
 		"personal_email": request.PersonalEmail,
 		// Recorded so a later dispute can establish that the submission did pass
-		// verification, rather than leaving it to inference from the absence of a
-		// failure row.
+		// verification.
 		"captcha": "passed",
 	}
 	s.auditSubmit(ctx, input, request.ID, true, 0, detail)
@@ -95,12 +86,8 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 }
 
 // checkOccupancy refuses a submission whose identifiers already belong to an
-// account.
-//
-// Pre-checked rather than left to the approval transaction because the applicant
-// is the only one who can fix it, and they are gone by review time. A collision
-// discovered at approval leaves the reviewer holding a ticket they cannot act on
-// and no way to reach the person who filled it in.
+// account. Pre-checked at submit time — the applicant is gone by review, so a
+// collision found then leaves the reviewer a ticket they cannot act on.
 func (s Service) checkOccupancy(ctx context.Context, validated validatedSubmit) error {
 	occupied, err := s.Users.ExistsAsEmailAnywhere(ctx, validated.personalEmail)
 	if err != nil {
@@ -112,8 +99,7 @@ func (s Service) checkOccupancy(ctx context.Context, validated validatedSubmit) 
 	}
 
 	// The login email is checked the same way: it becomes the account's login
-	// identity, and V005's triggers also forbid it from already existing as an
-	// other_mail binding on someone else's account.
+	// identity.
 	occupied, err = s.Users.ExistsAsEmailAnywhere(ctx, validated.loginEmail)
 	if err != nil {
 		return internalError(ctx, "check alumni request login email occupancy",
@@ -134,11 +120,9 @@ func (s Service) checkOccupancy(ctx context.Context, validated validatedSubmit) 
 	return nil
 }
 
-// mapCreateError classifies an insert failure.
-//
-// The pending-student index is the expected one: the applicant submitted twice.
-// Everything else is logged rather than guessed at, because reporting the wrong
-// cause on an anonymous endpoint gives the submitter no way to make progress.
+// mapCreateError classifies an insert failure. The pending-student index means the
+// applicant submitted twice; anything else is logged rather than guessed, since the
+// wrong cause on an anonymous endpoint gives the submitter no way to make progress.
 func (s Service) mapCreateError(ctx context.Context, err error) error {
 	if repository.DuplicateConstraint(err) == pendingStudentConstraint {
 		return newError(ErrPending, "该学号已有待审申请，请等待处理", err)
@@ -146,10 +130,9 @@ func (s Service) mapCreateError(ctx context.Context, err error) error {
 	return internalError(ctx, "create alumni request", "提交申请失败", err)
 }
 
-// attemptedSubmitDetail records the identifiers from a submission attempt.
-//
-// The captcha token is deliberately absent: it is a bearer value for the
-// verification, and one-time or not it has no place in a durable log.
+// attemptedSubmitDetail records the identifiers from a submission attempt. The
+// captcha token is deliberately absent: it is a bearer value with no place in a
+// durable log.
 func attemptedSubmitDetail(input SubmitInput) map[string]any {
 	return map[string]any{
 		"student_id":     input.StudentID,
@@ -159,9 +142,7 @@ func attemptedSubmitDetail(input SubmitInput) map[string]any {
 }
 
 // auditSubmit records a submission attempt with no acting user: the endpoint is
-// unauthenticated, so user_id stays NULL rather than being attributed to the
-// account the ticket refers to — that account does not exist yet, and the
-// submitter's identity is exactly what has not been established.
+// unauthenticated, so user_id stays NULL.
 func (s Service) auditSubmit(
 	ctx context.Context,
 	input SubmitInput,

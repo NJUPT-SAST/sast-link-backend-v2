@@ -12,18 +12,15 @@ import (
 
 // RequireRole admits only principals holding one of the allowed roles.
 //
-// Must be chained after RequireAuth, which is what puts the Principal in the
-// context; a missing Principal means the two are wired in the wrong order and is
-// reported as an internal error rather than as a permission denial, because it is
-// a programming mistake and not something the caller did.
+// Must be chained after RequireAuth, which puts the Principal in the context; a
+// missing Principal is a wiring mistake and reports as an internal error, not a
+// permission denial.
 //
-// The role is read from the Principal, which the authenticator populates from the
-// database row rather than from the token's role claim — see authenticate. A
-// demotion therefore takes effect on the next request.
+// The role comes from the database row, not the token's role claim, so a
+// demotion takes effect on the next request.
 //
-// An empty allowed set rejects every request. The alternative reading, "no
-// constraint means allow all", turns a wiring slip into a silently open admin
-// endpoint; failing closed makes it a visible 403 instead.
+// An empty allowed set rejects every request, so a wiring slip surfaces as a
+// visible 403 rather than a silently open admin endpoint.
 func (a Authenticator) RequireRole(allowed ...model.UserRole) gin.HandlerFunc {
 	permitted := make(map[string]struct{}, len(allowed))
 	for _, role := range allowed {

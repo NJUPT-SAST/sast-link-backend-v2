@@ -25,7 +25,7 @@ func (h Handler) Stats(c *gin.Context) {
 	users, err := h.Users.Stats(ctx)
 	if err != nil {
 		// The 500 carries no cause, so the reason must land in the logs here or it
-		// is gone entirely — the same discipline the audit path below follows.
+		// is gone entirely.
 		slog.ErrorContext(ctx, "load overview user stats", "error", err)
 		response.Error(c, internalError())
 		return
@@ -57,8 +57,8 @@ func (h Handler) Stats(c *gin.Context) {
 			}
 		} else {
 			// Fail-open by design, but the overview must not silently read as "no audit
-			// activity": an empty recent list could otherwise be a real empty table or
-			// a broken query. Log the failure so operators can tell the two apart.
+			// activity": an empty recent list could be a real empty table or a broken
+			// query, so log the failure.
 			slog.WarnContext(ctx, "load overview audit recent",
 				"error", err)
 		}

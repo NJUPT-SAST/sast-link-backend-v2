@@ -24,11 +24,9 @@ func NewAlumniRequest(database *gorm.DB) *AlumniRequestRepository {
 	return &AlumniRequestRepository{database: database}
 }
 
-// AlumniRequestFilter bounds a ticket listing.
-//
-// Status and Notified are tri-state: nil means "do not filter". Notified filters
-// on notified_at IS NULL / IS NOT NULL, which is the notification backlog the
-// partial index idx_alumni_requests_pending_notification supports.
+// AlumniRequestFilter bounds a ticket listing. Status and Notified are
+// tri-state: nil means "do not filter"; Notified filters on notified_at
+// IS NULL / IS NOT NULL.
 type AlumniRequestFilter struct {
 	Status   *model.AlumniRequestStatus
 	Notified *bool
@@ -37,12 +35,10 @@ type AlumniRequestFilter struct {
 	Offset   int
 }
 
-// Create inserts a pending ticket.
-//
-// A collision on uq_alumni_requests_pending_student surfaces as a unique
-// violation the caller classifies with DuplicateConstraint: one student ID may
-// hold at most one ticket awaiting review, while a rejected applicant may correct
-// their details and resubmit.
+// Create inserts a pending ticket. A collision on the pending-student unique
+// index surfaces as a unique violation the caller classifies with
+// DuplicateConstraint: one student ID holds at most one ticket awaiting review,
+// while a rejected applicant may correct their details and resubmit.
 func (r *AlumniRequestRepository) Create(ctx context.Context, request *model.AlumniRequest) error {
 	if request == nil {
 		return fmt.Errorf("%w: request is nil", ErrInvalidArgument)
@@ -69,13 +65,9 @@ func (r *AlumniRequestRepository) Get(ctx context.Context, requestID int64) (*mo
 	return &request, nil
 }
 
-// List returns a filtered page of tickets plus the total matching count.
-//
-// Mirrors ListAdminUsers: the count runs the same predicates without the window
-// so a caller paging a filtered set sees a reachable total, ordering is by id
-// because created_at is not unique enough to keep offset pages from overlapping,
-// and an over-cap limit is refused rather than clamped so a caller cannot receive
-// a differently sized page than it asked for.
+// List returns a filtered page of tickets plus the total matching count. It
+// mirrors ListAdminUsers: count on the same predicates without the window,
+// ordered by id, over-cap limit refused rather than clamped.
 func (r *AlumniRequestRepository) List(
 	ctx context.Context,
 	filter AlumniRequestFilter,
@@ -125,9 +117,8 @@ func (r *AlumniRequestRepository) listQuery(ctx context.Context, filter AlumniRe
 		}
 	}
 	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
-		// ILIKE with both wildcards: the reviewer is matching a name or a partial
-		// student ID off a chat message, not running a prefix search. The escape
-		// below keeps a literal % or _ in the keyword from turning into a wildcard.
+		// ILIKE with both wildcards so a partial name or student ID matches; the
+		// escape below keeps a literal % or _ from turning into a wildcard.
 		pattern := "%" + escapeLikePattern(keyword) + "%"
 		query = query.Where(
 			"name ILIKE ? ESCAPE '\\' OR student_id ILIKE ? ESCAPE '\\' "+
@@ -138,30 +129,22 @@ func (r *AlumniRequestRepository) listQuery(ctx context.Context, filter AlumniRe
 }
 
 // AlumniProvision is what the service layer builds from a locked ticket: the rows
-// to insert for the approved account.
-//
-// A callback rather than pre-built arguments because the mapping needs the ticket
-// the transaction just locked, and the password hash must be derived from it
-// inside the same call. This is the shape CreateRegistrationWithIdentity's
-// TokenPairFactory uses for the same reason: the transaction stays in the
-// repository, the policy stays in the service.
+// to insert for the approved account. It is a callback rather than pre-built
+// arguments because the password hash must be derived from the locked ticket
+// inside the transaction: the transaction stays in the repository, the policy
+// stays in the service.
 type AlumniProvision func(*model.AlumniRequest) (*model.User, *model.Profile, *model.Identity, error)
 
 // ApproveAlumniRequest locks a pending ticket, provisions the account, and writes
 // the verdict in one transaction.
 //
-// All three writes commit together or none do. Two failure modes make this
-// necessary rather than merely tidy:
-//
-//   - A committed account with a still-pending ticket invites a second approval,
-//     and the retry collides with the student ID the first one inserted - the
-//     reviewer sees "学号已被占用" for an account the system itself just created.
-//   - A committed verdict with no account leaves an alumnus holding an approval
-//     email for an account that does not exist.
-//
-// SELECT ... FOR UPDATE is what makes a double-clicked approve button safe: the
-// second transaction blocks until the first commits, then reads status =
-// 'approved' and returns ErrStateConflict instead of provisioning again.
+// All three writes commit together or none do: a committed account with a
+// still-pending ticket would invite a second approval that collides with the
+// student ID just inserted, and a committed verdict with no account would leave
+// an alumnus holding an approval email for something that does not exist. The
+// row lock (SELECT ... FOR UPDATE) is what makes a double-clicked approve button
+// safe: the second transaction blocks, reads status = 'approved', and returns
+// ErrStateConflict instead of provisioning again.
 //
 // Returns ErrNotFound for an unknown id and ErrStateConflict when the ticket
 // already carries a verdict.
@@ -225,11 +208,9 @@ func (r *AlumniRequestRepository) ApproveAlumniRequest(
 	return &approved, nil
 }
 
-// RejectAlumniRequest locks a pending ticket and records a rejection.
-//
-// Takes the same row lock as approval for the same reason: two reviewers acting
-// at once must not both write a verdict, and the loser must be told the ticket
-// was already handled rather than silently overwriting the reason.
+// RejectAlumniRequest locks a pending ticket and records a rejection. It takes
+// the same row lock as approval so two reviewers cannot both write a verdict,
+// and the loser learns the ticket was already handled.
 func (r *AlumniRequestRepository) RejectAlumniRequest(
 	ctx context.Context,
 	requestID int64,
@@ -290,12 +271,9 @@ func lockPendingRequest(transaction *gorm.DB, requestID int64) (*model.AlumniReq
 	return &request, nil
 }
 
-// MarkNotifyAttempt increments the delivery counter before a send is attempted.
-//
-// Counted before rather than after on purpose: a process killed mid-send leaves
-// notify_attempts incremented and notified_at NULL, which reads as "tried, not
-// confirmed delivered" - the truth. Incrementing afterwards would discard the
-// evidence that anything was attempted.
+// MarkNotifyAttempt increments the delivery counter before a send is attempted,
+// so a process killed mid-send leaves "tried, not confirmed" rather than
+// discarding the evidence that a send was attempted.
 func (r *AlumniRequestRepository) MarkNotifyAttempt(ctx context.Context, requestID int64) error {
 	if requestID <= 0 {
 		return fmt.Errorf("%w: request id must be positive", ErrInvalidArgument)

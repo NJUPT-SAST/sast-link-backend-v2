@@ -11,9 +11,8 @@ services:
       - "127.0.0.1:${COMPOSE_DB_PORT:-15432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    # Tuned for the 1c1g deployment shape: max_connections tracks the API pool
-    # (30) plus headroom, shared_buffers takes the memory the argon2id KDF leaves.
-    # synchronous_commit stays on — these writes are the durability-critical path.
+    # Tuned for the 1c1g deployment shape. synchronous_commit stays on: these
+    # writes are the durability-critical path.
     command:
       - "-c"
       - "max_connections=50"
@@ -84,15 +83,15 @@ services:
       APP_ENV: ${APP_ENV:-development}
       APP_PORT: "8080"
       # The compose stack serves the API at the root over plain HTTP, so the
-      # httpOnly session cookie must be root-scoped and non-Secure here — with
-      # the production defaults (/v2 + Secure) the browser never sends it back
-      # and the fresh-tab bootstrap silently no-ops.
+      # cookie must be root-scoped and non-Secure — with the production defaults
+      # (/v2 + Secure) the browser never sends it back and the fresh-tab
+      # bootstrap silently no-ops.
       SESSION_COOKIE_PATH: ${SESSION_COOKIE_PATH:-/}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       LOG_LEVEL: ${LOG_LEVEL:-warn}
-      # Kept below the 512M container limit (deploy.resources.limits.memory)
-      # with headroom for non-heap memory: a GOMEMLIMIT above the cgroup limit
-      # stops the GC from tightening and gets the container OOM-killed.
+      # Kept below the 512M container limit with headroom for non-heap memory — a
+      # GOMEMLIMIT above the cgroup limit stops the GC from tightening and gets
+      # the container OOM-killed.
       GOMEMLIMIT: ${GOMEMLIMIT:-400MiB}
       DB_HOST: postgres
       DB_PORT: "5432"
@@ -118,12 +117,10 @@ services:
       OAUTH_CONSENT_URL: ${OAUTH_CONSENT_URL}
       OAUTH_CODE_TTL: ${OAUTH_CODE_TTL:-5m}
       OAUTH_AUTHORIZE_REQUEST_TTL: ${OAUTH_AUTHORIZE_REQUEST_TTL:-20m}
-      # Third-party login: SAST Link acting as an OAuth *client*, the opposite
-      # direction from the provider settings above. Both providers default to
-      # off; a disabled one needs no credentials. Enabling either makes
-      # OAUTH_LOGIN_REDIRECTS required, and enabling Feishu additionally
-      # requires OAUTH_FEISHU_TENANT_KEY — an empty tenant key would accept
-      # logins from every Lark tenant instead of the SAST enterprise.
+      # Third-party login: SAST Link acting as an OAuth *client*, opposite of the
+      # provider settings above. Both providers default to off. Enabling either
+      # makes OAUTH_LOGIN_REDIRECTS required; Feishu additionally requires
+      # OAUTH_FEISHU_TENANT_KEY (an empty value would accept every Lark tenant).
       OAUTH_GITHUB_ENABLED: ${OAUTH_GITHUB_ENABLED:-false}
       OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID}
       OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET}
@@ -133,17 +130,16 @@ services:
       OAUTH_FEISHU_CLIENT_SECRET: ${OAUTH_FEISHU_CLIENT_SECRET}
       OAUTH_FEISHU_REDIRECT_URI: ${OAUTH_FEISHU_REDIRECT_URI}
       OAUTH_FEISHU_TENANT_KEY: ${OAUTH_FEISHU_TENANT_KEY}
-      # Exact-match allow-list of frontend URLs a callback may return to. The
-      # callback hands a login_code to whatever it redirects to, so a prefix
-      # rule would let link.sast.fun.evil.test collect one.
+      # Exact-match allow-list of frontend URLs a callback may redirect to — the
+      # callback hands a login_code to whatever it redirects to, so a prefix rule
+      # would let link.sast.fun.evil.test collect one.
       OAUTH_LOGIN_REDIRECTS: ${OAUTH_LOGIN_REDIRECTS}
       OAUTH_LOGIN_ERROR_REDIRECT: ${OAUTH_LOGIN_ERROR_REDIRECT}
       OAUTH_LOGIN_STATE_TTL: ${OAUTH_LOGIN_STATE_TTL:-10m}
       OAUTH_LOGIN_REGISTRATION_STATE_TTL: ${OAUTH_LOGIN_REGISTRATION_STATE_TTL:-15m}
       OAUTH_LOGIN_CODE_TTL: ${OAUTH_LOGIN_CODE_TTL:-60s}
-      # Rate-limit defaults for the local development stack. Tune them in your
-      # .env when running loadmix so the bench measures the service under test,
-      # not the limits.
+      # Rate-limit defaults for the local development stack; tune in .env when
+      # running loadmix so the bench measures the service, not the limits.
       RATE_LIMIT_LOGIN_RPM: ${RATE_LIMIT_LOGIN_RPM:-300}
       RATE_LIMIT_LOGIN_WINDOW: ${RATE_LIMIT_LOGIN_WINDOW:-15m}
       RATE_LIMIT_SEND_EMAIL_RPM: ${RATE_LIMIT_SEND_EMAIL_RPM:-3}
@@ -173,8 +169,8 @@ services:
       ARGON2_TIME: ${ARGON2_TIME:-2}
       ARGON2_MEMORY: ${ARGON2_MEMORY:-19456}
       ARGON2_THREADS: ${ARGON2_THREADS:-1}
-      # Retention sweeps run inside this process, not pg_cron. Listed here because
-      # this block is a whitelist: an omitted variable cannot be overridden from .env.
+      # Retention sweeps run inside this process, not pg_cron; listed because this
+      # block is a whitelist — an omitted variable cannot be overridden from .env.
       RETENTION_INTERVAL: ${RETENTION_INTERVAL:-1h}
       RETENTION_BATCH_SIZE: ${RETENTION_BATCH_SIZE:-1000}
       RETENTION_AUTHORIZATION_AGE: ${RETENTION_AUTHORIZATION_AGE:-1h}

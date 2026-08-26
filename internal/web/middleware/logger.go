@@ -11,13 +11,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// traceCounter disambiguates requests that start in the same nanosecond, which
-// is routine on one core under a burst; a time-only trace id would collide.
+// traceCounter disambiguates same-nanosecond request starts so trace ids do not
+// collide.
 var traceCounter atomic.Uint64
 
 // sensitiveQueryKeys are OAuth one-time credentials or CSRF tokens that must not
-// land in request logs. A logged authorization code can be replayed to redeem a
-// session; a logged state defeats the CSRF protection it exists to provide.
+// land in request logs: a logged code can be replayed to redeem a session, and a
+// logged state defeats the CSRF protection it exists to provide.
 var sensitiveQueryKeys = map[string]struct{}{
 	"code":               {},
 	"state":              {},
@@ -54,10 +54,9 @@ func sanitizeRawQuery(rawQuery string) string {
 // Logger returns a Gin middleware that logs each request with structured fields.
 func Logger() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// The timing and query-string sanitization below only exist to feed the
-		// info-level log line. When the level is above info (the production default
-		// is warn), skip them entirely — a discarded log must not cost a clock read
-		// and a couple of allocations per request.
+		// The timing and query-string sanitization below only feed the info-level log
+		// line; when the level is above info (the production default is warn), skip
+		// them entirely.
 		enabled := slog.Default().Enabled(c.Request.Context(), slog.LevelInfo)
 		var start time.Time
 		if enabled {

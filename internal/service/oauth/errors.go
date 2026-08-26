@@ -46,8 +46,8 @@ const (
 	// maps onto temporarily_unavailable on the wire.
 	KindRateLimited Kind = "rate_limited"
 	// KindDependencyUnavailable is a fail-closed Redis store being unreachable.
-	// HTTP 503. The authorize stash is the only such store here: a request whose
-	// parameters cannot be retrieved cannot be treated as consented.
+	// HTTP 503; a request whose parameters cannot be retrieved cannot be treated as
+	// consented.
 	KindDependencyUnavailable Kind = "dependency_unavailable"
 	// KindInternal is a server-side fault. HTTP 500.
 	KindInternal Kind = "internal"
@@ -55,12 +55,11 @@ const (
 
 // Error is a typed OAuth service error.
 //
-// Redirectable is the security-relevant field. RFC 6749 §4.1.2.1 forbids
-// redirecting an error to a redirect_uri that has not been validated: doing so
-// would turn the authorize endpoint into an open redirector, since an attacker
-// could name any URI and have the server bounce the browser there. Only errors
-// raised after client_id and redirect_uri both check out may travel back to the
-// client; everything else has to be shown on our own consent page.
+// Redirectable is the security-relevant field: RFC 6749 §4.1.2.1 forbids
+// redirecting an error to an unvalidated redirect_uri, or the authorize endpoint
+// becomes an open redirector. Only errors raised after client_id and redirect_uri
+// both check out may travel back to the client; everything else stays on the
+// consent page.
 type Error struct {
 	Kind Kind
 	// Code is the RFC error code placed in the `error` field.

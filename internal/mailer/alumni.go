@@ -10,9 +10,9 @@ import (
 // AlumniResult is the outcome of an account-request review, as the applicant is
 // told it.
 //
-// No password field, deliberately: see alumniResultData. The approved account's
-// generated password is discarded at approval time and the applicant sets their
-// own through the reset flow, so there is nothing here to leak into a mailbox.
+// No password field, deliberately: the approved account's generated password is
+// discarded at approval time and the applicant sets their own through the reset
+// flow, so there is nothing here to leak into a mailbox.
 type AlumniResult struct {
 	// Name is the applicant's name, for the greeting.
 	Name string
@@ -30,10 +30,7 @@ type AlumniResult struct {
 // SendAlumniRequestResult delivers the verdict for an account-request ticket.
 //
 // The recipient must be the applicant's personal email, never the login email the
-// ticket carries: that address is the deactivated school mailbox which is the
-// reason the ticket exists at all. Sending there would deliver the approval to a
-// mailbox nobody reads, and the applicant would never learn they can set a
-// password.
+// ticket carries — that address is the deactivated school mailbox.
 func (m *Mailer) SendAlumniRequestResult(ctx context.Context, to string, result AlumniResult) error {
 	if strings.TrimSpace(to) == "" {
 		return fmt.Errorf("mailer: recipient is required")

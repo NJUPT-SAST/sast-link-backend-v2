@@ -1,11 +1,8 @@
 // Package adminclient implements the administrative OAuth client registry use
 // cases without HTTP concerns.
 //
-// Kept separate from package oauth: that package implements the OAuth 2.1 and OIDC
-// protocol flows, where the caller is a registered client. These are management
-// operations whose caller is a human administrator. Folding them together would
-// give one service both the protocol logic and the console's write paths, and the
-// authorization models are unrelated — client_secret versus an admin role.
+// Kept separate from package oauth: these are management operations whose caller
+// is a human administrator, where oauth's caller is a registered client.
 package adminclient
 
 import (
@@ -69,18 +66,14 @@ var (
 	ErrNotFound     = &Error{Kind: KindNotFound, Code: errcode.CodeClientNotFound}
 	ErrConflict     = &Error{Kind: KindConflict, Code: errcode.CodeConflict}
 	// ErrProtectedClient refuses a change to the built-in client that would break
-	// the internal session flow. Distinct from ErrInvalidInput because the input is
-	// well formed — it is the target that is off limits — and the console needs to
-	// tell the two apart to explain why.
+	// the internal session flow; distinct from ErrInvalidInput because the target
+	// is off limits, not the input.
 	ErrProtectedClient = &Error{Kind: KindProtected, Code: errcode.CodeForbidden}
 	ErrInternal        = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 )
 
-// newError builds a typed error carrying sentinel's Kind and Code.
-//
-// The message is always a literal at the call site and never interpolates caller
-// input: descriptions reach the client verbatim, so echoing a submitted value back
-// would make this a reflection point. The cause travels in Err for the logs only.
+// newError builds a typed error carrying sentinel's Kind and Code. The message is a
+// literal at the call site, never caller input; the cause travels in Err for the logs.
 func newError(sentinel *Error, message string, cause error) error {
 	return &Error{Kind: sentinel.Kind, Code: sentinel.Code, Message: message, Err: cause}
 }

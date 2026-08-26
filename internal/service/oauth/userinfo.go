@@ -14,11 +14,9 @@ import (
 
 // UserInfo returns the OIDC claims a token's scopes permit.
 //
-// The caller has already been authenticated by the shared JWT middleware, so the
-// token's validity, revocation and token_version are settled before this runs.
-// What remains is scope filtering: a token without the profile scope must not
-// yield profile claims even though the same account would supply them to a
-// broader token.
+// The shared JWT middleware has already settled the token's validity, revocation
+// and token_version; all that remains is scope filtering, so a token without the
+// profile scope cannot yield profile claims.
 func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoResult, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "Access Token 无效", nil)
@@ -27,9 +25,8 @@ func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoRe
 	if err != nil {
 		return nil, newError(ErrInvalidToken, "Access Token 的 scope 无效", err)
 	}
-	// Admin scopes grant no claim. Dropping them here keeps this endpoint's answer
-	// identical for "openid" and "openid admin:read": sub alone. Rejecting the
-	// latter would break OIDC for a token this service legitimately issued.
+	// Admin scopes grant no claim, so "openid admin:read" answers identically to
+	// "openid": sub alone.
 	granted := scope.ClaimScopes(normalized)
 
 	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
@@ -48,8 +45,8 @@ func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoRe
 		return nil, err
 	}
 	result := &UserInfoResult{Subject: userIDString(user.ID)}
-	// sub always ships; everything else is gated, and the same gate as the ID
-	// Token so the two endpoints cannot disagree about one token's claims.
+	// sub always ships; the rest is gated by the same gate as the ID Token so the
+	// two endpoints cannot disagree about one token's claims.
 	if slices.Contains(granted, scope.Profile) {
 		result.Name = claims.Name
 		result.Picture = claims.Picture
@@ -68,27 +65,23 @@ func (s Service) UserInfo(ctx context.Context, input UserInfoInput) (*UserInfoRe
 }
 
 // idTokenClaims collects every claim an ID Token or UserInfo response could
-// carry. It does not filter by scope: the ID Token signer and UserInfo each apply
-// the gate, so this stays a single description of where each claim comes from.
+// carry, without filtering by scope — the signer and UserInfo each apply the gate.
 //
-// The avatar and nickname live on the profile row, which is optional, so a
-// missing card is not an error — it yields empty display claims that both callers
-// then omit.
+// The avatar and nickname live on the optional profile row, so a missing card is
+// not an error; it yields empty display claims the callers omit.
 func (s Service) idTokenClaims(ctx context.Context, user *model.User, granted []string) (auth.IDTokenSubjectClaims, error) {
 	claims := auth.IDTokenSubjectClaims{
 		Name: user.Name,
-		// The role as it stands in the database right now. The requesting token's own
-		// role claim is a signing-time snapshot that outlives a demotion, so it is not
-		// what gets reported here.
+		// Role read from the database now, not from the requesting token's signing-time
+		// snapshot that would outlive a demotion.
 		Role:      string(user.Role),
 		UpdatedAt: user.UpdatedAt,
 		Email:     user.LoginEmail,
-		// preferred_username falls back to the real name when no nickname is set, so
-		// a relying party always has something displayable.
+		// preferred_username falls back to the real name when no nickname is set.
 		PreferredUsername: user.Name,
 	}
-	// Only the profile scope needs the card lookup; skipping it otherwise keeps a
-	// token limited to openid or email from touching the profile table at all.
+	// Only the profile scope needs the card lookup; other tokens never touch the
+	// profile table.
 	if !slices.Contains(granted, scope.Profile) {
 		return claims, nil
 	}

@@ -25,17 +25,12 @@ type JWTKeyPair struct {
 
 // TokenClaims are access-token claims used by SAST Link.
 //
-// AZP (OIDC "authorized party") names the client the token was issued to. Every
-// access token shares one audience — this service — because the internal API is
-// the resource server in both cases. The audience therefore cannot distinguish a
-// token minted for a third-party client from a first-party session token, and
-// without that distinction a third-party token authenticates on the internal
-// surface: an openid-only grant would reach PUT /user/profile and the email
-// binding endpoints, which is account takeover. AZP is what the internal
-// middleware pins so only the built-in client's tokens are accepted there.
-//
-// Omitted (empty) means a first-party session token: only the built-in client
-// is ever issued one, and an azp-less token keeps verifying as first-party.
+// AZP (OIDC "authorized party") names the client the token was issued to. On a
+// shared-audience resource server it is what keeps a third-party token from
+// authenticating on the internal surface (which would be account takeover): the
+// internal middleware pins it so only the built-in client's tokens are accepted
+// there. Omitted (empty) means a first-party session token — only the built-in
+// client is ever issued one.
 type TokenClaims struct {
 	Role         string `json:"role"`
 	State        string `json:"state"`
@@ -136,25 +131,17 @@ func (m JWTManager) VerifyAccessToken(tokenString string) (*TokenClaims, error) 
 // expiry, returning the claims of a token whose signature is valid but whose lifetime
 // has run out.
 //
-// This exists for RFC 7009 revocation, which is family-wide in this service: an
-// expired access token is itself already useless, but it still names a token family
-// whose refresh token can be live for weeks. Without a way to read the jti out of it,
-// revoking an expired access token silently revokes nothing and answers 200, telling
-// the client the session ended while it has not.
-//
-// Every other check stays in force — EdDSA only, known kid, matching issuer and
-// audience, iat sanity, and the required-claim set — because the only thing safe to
-// relax here is the clock. In particular this is NOT jwt.ParseUnverified: an
-// unverified jti is attacker-chosen, and accepting one would let anyone revoke an
-// arbitrary family. The caller must still confirm ownership against the database row
-// the jti resolves to, which is what actually authorizes the revocation.
+// Used by RFC 7009 revocation: an expired access token still names a token family
+// whose refresh token can be live for weeks, so revoking it must read its jti. Every
+// other check stays in force — this is NOT jwt.ParseUnverified, since an unverified,
+// attacker-chosen jti would let anyone revoke an arbitrary family. The caller must
+// still confirm ownership against the database row the jti resolves to.
 func (m JWTManager) VerifyExpiredAccessToken(tokenString string) (*TokenClaims, error) {
 	return m.parseAccessToken(tokenString, true)
 }
 
-// parseAccessToken is the single parser both entry points share. The parser options
-// are identical in both modes; allowExpired changes only which failure is forgiven
-// afterwards, so nothing else can be relaxed by accident.
+// parseAccessToken is the single parser both entry points share; allowExpired
+// changes only which failure is forgiven afterwards.
 func (m JWTManager) parseAccessToken(tokenString string, allowExpired bool) (*TokenClaims, error) {
 	if m.Issuer == "" || len(m.Audience) == 0 {
 		return nil, ErrInvalidInput
@@ -167,19 +154,15 @@ func (m JWTManager) parseAccessToken(tokenString string, allowExpired bool) (*To
 		jwt.WithExpirationRequired(),
 		jwt.WithIssuedAt(),
 		jwt.WithNotBeforeRequired(),
-		// A small leeway so a freshly issued token is not rejected as
-		// not-valid-yet by a replica whose clock lags the signer by a second or
-		// two. The iat/nbf checks stay enforced; this only forgives the boundary.
+		// Small leeway so a replica whose clock lags the signer does not reject a
+		// freshly issued token; the iat/nbf checks stay enforced.
 		jwt.WithLeeway(5 * time.Second),
 		jwt.WithTimeFunc(func() time.Time { return now(m.Clock) }),
 	}
 	token, err := jwt.ParseWithClaims(tokenString, claims, m.keyfunc, parserOptions...)
 	if err != nil {
-		// jwt/v5 joins every claim failure into one error and each stays individually
-		// detectable, which is what lets expiry be forgiven on its own. Neither
-		// WithoutClaimsValidation nor a back-shifted clock would do: the first disables
-		// issuer and audience checking outright, and the second turns a freshly issued
-		// token into "not valid yet".
+		// jwt/v5 joins every claim failure into one error and keeps each
+		// individually detectable, so expiry can be forgiven on its own.
 		if allowExpired && isOnlyExpiredError(err) {
 			if claims.ExpiresAt == nil {
 				return nil, ErrInvalidToken
@@ -189,12 +172,8 @@ func (m JWTManager) parseAccessToken(tokenString string, allowExpired bool) (*To
 			}
 			return claims, nil
 		}
-		// Only a genuine expiry is reported as ErrExpiredToken. nbf-in-future and
-		// iat-in-future are "not valid yet", not "expired": mapping them here would
-		// tell callers (the revoke path, the middleware) to treat a not-yet-active
-		// token as expired, which is the wrong status and, for revoke, would route it
-		// into VerifyExpiredAccessToken unnecessarily. isOnlyExpiredError already
-		// refuses to forgive them; this keeps the classification consistent.
+		// Only a genuine expiry is reported as ErrExpiredToken; nbf-in-future and
+		// iat-in-future are "not valid yet", which isOnlyExpiredError refuses to forgive.
 		if errors.Is(err, jwt.ErrTokenExpired) {
 			return nil, ErrExpiredToken
 		}
@@ -212,11 +191,8 @@ func (m JWTManager) parseAccessToken(tokenString string, allowExpired bool) (*To
 // isOnlyExpiredError reports whether expiry is the sole reason a token was rejected.
 //
 // Enumerated as a deny list of everything that must still be fatal rather than as
-// "contains ErrTokenExpired", because a token can fail several validations at once: an
-// expired token from a foreign issuer reports both, and treating it as merely expired
-// would accept it. A signature failure never reaches here — the parser stops before
-// claim validation — but it is listed anyway so the guarantee does not depend on that
-// ordering.
+// "contains ErrTokenExpired", so an expired token from a foreign issuer is not
+// treated as merely expired and accepted.
 func isOnlyExpiredError(err error) bool {
 	if !errors.Is(err, jwt.ErrTokenExpired) {
 		return false

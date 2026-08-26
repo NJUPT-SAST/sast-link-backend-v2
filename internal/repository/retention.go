@@ -32,18 +32,11 @@ func NewRetention(database *gorm.DB) *RetentionRepository {
 }
 
 // TryLock reports whether this instance won the right to run a retention sweep.
-//
-// pg_try_advisory_lock returns immediately rather than queueing: a sweep that
-// loses the race should skip this tick, not repeat the same scan once the winner
-// finishes. Missing a tick is harmless because the next one covers the same rows.
-//
-// The lock is session-scoped, and a pooled *gorm.DB hands out an arbitrary
-// connection per statement — so releasing it through the pool could easily run
-// pg_advisory_unlock on a connection that never held the lock. That returns false
-// rather than erroring, and the real holder would stay locked until its connection
-// happened to be recycled, blocking every later sweep on every instance. So the
-// lock pins one connection for its whole lifetime and Unlock returns that same
-// connection to the pool.
+// pg_try_advisory_lock returns immediately: a losing sweep skips this tick, and
+// the next one covers the same rows. Because the advisory lock is session-scoped
+// and a pooled DB hands out arbitrary connections per statement, the lock pins
+// one connection for its whole lifetime and Unlock returns that same connection
+// to the pool.
 func (r *RetentionRepository) TryLock(ctx context.Context) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -99,9 +92,8 @@ func (r *RetentionRepository) Unlock(ctx context.Context) error {
 }
 
 // DeleteExpiredAuthorizations removes authorization codes that expired before
-// cutoff, whether or not they were redeemed. A code is single-use and its replay
-// defense lives in the family revocation performed at redemption time, so an
-// expired row has no remaining authority to record.
+// cutoff, whether or not they were redeemed; replay defense lives in the
+// redemption-time family revocation, so an expired row has no authority left.
 func (r *RetentionRepository) DeleteExpiredAuthorizations(
 	ctx context.Context,
 	cutoff time.Time,
@@ -112,15 +104,10 @@ func (r *RetentionRepository) DeleteExpiredAuthorizations(
 }
 
 // DeleteExpiredAccessTokens removes access-token metadata that expired before
-// cutoff.
-//
-// The auth middleware answers "no such JTI" with the same 401 it uses for a
-// revoked token, so deleting a row whose JWT is still inside its exp would
-// present an expired-but-valid token as revoked: the client receives
-// CodeAccessTokenInvalid instead of CodeAccessTokenExpired and treats it as a
-// forced logout rather than a cue to refresh. The caller's cutoff therefore
-// trails expires_at by a wide margin; see RETENTION_ACCESS_TOKEN_AGE, which
-// validation also refuses to set below JWT_ACCESS_TOKEN_EXPIRY.
+// cutoff. The middleware answers a missing JTI with the same 401 as a revoked
+// token, so deleting a row still inside its exp would present an
+// expired-but-valid token as revoked; the caller's cutoff therefore trails
+// expires_at by a wide margin (RETENTION_ACCESS_TOKEN_AGE).
 func (r *RetentionRepository) DeleteExpiredAccessTokens(
 	ctx context.Context,
 	cutoff time.Time,
@@ -130,21 +117,16 @@ func (r *RetentionRepository) DeleteExpiredAccessTokens(
 		&model.OAuthAccessToken{}, "oauth_access_tokens", "expires_at < ?", cutoff)
 }
 
-// DeleteRevokedRefreshTokens removes refresh tokens that expired before cutoff,
-// covering two shapes:
+// DeleteRevokedRefreshTokens removes refresh tokens that expired before cutoff:
+// rotated-away rows (revoked_at set, sequence > 0) and every row of a family
+// that is entirely dead (no member unrevoked and still valid) — the only branch
+// that removes a sequence-0 origin row left by a login the user never returned
+// to.
 //
-//   - rotated-away rows (revoked_at set, sequence > 0);
-//   - every row of a family that is entirely dead — no member is unrevoked and
-//     still valid, so the family can never rotate again. That includes the
-//     sequence-0 origin row a single login leaves behind when the user never
-//     comes back: the origin row is never revoked, so only the family-death
-//     branch removes it — without it, the table grows by one row per login.
-//
-// The origin row of a live family is still preserved: the refresh flow reads it to
-// set an ID Token's auth_time, and a family that keeps rotating outlives the
-// origin's own expires_at. Deleting it while the family lives makes the refresh
-// flow revoke the family and return 500. "Live" means unrevoked and not yet
-// expired, judged against cutoff so the sweep never races a valid token.
+// The origin row of a live family is preserved: the refresh flow reads it for an
+// ID Token's auth_time, and deleting it would make the refresh revoke the family
+// and return 500. "Live" means unrevoked and not yet expired, judged against
+// cutoff so the sweep never races a valid token.
 func (r *RetentionRepository) DeleteRevokedRefreshTokens(
 	ctx context.Context,
 	cutoff time.Time,
@@ -174,13 +156,10 @@ func (r *RetentionRepository) DeleteExpiredAuditLogs(
 		&model.AuditLog{}, "audit_logs", "created_at < ?", cutoff)
 }
 
-// deleteBatch deletes at most batchSize matching rows.
-//
-// The delete is restricted to a primary-key subquery rather than issuing a bare
-// DELETE ... WHERE: an unbounded delete on a table that has gone uncleaned for
-// months would hold row locks for the length of one statement, and this worker
-// shares its connection pool with live request traffic. Returning the row count
-// lets the caller keep sweeping until a pass comes back short.
+// deleteBatch deletes at most batchSize matching rows via a primary-key
+// subquery, so an uncleaned table cannot hold row locks for one unbounded
+// statement; the returned count lets the caller sweep until a pass comes back
+// short.
 func (r *RetentionRepository) deleteBatch(
 	ctx context.Context,
 	cutoff time.Time,
@@ -209,16 +188,11 @@ func (r *RetentionRepository) deleteBatch(
 }
 
 // DeleteExpiredAlumniRequests removes account-request tickets reviewed before
-// cutoff.
-//
-// Only approved and rejected tickets are swept, and the window is measured from
-// reviewed_at rather than created_at. A pending ticket is never deleted however
-// old it is: the three-day handling target is a statement in the UI, not a rule
-// the backend enforces, and dropping an unreviewed application would lose
-// someone's request rather than expire it. That is also why reviewed_at IS NOT
-// NULL is part of the predicate and not merely implied by the status - a row with
-// a verdict but no timestamp would otherwise be swept against a cutoff it has no
-// value to compare with.
+// cutoff. Only reviewed tickets are swept, measured from reviewed_at; a pending
+// ticket is never deleted, however old, since the three-day target is a UI
+// statement, not a backend rule. reviewed_at IS NOT NULL is part of the
+// predicate so a verdict with no timestamp is not swept against a cutoff it has
+// no value to compare with.
 func (r *RetentionRepository) DeleteExpiredAlumniRequests(
 	ctx context.Context,
 	cutoff time.Time,

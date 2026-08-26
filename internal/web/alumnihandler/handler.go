@@ -51,15 +51,13 @@ type Handler struct {
 	Requests RequestService
 }
 
-// Gates are the middleware the console routes are mounted behind.
-//
-// A struct rather than positional parameters, for the reason adminhandler.Gates
-// gives: they are interchangeable-looking gin.HandlerFuncs and a transposed pair
-// would compile into a route gated by the wrong permission.
+// Gates are the middleware the console routes are mounted behind. A struct
+// rather than positional parameters, for the reason adminhandler.Gates gives:
+// a transposed pair would compile into a route gated by the wrong permission.
 //
 // There is no captcha gate here. The human-verification check is a service-layer
 // port, because its verdict belongs in the same audit row as the submission and
-// it has to run after field validation — a middleware necessarily runs before the
+// it must run after field validation — a middleware necessarily runs before the
 // handler decodes the body, and a Turnstile token is single-use.
 type Gates struct {
 	RequireAuth       gin.HandlerFunc
@@ -71,17 +69,15 @@ type Gates struct {
 
 // RegisterRoutes mounts the account-request endpoints.
 //
-// The public submission sits at the root with no gate: it is reached by people who
-// have no account by definition. Its protection is the service's captcha check and
-// rate limiter, not a middleware.
+// The public submission sits at the root with no gate: it is reached by people
+// who have no account by definition; its protection is the service's captcha
+// check and rate limiter.
 //
 // Every console route names both a scope gate and a role gate, so a new route
-// cannot gain a permission by omission — it simply has none. Reading the queue is
-// open to the same roles that may read the user directory, since a ticket is a
-// pending directory entry; acting on one is admin-only.
+// cannot gain a permission by omission. Reading the queue is open to the same
+// roles that may read the user directory; acting on one is admin-only.
 func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
-	// Fail at boot rather than serve an ungated console route. gin would happily
-	// mount a nil handler and panic on the first request instead.
+	// Panic at boot rather than serve an ungated console route.
 	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil ||
 		g.RequireAdmin == nil || g.RequireReader == nil {
 		panic("alumnihandler: every gate in Gates must be set")
@@ -98,11 +94,9 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 		g.RequireWriteScope, g.RequireAdmin, h.ResendNotification)
 }
 
-// submitRequest is the anonymous submission body.
-//
-// Every field is a plain string with no binding tags: the service owns the rules,
-// so a `binding:"required"` here would produce a second, weaker copy that reports
-// a different message for the same violation.
+// submitRequest is the anonymous submission body. Every field has no binding
+// tags: the service owns the rules, so a binding:"required" here would produce a
+// second, weaker copy that reports a different message for the same violation.
 type submitRequest struct {
 	Name           string  `json:"name"`
 	StudentID      string  `json:"student_id"`
@@ -202,11 +196,9 @@ func (h Handler) Get(c *gin.Context) {
 	response.Ok(c, mapRequest(*view))
 }
 
-// approvedDTO reports the provisioned account.
-//
-// No initial_password field. The generated password is discarded at approval time
-// and the applicant sets their own through the reset flow, so there is nothing to
-// return — and the service's ApproveResult has no such field to accidentally
+// approvedDTO reports the provisioned account. No initial_password field: the
+// generated password is discarded at approval time and the applicant sets their
+// own through the reset flow.
 // serialize.
 type approvedDTO struct {
 	UserID     int64  `json:"user_id"`
@@ -342,9 +334,9 @@ func parseID(c *gin.Context) (int64, bool) {
 
 // parseOptionalBool accepts only "true" and "false".
 //
-// strconv.ParseBool would also take "1", "t" and "T", which the contract does not
-// document. An unrecognized value is an error rather than a silent false: a
-// mistyped notified=ture would otherwise return the opposite of what was asked.
+// strconv.ParseBool would also take "1", "t" and "T", which the contract
+// does not document; an unrecognized value is an error rather than a silent
+// false, so a mistyped notified=ture returns the opposite of what was asked.
 func parseOptionalBool(raw string) (*bool, error) {
 	switch strings.TrimSpace(raw) {
 	case "":
@@ -363,9 +355,9 @@ func parseOptionalBool(raw string) (*bool, error) {
 // decodeStrictJSON applies the shared request-body policy: exact content type, a
 // size cap, no unknown fields, and no trailing values.
 //
-// DisallowUnknownFields matters most on the submission: it refuses a body naming
-// status, reviewed_by or created_user_id outright instead of quietly ignoring
-// them, so a submitter cannot appear to set a field only the reviewer may write.
+// DisallowUnknownFields matters most on the submission: it refuses a body
+// naming status, reviewed_by or created_user_id outright, so a submitter cannot
+// appear to set a field only the reviewer may write.
 func decodeStrictJSON(c *gin.Context, destination any) error {
 	if err := requireJSONContentType(c); err != nil {
 		return err

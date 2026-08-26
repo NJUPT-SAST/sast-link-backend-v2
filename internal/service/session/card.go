@@ -10,11 +10,11 @@ import (
 
 // Card returns the public display card of any non-deleted user.
 //
-// This is the only unauthenticated read in the service. It goes through a
-// dedicated repository projection instead of reusing FindByID so that widening
-// UserProfileDTO later cannot silently publish private columns.
+// It is the only unauthenticated read in the service; it goes through a
+// dedicated repository projection so widening UserProfileDTO cannot publish
+// private columns.
 func (s Service) Card(ctx context.Context, input CardInput) (*CardResult, error) {
-	// Throttled ahead of the ID check so probing for valid IDs is capped too: the
+	// Throttled ahead of the ID check so probing for valid IDs is capped: the
 	// rejection an invalid ID gets is itself the signal an enumerator wants.
 	if clientIP := strings.TrimSpace(input.ClientIP); clientIP != "" {
 		if err := s.checkEndpointLimit(ctx, s.CardLimiter, "card", "ip:"+clientIP); err != nil {

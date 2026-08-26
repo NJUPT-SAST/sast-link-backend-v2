@@ -88,7 +88,7 @@
 | `40020` | 邮箱域名不允许（仅限 `@njupt.edu.cn` / `@sast.fun`） |
 | `40021` | 人机校验未通过（Turnstile token 缺失、无效、已使用或 action 不符） |
 
-> 参数类错误统一为 `40000`，不再细分"缺少参数"与"格式错误"：请求体解码是一次严格反序列化，缺字段与类型不符走同一条失败路径，拆成两个码只会让客户端依赖一个服务端无法稳定区分的差别。验证码发送超频返回 `42900`（与其他限流一致），不使用独立业务码。
+> 参数类错误统一为 `40000`，不再细分「缺少参数」与「格式错误」：请求体解码是一次严格反序列化，缺字段与类型不符走同一条失败路径，拆成两个码只会让客户端依赖一个服务端无法稳定区分的差别。验证码发送超频返回 `42900`（与其他限流一致），不使用独立业务码。
 
 #### 认证错误（401xx）
 
@@ -178,7 +178,7 @@
 > - **503**：本服务自身依赖不可用（Redis、COS 审核等），重试本服务有意义。
 > - **502**：GitHub / 飞书等**第三方 provider** 不可用，出现在 `GET /oauth/{github,lark}/callback`、`POST /user/identities/{github,lark}` 上。此时本服务健康、请求也合法，故障在上游，返回 503 会误导客户端以为重试本服务能解决。
 >
-> 客户端不应假定 `50300` 必然是 503，两者都要按"稍后重试"处理。
+> 客户端不应假定 `50300` 必然是 503，两者都要按「稍后重试」处理。
 
 OAuth 的 RFC 端点（`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`、`/userinfo`）不使用上述业务错误码，改用 RFC 6749 / RFC 6750 的 `{error, error_description}` 格式，详见 §5。`/oauth/authorize/consent` 是 SAST Link 自有端点，沿用本表业务码。
 
@@ -437,7 +437,7 @@ POST /auth/logout
 >
 > 登出使用**过期宽容认证**：access token 已过期（1h TTL 后）但签名有效时仍能登出——按其会话 family 撤销并清 cookie 返回成功；会话的 access 行已不存在或已撤销时同样幂等清 cookie 返回成功（`40102`）。缺失 Authorization Header 返回 `40100`（未登录）；伪造或签名无效的 token 返回 `40102`。
 >
-> 会话 cookie 是**浏览器级**的（同一浏览器的所有标签页共享）：单个标签页登出会清掉它，但不影响其他标签页 `sessionStorage` 里的凭据——它们下次刷新会通过 `/auth/refresh` 自动重建 cookie。因此"在一处登出，本浏览器其他标签页仍保有 session 直到其 token 过期"是预期行为。
+> 会话 cookie 是**浏览器级**的（同一浏览器的所有标签页共享）：单个标签页登出会清掉它，但不影响其他标签页 `sessionStorage` 里的凭据——它们下次刷新会通过 `/auth/refresh` 自动重建 cookie。因此「在一处登出，本浏览器其他标签页仍保有 session 直到其 token 过期」是预期行为。
 
 **Response** `200`:
 
@@ -608,7 +608,7 @@ GET /oauth/lark/callback?code=...&state=...
 
 - 已有绑定 → 签发一次性 `login_code`（Redis，60s），302 重定向至前端 `?code=<login_code>`
 - 无绑定 → 生成 `registration_state`（Redis，15min，暂存 provider + provider_id + identity_data + oauth_state），302 重定向至注册补全页 `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=lark&name=<name>&avatar=<url>`
-- 非 SAST 企业用户 → 拒绝，提示"仅限 SAST 成员登录"
+- 非 SAST 企业用户 → 拒绝，提示「仅限 SAST 成员登录」
 
 ---
 
@@ -679,11 +679,11 @@ POST /oauth/exchange-code
 
 - **纯提示，不影响任何正常路径**。没有任何端点会因为 `profile_needs_completion = true` 而拒绝请求，登录、刷新、OAuth 授权均不受影响。重定向完全由前端自行决定。
 - 不是权限输入，不参与任何鉴权判断。
-- 只读。该列是 PostgreSQL 生成列（V010），用户通过 `PUT /user/profile`（§3.2）补齐字段后自动转为 `false`，无专门的"确认已补全"接口。
+- 只读。该列是 PostgreSQL 生成列（V010），用户通过 `PUT /user/profile`（§3.2）补齐字段后自动转为 `false`，无专门的「确认已补全」接口。
 - **NOT NULL 自助字段一视同仁**：`name` / `phone_number` / `qq_number` / `major` 四个用户可自助补的必填字段只要为空（含纯空白）即触发提示。旧库无 `qq_number` 字段，迁移账号此列全空，老用户首次登录会被要求补全一次正是引导式补全的目的。
-- **不包含 `college`**：`其他` 是合法枚举值，无法区分"迁移默认值"与"用户真实选择"，否则会产生用户无法消除的提示。`student_id` / `login_email` / `password` 是标识或凭据而非资料字段，不在补全范畴。
+- **不包含 `college`**：`其他` 是合法枚举值，无法区分「迁移默认值」与「用户真实选择」，否则会产生用户无法消除的提示。`student_id` / `login_email` / `password` 是标识或凭据而非资料字段，不在补全范畴。
 - `name` 与 `student_id` 的比较**忽略大小写**：迁移数据中同时存在 `B24040525` 与 `b24040525` 两种形式。
-- 判空口径与 `PUT /user/profile` 完全一致（含 NBSP、U+3000 等 Unicode 空白），因此不会出现"提示已完成但提交被拒"或反之的死循环。
+- 判空口径与 `PUT /user/profile` 完全一致（含 NBSP、U+3000 等 Unicode 空白），因此不会出现「提示已完成但提交被拒」或反之的死循环。
 
 管理侧可见性见 §6.1（`needs_completion` 筛选）与 §6.2。
 
@@ -1264,7 +1264,7 @@ RFC 6749 §4.1.2.1 禁止把错误重定向到未经校验的 `redirect_uri`—�
 
 **scope 限制**：任何客户端（含 `first_party`）只能请求注册时声明的子集，超出返回 `invalid_scope`。`admin:read` / `admin:write` 仅 `third_party`（机密）客户端可持有；`user:read` / `user:write` 无客户端类型约束，任何客户端皆可持有——`/user/*` 每个端点只操作 token 主体本人的记录，持有 user scope 的应用不会是查他人凭据。
 
-`admin:read` / `admin:write` 在注册值约束之上再加一条限制：**仅 `third_party` 客户端可持有**，`first_party` 客户端请求任一 admin scope 返回 `invalid_scope`，即使其注册值中含有。原因是凭证能力——`first_party` 是公开客户端，token 端点仅凭 PKCE 认证它，因此从授权码被签出到管理 token 存在之间只有 `redirect_uri` 精确匹配一道屏障，而机密客户端有两道独立屏障。委派管理不应跑在更薄的那一侧。
+`admin:read` / `admin:write` 在注册值约束之上再加一条限制：**仅 `third_party` 客户端可持有**，`first_party` 客户端请求任一 admin scope 返回 `invalid_scope`，即使其注册值中含有。原因是凭证能力——`first_party` 是公开客户端，token 端点仅凭 PKCE 认证它，因此从授权码被签出到管理 token 存在之间只有 `redirect_uri` 精确匹配一道屏障，而机密客户端有两道独立屏障。委派管理只应落在屏障更厚的机密客户端上。
 
 `user:read` / `user:write` 无客户端类型约束，任何客户端（含 `first_party` 与 `third_party`）皆可持有。它们 gate `/user/*` 自助面——token 以当前用户本人身份操作其账号（读/改资料、绑/解绑身份、改密码、登出设备），每个端点都只操作 token 主体本人的记录，因此持有 user scope 的应用永远不会成为「查任意人」凭据，主体由 token 钉死，与签发客户端无关。
 
@@ -1596,7 +1596,7 @@ DELETE /oauth/grants/:client_id
 > 4. **`keyword` 长度上限 255**（所匹配列的最宽列宽）。超长返回 `400`：该参数会展开为三个无法走索引的 `ILIKE` 加一次全表 `COUNT(*)`，且本组端点未接入限流。
 > 5. **批量接口单次上限**：`GET /admin/users/batch` 的 `ids` 最多 100 个、`PUT /admin/users` 的 `ids` 最多 500 个，超出返回 `400`（不截断——静默截断会让调用方拿到的结果无法与其输入对齐）。
 >
-> 另有三条契约未写明的管理员自我保护规则，均返回 `403`：不可修改自己的 `role`；不可注销自己的账号；不可将系统中最后一名活跃管理员降权或注销（「活跃」指 `role = admin` 且 `state <> is_deleted`）。三者都是不可自行恢复的锁死场景 —— 能撤销该操作的端点正是被交出的那一个。
+> 另有三条契约未写明的管理员自我保护规则，均返回 `403`：不可修改自己的 `role`；不可注销自己的账号；不可将系统中最后一名活跃管理员降权或注销（「活跃」指 `role = admin` 且 `state <> is_deleted`）。三者都会让自己失去撤销该操作的权限，因此无法自行恢复。
 >
 > `department` 筛选跨表关联 `profile`，采用 `LEFT JOIN`，因此无 `profile` 行的用户在**不带** `department` 筛选时正常出现在列表中（`department` 为 `null`）；带该筛选时自然被排除。
 
@@ -2168,7 +2168,7 @@ DELETE /admin/oauth-clients/:id
 
 - **物理删除，不可恢复**：删除 `oauth_clients` 行，其全部授权码 / Access / Refresh Token 元数据经 `ON DELETE CASCADE` 级联清除；删前在同一事务内撤销活跃 token 并失效 auth-state 缓存，故已签发的 token **即刻全部失效**（不再能通过 `/userinfo` 或任何受保护端点）。`data.message` 在删除触发 token 撤销时提示已撤销该客户端的全部 Token；未撤销任何 token 时消息为「客户端已删除」。撤销计数（审计 `revoked_tokens`）含活跃 Access Token 与未撤销的 Refresh Token（每家族一条）——客户端 Access 已全部过期、仅剩活跃 Refresh 会话时同样计入。
 - 内置客户端（`INTERNAL_OAUTH_CLIENT_ID`，默认 `sast-link-web`）**不可删除**（`403`）：内部会话流程按 client_id 解析它，删除会使全站登录 / 刷新 / 注册立即中断，且控制台没有路径恢复（只能直连数据库）。
-- 带能力 scope（`admin:*` / `user:*`）的客户端**无额外限制**：删除移除了凭据与其携带的 scope，控制台或委派管理员均可执行——与授予时"仅控制台"（防委派蔓延）不同，删减委派不需要那道收紧。
+- 带能力 scope（`admin:*` / `user:*`）的客户端**无额外限制**：删除移除了凭据与其携带的 scope，控制台或委派管理员均可执行——与授予时「仅控制台」（防委派蔓延）不同，删减委派不需要那道收紧。
 - `:id` 为客户端主键（列表接口返回的 `id`，非 `client_id`）。非数字或非正整数返回 `404`。被拒的删除（内置客户端、未知 id）同样写入审计日志（`admin_oauth_client_delete`，success=false）。
 
 ---
@@ -2292,9 +2292,9 @@ GET /admin/stats
 
 ### 6.13 校友建号申请
 
-已毕业成员没有 `@sast.fun` 邮箱、学生邮箱也已停用，注册白名单（§1.6/1.7）会阻止其自助注册；§6.2.1 的管理员建号能解决，但校友侧没有入口去"请求建号"。这组端点补上那个入口：校友提交结构化工单，管理员在控制台一键通过，同一事务内建号并写入审批结果。
+已毕业成员没有 `@sast.fun` 邮箱、学生邮箱也已停用，注册白名单（§1.6/1.7）会阻止其自助注册；§6.2.1 的管理员建号能解决，但校友侧没有入口去「请求建号」。这组端点补上那个入口：校友提交结构化工单，管理员在控制台一键通过，同一事务内建号并写入审批结果。
 
-**身份核验始终是人工的。** 工单化自动的是转录劳动，不是核验责任——学号加姓名在毕业生群体里不是秘密，且 SMTP 发件人可伪造，任何"收到邮件即自动通过"的设计等于给任意人开号能力。
+**身份核验始终是人工的。** 工单化自动的是转录劳动，不是核验责任——学号加姓名在毕业生群体里不是秘密，且 SMTP 发件人可伪造，任何「收到邮件即自动通过」的设计等于给任意人开号能力。
 
 审批通过与驳回都会自动发邮件通知校友。通知发往**申请中填写的第三方邮箱**，不是 `login_email`——后者正是那个已停用的学生邮箱，发过去等于不发。
 
@@ -2342,7 +2342,7 @@ POST /alumni-requests
 | `note` | 否 | 补充说明，≤ 1000 字符 |
 | `captcha_token` | 是 | Turnstile 组件产出的 token |
 
-> **为何 `major` 必填、`name` 不能等于 `student_id`**：这两项正是 V010 生成列 `profile_needs_completion` 判定"资料残缺"的两种形态（§4.1 `profile_needs_completion`）。若放宽，审批建出的新号一登录就会被前端赶去资料补全页——为了校友从未被要求填写的字段。所以工单侧一次收齐。
+> **为何 `major` 必填、`name` 不能等于 `student_id`**：这两项正是 V010 生成列 `profile_needs_completion` 判定「资料残缺」的两种形态（§4.1 `profile_needs_completion`）。若放宽，审批建出的新号一登录就会被前端赶去资料补全页——为了校友从未被要求填写的字段。所以工单侧一次收齐。
 
 **Response** `200`:
 
@@ -2358,7 +2358,7 @@ POST /alumni-requests
 
 **校验顺序**（与直觉相反，是刻意的）：字段校验 → 人机校验 → 限流 → 占用预检 → 落库。
 
-> Turnstile token **一次性**且仅 300 秒有效。若先校验 token 再校字段，校友每改一个错字都要重新完成一次人机验证。字段规则本就公开在前端，前置不新增信息泄露面；真正的泄露面是"该邮箱/学号是否已有账号"这类占用查询，它们留在人机校验之后，未通过验证者探不到。
+> Turnstile token **一次性**且仅 300 秒有效。若先校验 token 再校字段，校友每改一个错字都要重新完成一次人机验证。字段规则本就公开在前端，前置不新增信息泄露面；真正的泄露面是「该邮箱/学号是否已有账号」这类占用查询，它们留在人机校验之后，未通过验证者探不到。
 
 **错误码**:
 
@@ -2429,8 +2429,8 @@ GET /admin/alumni-requests?status=&notified=&keyword=&page=&page_size=
 
 - `requests` 恒为数组，空队列是 `[]` 而非 `null`
 - **不返回提交者 IP**：它留在库里用于滥用追溯与限流取证，审批工单用不到它，把一个可关联到具体个人的网络标识复制到读接口上只是扩大暴露面
-- `notified_at` 为 `null` 表示结果邮件尚未确认送达，配合 `notified=false` 就是"已处理但未通知"的积压视图
-- `notify_attempts` 在每次投递**之前**递增：进程在发信中途被杀时，它已增而 `notified_at` 仍为 `null`，读作"试过但未确认"——这正是真实状态
+- `notified_at` 为 `null` 表示结果邮件尚未确认送达，配合 `notified=false` 就是「已处理但未通知」的积压视图
+- `notify_attempts` 在每次投递**之前**递增：进程在发信中途被杀时，它已增而 `notified_at` 仍为 `null`，读作「试过但未确认」——这正是真实状态
 
 **错误码**：`40000`、`40100`、`40300`、`50000`。
 
@@ -2472,7 +2472,7 @@ POST /admin/alumni-requests/:id/approve
 
 **不返回初始密码。** 系统生成的密码在审批时哈希后即丢弃，校友通过 `/reset` 自助设置——填写邮箱时用其**第三方邮箱**（`POST /auth/forgot-password/send-code` 不校验域名白名单，且会 JOIN `identities` 查 `other_mail`，见 §2.7）。通知邮件里也不含密码。
 
-`notify_enqueued` 回答的是"通知是否进入队列"，与 `notified_at` 回答的"是否送达"是两件事。队列满时它为 `false`，此时应调用 §6.13.6 手动补发——审批本身已提交，不会因为一封邮件没排上队而失败。
+`notify_enqueued` 回答的是「通知是否进入队列」，与 `notified_at` 回答的「是否送达」是两件事。队列满时它为 `false`，此时应调用 §6.13.6 手动补发——审批本身已提交，不会因为一封邮件没排上队而失败。
 
 **原子性**：锁工单行（`SELECT ... FOR UPDATE`）→ 建号 → 回写审批结果，三者同一事务。任一步失败整体回滚，工单留 `pending`，管理员可改字段重试。控制台按钮被双击时，第二个请求读到已是 `approved`，返回 `42204` 而不会重复建号。
 
@@ -2512,7 +2512,7 @@ POST /admin/alumni-requests/:id/resend-notification
 
 **Response** `200`: `{ "code": 0, "message": "ok", "data": { "notify_enqueued": true } }`
 
-投递链路是有界队列 + SMTP，两者都可能在审批已提交之后失败。通过邮件是校友唯一的"去设置密码"指引，丢了等于建号白做，所以提供手动补发。
+投递链路是有界队列 + SMTP，两者都可能在审批已提交之后失败。通过邮件是校友唯一的「去设置密码」指引，丢了等于建号白做，所以提供手动补发。
 
 `notified_at` 已非空时**也允许重发**：管理员提出补发说明他掌握系统不知道的信息（通常是校友根本没收到）。工单仍为 `pending` 时返回 `42200`——没有结果可通知。
 

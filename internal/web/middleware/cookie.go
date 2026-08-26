@@ -12,11 +12,9 @@ import (
 // refresh token, so /auth/refresh treats it as the refresh credential when the
 // JSON body carries none.
 //
-// Attributes follow the production topology: frontend and backend are same
-// origin on link.sast.fun (frontend at /, API under /v2 via the Caddy proxy),
-// so the cookie is host-only, scoped to /v2, and SameSite=Lax — cross-site
-// POSTs never carry it, which blocks cookie-CSRF on the refresh endpoint while
-// still letting same-site navigations and top-level GETs through.
+// Frontend and backend are same-origin on link.sast.fun (API under /v2 via the
+// Caddy proxy), so the cookie is host-only, scoped to /v2, and SameSite=Lax to
+// block cookie-CSRF on the refresh endpoint.
 type SessionCookie struct {
 	Name     string
 	Path     string
@@ -32,10 +30,8 @@ func (s *SessionCookie) Set(c *gin.Context, value string, maxAge time.Duration) 
 		return
 	}
 	// Below one second the cookie is not worth writing: Go omits Max-Age for a
-	// zero value and a sub-second truncation would land on that ambiguous spot
-	// (an ephemeral session cookie), while a negative Max-Age serializes as a
-	// delete. An expired or near-expired token gets a no-op instead of a silent
-	// clear or a near-dead cookie on a success path.
+	// zero value and serializes a negative one as a delete, so an expired token
+	// gets a no-op instead of a silent clear on a success path.
 	if maxAge < time.Second {
 		return
 	}

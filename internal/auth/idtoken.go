@@ -12,10 +12,8 @@ import (
 
 // IDTokenClaims are the OIDC ID Token claims issued by SAST Link.
 //
-// Every scope-gated claim is a pointer or omitempty: OIDC requires that a claim
-// absent from the granted scopes be absent from the token, not present-and-empty.
-// A relying party cannot distinguish `"name": ""` from a user without a name, so
-// emitting the zero value would misreport the subject.
+// Every scope-gated claim is a pointer or omitempty, so a claim absent from the
+// granted scopes is absent from the token rather than present-and-empty.
 type IDTokenClaims struct {
 	// AuthTime is the moment the user confirmed the authorization, in seconds
 	// since the epoch. OIDC names it auth_time and requires seconds, not RFC 3339.
@@ -30,19 +28,10 @@ type IDTokenClaims struct {
 	PreferredUsername string `json:"preferred_username,omitempty"`
 	UpdatedAt         int64  `json:"updated_at,omitempty"`
 	// Role is this service's own claim, not an OIDC one, carried under the profile
-	// scope because a member's standing in SAST is part of who they are here.
-	//
-	// Named without a URI namespace: OIDC reserves no `role` claim (the neighbouring
-	// specs use `roles`/`groups`), this provider's claim set is closed and validated
-	// against scope.canonicalOrder, and a namespaced key would only make every relying
-	// party parse a longer string. If a future standard claims the name, the migration
-	// is a version bump on this claim, not a silent collision.
-	//
-	// It is always the user's *current* role, read from the database row when the token
-	// is issued — never the role claim of whatever access token asked for it, which is
-	// a snapshot that survives a demotion. A relying party must still treat it as a
-	// display hint: it ages exactly like the ID Token it rides in, so it must not be
-	// the basis of an authorization decision this service would make itself.
+	// scope. It is always the user's *current* role, read from the database row when
+	// the token is issued — never the role claim of whatever access token asked for
+	// it, which is a snapshot that survives a demotion. A relying party must still
+	// treat it as a display hint, not the basis of an authorization decision.
 	Role string `json:"role,omitempty"`
 
 	// email scope. EmailVerified is a pointer so it can be omitted entirely
@@ -86,21 +75,16 @@ type IDTokenInput struct {
 
 // SignIDToken signs an OIDC ID Token with the active EdDSA key.
 //
-// This is deliberately a separate path from SignAccessToken rather than a shared
-// signer with a switch. The two tokens disagree on their most security-relevant
-// claim: an access token's aud is this service (and VerifyAccessToken enforces
-// that), while an ID Token's aud is the client_id. Signing ID Tokens through the
-// access-token path would either break the middleware's audience check or ship
-// ID Tokens that this service would accept as its own bearer credentials.
+// Deliberately separate from SignAccessToken: an ID Token's audience is the
+// client_id, not this service, so signing it through the access-token path could
+// ship ID Tokens this service would accept as its own bearer credentials.
 func (m JWTManager) SignIDToken(input IDTokenInput) (string, error) {
 	normalized, err := scope.Normalize(input.Scopes)
 	if err != nil {
 		return "", ErrInvalidInput
 	}
 	// Admin scopes carry no claim, so they are dropped before the mapping rather
-	// than left for applyIDTokenScopeClaims to skip by omission. Filtering here
-	// makes "this scope contributes nothing" an explicit decision instead of a
-	// property of which cases the switch below happens to list.
+	// than left for applyIDTokenScopeClaims to skip by omission.
 	granted := scope.ClaimScopes(normalized)
 	if m.Issuer == "" || strings.TrimSpace(input.Subject) == "" ||
 		strings.TrimSpace(input.ClientID) == "" || input.TTL <= 0 ||
@@ -151,9 +135,9 @@ func applyIDTokenScopeClaims(claims *IDTokenClaims, granted []string, subject ID
 			}
 		case scope.Email:
 			claims.Email = subject.Email
-			// Fixed true: an account only exists once its address passed the
+			// Fixed true: an account exists only after its address passed the
 			// registration verification code, so a bound email is verified by
-			// construction. There is no unverified-address state to report.
+			// construction.
 			verified := true
 			claims.EmailVerified = &verified
 		}

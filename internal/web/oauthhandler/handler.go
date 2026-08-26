@@ -34,8 +34,7 @@ type Service interface {
 // Authenticator validates bearer tokens for the OAuth-facing endpoints.
 //
 // UserInfo deliberately uses the any-client variant: it exists to serve the
-// third-party access tokens this provider issues, so pinning it to the built-in
-// client would break the endpoint's whole purpose. Internal endpoints must use
+// third-party tokens this provider issues. Internal endpoints must use
 // middleware.Authenticate instead, which rejects third-party tokens.
 type Authenticator interface {
 	AuthenticateAnyClient(ctx context.Context, header string) (middleware.Principal, error)
@@ -53,10 +52,9 @@ type Handler struct {
 
 // RegisterRoutes mounts the OAuth and OIDC endpoints.
 //
-// Only the consent endpoint sits behind the JWT middleware. GET /oauth/authorize
-// is unauthenticated by design (the browser arriving from a third party carries no
-// Authorization header), and /userinfo authenticates itself because its error
-// format is RFC 6750 rather than the standard envelope.
+// Only the consent endpoint sits behind the JWT middleware: GET /oauth/authorize
+// is unauthenticated by design, and /userinfo authenticates itself because its
+// error format is RFC 6750 rather than the standard envelope.
 func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	r.GET("/oauth/authorize", h.Authorize)
 	r.POST("/oauth/token", h.Token)
@@ -79,10 +77,9 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 // Authorize validates an authorization request and redirects to the consent page.
 //
 // Errors take one of two routes. A request whose client_id or redirect_uri could
-// not be verified must not be redirected to the client — that would make this an
-// open redirector — so it is sent to the consent page, which can show the user
-// what went wrong. Once those are verified, RFC 6749 §4.1.2.1 wants the error
-// delivered to the client instead.
+// not be verified is sent to the consent page rather than redirected to the
+// client — that would make this an open redirector. Once those are verified, the
+// error is delivered to the client per RFC 6749 §4.1.2.1.
 func (h Handler) Authorize(c *gin.Context) {
 	input := oauth.AuthorizeInput{
 		ResponseType:        c.Query("response_type"),
@@ -105,8 +102,8 @@ func (h Handler) Authorize(c *gin.Context) {
 		"request_id":  result.RequestID,
 		"client_name": result.ClientName,
 		"scope":       strings.Join(result.Scopes, " "),
-		// The stash lifetime, so the page can show the deadline and stop a user who
-		// left the tab open from submitting into a 400 with no prior warning.
+		// The stash lifetime, so the page can show the deadline instead of
+		// submitting into a 400 with no warning.
 		"expires_in": strconv.Itoa(result.ExpiresIn),
 	}))
 }
@@ -114,8 +111,7 @@ func (h Handler) Authorize(c *gin.Context) {
 // Consent records the user's decision and redirects to the client.
 //
 // The response is the standard envelope rather than a 302: the caller is the
-// consent page's own fetch, which needs to read the target URL and navigate
-// itself. A redirect here would be followed by the fetch, not the browser.
+// consent page's own fetch, which must read the target URL and navigate itself.
 func (h Handler) Consent(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
@@ -225,11 +221,10 @@ func (h Handler) Revoke(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// UserInfo returns the OIDC claims a token's scopes permit.
-//
-// It authenticates inline rather than behind the JWT middleware so that a
-// rejected token produces an RFC 6750 challenge. The validation itself is the
-// middleware's, so the two paths cannot drift.
+// UserInfo returns the OIDC claims a token's scopes permit. It authenticates
+// inline rather than behind the JWT middleware so a rejected token produces an
+// RFC 6750 challenge; the validation itself is the middleware's, so the two
+// paths cannot drift.
 func (h Handler) UserInfo(c *gin.Context) {
 	if h.Auth == nil {
 		writeBearerError(c, oauth.ErrInternal)
@@ -237,9 +232,8 @@ func (h Handler) UserInfo(c *gin.Context) {
 	}
 	principal, err := h.Auth.AuthenticateAnyClient(c.Request.Context(), c.GetHeader("Authorization"))
 	if err != nil {
-		// The middleware's typed error carries the reason, but its wording belongs to
-		// the standard envelope. RFC 6750 has exactly one code for every rejected
-		// token, so the distinction is deliberately collapsed here.
+		// RFC 6750 has exactly one code for every rejected token, so the middleware
+		// error's finer reason is deliberately collapsed here.
 		writeBearerError(c, invalidToken("Access Token 无效或已过期"))
 		return
 	}
@@ -270,12 +264,10 @@ func (h Handler) JWKS(c *gin.Context) {
 func (h Handler) redirectAuthorizeError(c *gin.Context, input oauth.AuthorizeInput, err error) {
 	code, description, redirectable := authorizeErrorParts(err)
 	if redirectable {
-		// Trimmed to match what the service compared against the registration. It
-		// validates strings.TrimSpace(redirect_uri) but the raw query value is what
-		// arrives here, so " https://app.example.com/cb" would pass the registry check
-		// and then be handed to url.Parse as a value it reads as a relative path —
-		// turning the error redirect into a path on this API's own host, where the client
-		// never learns why its request failed.
+		// Trimmed to match what the service compared against the registration:
+		// validating strings.TrimSpace(redirect_uri) but redirecting to the raw
+		// value would let " https://app.example.com/cb" pass the registry check and
+		// then be read by url.Parse as a relative path on this API's own host.
 		c.Redirect(http.StatusFound, appendQuery(strings.TrimSpace(input.RedirectURI), map[string]string{
 			"error":             code,
 			"error_description": description,

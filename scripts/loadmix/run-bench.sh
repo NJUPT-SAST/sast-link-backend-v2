@@ -3,37 +3,27 @@
 # must be built first via scripts/loadmix/allinone/build.sh — it packs PostgreSQL,
 # Redis, and the API in one container sharing `--cpus=1 --memory=1g`.
 #
-# Bench-only env: rate limits opened so the driver measures the path walls rather
-# than the limiters (the NAT-limiter finding is measured separately by rerunning
-# at production values); JWT_ACCESS_TOKEN_EXPIRY=60s compresses the refresh
-# cadence to ~one rotation per session-minute; LOG_LEVEL=warn keeps the per-request
-# logger from distorting the numbers; APP_ENV=bench runs gin in release mode
-# without triggering the migrate --confirm-production gate; Redis is published on
+# Bench-only env: rate limits opened so the driver measures path walls, not the
+# limiters; JWT_ACCESS_TOKEN_EXPIRY=60s compresses the refresh cadence;
+# LOG_LEVEL=warn keeps the per-request logger out of the numbers; APP_ENV=bench
+# runs gin in release mode without the migrate production gate; Redis published on
 # 16379 so `loadmix setup` can read the verification codes it stores.
 #
-# The volume accumulates refresh-token rows across runs and degrades measurements
-# over time; drop the volume (docker volume rm loadtest-pgdata) and rerun `loadmix
-# setup` for a clean baseline. Always warm up (~15s of mix traffic) after a
-# container restart before measuring, or the first requests hit cold caches and
-# stall.
+# Drop the volume (docker volume rm loadtest-pgdata) and rerun `loadmix setup`
+# between measurement rounds — it accumulates refresh-token rows; warm up (~15s of
+# mix traffic) after each container restart before measuring, or the first requests
+# hit cold caches.
 set -euo pipefail
 
 docker rm -f sastlink-allinone >/dev/null 2>&1 || true
 # Every setting is passed explicitly and the repository .env is deliberately NOT
-# mounted. Mounting it would carry real SMTP / GitHub / Feishu credentials into a
-# container whose entrypoint runs `migrate up` unconditionally and whose mail path
-# the setup driver actually exercises — a bench run would send real mail from the
-# production sender, and a .env pointing DB_HOST at a real host would only be
-# saved by the -e override below happening to win. The list is closed: config
-# validation names every required key, so a missing one fails at startup here
-# rather than silently falling back to an operator's personal .env.
+# mounted: it would carry real SMTP/GitHub/Feishu credentials into a container
+# that runs `migrate up` unconditionally and exercises the mail path. The list is
+# closed — config validation names every required key, so a missing one fails here
+# rather than falling back to an operator's personal .env. SMTP_USERNAME/PASSWORD
+# are left unset so the mailer skips AUTH and no real mailbox is reachable.
 #
-# SMTP_HOST/PORT/FROM are required by config validation; SMTP_USERNAME and
-# SMTP_PASSWORD are left unset on purpose, so the mailer skips AUTH entirely and
-# no real mailbox is reachable from the bench container.
-#
-# A throwaway Ed25519 key is generated per run so no private key lives in git;
-# the bench measures throughput, and signing cost is key-value independent.
+# A throwaway Ed25519 key is generated per run so no private key lives in git.
 docker run -d --name sastlink-allinone \
   --cpus=1 --memory=1g \
   -p 127.0.0.1:8080:8080 \

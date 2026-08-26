@@ -81,9 +81,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	identities := repository.NewIdentity(database)
 
 	keys := internalredis.NewKeys(cfg.RedisKeyPrefix)
-	// The tombstone must outlive the longest in-flight request. Size it from
-	// the server WriteTimeout plus a small margin so a configuration change to
-	// either value cannot silently reopen the stale-refill race window.
+	// The tombstone TTL must outlive the longest in-flight request, so size it
+	// from WriteTimeout plus a margin.
 	store := internalredis.Store{
 		Client:                rdb,
 		Keys:                  keys,
@@ -167,9 +166,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Window: cfg.RateLimitDeviceWindow,
 		},
 	}
-	// Object storage is optional: an unconfigured deployment keeps every other
-	// endpoint and answers 50002 on PUT /user/avatar. When configured, the COS
-	// client also carries the image review (fail-closed by default).
+	// Object storage is optional: unconfigured, PUT /user/avatar answers 50002;
+	// when configured the COS client also carries fail-closed image review.
 	var avatarStore objectstore.ObjectStore
 	var avatarAuditor objectstore.AvatarAuditor
 	if cfg.StorageConfigured() {
@@ -200,8 +198,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	})
 	forgotPasswords := sessionworker.NewForgotPassword(users, store, emailer, audit)
 
-	// Share one argon2id pool across all KDF work so session and admin provisioning
-	// use the same parameters and share a single CPU semaphore.
+	// One argon2id pool shared across all KDF work: same parameters, one CPU semaphore.
 	passwordHasher := auth.PasswordHasher{
 		Semaphore:     make(chan struct{}, cfg.Argon2Concurrency),
 		Argon2Time:    cfg.Argon2Time,
@@ -224,8 +221,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		VerificationCode: store,
 		RegisterTicket:   store,
 		BindTicket:       bindTickets,
-		// Reads the key oauthloginredis.RegistrationStateStore writes, so a
-		// callback's parked identity can be redeemed by POST /auth/register.
+		// Reads the key oauthloginredis.RegistrationStateStore writes, redeemable by POST /auth/register.
 		OAuthRegistration: sessionredis.OAuthRegistrationStore{Store: store},
 		UnbindLimiter:     unbindLimiter,
 		RegisterLimiter:   registerLimiter,
@@ -246,18 +242,14 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	}
 	authenticator := middleware.Authenticator{
 		JWT: jwtManager,
-		// The auth-state cache serves revocation/role state from Redis for a short
-		// TTL on the common path; the revocation paths delete the entry, and a
-		// cache miss or error falls back to the authoritative DB check (fail-open).
+		// The auth-state cache is fail-open: a miss or error falls back to the DB check.
 		Tokens:         tokens,
 		AuthStateCache: store,
 		AuthStateTTL:   cfg.AuthStateCacheTTL,
-		// Pins the internal API to the built-in client, so a third-party OAuth access
-		// token cannot be used as a session credential.
+		// Pins the internal API to the built-in client so a third-party token cannot be a session credential.
 		InternalClientID: cfg.InternalOAuthClientID,
 		// Delegated administration needs no wiring here: a third-party token reaches
-		// /admin by carrying an admin scope, which only a registration an operator granted
-		// one can produce. See AuthenticateAdminDelegated.
+		// /admin by carrying an admin scope.
 	}
 
 	authorizeLimiter := oauthredis.EndpointLimiter{
@@ -276,8 +268,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Window: cfg.RateLimitTokenWindow,
 		},
 	}
-	// Keyed per user, not per IP: the consent-info peek is authenticated, and the
-	// campus shares one NAT egress IP.
+	// Keyed per user, not per IP: this surface is authenticated and the campus shares one NAT egress.
 	consentInfoLimiter := oauthredis.EndpointLimiter{
 		Limiter: internalredis.FixedWindowLimiter{
 			Client: rdb,
@@ -286,10 +277,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			Window: cfg.RateLimitConsentInfoWindow,
 		},
 	}
-	// The consent submission mints codes, so it gets its own per-user budget; the
-	// grants list/revoke run a family-revocation transaction. userinfo is
-	// deliberately not budgeted: it requires a valid token and is the surface every
-	// OIDC relying party hits, so a per-IP cap would throttle a campus-shared NAT.
+	// Consent submission mints codes, so it gets its own per-user budget; userinfo
+	// is deliberately unbudgeted — it requires a valid token and campus NAT is shared.
 	consentLimiter := oauthredis.EndpointLimiter{
 		Limiter: internalredis.FixedWindowLimiter{
 			Client: rdb, Keys: keys,
@@ -323,14 +312,11 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		CapabilityRefreshMaxLifetime: cfg.JWTRefreshCapabilityMaxLifetime,
 		CodeTTL:                      cfg.OAuthCodeTTL,
 		RequestTTL:                   cfg.OAuthAuthorizeRequestTTL,
-		// The discovery document's issuer must equal the iss claim of every issued
-		// token, so both read the same setting.
+		// Issuer must match the iss claim of every issued token, so both read one setting.
 		Issuer: cfg.JWTIssuer,
 	}
 
-	// Third-party login providers. Only the enabled ones are registered, and the
-	// service answers 400 for a provider absent from the map, so a disabled
-	// provider's route exists but declines rather than 404ing.
+	// Third-party login providers; a disabled provider's route stays registered but declines (400).
 	loginProviders := make(map[model.LoginMethod]oauthlogin.ProviderClient)
 	if cfg.OAuthGitHubEnabled {
 		loginProviders[model.LoginMethodGitHub] = provider.NewGitHub(provider.GitHubConfig{
@@ -344,8 +330,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			AppID:       cfg.OAuthLarkClientID,
 			AppSecret:   cfg.OAuthLarkClientSecret,
 			RedirectURI: cfg.OAuthLarkRedirectURI,
-			// Config validation requires this whenever Lark is enabled, so the
-			// tenant gate cannot be silently disabled in production.
+			// Config validation requires this whenever Lark is enabled, so the tenant gate cannot be silently disabled.
 			TenantKey: cfg.OAuthLarkTenantKey,
 		}, nil, nil)
 	}
@@ -377,9 +362,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		States:            oauthLoginStates,
 		RegistrationState: oauthRegistrations,
 		LoginCodes:        oauthLoginCodes,
-		// Third-party logins register as devices in the same Redis store as
-		// password logins, so they count against the 5-device cap and appear in
-		// the device list.
+		// Third-party logins register as devices in the same store as password
+		// logins, so they count against the cap and appear in the list.
 		Devices:   sessionredis.DeviceStore{Store: store},
 		Blacklist: blacklist,
 		Issuer: tokenissue.Issuer{
@@ -394,8 +378,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		AccessTTL:            cfg.JWTAccessTokenExpiry,
 		RefreshTTL:           cfg.JWTRefreshTokenExpiry,
 	}
-	// The first allow-listed redirect is the default for a callback that names
-	// none, so a login started without one still lands somewhere valid.
+	// The first allow-listed redirect is the default for a callback that names none.
 	if len(cfg.OAuthLoginRedirects) > 0 {
 		oauthLoginService.DefaultRedirect = cfg.OAuthLoginRedirects[0]
 	}
@@ -404,20 +387,15 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Users:     users,
 		Audit:     audit,
 		Blacklist: oauthredis.BlacklistStore{Store: store},
-		// Admin session-killing actions clear the user's device records in the
-		// same Redis store, so a demoted/closed account leaves no ghost logins.
+		// Admin session-killing actions clear device records here, so a demoted/closed account leaves no ghosts.
 		Devices: sessionredis.DeviceStore{Store: store},
-		// Recorded as the audit actor when a request carries no azp. Same config value
-		// the authenticator pins to and adminclient uses as ProtectedClientID, so the
-		// three cannot name different clients for the same console.
+		// Recorded as the audit actor when no azp is present; must match the authenticator's pinned client.
 		ConsoleClientID: cfg.InternalOAuthClientID,
 		Passwords:       passwordHasher,
 	}
 
-	// The account-request intake. Its captcha verifier is never nil: without a
-	// configured secret the composition root injects one that refuses everything,
-	// because a nil dependency has to be guarded at each call site and the failure
-	// mode of a missed guard is an unverified anonymous write.
+	// The captcha verifier is never nil: without a configured secret the composition
+	// root injects one that refuses everything (fail-closed against unverified writes).
 	var captchaVerifier alumnirequest.CaptchaVerifier = turnstile.Unavailable{}
 	if strings.TrimSpace(cfg.TurnstileSecret) != "" {
 		verifier, err := turnstile.New(turnstile.Config{
@@ -456,22 +434,18 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Clients:   clients,
 		Blacklist: oauthredis.BlacklistStore{Store: store},
 		Audit:     audit,
-		// Default random source and hashing; no work factor is bought for a 32-byte
-		// random secret, see auth.ClientSecretHasher.
+		// Default random source and hashing; see auth.ClientSecretHasher.
 		Secrets: auth.ClientSecretHasher{},
-		// The same client the internal API pins its azp gate to. Disabling it would
-		// lock every user out of login with no in-band way back.
+		// The same client the internal API pins its azp gate to; disabling it locks everyone out of login.
 		ProtectedClientID: cfg.InternalOAuthClientID,
 	}
 
-	// oauthStateCookieName is the login-CSRF cookie written at third-party
-	// authorize time and read back at callback time. It must differ from the
-	// session cookie: the state digest is not a session credential.
+	// oauthStateCookieName is the login-CSRF cookie written at authorize time and
+	// read back at callback; it must differ from the session cookie.
 	const oauthStateCookieName = "sl_oauth_state"
 
-	// The httpOnly session cookie a fresh tab uses to rebuild a session. The
-	// value is the rotating refresh token; SameSite=Lax keeps it off cross-site
-	// POSTs (cookie-CSRF) while letting same-site navigations through.
+	// The httpOnly session cookie a fresh tab uses to rebuild a session; its value
+	// is the rotating refresh token and SameSite=Lax blocks cross-site POSTs.
 	sessionCookie := &middleware.SessionCookie{
 		Name:     cfg.SessionCookieName,
 		Path:     cfg.SessionCookiePath,
@@ -479,9 +453,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		SameSite: http.SameSiteLaxMode,
 	}
 	// The login-CSRF cookie pairs a callback with the browser that started the
-	// authorization (OAuth 2.0 §10.12). The value is hex(SHA-256(state)) — not
-	// the state itself — and it shares the session cookie's path/secure posture
-	// so the two can never be sent to different scopes.
+	// authorization (OAuth 2.0 §10.12); its value is hex(SHA-256(state)) and it
+	// shares the session cookie's path/secure posture.
 	stateCookie := &middleware.SessionCookie{
 		Name:     oauthStateCookieName,
 		Path:     cfg.SessionCookiePath,

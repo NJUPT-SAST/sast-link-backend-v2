@@ -276,12 +276,9 @@ func (j JSONB) Value() (driver.Value, error) {
 	return []byte(j), nil
 }
 
-// MarshalJSON emits the stored document as JSON rather than as a base64 string.
-//
-// JSONB is a named type over json.RawMessage, and a named byte-slice type does
-// not inherit the underlying type's marshaller, so encoding/json falls back to
-// its default []byte handling and base64-encodes the payload. Any DTO exposing a
-// JSONB column would then contradict its documented object shape.
+// MarshalJSON emits the stored document as JSON rather than as a base64 string:
+// as a named type over json.RawMessage, JSONB does not inherit the underlying
+// marshaller, so encoding/json would base64-encode it by default.
 func (j JSONB) MarshalJSON() ([]byte, error) {
 	if len(j) == 0 {
 		return []byte("null"), nil

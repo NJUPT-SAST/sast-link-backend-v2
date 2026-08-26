@@ -18,9 +18,8 @@ const (
 	grantRefreshToken      = "refresh_token"
 )
 
-// supportedGrantTypes is the closed set this provider implements. Registering a
-// grant the token endpoint does not implement would advertise a capability that
-// fails at redemption.
+// supportedGrantTypes is the closed set this provider implements; registering an
+// unimplemented grant advertises a capability that fails at redemption.
 var supportedGrantTypes = []string{grantAuthorizationCode, grantRefreshToken}
 
 // validateClientName normalizes and bounds a display name.
@@ -29,25 +28,21 @@ func validateClientName(name string) (string, error) {
 	if trimmed == "" {
 		return "", newError(ErrInvalidInput, "client_name 不能为空", nil)
 	}
-	// Counted in runes: a 100-character Chinese name is not 300 characters long.
+	// Counted in runes, so a 100-character Chinese name is 100 characters.
 	if len([]rune(trimmed)) > maxClientNameLength {
 		return "", newError(ErrInvalidInput, "client_name 长度超出限制", nil)
 	}
-	// Control characters would corrupt the consent page that displays this name.
+	// Control characters would corrupt the consent page.
 	if strings.ContainsFunc(trimmed, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return "", newError(ErrInvalidInput, "client_name 含非法字符", nil)
 	}
 	return trimmed, nil
 }
 
-// validateRedirectURIs checks every registered callback.
-//
-// This is the first of the two open-redirect defenses. /oauth/authorize matches the
-// incoming redirect_uri against this list by exact string equality, so whatever is
-// accepted here is what an authorization code can be delivered to — a registration
-// holding "javascript:..." or an open redirector on the client's domain would make
-// exact matching worthless. Validating at registration is also the only place a
-// human is present to see the rejection.
+// validateRedirectURIs checks every registered callback. This is the first of the
+// two open-redirect defenses: whatever is accepted here is where an authorization
+// code can be delivered, and registration is the only place a human sees the
+// rejection.
 func validateRedirectURIs(uris []string) (model.StringArray, error) {
 	if len(uris) == 0 {
 		return nil, newError(ErrInvalidInput, "redirect_uris 不能为空", nil)
@@ -61,9 +56,7 @@ func validateRedirectURIs(uris []string) (model.StringArray, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Duplicates are rejected rather than deduplicated: a repeated entry means the
-		// submitter did not mean what they wrote, and silently changing their list is
-		// worse than telling them.
+		// Duplicates are rejected rather than silently deduplicated.
 		if slices.Contains(validated, uri) {
 			return nil, newError(ErrInvalidInput, "redirect_uris 含重复项", nil)
 		}
@@ -88,9 +81,8 @@ func validateRedirectURI(raw string) (string, error) {
 	if !parsed.IsAbs() || parsed.Host == "" {
 		return "", newError(ErrInvalidInput, "redirect_uri 必须是绝对 URI", nil)
 	}
-	// RFC 6749 §3.1.2: the endpoint URI must not include a fragment. The browser
-	// never sends a fragment to the server, so one here cannot be matched and would
-	// also let two registrations differ only in a part the server cannot see.
+	// RFC 6749 §3.1.2 forbids a fragment; the browser never sends one, so two
+	// registrations could otherwise differ only in a part the server cannot see.
 	if parsed.Fragment != "" || strings.Contains(raw, "#") {
 		return "", newError(ErrInvalidInput, "redirect_uri 不得包含 fragment", nil)
 	}
@@ -101,29 +93,22 @@ func validateRedirectURI(raw string) (string, error) {
 	case "https":
 		return raw, nil
 	case "http":
-		// Plaintext is allowed only on loopback, where there is no network to intercept.
-		// This is what lets a developer run the client locally; RFC 8252 §7.3 takes the
-		// same position for native apps.
+		// Plaintext is allowed only on loopback, where there is no network to intercept
+		// (RFC 8252 §7.3).
 		if !isLoopbackHost(parsed.Hostname()) {
 			return "", newError(ErrInvalidInput, "redirect_uri 仅允许 https，http 限 localhost", nil)
 		}
 		return raw, nil
 	default:
-		// Everything else — javascript:, data:, custom schemes — is refused. A custom
-		// scheme would need its own review; the two above are what this provider serves.
+		// Everything else — javascript:, data:, custom schemes — is refused.
 		return "", newError(ErrInvalidInput, "redirect_uri 仅允许 https，http 限 localhost", nil)
 	}
 }
 
 func isLoopbackHost(hostname string) bool {
-	// Case-insensitive because DNS is: "LOCALHOST" names the same host, and rejecting
-	// it would be a false refusal of a valid loopback registration.
-	//
-	// Folded as ASCII rather than with strings.EqualFold, which applies Unicode simple
-	// folding: U+017F (ſ, long s) folds to "s", so EqualFold accepts "localhoſt" — a
-	// distinct name url.Parse preserves verbatim, which would register a plaintext http
-	// URI for a host this provider never vetted. Only the ASCII spelling names loopback;
-	// net.ParseIP handles the numeric forms, and 127.0.0.1.evil.com and 0.0.0.0 still fail.
+	// Case-insensitive because DNS is; folded as ASCII, not with strings.EqualFold,
+	// whose Unicode folding accepts "localhoſt" (U+017F) as "localhost" — a distinct
+	// name url.Parse preserves verbatim. net.ParseIP handles the numeric forms.
 	if asciiLower(hostname) == "localhost" {
 		return true
 	}
@@ -131,12 +116,9 @@ func isLoopbackHost(hostname string) bool {
 	return address != nil && address.IsLoopback()
 }
 
-// asciiLower lowercases only A-Z, leaving every other byte untouched.
-//
-// Deliberately not strings.ToLower, which is Unicode-aware: folding a hostname with
-// case mappings outside ASCII would let a name that merely folds to "localhost"
-// answer to it. A host comparison wants byte equality after ASCII case folding, which
-// is also what DNS itself specifies (RFC 4343).
+// asciiLower lowercases only A-Z. A host comparison wants byte equality after ASCII
+// case folding, which is also what DNS itself specifies (RFC 4343); strings.ToLower
+// would fold hosts that merely map to "localhost" under Unicode case rules.
 func asciiLower(value string) string {
 	return strings.Map(func(r rune) rune {
 		if r >= 'A' && r <= 'Z' {
@@ -166,8 +148,7 @@ func validateGrantTypes(grants []string) (model.StringArray, error) {
 	if !slices.Contains(validated, grantAuthorizationCode) {
 		return nil, newError(ErrInvalidInput, "grant_types 必须包含 authorization_code", nil)
 	}
-	// Canonical order, so two registrations listing the same grants store the same
-	// array and comparisons in tests and logs stay stable.
+	// Canonical order, so equivalent registrations store the same array.
 	return model.StringArray(slices.DeleteFunc(slices.Clone(supportedGrantTypes), func(grant string) bool {
 		return !slices.Contains(validated, grant)
 	})), nil

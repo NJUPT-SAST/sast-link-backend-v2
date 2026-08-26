@@ -17,20 +17,12 @@ import (
 // adminLockKey serializes the writes that must observe an accurate count of
 // active administrators.
 //
-// PostgreSQL cannot lock an aggregate: SELECT count(*) ... FOR UPDATE is not
-// valid, and locking the rows the count read does not stop a concurrent
-// transaction from demoting a different row. Two simultaneous demotions would
-// each read "2 admins remain" and both commit, leaving zero. Every writer takes
-// this one advisory lock first, so those transactions serialize. The V005
-// migration uses the same technique for the cross-table email invariant.
-//
-// The value is arbitrary. It shares the single-argument bigint advisory keyspace
-// with V005, whose keys are hashtextextended over an email address and so could in
-// principle land on this constant — nothing rules that out. A collision would only
-// make an email write and an admin write wait for each other, never corrupt either,
-// since both are transaction-scoped mutexes. Deadlock is separately impossible:
-// this lock is only ever taken as the first statement of its transaction, so it
-// cannot be acquired after an email key.
+// PostgreSQL cannot lock an aggregate, so two concurrent demotions could each
+// read "2 admins remain" and both commit, leaving zero; every writer takes this
+// one advisory lock first, so those transactions serialize. The V005 migration
+// uses the same technique for the cross-table email invariant. The value is
+// arbitrary; the lock is always taken as the first statement of its
+// transaction, so it cannot deadlock against the email key.
 const adminLockKey int64 = 0x5A5701AD
 
 // AdminUserFilter narrows the administrative user list. Zero values mean "no
@@ -43,20 +35,16 @@ type AdminUserFilter struct {
 	StudentID  string
 	// Keyword matches name, student_id or login_email case-insensitively.
 	Keyword string
-	// NeedsCompletion filters on V010's generated flag: true lists only the
-	// accounts still carrying migration debris, false only the healthy ones, nil
-	// applies no filter. This is what makes the backlog reviewable, so an
-	// administrator can work through it instead of guessing at its size.
+	// NeedsCompletion filters on V010's generated flag: true lists only accounts
+	// still carrying migration debris, false only the healthy ones, nil applies no
+	// filter.
 	NeedsCompletion *bool
 	Limit           int
 	Offset          int
 }
 
-// AdminUserRow is one row of the administrative user list.
-//
-// Column tags are explicit on every field for the reason documented on
-// PublicCard: GORM's naming strategy derives names this query does not select,
-// and a mismatch is discarded silently rather than reported.
+// AdminUserRow is one row of the administrative user list. Column tags are
+// explicit because GORM silently discards a mismatched column name.
 type AdminUserRow struct {
 	ID          int64             `gorm:"column:id"`
 	Name        string            `gorm:"column:name"`
@@ -77,12 +65,9 @@ type AdminUserRow struct {
 	UpdatedAt              time.Time `gorm:"column:updated_at"`
 }
 
-// ListAdminUsers returns a filtered page of users plus the total matching count.
-//
-// The count runs against the same predicates without the page window, so a
-// caller paging through a filtered set sees a total consistent with what it can
-// actually reach. Ordering is by id so the pages of an offset scan do not
-// overlap; created_at alone is not unique enough to be a stable sort key.
+// ListAdminUsers returns a filtered page of users plus the total matching count,
+// counted on the same predicates outside the page window and ordered by id for
+// stable offset pagination.
 func (r *UserRepository) ListAdminUsers(
 	ctx context.Context,
 	filter AdminUserFilter,
@@ -90,12 +75,8 @@ func (r *UserRepository) ListAdminUsers(
 	if filter.Limit <= 0 {
 		return nil, 0, fmt.Errorf("%w: limit must be positive", ErrInvalidArgument)
 	}
-	// The result slice is sized from Limit before any row is read, so an unbounded limit
-	// reserves memory for rows that may not exist — 50 million AdminUserRows is
-	// gigabytes for a query that can return nothing. Refusing rather than clamping: this
-	// method is exported, and a caller asking for a page this large has misunderstood
-	// the contract, which serves at most MaxPageSize per page everywhere. Silently
-	// returning a differently sized page would hide that.
+	// Over-cap is refused rather than clamped, so a caller is never handed a
+	// page whose size disagrees with its request.
 	if filter.Limit > validate.MaxPageSize {
 		return nil, 0, fmt.Errorf("%w: limit must not exceed %d",
 			ErrInvalidArgument, validate.MaxPageSize)
@@ -155,9 +136,8 @@ type UserStats struct {
 	IncompleteByState map[model.UserState]int64 `json:"incomplete_by_state"`
 }
 
-// liveUser predicates every non-deleted-account count: a soft-deleted row still
-// exists in the table, so an unfiltered COUNT would inflate the totals the
-// console reads as "usable accounts".
+// liveUser restricts a count to non-deleted accounts, since a soft-deleted row
+// still exists in the table.
 func liveUser(query *gorm.DB) *gorm.DB {
 	return query.Where(`"user".state <> ?`, model.UserStateDeleted)
 }
@@ -203,9 +183,7 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 
 	rows = rows[:0]
 	// IncompleteByRole: only live accounts still flagged incomplete whose role is
-	// neither lecturer nor admin. Grouped by role so the frontend can subtract each
-	// role's incomplete count from its own true bucket before folding them into the
-	// "未补全" slice (an incomplete account must not appear in both).
+	// neither lecturer nor admin, grouped by role for the frontend's subtraction.
 	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{}).
 		Where(`profile_needs_completion = true AND role NOT IN (?, ?)`,
 			model.UserRoleLecturer, model.UserRoleAdmin)).
@@ -246,12 +224,9 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	return stats, nil
 }
 
-// adminUserQuery builds the shared predicates of the list and its count.
-//
-// The join is LEFT rather than INNER so a user whose profile row is missing still
-// appears, with a null department. An INNER join would hide exactly the accounts
-// an administrator is most likely looking for. It is unconditional so that both
-// halves of the pair see identical row sets.
+// adminUserQuery builds the shared predicates of the list and its count. The
+// join is LEFT so a user with a missing profile row still appears, and is
+// unconditional so the list and its count see identical row sets.
 func (r *UserRepository) adminUserQuery(ctx context.Context, filter AdminUserFilter) *gorm.DB {
 	query := r.database.WithContext(ctx).
 		Model(&model.User{}).
@@ -269,8 +244,6 @@ func (r *UserRepository) adminUserQuery(ctx context.Context, filter AdminUserFil
 		query = query.Where(`"user".student_id = ?`, filter.StudentID)
 	}
 	if filter.NeedsCompletion != nil {
-		// V010's partial index covers the true case, which is the one an
-		// administrator working through the backlog actually asks for.
 		query = query.Where(`"user".profile_needs_completion = ?`, *filter.NeedsCompletion)
 	}
 	if filter.Keyword != "" {
@@ -283,11 +256,7 @@ func (r *UserRepository) adminUserQuery(ctx context.Context, filter AdminUserFil
 	return query
 }
 
-// escapeLikePattern neutralizes the LIKE metacharacters in a user-supplied
-// keyword. Without it, a keyword of "%" matches every row and "_" matches any
-// single character, so the search silently means something other than what was
-// typed. The backslash is escaped first, otherwise it would double-escape the
-// escapes added afterwards.
+// escapeLikePattern neutralizes the LIKE metacharacters in a user-supplied keyword.
 func escapeLikePattern(keyword string) string {
 	escaped := strings.ReplaceAll(keyword, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, "%", `\%`)
@@ -295,10 +264,8 @@ func escapeLikePattern(keyword string) string {
 }
 
 // AdminUserUpdate carries the administrative field changes for one user. A nil
-// pointer means "leave unchanged". Unlike ProfileUpdate this type does reach the
-// identity and permission columns, which is the whole point of the admin console;
-// token_version and password are still absent, so no request shape can rewrite a
-// credential or forge a version bump through this path.
+// pointer means "leave unchanged". token_version and password are deliberately
+// absent, so no request shape can rewrite a credential or forge a version bump.
 type AdminUserUpdate struct {
 	Name        *string
 	PhoneNumber *string
@@ -338,24 +305,16 @@ func (u AdminUserUpdate) columns() map[string]any {
 
 // UpdateAdminUser applies an administrative edit in one transaction.
 //
-// Whether the write demotes an administrator, and therefore whether it needs the
-// last-admin guard and a session revocation, is decided here from the row as it
-// exists inside the transaction. It is deliberately not a caller-supplied flag: a
-// caller compares against a read taken before the transaction opened, so by the time
-// the write lands the stored role may have changed underneath it. Since the update
-// writes the role column whenever one was submitted, trusting that comparison let a
-// demotion commit with no guard, no token_version bump and no revocation — the
-// combination that empties the administrator set and leaves a demoted account still
-// able to mint access tokens.
-//
-// A role change increments token_version and revokes every live token of the user in
-// this same transaction rather than after it. Splitting them would leave a window
-// where a demoted account still holds refresh tokens able to mint access tokens,
-// since the refresh flow does not compare token_version.
+// Whether the write demotes an administrator is decided from the row inside the
+// transaction, not from a caller-supplied flag, so the guard cannot be bypassed
+// by a stale pre-transaction read: trusting that comparison would let a demotion
+// commit with no guard or revocation. A role change bumps token_version and
+// revokes the user's live tokens in the same transaction, so a demoted account
+// cannot keep minting access tokens from live refresh tokens.
 //
 // Soft-deleted accounts are excluded by predicate: closing an account is
-// DELETE's job and reopening it is restore's, so this path never edits one and
-// reports it as ErrNotFound.
+// SoftDeleteAndRevokeSessions' job, so this path never edits one and reports it
+// as ErrNotFound.
 func (r *UserRepository) UpdateAdminUser(
 	ctx context.Context,
 	userID int64,
@@ -365,19 +324,15 @@ func (r *UserRepository) UpdateAdminUser(
 	if userID <= 0 {
 		return nil, false, fmt.Errorf("%w: user id must be positive", ErrInvalidArgument)
 	}
-	// email_type is derived from login_email, and the V001 trigger only recomputes it
-	// when login_email is in the SET list. Writing it alone would therefore store a type
-	// contradicting the address, with nothing downstream to correct it. Refusing here
-	// keeps that unrepresentable at the layer that owns the column rather than resting
-	// on every caller validating it first.
+	// email_type is derived from login_email and the V001 trigger only recomputes
+	// it when login_email is in the SET list; writing it alone would store a type
+	// contradicting the address.
 	if update.EmailType != nil && update.LoginEmail == nil {
 		return nil, false, fmt.Errorf("%w: email_type cannot be set without login_email", ErrInvalidArgument)
 	}
-	// Closing an account is SoftDeleteAndRevokeSessions' job: it bumps
-	// token_version and revokes every session in the same transaction. Accepting
-	// state=is_deleted here would mark the row deleted while every session stays
-	// live — a silent bypass of the "cut access now" invariant that the handler
-	// layer alone cannot be trusted to always remember.
+	// Closing an account must go through SoftDeleteAndRevokeSessions, which bumps
+	// token_version and revokes every session in the same transaction; accepting
+	// state=is_deleted here would leave every session live.
 	if update.State != nil && *update.State == model.UserStateDeleted {
 		return nil, false, fmt.Errorf("%w: account close must go through SoftDeleteAndRevokeSessions", ErrInvalidArgument)
 	}
@@ -389,11 +344,9 @@ func (r *UserRepository) UpdateAdminUser(
 	var entries []model.BlacklistEntry
 	sessionsRevoked := false
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		// The last-admin advisory lock is taken unconditionally, before the user
-		// row: SoftDeleteAndRevokeSessions takes the same lock first too, so the
-		// two write paths acquire row and advisory locks in one consistent order
-		// (advisory first, row second) and cannot deadlock each other. Admin
-		// edits are rare enough that serializing all of them costs nothing.
+		// The advisory lock is taken before the user row, matching
+		// SoftDeleteAndRevokeSessions' lock order so the two write paths cannot
+		// deadlock each other.
 		if err := transaction.Exec("SELECT pg_advisory_xact_lock(?)", adminLockKey).Error; err != nil {
 			return fmt.Errorf("lock admin guard: %w", err)
 		}
@@ -451,11 +404,8 @@ func (r *UserRepository) UpdateAdminUser(
 
 // SoftDeleteAndRevokeSessions closes an account and cuts every session it holds
 // in one transaction, returning the access-token entries still needing blacklist
-// delivery.
-//
-// The three steps are inseparable for the reason given on UpdateAdminUser: the
-// state flag alone stops new logins and is checked by the auth middleware, but a
-// partial failure would leave live refresh tokens on a closed account.
+// delivery. The steps stay in one transaction because a partial failure would
+// leave live refresh tokens on a closed account.
 func (r *UserRepository) SoftDeleteAndRevokeSessions(
 	ctx context.Context,
 	userID int64,
@@ -499,12 +449,10 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 	return entries, nil
 }
 
-// RestoreUser reopens a soft-deleted account at the njupter state.
-//
-// Revoked tokens are deliberately not restored: they were cut when the account
-// closed and the owner signs in again. PRD §4.9 also states the restored state is
-// always njupter — the previous state is not remembered, so an on_sast member
-// comes back as a njupter and an administrator re-promotes them.
+// RestoreUser reopens a soft-deleted account at the njupter state. Revoked
+// tokens are deliberately not restored — the owner signs in again — and the
+// previous state is not remembered (PRD §4.9), so an administrator re-promotes
+// an on_sast member who comes back as a njupter.
 func (r *UserRepository) RestoreUser(ctx context.Context, userID int64) error {
 	if userID <= 0 {
 		return fmt.Errorf("%w: user id must be positive", ErrInvalidArgument)
@@ -517,8 +465,7 @@ func (r *UserRepository) RestoreUser(ctx context.Context, userID int64) error {
 			return fmt.Errorf("restore user: %w", result.Error)
 		}
 		if result.RowsAffected == 0 {
-			// A live account is a state conflict, not a missing one; reporting 404 for a
-			// user the console just listed would look like the record had vanished.
+			// A live account is a state conflict rather than a missing one.
 			return classifyLiveUser(transaction, userID)
 		}
 		return nil
@@ -533,13 +480,9 @@ func (r *UserRepository) RestoreUser(ctx context.Context, userID int64) error {
 }
 
 // ensureAnotherAdminRemains refuses a write that would remove the last active
-// administrator, where "active" means an admin whose account is not closed.
-//
-// The advisory lock is taken before the count and is why this is correct under
-// concurrency; see adminLockKey. It is taken even when the target is not an
-// admin, which costs one lock per admin write but keeps every writer on the same
-// serialization point — a writer that skipped the lock could demote the second
-// admin while a locked writer was busy demoting the first.
+// administrator ("active" = admin whose account is not closed). The advisory
+// lock (adminLockKey) is taken before the count on every admin write so a
+// writer cannot demote an admin while another is mid-count.
 func ensureAnotherAdminRemains(transaction *gorm.DB, userID int64) error {
 	if err := transaction.Exec("SELECT pg_advisory_xact_lock(?)", adminLockKey).Error; err != nil {
 		return fmt.Errorf("lock admin guard: %w", err)
@@ -554,9 +497,8 @@ func ensureAnotherAdminRemains(transaction *gorm.DB, userID int64) error {
 	if remaining > 0 {
 		return nil
 	}
-	// The target is only blocking if it is itself an active admin: when it is not,
-	// there was no administrator to begin with and this write is not what removed
-	// one, so refusing it would make the console unusable rather than safer.
+	// The refusal applies only when the target is itself an active admin;
+	// otherwise this write is not what would remove the last one.
 	var isActiveAdmin int64
 	if err := transaction.Model(&model.User{}).
 		Where("id = ? AND role = ? AND state <> ?",

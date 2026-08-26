@@ -43,29 +43,22 @@ func mapServiceError(err error) error {
 	case errcode.CodePasswordUnchanged:
 		message = "新旧密码相同"
 	case errcode.CodeUserNotFound:
-		// Without a case here the message falls back to the KindNotFound default
-		// ("资源不存在"), which contradicts the code's own meaning and the handler's
-		// malformed-ID path.
+		// The KindNotFound default would contradict this code's own meaning.
 		message = "用户不存在"
 	case errcode.CodeNotFound:
-		// The unbind path and the device-logout path both raise this code, each
-		// with its own service-level message ("绑定记录不存在" / "设备不存在").
-		// The service error carries the right one, so pass it through; without a
-		// case the message would fall back to the KindNotFound default
-		// ("资源不存在"), and stamping a single message would mislabel one of
-		// the two paths.
+		// The service error carries the right message for either the unbind or
+		// the device-logout path; stamping one here would mislabel the other.
 		if serviceErr.Message != "" {
 			message = serviceErr.Message
 		}
 	case errcode.CodeValidationFailed:
-		// Only ErrLastLoginMethod raises this. The KindValidationFailed default
-		// ("业务校验失败") drops the one thing the client needs to know: which rule
+		// Only ErrLastLoginMethod raises this; the default would drop the rule
+		// it broke.
 		// it broke.
 		message = "不能解绑唯一的登录方式"
 	case errcode.CodeAvatarRejected:
-		// The audit rejection is a policy verdict, not a malformed request; the
-		// dedicated code needs its own message instead of the generic
-		// "业务校验失败".
+		// A policy verdict, not a malformed request; the generic default would
+		// mislabel it.
 		message = "头像未通过内容审核"
 	}
 	var status int

@@ -8,8 +8,8 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
-// nullableClientID keeps an absent azp NULL in the audit row instead of writing
-// an empty string, which V007 reads as "no OAuth credential authorized this".
+// nullableClientID keeps an absent azp NULL in the audit row, which V007 reads as
+// "no OAuth credential authorized this".
 func nullableClientID(value string) *string {
 	if strings.TrimSpace(value) == "" {
 		return nil
@@ -39,9 +39,8 @@ func (s Service) RevokeGrant(ctx context.Context, userID, clientID int64, actorC
 	if s.Tokens == nil {
 		return nil
 	}
-	// The revoke runs a family-revocation transaction plus a consent-history
-	// delete, so it is budgeted per user — under its own key, so the read path
-	// cannot starve it.
+	// The revoke runs a family-revocation transaction plus a consent-history delete,
+	// so it gets its own per-user budget that the read path cannot starve.
 	if err := s.checkGrantsRevokeLimit(ctx, userID); err != nil {
 		return err
 	}
@@ -51,17 +50,14 @@ func (s Service) RevokeGrant(ctx context.Context, userID, clientID int64, actorC
 		return err
 	}
 	s.deliverBlacklist(ctx, entries, now)
-	// Drop the consent history too, so the application leaves the authorized list
-	// and must re-consent on its next use.
+	// Drop the consent history too, so the application leaves the authorized list.
 	if s.Authorizations != nil {
 		if err := s.Authorizations.DeleteByUserClient(ctx, userID, clientID); err != nil {
 			return err
 		}
 	}
-	// resource_id is the primary key of the client whose access was cut, which is
-	// all the route carries; actor_client_id is the credential that authorized the
-	// cut. An empty azp stays NULL rather than becoming an empty string, matching
-	// V007's "no OAuth credential involved" reading.
+	// resource_id is the client whose access was cut; actor_client_id is the
+	// credential that authorized the cut, with an empty azp staying NULL.
 	clientIDStr := strconv.FormatInt(clientID, 10)
 	s.auditAs(ctx, &userID, "oauth_grant_revoke", &clientIDStr,
 		nullableClientID(actorClientID), true, 0, "", "", nil)

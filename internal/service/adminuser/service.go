@@ -26,18 +26,12 @@ type Service struct {
 	Blacklist TokenBlacklist
 	Devices   DeviceStore
 	Clock     Clock
-	// Passwords hashes the initial password for provisioned accounts. This path has
-	// no previous hash to reuse because the V001 password column is NOT NULL.
+	// Passwords hashes the initial password for provisioned accounts.
 	Passwords auth.PasswordHasher
 	// ConsoleClientID is the built-in first-party client, recorded as the actor when
-	// a request carries no azp.
-	//
-	// A first-party session token predates the azp claim, so an empty azp on the admin
-	// surface means the console — the service cannot derive that name itself, so the
-	// composition root supplies it from the same config value the auth middleware pins
-	// to. Naming it explicitly keeps NULL in actor_client_id meaning exactly one thing:
-	// no OAuth credential authorized the action. Left empty, the column stays NULL
-	// rather than inventing a value.
+	// a request carries no azp (first-party sessions predate the claim). Naming it
+	// explicitly keeps NULL in actor_client_id meaning exactly one thing: no OAuth
+	// credential authorized the action.
 	ConsoleClientID string
 }
 
@@ -59,11 +53,8 @@ func (s Service) now() time.Time {
 	return clock.Now().UTC()
 }
 
-// auditParams describes one admin audit row.
-//
-// A struct rather than positional parameters: there are now nine, three of them
-// adjacent strings, and a transposed clientIP/userAgent/actorClientID would compile
-// into a row that misattributes the action.
+// auditParams describes one admin audit row. A struct rather than positional
+// parameters, which would invite a transposition.
 type auditParams struct {
 	AdminUserID int64
 	// ActorClientID is the azp of the token that authorized this action. Empty means
@@ -113,10 +104,8 @@ func (s Service) audit(ctx context.Context, params auditParams) {
 		}
 		entry.Detail = model.JSONB(encoded)
 	}
-	// Detached like adminclient.Service.audit: an action that already committed
-	// (closing an account and revoking its tokens) must still be recorded when the
-	// caller goes away, or the audit log loses exactly the events an aborted request
-	// produced.
+	// Detached so an action that already committed (closing an account and revoking
+	// its tokens) is still recorded when the caller disconnects.
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
 	defer cancel()
 	if err := s.Audit.Create(auditCtx, entry); err != nil {

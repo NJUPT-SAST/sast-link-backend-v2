@@ -53,7 +53,7 @@ type AuditRepository interface {
 }
 
 // CreateClientInput registers a new client. ClientID is not accepted from the
-// caller: it is generated here, so nobody can register under a chosen identifier
+// caller: it is generated here so nobody can register under a chosen identifier
 // and impersonate an existing or future client.
 type CreateClientInput struct {
 	ClientName   string
@@ -70,13 +70,10 @@ type CreateClientInput struct {
 	UserAgent     string
 }
 
-// UpdateClientInput is a partial update. A nil field is left unchanged; the
+// UpdateClientInput is a partial update; a nil field is left unchanged. The
 // immutable properties (client_id, client_type, client_secret) are absent by
 // construction rather than validated away, so this type cannot express a change to
-// them. client_type decides the client's credential model (secret vs public PKCE)
-// and its scope-granting rules, so flipping it in place without reissuing a secret
-// would create a credential-less third_party client — changing type means
-// registering a new client.
+// them.
 type UpdateClientInput struct {
 	ClientPK     int64
 	ClientName   *string
@@ -93,8 +90,7 @@ type UpdateClientInput struct {
 }
 
 // Client is one registration as reported to the console. It deliberately omits the
-// secret hash: a DTO that has no such field cannot leak it, whereas a model with a
-// json:"-" tag relies on that tag surviving every future edit.
+// secret hash, so the type cannot leak it.
 type Client struct {
 	ID           int64
 	ClientID     string
@@ -147,10 +143,10 @@ type RotateClientSecretResult struct {
 	ClientSecret string
 }
 
-// DeleteClientInput identifies a registration to remove. The only built-in
-// client (ProtectedClientID) is refused inside the service; everything else —
-// capability clients included — is deletable by any administrator, console or
-// delegated, because deleting removes the credential and the scope it carried.
+// DeleteClientInput identifies a registration to remove. The built-in client
+// (ProtectedClientID) is refused inside the service; everything else — capability
+// clients included — is deletable by any administrator, since deleting removes the
+// credential and the scope it carried.
 type DeleteClientInput struct {
 	ClientPK int64
 	// AdminUserID is the authenticated administrator, for the audit trail.

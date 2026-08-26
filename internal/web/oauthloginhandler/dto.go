@@ -33,9 +33,7 @@ type authUserDTO struct {
 	//
 	// This DTO is a separate type from sessionhandler's identically named one, and
 	// this is the exit that matters most for the flag: the accounts carrying
-	// migration debris are largely the ones that sign in through GitHub or Lark,
-	// so omitting the fields here would leave exactly the target population
-	// unable to see the prompt.
+	// migration debris are largely the ones that sign in through GitHub or Lark.
 	ProfileNeedsCompletion bool     `json:"profile_needs_completion"`
 	IncompleteFields       []string `json:"incomplete_fields"`
 }
@@ -93,12 +91,9 @@ func mapIdentity(identity model.Identity) identityDTO {
 }
 
 // decodeIdentityData turns the raw JSONB column into a value the response
-// encoder emits as a JSON object rather than a base64 string.
-//
-// model.JSONB is []byte underneath, so handing it to the encoder directly would
-// serialize it as base64. Invalid stored JSON yields nil instead of an error: the
-// binding itself is valid, and failing the whole response over unreadable
-// display metadata would be a worse outcome.
+// encoder emits as a JSON object rather than a base64 string. Invalid stored
+// JSON yields nil instead of an error, since failing the whole response over
+// unreadable display metadata would be worse.
 func decodeIdentityData(raw model.JSONB) any {
 	if len(raw) == 0 {
 		return nil

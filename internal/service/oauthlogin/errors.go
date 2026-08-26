@@ -10,10 +10,8 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 )
 
-// Kind identifies a typed failure for HTTP-layer mapping. It mirrors
-// session.Kind rather than importing it: the two packages map onto different
-// subsets of outcomes, and aliasing would let a session-only Kind leak into a
-// mapping table that has no arm for it.
+// Kind identifies a typed failure for HTTP-layer mapping; it mirrors
+// session.Kind rather than importing it.
 type Kind string
 
 const (
@@ -26,14 +24,13 @@ const (
 	KindConflict     Kind = "conflict"
 	KindNotFound     Kind = "not_found"
 	KindInternal     Kind = "internal"
-	// KindProviderUnavailable is for a failed outbound call to GitHub or Lark.
-	// It maps to HTTP 502: the request was well formed and this service is
-	// healthy, but an upstream it depends on is not.
+	// KindProviderUnavailable marks a failed outbound call to GitHub or Lark,
+	// mapping to HTTP 502.
 	KindProviderUnavailable Kind = "provider_unavailable"
-	// KindDependencyUnavailable is for the fail-closed Redis state this flow
-	// owns (oauth_state, registration_state, login_code). Per PRD §6.0 a missing
-	// value cannot be treated as valid, so the flow is rejected with HTTP 503
-	// rather than masked as an internal error.
+	// KindDependencyUnavailable flags the fail-closed Redis state this flow owns
+	// (oauth_state, registration_state, login_code): a missing value cannot be
+	// treated as valid, and the flow is rejected with HTTP 503 rather than masked
+	// as an internal error.
 	KindDependencyUnavailable Kind = "dependency_unavailable"
 )
 
@@ -46,12 +43,9 @@ type Error struct {
 	// Display marks Message as written for the end user, so the HTTP layer
 	// surfaces it instead of the generic per-Kind string.
 	//
-	// Off by default on purpose: most messages here name an internal step ("保存
-	// OAuth state 失败") and describe which dependency broke, which is a log
-	// line, not something to hand a browser. Only outcomes the user can act on
-	// differently from their Kind's default set it — otherwise a caller cannot
-	// tell "GitHub refused your authorization code" apart from "your state
-	// expired", because both are one Kind and one code.
+	// Off by default: most messages name an internal step or a broken dependency,
+	// which is a log line, not something to hand a browser. Only outcomes the user
+	// can act on differently from the Kind default set it.
 	Display bool
 	// RetryAfter carries the limiter's remaining window so the HTTP layer can
 	// emit a Retry-After header.
@@ -91,14 +85,14 @@ var (
 	ErrInvalidInput = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
 	// ErrRateLimited reports that a per-IP endpoint cap was exceeded.
 	ErrRateLimited = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
-	// ErrStateInvalid covers a missing, expired or already-consumed OAuth state.
-	// All three are one outcome for the user: restart the login.
+	// ErrStateInvalid covers a missing, expired or already-consumed OAuth state;
+	// all three are one outcome: restart the login.
 	ErrStateInvalid = &Error{Kind: KindInvalidState, Code: errcode.CodeBadRequest}
 	// ErrLoginCodeInvalid covers a login_code that is unknown, expired or spent.
 	ErrLoginCodeInvalid = &Error{Kind: KindInvalidToken, Code: errcode.CodeLoginCodeInvalid}
 	// Registration-state failures are raised by the session service, which owns
-	// POST /auth/register and has its own sentinel for them; this package only
-	// writes the parked state, so it needs no equivalent here.
+	// POST /auth/register; this package only writes the parked state and needs no
+	// sentinel for them.
 	ErrUserDeleted = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
 	// ErrForeignTenant rejects a Lark account outside the SAST enterprise.
 	ErrForeignTenant = &Error{Kind: KindForbidden, Code: errcode.CodeLarkTenantRequired}

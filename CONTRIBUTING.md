@@ -128,7 +128,7 @@ docs(readme): add local development environment setup notes
 chore(deps): upgrade golang.org/x/crypto to v0.35.0
 ```
 
-保持提交原子化——每次提交只包含一个逻辑变更。如需修正上一个提交，使用 rebase 而非追加"修复笔误"类提交。
+保持提交原子化——每次提交只包含一个逻辑变更。如需修正上一个提交，使用 rebase 而非追加「修复笔误」类提交。
 
 ## Pull Request 流程
 

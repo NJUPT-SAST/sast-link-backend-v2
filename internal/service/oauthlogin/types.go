@@ -17,16 +17,14 @@ type LimitResult struct {
 	RetryAfter time.Duration
 }
 
-// EndpointLimiter throttles one endpoint per subject. It mirrors the port the
-// session and oauth services declare rather than importing either: each package
-// owns its own result type so a limiter adapter cannot couple them.
+// EndpointLimiter throttles one endpoint per subject, mirroring the same port
+// the session and oauth services declare.
 type EndpointLimiter interface {
 	Allow(ctx context.Context, endpoint, subject string) (LimitResult, error)
 }
 
-// ProviderClient is one third-party provider. Both concrete clients in
-// internal/provider satisfy it; the interface lives here so tests can fake a
-// provider without a live endpoint.
+// ProviderClient is one third-party provider; the interface lives here so
+// tests can fake a provider without a live endpoint.
 type ProviderClient interface {
 	// AuthorizeURL builds the provider page to redirect the user to.
 	AuthorizeURL(state string) string
@@ -36,10 +34,9 @@ type ProviderClient interface {
 	Exchange(ctx context.Context, code, redirectURI string) (*provider.Identity, error)
 }
 
-// StatePayload is the value stored under oauth_state for the duration of one
-// login round trip.
+// StatePayload is the value stored under oauth_state for one login round trip.
 //
-// Provider is stored rather than inferred from the callback route so a state
+// Provider is stored rather than inferred from the callback route, so a state
 // issued for GitHub cannot be replayed against the Lark callback. Redirect is
 // the frontend URL the callback returns the user to.
 type StatePayload struct {
@@ -50,8 +47,8 @@ type StatePayload struct {
 // OAuthStateStore holds the short-lived CSRF state for one authorization round
 // trip.
 //
-// Fail-closed (PRD §6.0): Redis is the only copy, so an unreadable state cannot
-// be treated as valid and the user must restart the login.
+// Fail-closed: Redis is the only copy, so an unreadable state cannot be treated
+// as valid and the user must restart the login.
 type OAuthStateStore interface {
 	SaveOAuthState(ctx context.Context, state string, payload StatePayload, ttl time.Duration) error
 	// ConsumeOAuthState atomically reads and deletes the state, so a replayed
@@ -62,17 +59,17 @@ type OAuthStateStore interface {
 // RegistrationPayload is the third-party identity parked for a user who has no
 // account yet.
 //
-// OAuthState is the second half of PRD §4.5's double binding: the registration
-// request must present both this registration_state and the original OAuth
-// state, so a leaked registration_state alone is not usable.
+// OAuthState is the second half of the double binding: registration must
+// present both this registration_state and the original OAuth state, so a
+// leaked registration_state alone is not usable.
 type RegistrationPayload struct {
 	Provider     model.LoginMethod `json:"provider"`
 	ProviderID   string            `json:"provider_id"`
 	IdentityData model.JSONB       `json:"identity_data"`
 	OAuthState   string            `json:"oauth_state"`
 	// The provider's own credentials are carried through registration so the
-	// identity row created with the account records them, matching what a
-	// binding through /user/identities/* would store.
+	// identity row records them, matching what a /user/identities/* binding
+	// would store.
 	AccessToken    string     `json:"access_token,omitempty"`
 	RefreshToken   string     `json:"refresh_token,omitempty"`
 	TokenExpiresAt *time.Time `json:"token_expires_at,omitempty"`
@@ -82,17 +79,16 @@ type RegistrationPayload struct {
 // registration. Fail-closed, one-time consumption.
 type RegistrationStateStore interface {
 	SaveRegistrationState(ctx context.Context, state string, payload RegistrationPayload, ttl time.Duration) error
-	// ConsumeRegistrationState atomically reads and deletes the payload. The
-	// caller compares the stored OAuthState against the submitted one; a
-	// mismatch is rejected after the value is already gone, which is correct:
-	// the pair was presented and failed, so it must not be retryable.
+	// ConsumeRegistrationState atomically reads and deletes the payload; the
+	// caller compares the stored OAuthState against the submitted one. A mismatch
+	// is rejected after the value is gone, so a failed pair is not retryable.
 	ConsumeRegistrationState(ctx context.Context, state string) (payload RegistrationPayload, found bool, err error)
 }
 
 // LoginCodeStore holds the one-time code the callback hands to the frontend in a
 // URL, redeemed for a token pair by POST /oauth/exchange-code.
 //
-// The callback cannot return tokens directly: it is a 302 to the frontend, so a
+// The callback cannot return tokens directly: it is a 302 to the frontend, and a
 // token in the query string would land in browser history and Referer headers.
 type LoginCodeStore interface {
 	SaveLoginCode(ctx context.Context, code string, userID int64, ttl time.Duration) error
@@ -127,27 +123,24 @@ type ClientRepository interface {
 	FindActiveInternalClient(ctx context.Context, clientID string) (*model.OAuthClient, error)
 }
 
-// TokenRepository persists an issued session and can revoke a token family.
-// RevokeFamily is the same repository method the session service uses, so a
-// device evicted by a third-party login dies the same way a password-login
-// eviction does.
+// TokenRepository persists an issued session and can revoke a token family;
+// RevokeFamily is the same method the session service uses, so an evicted
+// device dies the same way a password-login eviction does.
 type TokenRepository interface {
 	CreatePair(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
 }
 
 // DeviceStore registers a third-party login session as a device and can drop
-// one. The method signatures mirror the session service's DeviceStore port so
-// the same adapter satisfies both (the two packages must not import each
-// other, PRD §6.1). Only registration and removal are needed here: refresh
-// touch, list and single-device logout all run through the session service on
-// the shared token-family IDs.
+// one. The signatures mirror the session service's DeviceStore port so the same
+// adapter satisfies both; only registration and removal are needed here, since
+// touch/list/logout run through the session service on the shared family IDs.
 type DeviceStore interface {
 	RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (evicted string, err error)
 	RemoveDevice(ctx context.Context, userID int64, deviceID string) error
 }
 
-// TokenBlacklist deletes the revoked JWT JTIs' auth-state cache entries so the
+// TokenBlacklist deletes revoked JTIs' auth-state cache entries so the
 // middleware cannot serve a stale non-revoked state. The durable revocation is
 // the PostgreSQL row the middleware always checks; this delivery is best-effort
 // and must never turn a session into a hard dependency on Redis.
@@ -174,32 +167,31 @@ type AuthorizeResult struct {
 	AuthorizeURL string
 	State        string
 	// StateDigest is the login-CSRF cookie value pairing the callback with the
-	// browser that started this authorization: hex(SHA-256(state)). The handler
-	// writes it into the SameSite=Lax state cookie; the callback must present it
-	// back, so a state an attacker started cannot complete in a victim's browser.
+	// browser that started this authorization: hex(SHA-256(state)). The callback
+	// must present it back, so a state an attacker started cannot complete in a
+	// victim's browser.
 	StateDigest string
 	// StateTTL is how long the state lives; the handler bounds the cookie's
 	// Max-Age to it.
 	StateTTL time.Duration
 }
 
-// CallbackInput is a provider callback. Provider comes from the route, not from
-// the query, so it cannot be spoofed by the redirect.
+// CallbackInput is a provider callback; Provider comes from the route, not the
+// query, so it cannot be spoofed by the redirect.
 type CallbackInput struct {
 	Provider  model.LoginMethod
 	Code      string
 	State     string
 	ClientIP  string
 	UserAgent string
-	// ProviderError is the OAuth error parameter the provider bounced back
-	// with (GitHub and Lark send error=access_denied when the user cancels).
-	// Any other value is ignored and the callback is judged on its code/state
-	// alone, so a provider failure string cannot be mistaken for a user action.
+	// ProviderError is the OAuth error parameter the provider bounced back with
+	// (GitHub and Lark send error=access_denied on cancel). Other values are
+	// ignored and the callback is judged on code/state alone, so a provider
+	// failure string cannot be mistaken for a user action.
 	ProviderError string
-	// StateCookie is the state cookie the browser sent back; Callback verifies
-	// it against the state's digest. Empty means the cookie is missing (or the
-	// deployment does not write it), which refuses the callback for any state
-	// that did not originate in this browser.
+	// StateCookie is the state cookie the browser sent back; Callback verifies it
+	// against the state's digest. Empty means the cookie is missing, which
+	// refuses any state that did not originate in this browser.
 	StateCookie string
 }
 
@@ -215,9 +207,9 @@ type CallbackResult struct {
 	LoginCode string
 
 	RegistrationState string
-	// OAuthState is echoed back so the handler can hand it to the frontend.
-	// POST /auth/register needs it alongside RegistrationState, and the page
-	// that started the login no longer exists to remember it.
+	// OAuthState is echoed back so the handler can hand it to the frontend;
+	// POST /auth/register needs it alongside RegistrationState, and the page that
+	// started the login no longer exists to remember it.
 	OAuthState  string
 	Provider    string
 	DisplayName string
@@ -250,9 +242,8 @@ type ExchangeCodeResult struct {
 // BindInput binds a provider account to the authenticated caller.
 //
 // RedirectURI is the exact frontend callback the provider code was issued
-// against, and must be repeated when exchanging the code (RFC 6749 §4.1.3). An
-// empty value falls back to the provider's configured login callback, matching
-// the login flow.
+// against, and must be repeated when exchanging the code; an empty value falls
+// back to the provider's configured login callback.
 type BindInput struct {
 	UserID      int64
 	Provider    model.LoginMethod

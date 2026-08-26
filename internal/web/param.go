@@ -17,16 +17,12 @@ var ErrInvalidQueryParameter = errors.New("invalid query parameter")
 
 // MaxPageNumber bounds a requested page. The service turns page and page_size
 // into an offset by multiplying them, which silently overflows for a large
-// enough page: 4611686018427387905 wraps to offset 0, so the request would be
-// answered with the first page while the response echoed the page number it
-// asked for — a wrong answer rather than an error. Other values wrap negative
-// and reach the repository's argument guard, surfacing as a 500 where the
-// contract documents a 400.
+// enough page: 4611686018427387905 wraps to offset 0, answering with the first
+// page while echoing the page it was asked for, and other values wrap negative
+// and surface as a 500 where the contract documents a 400.
 //
 // Rejecting rather than clamping: a caller asking for page 2^62 has made a
-// mistake, and answering with some other page would hide it. The bound is far
-// past any real page — at the maximum page size of 100 it addresses a hundred
-// billion rows.
+// mistake, and answering with some other page would hide it.
 const MaxPageNumber = 1 << 30
 
 // ParsePaging reads the page window from query parameters. An absent parameter
@@ -77,12 +73,9 @@ func parseOptionalPositiveInt(raw string) (int, error) {
 }
 
 // ParsePositiveID parses a path or query segment as a positive primary key.
-//
 // Strict digits only: the admin and session surfaces must agree on what a valid
-// id looks like, and a path segment with surrounding whitespace was never a
-// meaningful resource — accepting it while the other surface refuses it makes
-// the same URL answer differently depending on which handler it hits.
-// Overflow and empty input fall out of ParseInt itself.
+// id looks like, or the same URL answers differently depending on which handler
+// it hits. Overflow and empty input fall out of ParseInt.
 func ParsePositiveID(raw string) (int64, bool) {
 	if raw == "" {
 		return 0, false

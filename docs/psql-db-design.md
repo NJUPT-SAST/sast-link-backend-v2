@@ -312,7 +312,7 @@ CREATE TABLE audit_logs (
 
 NULL 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 之前写入的历史行。控制台之所以写显式值而非 NULL，正是为了让 NULL 只有这一层含义；历史行的歧义随 90 天保留期自行消失，无需回填。
 
-刻意**无外键**：审计行必须比它命名的注册活得更久。`ON DELETE SET NULL` 会在注销客户端时把历史悄悄改写成「无凭证」，`RESTRICT` 则会让注销客户端卡在自己的审计尾巴上。同样**未加索引**：基数目前约为 1（仅一个委派客户端），既有 `action` 索引已把常用过滤切得足够小，且表有 90 天上限——等该过滤真有量再按 `EXPLAIN` 决定。
+刻意**无外键**：审计行需要比它命名的客户端注册存活得更久。`ON DELETE SET NULL` 会在注销客户端时把历史悄悄改写成「无凭证」，`RESTRICT` 则会让注销客户端卡在自己的审计尾巴上。同样**未加索引**：基数目前约为 1（仅一个委派客户端），既有 `action` 索引已把常用过滤切得足够小，且表有 90 天上限——等该过滤真有量再按 `EXPLAIN` 决定。
 
 命名不用 `client_id`：本表已在两个不同角色上承载客户端标识——`resource_id` 在 `admin_oauth_client_*` 动作中存的是 oauth_client 主键，`detail` 在 OAuth token 端点中带 `client_id`。裸 `client_id` 在此处会真正产生「行为主体 vs 被操作对象」的歧义。
 
@@ -461,7 +461,7 @@ CREATE INDEX idx_oauth_authorizations_user_client
     ON oauth_authorizations(user_id, client_id);
 ```
 
-> 此表无 `updated_at`。生命周期为"创建 → 标记已用"。已使用 + 已过期的 code 由 API 内 retention worker 统一清理；V006 增设全量 `expires_at` 索引 `idx_oauth_authorizations_expires_at_all`，过期行按索引定位，无需 seq scan
+> 此表无 `updated_at`。生命周期为「创建 → 标记已用」。已使用 + 已过期的 code 由 API 内 retention worker 统一清理；V006 增设全量 `expires_at` 索引 `idx_oauth_authorizations_expires_at_all`，过期行按索引定位，无需 seq scan
 
 ## alumni_requests 校友建号申请
 
@@ -790,7 +790,7 @@ CREATE INDEX idx_token_blacklist_outbox_expiry
     ON token_blacklist_outbox (expires_at);
 ```
 
-> 此表无 `updated_at`。生命周期为"UPSERT → 认领 → 投递成功 DELETE / 过期清理"。`claim_token` + `claimed_until` 实现分布式 worker 的乐观锁认领，避免重复投递。
+> 此表无 `updated_at`。生命周期为「UPSERT → 认领 → 投递成功 DELETE / 过期清理」。`claim_token` + `claimed_until` 实现分布式 worker 的乐观锁认领，避免重复投递。
 
 ### Worker 认领与投递流程
 

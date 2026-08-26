@@ -63,12 +63,9 @@ func (r *UserRepository) CreateWithProfile(
 }
 
 // CreateAdminUser creates an account, its profile, and an optional other_mail
-// identity in one transaction, without issuing a token pair.
-//
-// Unlike CreateRegistrationWithIdentity, provisioning has no present subject to
-// receive a session, so the caller should not get a signed token for the new
-// account. The identity is included in the same transaction so the bound email
-// works for login immediately; nil means no binding.
+// identity in one transaction, without issuing a token pair — provisioning has
+// no subject to receive a session. The identity joins the same transaction so
+// the bound email works for login immediately; nil means no binding.
 func (r *UserRepository) CreateAdminUser(
 	ctx context.Context,
 	user *model.User,
@@ -88,18 +85,11 @@ func (r *UserRepository) CreateAdminUser(
 }
 
 // createAdminUserInTransaction appends an account, its profile and an optional
-// other_mail identity to an existing transaction.
-//
-// Extracted from CreateAdminUser because approving an alumni account request has
-// to provision the account and write the ticket's verdict in one transaction: a
-// committed account with a still-pending ticket would let a reviewer approve
-// again, and the retry would collide with the student ID it just inserted.
-//
-// The transaction is opened by the repository rather than passed in from a
-// service. Services in this codebase never hold a *gorm.DB - handing them one to
-// share would put transaction lifetime in the layer that is supposed to be
-// unaware of it. This mirrors createTokenPairInTransaction and
-// revokeFamilyInTransaction, which exist for the same reason.
+// other_mail identity to an existing transaction. It was extracted from
+// CreateAdminUser because the alumni approval must provision the account and
+// write the ticket's verdict in one transaction. The transaction is opened by
+// the repository rather than handed in from a service, which never holds a
+// *gorm.DB, so transaction lifetime stays out of the layer that is unaware of it.
 func createAdminUserInTransaction(
 	transaction *gorm.DB,
 	user *model.User,
@@ -137,19 +127,15 @@ func (r *UserRepository) CreateRegistration(
 }
 
 // CreateRegistrationWithIdentity creates an account, its profile, an optional
-// third-party binding and the initial session in one PostgreSQL transaction.
+// third-party binding and the initial session in one PostgreSQL transaction:
+// "register through GitHub" is one atomic outcome, and a failed identity insert
+// would leave an account whose provider binding looks unbound. A nil identity is
+// the plain email registration path.
 //
-// The identity joins the same transaction rather than being inserted afterwards
-// because "register through GitHub" is one atomic outcome: a committed account
-// with a failed identity insert would leave a user who cannot log in the way
-// they just registered, and whose provider account still looks unbound. A nil
-// identity is the plain email registration path.
-//
-// This deliberately does not reuse IdentityRepository.CreateWithinLimit: that
-// method opens its own transaction and locks the user row, which is redundant
-// here — the user row was created in this transaction and is not yet visible to
-// any concurrent writer, so no other binding can race it. The V001 unique
-// indexes remain the backstop.
+// It deliberately does not reuse IdentityRepository.CreateWithinLimit, which
+// opens its own transaction and locks the user row — here the user row was just
+// created in this transaction and is not visible to any concurrent writer, so
+// the V001 unique indexes are the backstop.
 func (r *UserRepository) CreateRegistrationWithIdentity(
 	ctx context.Context,
 	user *model.User,
@@ -212,12 +198,9 @@ func (r *UserRepository) FindByID(ctx context.Context, userID int64) (*model.Use
 }
 
 // FindByIDs finds the users matching the given ids with their profile and
-// identities, regardless of state, in unspecified order.
-//
-// Unlike FindByID it is not an error when some ids match nothing: the caller is
-// a batch lookup that reports per-id results, and a missing row is a fact about
-// the input rather than a failure of the query. Ordering is the caller's to
-// restore from its request order — SQL does not promise IN-list order.
+// identities, regardless of state, in unspecified order. Missing ids are not an
+// error — the caller is a batch lookup that reports per-id results — and
+// ordering is the caller's to restore from its request order.
 func (r *UserRepository) FindByIDs(ctx context.Context, ids []int64) ([]model.User, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("%w: id list must not be empty", ErrInvalidArgument)
@@ -234,11 +217,9 @@ func (r *UserRepository) FindByIDs(ctx context.Context, ids []int64) ([]model.Us
 	return users, nil
 }
 
-// FindProfileByID loads a user for a profile response in two queries instead of
-// three: the profile row joins the user row (one-to-one), and identities are
-// preloaded with a column projection that excludes the provider access/refresh
-// tokens, which the response never serializes but which would otherwise be pulled
-// into the process on every profile read.
+// FindProfileByID loads a user for a profile response: the profile row joins the
+// user row, and identities are preloaded with a projection that excludes the
+// provider access/refresh tokens the response never serializes.
 func (r *UserRepository) FindProfileByID(ctx context.Context, userID int64) (*model.User, error) {
 	var user model.User
 	err := r.database.WithContext(ctx).
@@ -258,10 +239,7 @@ func (r *UserRepository) FindProfileByID(ctx context.Context, userID int64) (*mo
 }
 
 // FindAuthUserByID finds a user's scalar columns without preloading Profile or
-// Identities. Auth and session paths that only need id, state, password or the
-// claims columns use this so they do not drag two association queries — and the
-// third-party provider credentials Identities carries — into memory on every
-// request.
+// Identities, which auth paths do not need.
 func (r *UserRepository) FindAuthUserByID(ctx context.Context, userID int64) (*model.User, error) {
 	var user model.User
 	err := r.database.WithContext(ctx).First(&user, userID).Error
@@ -290,9 +268,8 @@ func (r *UserRepository) FindAuthUserByLoginEmail(ctx context.Context, email str
 
 // FindAuthUserByLoginIdentifier is FindByLoginIdentifier without the
 // Profile/Identities preloads: it matches the login email or an other_mail
-// identity, returning only the user row's scalar columns. The login handler
-// serializes only those fields (mapAuthUser), so the preloads would be pure
-// waste — two extra SQL statements per login for data the response never uses.
+// identity and returns only the user row's scalar columns, which is all the
+// login handler serializes.
 func (r *UserRepository) FindAuthUserByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error) {
 	var user model.User
 	err := r.database.WithContext(ctx).Where("login_email = ?", identifier).First(&user).Error
@@ -317,12 +294,9 @@ func (r *UserRepository) FindAuthUserByLoginIdentifier(ctx context.Context, iden
 
 // UpdatePasswordAndRevokeSessions replaces the password hash, increments
 // token_version and revokes every live token of the user in one transaction,
-// returning the access-token entries that still need revocation delivery.
-//
-// The three steps must not be split: token_version alone only invalidates
-// access tokens (the refresh flow does not compare it), so a partial failure
-// would leave live refresh tokens able to mint fresh access tokens for an
-// account whose owner was told every session had ended.
+// returning the access-token entries that still need revocation delivery. The
+// steps must not be split: token_version alone does not invalidate refresh
+// tokens, so a partial failure would leave them able to mint fresh access tokens.
 func (r *UserRepository) UpdatePasswordAndRevokeSessions(
 	ctx context.Context,
 	userID int64,
@@ -359,23 +333,18 @@ func (r *UserRepository) UpdatePasswordAndRevokeSessions(
 }
 
 // UpdatePasswordHash rewrites only the stored hash, without bumping token_version
-// or revoking sessions. It is the in-place rehash-on-login write: a successful
-// login brings a stale hash up to the configured KDF parameters, and the session
-// being created must survive it. Callers that mean "change the password" must use
-// UpdatePasswordAndRevokeSessions instead, because bumping token_version alone is
-// what makes a password change cut off live refresh tokens.
-//
-// The UPDATE is guarded on the hash the caller just verified, so a concurrent
-// password change or reset that committed a new hash between verify and write
-// wins and this rehash of the old password is skipped (ErrRehashSkipped) rather
-// than silently reverting the credential.
+// or revoking sessions — the in-place rehash-on-login write, where the session
+// being created must survive. Callers that mean "change the password" must use
+// UpdatePasswordAndRevokeSessions instead. The UPDATE is guarded on the hash the
+// caller just verified, so a concurrent change that committed a new hash wins
+// and this rehash is skipped (ErrRehashSkipped) rather than reverting the
+// credential.
 func (r *UserRepository) UpdatePasswordHash(ctx context.Context, userID int64, currentHash, passwordHash string) error {
 	if strings.TrimSpace(passwordHash) == "" {
 		return fmt.Errorf("%w: password hash is empty", ErrInvalidArgument)
 	}
-	// A map condition rather than a hand-written column=placeholder comparison:
-	// GORM expands it to the same WHERE clause, and no password-keyed literal
-	// stays in the source for a secret scanner to misread.
+	// A map condition keeps any password-keyed literal out of the source, so a
+	// secret scanner cannot misread it.
 	result := r.database.WithContext(ctx).
 		Model(&model.User{}).
 		Where(map[string]any{"id": userID, "password": currentHash}).
@@ -427,12 +396,9 @@ func (r *UserRepository) ExistsAsEmailAnywhere(ctx context.Context, email string
 
 // ProfileUpdate carries the self-service field changes for one user. A nil
 // pointer means "leave unchanged"; a non-nil pointer to the zero value means
-// "write that value". The two are distinct because PUT /user/profile is a
-// partial update and clearing a nullable profile field is a legitimate edit.
-//
-// Identity and permission columns (login_email, role, state, email_type) are
-// deliberately absent: they are admin-only per PRD §4.9, and leaving them out of
-// the struct makes that unreachable rather than merely unvalidated.
+// "write that value". Identity and permission columns (login_email, role, state,
+// email_type) are deliberately absent: they are admin-only (PRD §4.9), and
+// leaving them out makes that unreachable rather than merely unvalidated.
 type ProfileUpdate struct {
 	Name        *string
 	PhoneNumber *string
@@ -508,12 +474,9 @@ func assignNullable(columns map[string]any, name string, value *string) {
 }
 
 // UpdateProfile applies a partial self-service update across "user" and profile
-// in one transaction and returns the reloaded aggregate.
-//
-// The profile row is upserted rather than updated: profile is created alongside
-// the user at registration, but a row imported before V001's registration flow
-// (or removed by hand) would otherwise make the display fields silently
-// unwritable while the response still reported success.
+// in one transaction and returns the reloaded aggregate. The profile row is
+// upserted rather than plain-updated, so a user missing a profile row (imported
+// before V001's flow, or removed by hand) still gets writable display fields.
 func (r *UserRepository) UpdateProfile(
 	ctx context.Context,
 	userID int64,
@@ -526,9 +489,8 @@ func (r *UserRepository) UpdateProfile(
 		return nil, fmt.Errorf("%w: update has no fields", ErrInvalidArgument)
 	}
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		// The state predicate makes a soft-deleted account indistinguishable from a
-		// missing one here, so this repository never edits a closed account even if
-		// a caller reaches it without the auth middleware's state gate.
+		// The state predicate keeps soft-deleted accounts out of this path even if a
+		// caller bypasses the middleware's state gate.
 		if userColumns := update.userColumns(); len(userColumns) > 0 {
 			result := transaction.Model(&model.User{}).
 				Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
@@ -544,9 +506,8 @@ func (r *UserRepository) UpdateProfile(
 		if len(profileColumns) == 0 {
 			return nil
 		}
-		// Verify the owner first, not only on the insert path. A request touching
-		// profile columns alone never reads "user", so without this an update to a
-		// missing or soft-deleted account would report success off RowsAffected.
+		// Verify the owner first, since a profile-only request never reads "user" and
+		// would otherwise report success on a missing or soft-deleted account.
 		var owner model.User
 		if err := transaction.Select("id").
 			Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
@@ -564,12 +525,9 @@ func (r *UserRepository) UpdateProfile(
 			return nil
 		}
 		profileColumns["user_id"] = userID
-		// ON CONFLICT rather than a bare INSERT: two concurrent first writes both
-		// see RowsAffected == 0 and both insert, and the loser would violate
-		// profile_user_id_key. That is a retryable race on the user's own row, but
-		// the constraint name is unmapped upstream and would surface as a 40900
-		// "conflicts with an existing account". Merging instead makes both callers
-		// succeed with their own columns.
+		// ON CONFLICT rather than a bare INSERT: two concurrent first writes would both
+		// insert and the loser would violate profile_user_id_key, surfacing as an
+		// unmapped 40900. Merging lets both callers succeed with their own columns.
 		if err := transaction.Model(&model.Profile{}).Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "user_id"}},
 			DoUpdates: clause.AssignmentColumns(profileColumnNames(profileColumns)),
@@ -602,15 +560,10 @@ func profileColumnNames(columns map[string]any) []string {
 	return names
 }
 
-// PublicCard is the unauthenticated display-card projection of a user. It holds
-// only the columns PRD §4.14 lists as public; nothing from "user" beyond the ID
-// is included, so a query change cannot accidentally widen the public surface.
-// Column tags are explicit on every field rather than left to the naming
-// strategy. GORM's initialism replacer knows URL but not Hub, so it derives
-// git_hub_url from GitHubURL; the column then matches no field and the scanned
-// value is silently discarded, which reads as an unset github_url on the card
-// rather than as an error. model.Profile carries the same tags for the same
-// reason.
+// PublicCard is the unauthenticated display-card projection of a user, holding
+// only the columns PRD §4.14 lists as public so a query change cannot widen the
+// surface. Column tags are explicit: GORM's initialism replacer derives
+// git_hub_url from GitHubURL, which would be silently discarded on scan.
 type PublicCard struct {
 	ID         int64             `gorm:"column:id"`
 	Nickname   *string           `gorm:"column:nickname"`
@@ -622,11 +575,9 @@ type PublicCard struct {
 }
 
 // FindPublicCardByUserID returns the public card of a non-deleted user.
-//
-// Soft-deleted accounts are filtered in SQL rather than by the caller: /card/:id
-// needs no authentication, so a missed check would publish the profile of an
-// account the owner asked to have removed. A deleted user is reported as
-// ErrNotFound, which is also what the contract documents (404).
+// Soft-deleted accounts are filtered in SQL because /card/:id is
+// unauthenticated; a missed check would publish an account the owner asked to
+// have removed. A deleted user reports ErrNotFound, matching the 404 contract.
 func (r *UserRepository) FindPublicCardByUserID(ctx context.Context, userID int64) (*PublicCard, error) {
 	if userID <= 0 {
 		return nil, ErrNotFound

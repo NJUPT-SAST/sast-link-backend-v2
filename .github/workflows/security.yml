@@ -1,9 +1,8 @@
 name: Security
 
 on:
-  # govulncheck also gates pull requests (see the job's own comment). The weekly
-  # run stays, because it is the only thing that catches an advisory published
-  # against a dependency the repository has not touched since.
+  # govulncheck also gates pull requests (see its job below); the weekly run
+  # catches advisories on dependencies the repository has not touched since.
   pull_request:
     branches: [main]
   schedule:
@@ -27,10 +26,9 @@ jobs:
     name: gosec
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Scheduled and manual only. gosec's value here is a periodic sweep of the
-    # whole module, and its findings are style-adjacent often enough that making
-    # it a merge gate would block pull requests on judgement calls rather than on
-    # known-vulnerable code. govulncheck below is the one that gates.
+    # Scheduled and manual only: gosec is a periodic whole-module sweep whose
+    # findings are often judgement calls, so it does not gate merges; govulncheck
+    # below is the one that does.
     if: github.event_name != 'pull_request'
     steps:
       - name: Checkout
@@ -49,11 +47,9 @@ jobs:
     name: govulncheck
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Runs on pull requests too, not just weekly. A dependency bump that pulls in
-    # a known-vulnerable version used to have a worst case of seven days in
-    # production before the Monday sweep found it, and a push to main deploys
-    # straight away. govulncheck reports only vulnerabilities reachable from this
-    # module's own call graph, so it is specific enough to block a merge on.
+    # Runs on pull requests too: a vulnerable dependency bump would otherwise sit
+    # in production until the Monday sweep, and a push to main deploys immediately.
+    # govulncheck reports only reachable vulnerabilities, so it can gate merges.
     steps:
       - name: Checkout
         uses: actions/checkout@v7

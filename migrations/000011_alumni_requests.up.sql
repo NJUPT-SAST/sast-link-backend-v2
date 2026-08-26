@@ -1,25 +1,13 @@
--- Alumni account-request tickets.
---
--- Graduated members cannot register: the first step of /auth/register sends a
--- code to an @njupt.edu.cn or @sast.fun address, and a deactivated school
--- mailbox makes that a dead end. The console can already provision an account,
--- but there was no way for the alumnus to ask.
---
--- A structured ticket rather than an inbound-email parser. The mailer is
--- outbound-only, and more importantly an SMTP sender is forgeable while a
--- student ID plus a name is not a secret among graduates - automatic approval on
--- a received email would hand anyone the ability to open an account. Identity
--- verification stays human. What this table automates is the transcription
--- labour, not the judgement.
+-- Alumni account-request tickets. Graduated members cannot register (the
+-- register flow emails a dead school mailbox) and had no way to ask, so this
+-- table is the intake. A structured ticket rather than inbound email, because
+-- an SMTP sender is forgeable: identity verification stays human, and the table
+-- only automates the transcription.
 CREATE TYPE alumni_request_status_enum AS ENUM ('pending', 'approved', 'rejected');
 
--- Column widths are TEXT rather than VARCHAR(n) because the length rules live in
--- internal/validate, where both this flow and the console read them from the same
--- constants. A second copy in the schema is one more thing an ALTER TABLE has to
--- find. The service layer still enforces the V001 widths on every field that
--- gets copied into "user" on approval - a ticket holding a 300-character name
--- would otherwise be accepted here and fail at approval time, which is the worst
--- place to discover it.
+-- TEXT rather than VARCHAR(n): the length rules live in internal/validate and
+-- the service layer still enforces them on every field copied into "user" on
+-- approval, so a schema copy would only be one more thing an ALTER has to find.
 CREATE TABLE alumni_requests (
     id              BIGSERIAL PRIMARY KEY,
     name            TEXT NOT NULL,
@@ -63,10 +51,9 @@ COMMENT ON COLUMN alumni_requests.created_user_id IS
 COMMENT ON COLUMN alumni_requests.client_ip IS
     'Submitter address, kept for abuse tracing and rate-limit forensics. Never returned in a response.';
 
--- One open ticket per student ID. Partial on status so a rejected applicant can
--- correct their details and resubmit, while a pending one cannot flood the queue.
--- lower(btrim(...)) matches how the import produced both 'B24040525' and
--- 'b24040525' for the same person.
+-- One open ticket per student ID. Partial on status so a rejected applicant may
+-- resubmit while a pending ticket blocks duplicates. lower(btrim(...)) folds
+-- the case variance the import produced.
 CREATE UNIQUE INDEX uq_alumni_requests_pending_student
     ON alumni_requests (lower(btrim(student_id))) WHERE status = 'pending';
 
@@ -74,13 +61,13 @@ CREATE UNIQUE INDEX uq_alumni_requests_pending_student
 CREATE INDEX idx_alumni_requests_status_created
     ON alumni_requests (status, created_at DESC);
 
--- The notification backlog. Partial, so it holds only the rows that need
--- attention: a healthy ticket has a non-NULL notified_at and never enters it.
+-- The notification backlog. Partial so a healthy ticket (notified_at set)
+-- never enters it.
 CREATE INDEX idx_alumni_requests_pending_notification
     ON alumni_requests (id) WHERE status <> 'pending' AND notified_at IS NULL;
 
--- Reuse V001's trigger function rather than defining another one. It is already
--- shared by "user", profile, identities and oauth_clients.
+-- Reuses V001's update_updated_at_column, already shared by "user", profile,
+-- identities and oauth_clients.
 CREATE TRIGGER trg_alumni_requests_updated_at
     BEFORE UPDATE ON alumni_requests FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();

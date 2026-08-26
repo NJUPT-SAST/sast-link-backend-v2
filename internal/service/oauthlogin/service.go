@@ -22,15 +22,14 @@ const (
 	oauthStatePrefix        = "os_"
 )
 
-// providerIdentityLimit is the per-user cap on github and lark bindings. V001
-// enforces it with a partial unique index; passing it to CreateWithinLimit makes
-// the service reject the second binding with a business error instead of relying
-// on a constraint violation.
+// providerIdentityLimit is the per-user cap on github and lark bindings;
+// passing it to CreateWithinLimit rejects a second binding with a business error
+// instead of a constraint violation.
 const providerIdentityLimit = 1
 
-// sessionScopes is the scope set granted to an internally issued session. It
-// matches the password-login flow, so a third-party login is not more or less
-// privileged than the front door.
+// sessionScopes is the scope set granted to an internally issued session,
+// matching the password-login flow so a third-party login is not more or less
+// privileged.
 var sessionScopes = scope.InternalSessionScopes
 
 // Service implements third-party OAuth login, binding and the registration
@@ -47,12 +46,10 @@ type Service struct {
 	Tokens     TokenRepository
 	Audits     AuditRepository
 
-	// Devices registers third-party login sessions in the shared device store
-	// (the same Redis adapter the session service uses). A login that goes
-	// through GitHub/Lark must count against the per-user 5-device cap like any
-	// password login; leaving it out would let a user bypass the cap and would
-	// hide the session from the device list entirely. Nil disables the hook
-	// (fail-open).
+	// Devices registers third-party login sessions in the shared device store (the
+	// same Redis adapter the session service uses), so a GitHub/Lark login counts
+	// against the per-user 5-device cap and appears in the device list. Nil
+	// disables the hook (fail-open).
 	Devices DeviceStore
 	// Blacklist delivers revoked JTIs to Redis after an eviction revoke. Nil
 	// skips delivery; the DB revoke is authoritative either way.
@@ -63,12 +60,10 @@ type Service struct {
 	LoginCodes        LoginCodeStore
 
 	// AuthorizeLimiter throttles the unauthenticated provider-login endpoints per
-	// IP. Each call writes one oauth_state key, so an uncapped endpoint lets
-	// anyone fill the keyspace.
+	// IP; each call writes one oauth_state key.
 	AuthorizeLimiter EndpointLimiter
-	// ExchangeLimiter throttles login_code redemption per IP. The endpoint cannot
-	// require a session — redeeming the code is how one is obtained — so the cap is
-	// what bounds free probing of the code space.
+	// ExchangeLimiter throttles login_code redemption per IP; the endpoint cannot
+	// require a session, so the cap bounds probing of the code space.
 	ExchangeLimiter EndpointLimiter
 
 	Issuer tokenissue.Issuer
@@ -79,9 +74,8 @@ type Service struct {
 	InternalClientID string
 
 	// AllowedRedirects is the exact-match allow-list of frontend URLs a callback
-	// may return the browser to. An open redirect here would let an attacker
-	// receive a login_code, so an unlisted value is refused rather than
-	// sanitized.
+	// may return the browser to; an open redirect would let an attacker receive a
+	// login_code, so an unlisted value is refused rather than sanitized.
 	AllowedRedirects []string
 	// DefaultRedirect is used when the caller names no redirect.
 	DefaultRedirect string
@@ -95,13 +89,13 @@ type Service struct {
 
 // checkLimit applies one per-IP endpoint cap.
 //
-// Fail-open per PRD §6.0: these limiters bound abuse volume, and PostgreSQL plus
-// the fail-closed Redis state this flow already consults remain authoritative for
-// every decision that matters. Refusing all third-party logins during a Redis
-// blip would take the feature down to protect a counter.
+// Fail-open: these limiters bound abuse volume, while PostgreSQL and the
+// fail-closed Redis state this flow consults remain authoritative for every
+// decision that matters; refusing all third-party logins during a Redis blip
+// would take the feature down to protect a counter.
 //
-// An empty clientIP skips the check rather than sharing one bucket: collapsing
-// unknown callers into a single key would let one of them lock out the rest.
+// An empty clientIP skips the check rather than sharing one bucket, so one
+// unknown caller cannot lock out the rest.
 func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, clientIP string) error {
 	subject := strings.TrimSpace(clientIP)
 	if limiter == nil || subject == "" {
@@ -122,7 +116,7 @@ func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoi
 // Authorize issues an OAuth state and returns the provider page to redirect to.
 func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*AuthorizeResult, error) {
 	// Throttled before the provider is resolved, so a disabled provider's route
-	// cannot be used as an unthrottled probe either.
+	// cannot serve as an unthrottled probe.
 	if err := s.checkLimit(ctx, s.AuthorizeLimiter, "oauth_login", input.ClientIP); err != nil {
 		return nil, err
 	}
@@ -141,8 +135,8 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	}
 	payload := StatePayload{Provider: input.Provider, Redirect: redirect}
 	if err := s.States.SaveOAuthState(ctx, state, payload, s.stateTTL()); err != nil {
-		// Fail-closed: without a stored state the callback could not be
-		// validated, so the login must not start.
+		// Fail-closed: without a stored state the callback could not be validated,
+		// so the login must not start.
 		return nil, newError(ErrDependencyUnavailable, "保存 OAuth state 失败", err)
 	}
 	return &AuthorizeResult{
@@ -158,10 +152,9 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
 	result, err := s.callback(ctx, input)
 	if err != nil {
-		// Audit failed callbacks too — they are exactly the events an incident
-		// review wants when someone drives a stolen or replayed state at the
-		// endpoint. The success legs audit themselves with the resolved user and
-		// provider identity.
+		// Audit failed callbacks too — they are the events an incident review wants
+		// when someone drives a stolen or replayed state at the endpoint; the success
+		// legs audit themselves.
 		s.auditLogin(ctx, nil, input, false, auditErrorCode(err), "")
 		return nil, err
 	}
@@ -174,13 +167,11 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		return nil, err
 	}
 
-	// Cancelling on the provider's page is a third outcome, not a failure:
-	// GitHub and Lark bounce back with error=access_denied and no code. It
-	// skips the code/state demands and the login-CSRF digest binding on
-	// purpose — no credential is issued here, so a callback lured onto a
-	// cancellation link can show at worst the "已取消登录" page. The state is
-	// still consumed when present: one authorization round trip ends with the
-	// cancellation, and a later replayed callback finds nothing.
+	// Cancelling on the provider's page is a third outcome, not a failure: GitHub
+	// and Lark bounce back with error=access_denied and no code. It skips the
+	// code/state demands and the login-CSRF binding on purpose — no credential is
+	// issued here, so a cancellation callback is harmless. The state is still
+	// consumed when present, so a replayed callback finds nothing.
 	if input.ProviderError == "access_denied" {
 		redirect := s.DefaultRedirect
 		if input.State != "" {
@@ -188,11 +179,9 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 			if consumeErr != nil {
 				return nil, newError(ErrDependencyUnavailable, "读取 OAuth state 失败", consumeErr)
 			}
-			// The stored redirect is never empty (resolveRedirect substitutes the
-			// default at authorize time), but a spent or forged state reports
-			// not-found and falls back to the default. A state issued for the
-			// other provider is likewise not adopted: it has no redirect worth
-			// honoring here.
+			// The stored redirect is never empty, but a spent or forged state reports
+			// not-found and falls back to the default; a state issued for the other
+			// provider is likewise not adopted.
 			if found && payload.Provider == input.Provider && payload.Redirect != "" {
 				redirect = payload.Redirect
 			}
@@ -209,8 +198,8 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 	if input.State == "" {
 		return nil, newError(ErrStateInvalid, "state 不能为空", nil)
 	}
-	// The state is consumed before the provider is called, so a replayed
-	// callback cannot even reach the exchange.
+	// The state is consumed before the provider is called, so a replayed callback
+	// cannot even reach the exchange.
 	statePayload, found, err := s.States.ConsumeOAuthState(ctx, input.State)
 	if err != nil {
 		return nil, newError(ErrDependencyUnavailable, "读取 OAuth state 失败", err)
@@ -220,17 +209,15 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 	}
 	// Login CSRF (OAuth 2.0 §10.12): the state alone proves somebody started a
 	// login, not that the browser completing it is the one that did. The digest
-	// cookie written at authorize time binds the state to that browser; a
-	// callback whose cookie is missing or does not match was completed by a
-	// browser an attacker lured onto their own authorization URL, and handing it
-	// a login_code or registration_state would plant the attacker's provider
-	// identity into the victim's session.
+	// cookie binds the state to that browser; a mismatched callback was completed
+	// by a browser an attacker lured onto their own authorization URL, and
+	// handing it a login_code or registration_state would plant the attacker's
+	// provider identity into the victim's session.
 	if !stateDigestMatches(input.State, input.StateCookie) {
 		return nil, newError(ErrStateInvalid, "state 与发起授权的浏览器不匹配", nil)
 	}
-	// A state issued for one provider must not be redeemable at another
-	// provider's callback, which would let a caller pair a GitHub state with a
-	// Lark identity.
+	// A state issued for one provider must not be redeemable at another's
+	// callback, which would pair a GitHub state with a Lark identity.
 	if statePayload.Provider != input.Provider {
 		return nil, newError(ErrStateInvalid, "state 与回调 provider 不匹配", nil)
 	}
@@ -240,11 +227,9 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		return nil, providerError(err)
 	}
 
-	// Taken from the state rather than re-resolved: Authorize validated it
-	// against the allow-list before storing, and SetOneTime's SET NX means an
-	// attacker cannot overwrite a victim's pending state to retarget it. The
-	// value is never empty, because resolveRedirect substitutes the default at
-	// authorize time.
+	// Taken from the state rather than re-resolved: Authorize validated it before
+	// storing, and the SET NX write means an attacker cannot overwrite a victim's
+	// pending state to retarget it.
 	redirect := statePayload.Redirect
 
 	existing, err := s.Identities.FindByProviderID(ctx, input.Provider, identity.ProviderID)
@@ -269,8 +254,8 @@ func (s Service) loginBranch(
 	user, err := s.Users.FindAuthUserByID(ctx, existing.UserID)
 	if err != nil {
 		if isNotFound(err) {
-			// The binding outlived its user row. Nothing the caller can fix, and
-			// it must not mint a login_code for a missing account.
+			// The binding outlived its user row; nothing the caller can fix, and it must
+			// not mint a login_code for a missing account.
 			return nil, newError(ErrUserNotFound, "绑定对应的用户不存在", err)
 		}
 		return nil, newError(ErrInternal, "查询用户失败", err)
@@ -280,9 +265,8 @@ func (s Service) loginBranch(
 		return nil, newError(ErrUserDeleted, "账号已注销", nil)
 	}
 
-	// Credential refresh is best effort: the user has authenticated, and failing
-	// the login because a metadata write failed would be a worse outcome than
-	// serving a slightly stale identity_data.
+	// Credential refresh is best effort: failing the login over a metadata write
+	// would be worse than serving slightly stale identity_data.
 	if updateErr := s.Identities.UpdateProviderCredentials(ctx, existing.ID,
 		credentialUpdate(ctx, identity)); updateErr != nil {
 		slog.WarnContext(ctx, "refresh identity provider credentials",
@@ -317,9 +301,9 @@ func (s Service) registrationBranch(
 		Provider:     input.Provider,
 		ProviderID:   identity.ProviderID,
 		IdentityData: identityJSONB(ctx, identity.Data),
-		// The original OAuth state is stored alongside so registration can
-		// verify the pair. This is the double binding from PRD §4.5: a leaked
-		// registration_state is useless without the state the browser carried.
+		// The original OAuth state is stored alongside so registration can verify the
+		// pair — the double binding: a leaked registration_state is useless without
+		// the state the browser carried.
 		OAuthState:     input.State,
 		AccessToken:    identity.AccessToken,
 		RefreshToken:   identity.RefreshToken,
@@ -345,8 +329,8 @@ func (s Service) registrationBranch(
 func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*ExchangeCodeResult, error) {
 	result, err := s.exchangeCode(ctx, input)
 	if err != nil {
-		// The user is unknown on most failure legs (the code may name no one),
-		// so the subject stays nil; the action and outcome are what matter.
+		// The user is unknown on most failure legs (the code may name no one), so the
+		// subject stays nil; the action and outcome are what matter.
 		if auditErr := s.audit(ctx, nil, "oauth_login_exchange", "session", nil, false, auditErrorCode(err),
 			input.ClientIP, input.UserAgent, nil); auditErr != nil {
 			logAuditFailure(ctx, "oauth_login_exchange", auditErr)
@@ -357,9 +341,9 @@ func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 }
 
 func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*ExchangeCodeResult, error) {
-	// Throttled ahead of the empty-code check: an attacker probing the code space
-	// controls the input, so rejecting blanks for free would leave the expensive
-	// path — a Redis GetDel per guess — uncapped.
+	// Throttled ahead of the empty-code check: probing controls the input, so
+	// rejecting blanks for free would leave the expensive Redis GetDel path
+	// uncapped.
 	if err := s.checkLimit(ctx, s.ExchangeLimiter, "oauth_exchange_code", input.ClientIP); err != nil {
 		return nil, err
 	}
@@ -382,14 +366,12 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 		return nil, newError(ErrInternal, "查询用户失败", err)
 	}
 	// State is re-checked here rather than trusted from the callback: the code
-	// lives for a minute, and an account closed in that window must not be able
-	// to redeem it.
+	// lives for a minute, and an account closed in that window must not redeem it.
 	if user.State == model.UserStateDeleted {
 		return nil, newError(ErrUserDeleted, "账号已注销", nil)
 	}
 
-	// The built-in client is immutable and cached process-locally, so this costs
-	// no DB round trip.
+	// The built-in client is immutable and cached process-locally.
 	client, err := s.Clients.FindActiveInternalClient(ctx, s.InternalClientID)
 	if err != nil {
 		return nil, newError(ErrInternal, "查询内置客户端失败", err)
@@ -412,12 +394,10 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 		input.ClientIP, input.UserAgent, map[string]any{"user_id": user.ID}); auditErr != nil {
 		slog.ErrorContext(ctx, "audit oauth login exchange", "user_id", user.ID, "error", auditErr)
 	}
-	// A GitHub/Lark login is a session like any password login: register it as
-	// a device so it shows up in the device list, counts against the 5-device
-	// cap, and can be logged out from the list. The eviction side (revoke the
-	// displaced family, drop its record, audit) mirrors the session service.
-	// Fail-open: the pair is already committed, and a store outage must not
-	// break the login that just succeeded.
+	// A GitHub/Lark login is a session like any password login: register it as a
+	// device so it shows in the device list, counts against the 5-device cap, and
+	// can be logged out. Fail-open: the pair is already committed, and a store
+	// outage must not break the login that just succeeded.
 	if s.Devices != nil {
 		// s.now(), not s.Clock.Now(): Clock is not wired in production, and
 		// s.now() falls back to the system clock instead of dereferencing nil.
@@ -439,11 +419,9 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 }
 
 // revokeEvictedDevice revokes the token family of a device evicted by the
-// per-user cap, exactly like the session service's hook of the same name: the
-// eviction is "最多 5 台同时登录" enforcement, and a family whose record
-// vanished while its tokens stayed live would become an invisible, unmanageable
-// ghost session. Fail-open: the new login already succeeded and an outage must
-// not be able to block it.
+// per-user cap, like the session service's hook of the same name: a family whose
+// record vanished while its tokens stayed live would become an invisible,
+// unmanageable ghost session. Fail-open: the new login already succeeded.
 func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted string, now time.Time, clientIP, userAgent string) {
 	if evicted == "" {
 		return
@@ -456,8 +434,8 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 	if s.Blacklist != nil {
 		jtis := make([]string, 0, len(entries))
 		for _, entry := range entries {
-			// The auth-state cache entry must be deleted so the middleware cannot
-			// serve a stale non-revoked state for a token the DB now says revoked.
+			// The auth-state cache entry must be deleted so the middleware cannot serve a
+			// stale non-revoked state for a token the DB now says revoked.
 			if entry.ExpiresAt.Sub(now) <= 0 || strings.TrimSpace(entry.TokenID) == "" {
 				continue
 			}
@@ -470,9 +448,9 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 			}
 		}
 	}
-	// Drop the displaced record (idempotent). The Redis script already removed
-	// the member and usually the Hash; this closes the gap where the Hash
-	// delete failed after the script evicted, so no orphan record survives.
+	// Drop the displaced record (idempotent): the script already removed the
+	// member, and this closes the gap where a failed Hash delete would leave an
+	// orphan record.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveDevice(ctx, userID, evicted); err != nil {
 			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)

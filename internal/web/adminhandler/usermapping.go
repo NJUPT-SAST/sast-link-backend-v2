@@ -13,9 +13,9 @@ import (
 
 var errInvalidQueryParameter = errors.New("query parameter is not valid")
 
-// adminUserDTO is one user row on the wire. Written out field by field rather than
-// serializing model.User, which carries the password hash: a response type with no
-// such field cannot leak it no matter how the model changes later.
+// adminUserDTO is one user row on the wire. Written out field by field rather
+// than serializing model.User, which carries the password hash: a response type
+// with no such field cannot leak it no matter how the model changes later.
 type adminUserDTO struct {
 	ID          int64   `json:"id"`
 	Name        string  `json:"name"`
@@ -101,15 +101,10 @@ type userProfileDTO struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
-// userIdentityDTO omits the stored provider access and refresh tokens: the console
-// displays bindings, it does not hand out the credentials behind them.
-//
-// identity_data is omitted for the same reason. It holds the provider's whole user
-// object — docs/psql-db-design.md documents the Lark payload as carrying mobile,
-// email, enterprise_email and employee_no — and these endpoints are readable by
-// lecturers, not just administrators. Listing which accounts a user has bound does
-// not require handing over the personal contact details behind them. If the console
-// ever needs a field from it, forward that field, not the blob.
+// userIdentityDTO omits the stored provider access and refresh tokens and the
+// identity_data blob, which can carry personal contact details: these endpoints
+// are readable by lecturers, not just administrators, and listing bindings does
+// not require handing over the credentials or details behind them.
 type userIdentityDTO struct {
 	ID             int64      `json:"id"`
 	Provider       string     `json:"provider"`
@@ -234,10 +229,8 @@ func mapAuditLog(entry adminuser.AuditLogItem) auditLogDTO {
 }
 
 // mapUserServiceError converts a typed adminuser error into the HTTP envelope.
-//
 // Separate from mapServiceError rather than shared: that one matches
-// *adminclient.Error and reports "OAuth 客户端不存在" for a not-found, which is the
-// wrong noun and the wrong business code here.
+// *adminclient.Error with the client not-found noun and business code.
 func mapUserServiceError(err error) error {
 	var serviceErr *adminuser.Error
 	if !errors.As(err, &serviceErr) {
@@ -248,9 +241,8 @@ func mapUserServiceError(err error) error {
 	switch serviceErr.Kind {
 	case adminuser.KindInvalidInput:
 		status = http.StatusBadRequest
-		// The service's messages are literals naming which rule was broken, never echoes
-		// of submitted values, so they are safe to return verbatim and are what makes a
-		// rejected edit actionable.
+		// The service's messages are literals naming which rule was broken, never
+		// echoes of submitted values, so they are safe to return verbatim.
 		message = serviceErr.Message
 	case adminuser.KindNotFound:
 		status = http.StatusNotFound
@@ -259,14 +251,14 @@ func mapUserServiceError(err error) error {
 		status = http.StatusConflict
 		message = serviceErr.Message
 	case adminuser.KindStateConflict:
-		// 422 rather than 409: the request is well formed and the target exists, it is
-		// the transition that the account's current state does not allow.
+		// 422 rather than 409: the request is well formed and the target exists; the
+		// transition is what the account's current state does not allow.
 		status = http.StatusUnprocessableEntity
 		message = serviceErr.Message
 	case adminuser.KindProtected:
 		// 403 rather than 400: the request is well formed and the administrator is
-		// authorized, but the target is not theirs to change. The message names the rule,
-		// since a bare "forbidden" would look like a role problem.
+		// authorized, but the target is not theirs to change; the message names the
+		// rule.
 		status = http.StatusForbidden
 		message = serviceErr.Message
 	case adminuser.KindInternal:

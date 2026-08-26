@@ -48,9 +48,9 @@ func (r *IdentityRepository) ListByUser(ctx context.Context, userID int64) ([]mo
 }
 
 // FindByIDAndUser returns the identity with the given primary key only when
-// userID owns it. Scoping the lookup by owner rather than filtering afterwards
-// means a caller cannot learn that somebody else's binding ID exists: a foreign
-// ID and a missing ID are indistinguishable ErrNotFound.
+// userID owns it. Scoping by owner makes a foreign ID and a missing ID
+// indistinguishable ErrNotFound, so a caller cannot learn that somebody else's
+// binding IDs exist.
 func (r *IdentityRepository) FindByIDAndUser(ctx context.Context, identityID, userID int64) (*model.Identity, error) {
 	var identity model.Identity
 	err := r.database.WithContext(ctx).
@@ -65,13 +65,9 @@ func (r *IdentityRepository) FindByIDAndUser(ctx context.Context, identityID, us
 	return nil, fmt.Errorf("find identity by ID and user: %w", err)
 }
 
-// DeleteByIDAndUser removes an identity owned by userID.
-//
-// The delete carries the owner in its WHERE clause instead of trusting a prior
-// read: between the caller's ownership check and this statement the row could
-// have been re-bound, and a bare `DELETE WHERE id = ?` would then unbind another
-// user's identity. It reports ErrNotFound when nothing matched, so a caller that
-// raced a concurrent unbind of the same row does not report success twice.
+// DeleteByIDAndUser removes an identity owned by userID. The delete carries the
+// owner in its WHERE clause, so a row re-bound between check and delete cannot
+// be unbound for another user; a zero-row delete reports ErrNotFound.
 func (r *IdentityRepository) DeleteByIDAndUser(ctx context.Context, identityID, userID int64) error {
 	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		return deleteIdentityByIDAndUser(transaction, identityID, userID)
@@ -79,13 +75,10 @@ func (r *IdentityRepository) DeleteByIDAndUser(ctx context.Context, identityID, 
 }
 
 // DeleteIdentityGuardingLoginMethod removes identityID owned by userID unless
-// doing so would strip the account of its last login method.
-//
-// The guard runs inside one transaction under a FOR UPDATE lock on the user row,
-// so two concurrent unbinds of different identities cannot both read a snapshot
-// showing the other identity still present and delete their way to an
-// un-signable account. A user with a login_email always qualifies; only an
-// account whose only ways in are third-party bindings needs the count.
+// doing so would strip the account of its last login method. The guard runs
+// under a FOR UPDATE lock on the user row so concurrent unbinds cannot both pass
+// a snapshot showing the other identity still present. A user with a login_email
+// always qualifies; only third-party-only accounts need the count.
 func (r *IdentityRepository) DeleteIdentityGuardingLoginMethod(ctx context.Context, identityID, userID int64) error {
 	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var loginEmail string
@@ -141,11 +134,9 @@ func (r *IdentityRepository) FindByProviderID(ctx context.Context, provider mode
 }
 
 // IdentityCredentialUpdate carries the provider-issued credentials and metadata
-// refreshed on an existing binding when the user logs in again.
-//
-// IdentityData is a whole-column replacement rather than a merge: the provider
-// response is the authoritative description of the account, and merging would
-// keep stale keys (a renamed GitHub login, a changed avatar) alive forever.
+// refreshed on an existing binding when the user logs in again. IdentityData is
+// a whole-column replacement rather than a merge, so stale provider keys cannot
+// survive.
 type IdentityCredentialUpdate struct {
 	IdentityData   model.JSONB
 	AccessToken    *string
@@ -154,11 +145,8 @@ type IdentityCredentialUpdate struct {
 }
 
 // UpdateProviderCredentials refreshes the provider tokens and metadata stored on
-// an existing binding.
-//
-// This is deliberately not an upsert on (provider, provider_id): a login must
-// never create a binding as a side effect. Creating one belongs to the explicit
-// bind and registration paths, which check ownership first.
+// an existing binding. It is deliberately not an upsert on (provider,
+// provider_id): a login must never create a binding as a side effect.
 func (r *IdentityRepository) UpdateProviderCredentials(
 	ctx context.Context,
 	identityID int64,
@@ -167,11 +155,8 @@ func (r *IdentityRepository) UpdateProviderCredentials(
 	if identityID <= 0 {
 		return ErrInvalidArgument
 	}
-	// Nil means "the provider did not return this field", which must leave the
-	// stored value alone: a login callback usually returns no refresh token (the
-	// provider only issues one on first authorization), and blanking the column
-	// would throw away the still-valid credential. This mirrors the IdentityData
-	// nil-is-keep semantics, so every column of this update means the same thing.
+	// Nil means the provider did not return this field, which must leave the
+	// stored value alone rather than blanking a still-valid credential.
 	fields := map[string]any{}
 	if update.AccessToken != nil {
 		fields["access_token"] = *update.AccessToken

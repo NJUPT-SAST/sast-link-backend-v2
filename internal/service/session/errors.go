@@ -26,12 +26,11 @@ const (
 	KindNotFound          Kind = "not_found"
 	KindInternal          Kind = "internal"
 	// KindObjectUploadFailed reports that an object-storage upload or review
-	// failed (errcode 50002). Distinct from KindInternal so the HTTP layer maps
-	// the documented code without a code-override case.
+	// failed (errcode 50002), distinct from KindInternal.
 	KindObjectUploadFailed Kind = "object_upload_failed"
-	// KindDependencyUnavailable is for fail-closed dependencies (verification
-	// codes, tickets) that cannot be validated when their Redis store is down.
-	// It maps to HTTP 503 so a Redis outage does not surface as a server bug.
+	// KindDependencyUnavailable flags fail-closed dependencies (verification
+	// codes, tickets) whose Redis store is unreachable, mapping to HTTP 503 so an
+	// outage does not surface as a server bug.
 	KindDependencyUnavailable Kind = "dependency_unavailable"
 )
 
@@ -82,8 +81,8 @@ var (
 	ErrInvalidToken      = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}
 	// ErrConcurrentRefresh reports a benign concurrent refresh within the 30s
 	// grace window: a sibling rotation already cut this token but preserved the
-	// family. Still an invalid-token outcome for the client, but distinct so the
-	// session handler does not clear the cookie that now holds the winner's token.
+	// family. It stays an invalid-token outcome for the client, but distinct so
+	// the session handler does not clear the cookie that now holds the winner's token.
 	ErrConcurrentRefresh       = &Error{Kind: KindInvalidToken, Code: errcode.CodeConcurrentRefresh}
 	ErrEmailFailed             = &Error{Kind: KindEmailFailed, Code: errcode.CodeEmailDeliveryFailed}
 	ErrVerificationCodeWrong   = &Error{Kind: KindInvalidInput, Code: errcode.CodeVerificationCodeWrong}
@@ -101,12 +100,12 @@ var (
 	ErrPasswordTooShort     = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordTooShort}
 	ErrPasswordUnchanged    = &Error{Kind: KindValidationFailed, Code: errcode.CodePasswordUnchanged}
 	// ErrIdentityNotFound covers both a missing binding and one owned by another
-	// user. They deliberately share a code so an authenticated caller cannot probe
-	// which identity IDs exist outside their own account.
+	// user; they share a code so a caller cannot probe identity IDs outside their
+	// own account.
 	ErrIdentityNotFound = &Error{Kind: KindNotFound, Code: errcode.CodeNotFound}
 	// ErrDeviceNotFound covers both a missing device and one owned by another
-	// user: the ownership gate already ran, so anything past it that is not owned
-	// is reported identically without leaking existence.
+	// user: the ownership gate already ran, so anything past it reports
+	// identically without leaking existence.
 	ErrDeviceNotFound = &Error{Kind: KindNotFound, Code: errcode.CodeNotFound}
 	ErrUserNotFound   = &Error{Kind: KindNotFound, Code: errcode.CodeUserNotFound}
 	// ErrLastLoginMethod rejects unbinding the caller's only remaining login
@@ -117,16 +116,16 @@ var (
 	// policy rejection from a malformed request.
 	ErrAvatarRejected = &Error{Kind: KindValidationFailed, Code: errcode.CodeAvatarRejected}
 	// ErrObjectUploadFailed reports a failed object-storage upload. The content
-	// review has its own failure path (ErrDependencyUnavailable, fail-closed):
-	// an image that was not reviewed must not be served as cleared.
+	// review has its own fail-closed path (ErrDependencyUnavailable): an image
+	// that was not reviewed must not be served as cleared.
 	ErrObjectUploadFailed = &Error{Kind: KindObjectUploadFailed, Code: errcode.CodeObjectUploadFailed}
 	// ErrDatabase reports a persistence failure with the documented 50003 code.
 	ErrDatabase = &Error{Kind: KindInternal, Code: errcode.CodeDatabaseFailed}
 	ErrInternal = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 	// ErrDependencyUnavailable reports that a fail-closed Redis-backed store
-	// (verification codes, register/bind tickets) is unreachable. Per PRD §6.0
-	// these flows must reject the request so the user can retry, not mask the
-	// outage as an internal 500.
+	// (verification codes, register/bind tickets) is unreachable; the flow
+	// rejects so the user can retry, rather than masking the outage as an
+	// internal 500.
 	ErrDependencyUnavailable = &Error{Kind: KindDependencyUnavailable, Code: errcode.CodeDependencyUnavailable}
 )
 

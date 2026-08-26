@@ -32,18 +32,9 @@ func NewOAuthAuthorization(database *gorm.DB) *OAuthAuthorizationRepository {
 }
 
 // CreateWithGrant persists a new authorization code and records the user's
-// consent in oauth_grants, in one transaction.
-//
-// This is the only authorization-code write path, deliberately. A bare code
-// insert would be the shorter and more obvious call, and it would silently
-// reintroduce the defect V009 fixed: an application holding a live code while
-// absent from the user's authorized-apps list.
-//
-// The two writes share a transaction so an application can never hold a live
-// code without appearing in the user's authorized-apps list, and vice versa: if
-// the grant fails to record, the code is not issued and the user retries
-// consent. oauth_grants is keyed by (user_id, client_id), so a repeated consent
-// upserts the pair, refreshing scopes and granted_at to the latest decision.
+// consent in oauth_grants, in one transaction: an application can never hold a
+// live code without appearing in the authorized-apps list. oauth_grants is
+// keyed by (user_id, client_id), so a repeated consent upserts the pair.
 func (r *OAuthAuthorizationRepository) CreateWithGrant(ctx context.Context, authorization *model.OAuthAuthorization) error {
 	if authorization == nil || strings.TrimSpace(authorization.Code) == "" ||
 		authorization.ClientID <= 0 || authorization.UserID <= 0 {
@@ -70,17 +61,12 @@ func (r *OAuthAuthorizationRepository) CreateWithGrant(ctx context.Context, auth
 	return nil
 }
 
-// Consume atomically marks an authorization code used and returns it.
-//
-// The row is locked before is_used is inspected, so two token requests carrying
-// the same code serialize here rather than both passing the check: the loser sees
-// is_used already TRUE and gets ErrAuthorizationReplayed. Doing this as a bare
-// read-then-update would let both requests mint a token pair from one code.
-//
-// On replay the record is still returned alongside the error, because the caller
-// needs its family_id to cascade the revocation. Expiry is reported separately
-// and does not mark the code used — an expired code was never redeemed, so there
-// is no family to punish.
+// Consume atomically marks an authorization code used and returns it. The row
+// is locked before is_used is inspected, so two requests carrying the same code
+// serialize and the loser gets ErrAuthorizationReplayed instead of minting a
+// pair. On replay the record is still returned because the caller needs its
+// family_id to cascade revocation; expiry is reported separately and does not
+// mark the code used.
 func (r *OAuthAuthorizationRepository) Consume(
 	ctx context.Context,
 	code string,
@@ -126,12 +112,9 @@ func (r *OAuthAuthorizationRepository) Consume(
 			return nil
 		}
 		authorization.IsUsed = true
-		// The user's token_version rides the consume transaction as a snapshot: a
-		// bulk revocation (password change, demotion, account close) that commits
-		// after this consume bumps the version, and the token-pair creation below
-		// compares its locked read against this snapshot to refuse the redemption.
-		// Without the snapshot the pair would be created after the revocation and
-		// escape it, exactly like a rotated refresh token.
+		// The user's token_version rides the consume transaction as a snapshot so a
+		// revocation that commits after this consume cannot be escaped by the pair
+		// creation below.
 		if err := transaction.Model(&model.User{}).
 			Select("token_version").
 			Where("id = ?", authorization.UserID).
@@ -154,10 +137,8 @@ func (r *OAuthAuthorizationRepository) Consume(
 
 // OAuthGrant is one application a user has authorized via the consent screen,
 // with the client's display fields and the most recent authorization's scopes.
-//
-// RedirectURIs and Scopes must be model.StringArray, not []string: the columns
-// are PostgreSQL text[], and []string has no sql.Scanner to decode them — a
-// plain []string scan fails at runtime on a real database.
+// RedirectURIs and Scopes are model.StringArray because the columns are
+// PostgreSQL text[], which []string cannot scan.
 type OAuthGrant struct {
 	ClientID         int64             `json:"client_id"`
 	ClientKey        string            `json:"client_key"`
@@ -197,11 +178,8 @@ func (r *OAuthAuthorizationRepository) ListGrantsByUser(ctx context.Context, use
 
 // DeleteByUserClient removes every authorization and the consent grant a user
 // holds with one client, dropping the application from the authorized-apps list.
-//
-// The oauth_authorizations delete is not just cleanup: it kills any in-flight,
-// unredeemed authorization code the user holds with this client, so a revoke
-// takes effect at once instead of leaving a code redeemable for the rest of its
-// short TTL (the redemption leg checks the client and scope, not the grant).
+// The authorization delete also kills any in-flight code, so a revoke takes
+// effect at once instead of leaving a code redeemable for the rest of its TTL.
 func (r *OAuthAuthorizationRepository) DeleteByUserClient(ctx context.Context, userID, clientID int64) error {
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		if err := transaction.Where("user_id = ? AND client_id = ?", userID, clientID).

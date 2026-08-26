@@ -17,14 +17,14 @@ import (
 )
 
 // clientAuthFailed is the single description every client authentication failure
-// returns. Shared as a constant so a future branch cannot reintroduce a
-// distinguishable message; see authenticateClient for why they must not differ.
+// returns, so a future branch cannot reintroduce a distinguishable message.
 const clientAuthFailed = "客户端认证失败"
 
 // Token implements RFC 6749 §4.1.3 and §6 for the two supported grants.
 func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, error) {
-	// Throttled before the grant is dispatched, so a caller cannot spend an unlimited
-	// number of client_secret or refresh_token guesses, each costing a DB round trip.
+	// Throttled before the grant is dispatched, so a caller cannot spend an
+	// unlimited number of client_secret or refresh_token guesses, each costing a DB
+	// round trip.
 	if err := s.checkTokenLimit(ctx, input.ClientIP); err != nil {
 		return nil, err
 	}
@@ -42,11 +42,11 @@ func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, err
 
 // tokenByAuthorizationCode redeems an authorization code for a token pair.
 //
-// Order matters. The client is authenticated first, then the code is consumed,
-// and only then are the code's bindings checked. Consuming before the bindings
-// are verified is deliberate: the code is single-use, so a request that fails
-// PKCE must still burn it — otherwise an attacker holding a stolen code could
-// probe verifiers indefinitely against a code that stays live.
+// Order matters: the client is authenticated first, then the code is consumed,
+// and only then are its bindings checked. Consuming before the bindings are
+// verified is deliberate — the code is single-use, so a failed PKCE attempt must
+// still burn it, or an attacker holding a stolen code could probe verifiers
+// indefinitely against a code that stays live.
 func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput) (*TokenResult, error) {
 	client, err := s.authenticateClient(ctx, input.ClientID, input.ClientSecret)
 	if err != nil {
@@ -72,22 +72,20 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	case errors.Is(consumeErr, repository.ErrNotFound):
 		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
 	case errors.Is(consumeErr, repository.ErrAuthorizationReplayed):
-		// The code must belong to the authenticated client before its family is cut.
-		// Without this, any client that can authenticate and has obtained another
-		// client's spent code can revoke that client's family — a cross-client
-		// revocation primitive. A mismatch is reported as a plain invalid_grant, the
-		// same answer an unknown code gets, so it reveals nothing either way.
+		// The code must belong to the authenticated client before its family is cut,
+		// or any authenticated client holding another client's spent code could
+		// revoke that client's family. A mismatch answers as a plain invalid_grant,
+		// the same as an unknown code, revealing nothing either way.
 		if authorization == nil || authorization.ClientID != client.ID {
 			return nil, newError(ErrInvalidGrant, "授权码无效", nil)
 		}
-		// PRD §4.10: a replayed code means the code leaked, and whatever tokens were
-		// already minted from it are suspect. Cut the whole family.
+		// PRD §4.10: a replayed code means it leaked, so cut the whole family.
 		if authorization.FamilyID != nil {
 			s.revokeFamily(ctx, *authorization.FamilyID)
 		} else {
-			// family_id is nullable and Consent always sets it, so this means a row this
-			// service did not mint. The replay is real but there is nothing to revoke,
-			// which must not pass silently: whatever tokens exist stay live.
+			// family_id is nullable and Consent always sets it, so this is a row this
+			// service did not mint; the replay must not pass silently since there is
+			// nothing to cut.
 			slog.ErrorContext(ctx, "replayed authorization code has no family to revoke",
 				"client_id", client.ClientID)
 		}
@@ -99,10 +97,10 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, newError(ErrInternal, "消费授权码失败", consumeErr)
 	}
 
-	// The code must belong to the authenticated client. Without this a client could
-	// redeem a code issued to a different client and receive tokens for it. The
-	// description is the same "授权码无效" as an unknown code so this endpoint is
-	// not an oracle; the wrapped error records the mismatch for operators.
+	// The code must belong to the authenticated client, or a client could redeem a
+	// code issued to someone else. The description stays the same "授权码无效" as an
+	// unknown code so this endpoint is not an oracle; the wrapped error records the
+	// mismatch for operators.
 	if authorization.ClientID != client.ID {
 		return nil, newError(ErrInvalidGrant, "授权码无效",
 			errors.New("authorization code belongs to a different client"))
@@ -126,26 +124,19 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, newError(ErrInvalidGrant, "账号已注销", nil)
 	}
 	// A bulk revocation (password change, demotion, account close) bumps
-	// token_version in the same transaction that cuts tokens, and the code was
-	// already consumed. If the version moved since the consume, the revocation
-	// happened in between: issuing now would mint a session the revocation never
-	// saw. The write below re-checks under the user row lock, so this early exit
-	// only skips work — the pair cannot land on a stale version either way.
+	// token_version in the same transaction that cuts tokens. If it moved since the
+	// consume, issuing now would mint a session the revocation never saw; the write
+	// below re-checks under the user row lock, so this early exit only skips work.
 	if user.TokenVersion != int(consumedVersion) {
 		s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_redeemed_after_revocation")
 		return nil, newError(ErrInvalidGrant, "授权码已失效，请重新发起授权",
 			errors.New("user token version changed since code consume"))
 	}
 
-	// The code's scopes are re-checked against the registration as it stands now, the
-	// same live re-check Consent applies to a stash and this function already applies
-	// to grant_types. A code is minted before it is redeemed, so without this an
-	// administrator who revokes a client's admin scope still has every outstanding
-	// code redeemable for an administrative token until it expires. Consent closes
-	// the stash half of that window; this closes the code half.
-	//
-	// Checked after the code was consumed, matching this function's stated ordering:
-	// a rejection here must still burn the code.
+	// Scopes are re-checked against the live registration, the same re-check Consent
+	// applies to a stash: without it, revoking a client's admin scope would leave
+	// every outstanding code redeemable for an administrative token until it expires.
+	// Checked after the consume, so a rejection here still burns the code.
 	if scopeErr := checkScopeForClient(client, []string(authorization.Scopes)); scopeErr != nil {
 		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
@@ -180,9 +171,8 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if err != nil {
 		return nil, newError(ErrInternal, "签发 Token Pair 失败", err)
 	}
-	// The success audit rides the token transaction (one fsync), consistent with
-	// the refresh grant and the session login; a build failure logs and drops the
-	// row — there is no synchronous fallback for the success path.
+	// The success audit rides the token transaction; a build failure logs and drops
+	// the row — there is no synchronous fallback for the success path.
 	var codeAudit *model.AuditLog
 	if s.Audit != nil {
 		resourceID := client.ClientID
@@ -200,10 +190,9 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if createErr := s.Tokens.CreatePairWithUserAndClientLock(ctx, user.ID, client.ID, consumedVersion, pair.Access, pair.Refresh, codeAudit); createErr != nil {
 		if errors.Is(createErr, repository.ErrUserStateChanged) || errors.Is(createErr, repository.ErrClientInactive) ||
 			errors.Is(createErr, repository.ErrClientScopeChanged) || errors.Is(createErr, repository.ErrNotFound) {
-			// A revocation committed between the consume and this write (the
-			// account vanished or its version moved, or the client was disabled /
-			// narrowed in scope / deleted): the pair must not land, and the answer
-			// matches an unknown code so the endpoint stays non-oracular.
+			// A revocation landed between the consume and this write: the pair must not
+			// be minted, and the answer matches an unknown code so the endpoint stays
+			// non-oracular.
 			s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_redeemed_after_revocation")
 			return nil, newError(ErrInvalidGrant, "授权码已失效，请重新发起授权", createErr)
 		}
@@ -244,8 +233,8 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 
 	tokenHash, err := s.RefreshTokens.HashRefreshToken(presented)
 	if err != nil {
-		// A token that is not even shaped like ours cannot be looked up; reporting
-		// invalid_grant keeps a malformed value indistinguishable from an unknown one.
+		// A token not shaped like ours reports invalid_grant, indistinguishable from an
+		// unknown one.
 		return nil, newError(ErrInvalidGrant, "refresh_token 无效", err)
 	}
 	current, err := s.Tokens.FindRefreshToken(ctx, tokenHash)
@@ -256,31 +245,27 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		return nil, newError(ErrInternal, "查询 refresh_token 失败", err)
 	}
 
-	// The token must belong to the authenticated client. This is also what keeps
-	// the OAuth path and the internal session path from crossing: a session token
-	// belongs to the built-in client, so presenting it here with a third-party
-	// client_id fails, and vice versa in session.Refresh. The description is the
-	// same "refresh_token 无效" as an unknown token so this endpoint is not an
-	// oracle; the wrapped error records the mismatch for operators.
+	// The token must belong to the authenticated client; this also keeps the OAuth
+	// path and the internal session path from crossing, since a session token belongs
+	// to the built-in client. The description stays the same "refresh_token 无效" as an
+	// unknown token so this endpoint is not an oracle; the wrapped error records the
+	// mismatch for operators.
 	if current.ClientID != client.ID {
 		return nil, newError(ErrInvalidGrant, "refresh_token 无效",
 			errors.New("refresh token belongs to a different client"))
 	}
 	if current.RevokedAt != nil {
-		// The token was rotated or cancelled by another request in this family.
-		// Within the grace window that is a benign concurrent refresh (the winning
-		// rotation preserved the family), and this request must not re-revoke or it
-		// would log out the winner. Beyond the window it is a true replay of a
-		// long-dead token and the family is cut.
+		// The token was rotated or cancelled by another request in this family: within
+		// the grace window that is a benign concurrent refresh that must not re-revoke,
+		// or it would log out the winner; beyond it, a true replay whose family is cut.
 		if !repository.IsWithinRefreshGrace(*current.RevokedAt, s.now()) {
 			// A true replay of a long-dead token: cut the family.
 			s.revokeFamily(ctx, current.FamilyID)
 			s.auditToken(ctx, &current.UserID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
 		} else {
-			// A benign concurrent refresh within the grace window: the winning
-			// rotation preserved the family, so report invalid without cutting —
-			// audited distinctly so a reviewer can tell it apart from a replay
-			// (matching the session path's concurrent_refresh).
+			// A benign concurrent refresh within the grace window: report invalid
+			// without cutting, audited distinctly from a replay (matching the session
+			// path's concurrent_refresh).
 			s.auditToken(ctx, &current.UserID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "concurrent_refresh")
 		}
 		return nil, newError(ErrInvalidGrant, "refresh_token 无效", nil)
@@ -300,18 +285,13 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		return nil, newError(ErrInvalidGrant, "账号已注销", nil)
 	}
 
-	// Scope narrowing (RFC 6749 §6) is not supported: the repository requires a
-	// rotated pair to carry exactly the current scopes, so the rotated tokens
-	// inherit them unchanged. A client wanting fewer scopes must start a new
-	// authorization.
+	// Scope narrowing (RFC 6749 §6) is not supported: rotated pairs carry exactly
+	// the current scopes unchanged; a client wanting fewer must re-authorize.
 	scopes := []string(current.Scopes)
-	// Defense-in-depth, mirroring the code-redemption leg. The family's scopes were
-	// checked against the registration when its first pair was minted; a change
-	// that did not go through the revoking update (a direct database edit, a future
-	// path that narrows scopes without UpdateAndRevoke) would otherwise let the
-	// family keep minting access tokens that assert a scope the registration no
-	// longer holds. The revoking update normally cuts the family first, so this is
-	// a backstop rather than the primary control.
+	// Defense-in-depth mirroring the redemption leg: a change that did not go through
+	// the revoking update would otherwise let the family keep minting access tokens
+	// for a scope the registration no longer holds. The revoking update normally cuts
+	// the family first, so this is a backstop.
 	if scopeErr := checkScopeForClient(client, scopes); scopeErr != nil {
 		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
@@ -327,16 +307,11 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	if err != nil {
 		return nil, newError(ErrInternal, "签发 Token Pair 失败", err)
 	}
-	// A rotation is not a fresh authentication, so auth_time stays the moment the
-	// user actually authorized this family: the creation time of its first refresh
-	// token, read by the repository inside the rotation transaction (lowest
-	// sequence, never the rotated row). Reading current.CreatedAt instead would be
-	// right only for the first rotation and would then advance by one rotation
-	// interval on every subsequent one.
-	// The success audit rides the rotation transaction (one fsync, like the
-	// session refresh path). A build failure (practically unreachable — the detail
-	// map is constant) logs and drops the success row; there is no synchronous
-	// fallback.
+	// A rotation is not a fresh authentication, so auth_time stays the family
+	// origin: the sequence-0 row's creation time, read inside the rotation
+	// transaction. Reading current.CreatedAt would advance it with every rotation.
+	// The success audit rides the rotation transaction; a build failure logs and
+	// drops the row.
 	var refreshAudit *model.AuditLog
 	if s.Audit != nil {
 		resourceID := client.ClientID
@@ -358,9 +333,8 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	if rotateErr != nil {
 		if errors.Is(rotateErr, repository.ErrTokenReplayWithinGrace) {
 			// The rotation transaction preserved the family for a benign concurrent
-			// refresh within the grace window; re-revoking here would cut the
-			// preserved family and log out the winning request. Audited as
-			// concurrent_refresh, not a replay, matching the session path.
+			// refresh; re-revoking would log out the winner. Audited as
+			// concurrent_refresh, not a replay.
 			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "concurrent_refresh")
 			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
 		}
@@ -374,9 +348,8 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		}
 		if errors.Is(rotateErr, repository.ErrTokenFamilyExpired) {
 			// The family reached its capability lifetime cap and the rotation
-			// transaction revoked it; the client must re-authorize. Reported in the
-			// standard invalid_grant envelope so the client starts a new
-			// authorization, audited distinctly from a replay.
+			// transaction revoked it, so the client must re-authorize. Audited
+			// distinctly from a replay.
 			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_family_expired")
 			return nil, newError(ErrInvalidGrant, "refresh_token 已超过最长有效期，请重新授权", rotateErr)
 		}
@@ -393,21 +366,17 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 
 // authenticateClient resolves and authenticates the requesting client.
 //
-// A public client (no stored secret) authenticates by PKCE alone, which the
-// caller verifies against the authorization code. A confidential client must
-// present a matching client_secret. A public client that sends a secret anyway is
-// rejected rather than ignored: it signals a client misconfigured about its own
-// type, and silently accepting it would hide that.
+// A public client (no stored secret) authenticates by PKCE alone, which the caller
+// verifies against the authorization code; a confidential client must present a
+// matching client_secret. A public client that sends a secret anyway is rejected
+// rather than ignored, so a misconfiguration about its own type is surfaced.
 //
-// Every rejection below answers with the same description, on purpose. Distinct
-// wording would make this endpoint an oracle for a known client_id: a caller could
-// send one request with a secret and one without, and learn from which message came
-// back whether that client exists and whether it is public or confidential. client_id
-// is public by design — it travels in authorize URLs and front-end code — so the thing
-// worth protecting is not its existence but the client's configuration, and knowing a
-// target is public (no secret, PKCE only) is useful to an attacker. Authorize already
-// holds this line for the same reason; the two endpoints must not disagree. The
-// specific cause is preserved for operators via the wrapped error and the audit log.
+// Every rejection answers with the same description on purpose: distinct wording
+// would make this endpoint an oracle for a known client_id, telling a caller
+// whether the client exists and whether it is public or confidential. client_id is
+// public by design, so what needs protecting is the client's configuration.
+// Authorize holds the same line, and the wrapped error plus audit log preserve the
+// specific cause for operators.
 func (s Service) authenticateClient(ctx context.Context, clientID, clientSecret string) (*model.OAuthClient, error) {
 	id := strings.TrimSpace(clientID)
 	if id == "" {
@@ -443,8 +412,8 @@ func (s Service) authenticateClient(ctx context.Context, clientID, clientSecret 
 func matchRedirectURI(authorized *string, presented string) error {
 	value := strings.TrimSpace(presented)
 	if authorized == nil || *authorized == "" {
-		// Every code this service issues stores its redirect_uri, so a missing one
-		// means the row was not written by Consent.
+		// Every code issued stores its redirect_uri, so a missing one was not written
+		// by Consent.
 		return newError(ErrInvalidGrant, "授权码缺少 redirect_uri", nil)
 	}
 	if value == "" {
@@ -458,15 +427,10 @@ func matchRedirectURI(authorized *string, presented string) error {
 
 // signIDToken builds the ID Token for a granted scope set.
 //
-// authTime is the instant the user approved this authorization, which is NOT what
-// OIDC means by auth_time: that is when the end user authenticated. Nothing in this
-// service records an authentication instant yet, so a user who signed in days ago and
-// authorizes today yields today's value — overstating recency, the opposite of what a
-// relying party enforcing max_age needs. The claim is therefore kept out of
-// claims_supported (see Discovery) so nothing is invited to depend on it, and neither
-// max_age nor prompt is implemented. Making this correct means persisting a real
-// authentication timestamp at login and carrying it through consent into the code and
-// the token family; until then the value stays deliberately unadvertised.
+// authTime is the moment the user approved the authorization, which is NOT what
+// OIDC means by auth_time (when the end user authenticated): nothing records an
+// authentication instant yet, so the value overstates recency. The claim is kept
+// out of claims_supported for that reason — see Discovery.
 func (s Service) signIDToken(
 	ctx context.Context,
 	user *model.User,

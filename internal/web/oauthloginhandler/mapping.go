@@ -50,9 +50,9 @@ func mapServiceError(err error) error {
 	case oauthlogin.KindNotFound:
 		status = http.StatusNotFound
 	case oauthlogin.KindProviderUnavailable:
-		// 502, not 503: this service is healthy and the request was well formed,
-		// but an upstream it depends on answered badly. A 503 would suggest
-		// retrying here helps, when the fix is on GitHub's or Lark's side.
+		// 502, not 503: this service is healthy and the request well formed; the
+		// fix is on GitHub's or Lark's side, and a 503 would suggest retrying here
+		// helps.
 		message = "第三方服务暂时不可用"
 		status = http.StatusBadGateway
 	case oauthlogin.KindDependencyUnavailable:
@@ -66,11 +66,8 @@ func mapServiceError(err error) error {
 		status = http.StatusInternalServerError
 	}
 
-	// Last, so it wins over both tables above. A service outcome that opted in
-	// wrote a message the per-Kind default would state incorrectly — a refused
-	// authorization code is not an expired state, even though they share a Kind
-	// and a code. Only messages the service marked as user-facing get here; the
-	// internal ones ("保存 OAuth state 失败") keep their generic replacement.
+	// Last, so it wins over both tables above. Only messages the service marked
+	// as user-facing get here; internal ones keep their generic replacement.
 	if serviceErr.Display && strings.TrimSpace(serviceErr.Message) != "" {
 		message = serviceErr.Message
 	}

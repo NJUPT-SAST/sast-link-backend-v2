@@ -23,10 +23,8 @@ import (
 // package's signatures do not repeat the import path.
 type providerIdentity = provider.Identity
 
-// auditTimeout bounds the detached audit write, matching the oauth service. An
-// audit row for a completed action must survive the caller going away, but a
-// stuck database must not hold a login callback hostage; the write is fail-open
-// either way.
+// auditTimeout bounds the detached audit write; the row must survive the caller
+// going away, but a stuck database must not hold a login callback hostage.
 const auditTimeout = 5 * time.Second
 
 // providerClient resolves an enabled provider, or reports that this deployment
@@ -40,9 +38,8 @@ func (s Service) providerClient(name model.LoginMethod) (ProviderClient, error) 
 }
 
 // stateDigest is the login-CSRF cookie value for a state: hex(SHA-256(state)).
-// The state is a high-entropy random token, so a bare digest suffices — the
-// cookie's job is to prove the callback browser is the one that started the
-// authorization, not to hide the state (which the same browser already knows).
+// The state is high-entropy, so a bare digest suffices — the cookie proves the
+// callback browser started the authorization rather than hiding the state.
 func stateDigest(state string) string {
 	sum := sha256.Sum256([]byte(state))
 	return hex.EncodeToString(sum[:])
@@ -58,10 +55,8 @@ func stateDigestMatches(state, cookieValue string) bool {
 // resolveRedirect validates a requested frontend redirect against the
 // allow-list.
 //
-// Exact match only. A prefix or suffix rule is what turns an allow-list into an
-// open redirect: "starts with https://link.sast.fun" also admits
-// https://link.sast.fun.evil.test, and the callback hands a login_code to
-// whatever it redirects to.
+// Exact match only: a prefix rule would admit https://link.sast.fun.evil.test
+// and hand a live login_code to whatever it redirects to.
 func (s Service) resolveRedirect(requested string) (string, error) {
 	if requested == "" {
 		return s.DefaultRedirect, nil
@@ -76,11 +71,9 @@ func (s Service) resolveRedirect(requested string) (string, error) {
 
 // providerError maps an outbound provider failure onto a business outcome.
 //
-// The two restart-the-login outcomes carry display messages: they share
-// KindInvalidState with a genuinely expired state, and the default string for
-// that Kind ("state 无效或已过期") sends someone whose authorization code
-// GitHub refused, or whose exchange timed out, looking for a fault in a state
-// that was in fact valid and correctly bound to their browser.
+// The restart-the-login outcomes carry display messages because they share
+// KindInvalidState with a genuinely expired state, whose default string would
+// send the user looking for a fault in a valid state.
 func providerError(err error) error {
 	switch {
 	case errors.Is(err, provider.ErrForeignTenant):
@@ -91,14 +84,12 @@ func providerError(err error) error {
 		return newDisplayError(ErrStateInvalid, "第三方授权码无效或已过期", err)
 	case errors.Is(err, context.DeadlineExceeded):
 		// The provider accepted the connection and then did not answer within
-		// httpIOTimeout. Reported as a restartable failure rather than an outage
-		// because a single slow round trip is not evidence GitHub or Lark is
-		// down, but the message must say so — nothing about the user's state was
-		// wrong, and retrying is exactly the right advice.
+		// httpIOTimeout — a single slow round trip is not evidence the provider is
+		// down, so this is a restartable failure.
 		return newDisplayError(ErrStateInvalid, "连接第三方登录服务超时", err)
 	case errors.Is(err, context.Canceled):
-		// The caller went away mid-exchange. Reporting a provider outage would
-		// blame GitHub or Lark for a client disconnect.
+		// The caller went away mid-exchange; reporting a provider outage would blame
+		// the provider for a client disconnect.
 		return newError(ErrDependencyUnavailable, "第三方授权请求被中断", err)
 	default:
 		return newError(ErrProviderUnavailable, "第三方服务暂时不可用", err)
@@ -139,11 +130,9 @@ func (s Service) now() time.Time {
 	return clock.Now().UTC()
 }
 
-// audit writes one audit row. Audit failures never fail the caller's flow; the
-// caller logs them. Mirrors session.Service.audit so both services produce
-// identically shaped rows, including the resourceID the session service carries
-// on evict_device rows — a third-party login eviction must leave the same trail
-// as a password-login one.
+// audit writes one audit row; failures never fail the caller's flow and are
+// logged by the caller. It mirrors session.Service.audit so both services
+// produce identically shaped rows.
 func (s Service) audit(
 	ctx context.Context,
 	userID *int64,
@@ -180,9 +169,8 @@ func (s Service) audit(
 		userAgentPtr = &userAgent
 	}
 	successValue := success
-	// Detached like the oauth and admin services: an audit row for a completed
-	// action must survive the caller going away, or the log silently loses the
-	// very events an aborted callback or exchange produced.
+	// Detached context: an audit row for a completed action must survive the
+	// caller going away, or an aborted callback's events vanish from the log.
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
 	defer cancel()
 	return s.Audits.Create(auditCtx, &model.AuditLog{
@@ -199,10 +187,9 @@ func (s Service) audit(
 	})
 }
 
-// identityJSONB encodes a provider's metadata map for the identity_data column.
-// model.JSONB is raw JSON, not a map, so the map has to be marshalled rather
-// than converted. A marshal failure yields nil, which leaves the column NULL —
-// losing display metadata is preferable to failing a login over it.
+// identityJSONB encodes a provider metadata map for the identity_data column;
+// model.JSONB is raw JSON, so the map is marshalled. A failure yields nil
+// (NULL column), losing display metadata rather than failing a login.
 func identityJSONB(ctx context.Context, data map[string]any) model.JSONB {
 	if len(data) == 0 {
 		return nil

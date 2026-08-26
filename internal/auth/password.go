@@ -20,28 +20,24 @@ const (
 	passwordKeyBytes    = 64
 
 	// minimumHashIterations and maximumHashIterations bound the PBKDF2 count
-	// accepted from a stored legacy hash. The bounds reject garbage and stop a
-	// corrupted or hostile iterations field from turning one login into a
-	// CPU-burning DoS. The ceiling is tight enough to reject maliciously large
-	// values while still accommodating the historical fixed parameter of 600k.
+	// accepted from a stored legacy hash, so a corrupted or hostile iterations
+	// field cannot turn one login into a CPU-burning DoS. The ceiling still
+	// accommodates the historical fixed parameter of 600k.
 	minimumHashIterations = 10_000
 	maximumHashIterations = 1_000_000
 
 	// memoryHashKeyBytes is the derived-key length for argon2id.
 	memoryHashKeyBytes = 32
 
-	// defaultArgon2Time and defaultArgon2Memory (19 MiB, t=2) are the OWASP
-	// low-memory work factor, adopted after review: login is not a hot path and
-	// the derivation concurrency is capped, so the extra ~20-30ms per hash is
-	// free while the memory keeps the GPU/ASIC resistance argon2id exists for.
+	// defaultArgon2Time and defaultArgon2Memory (19 MiB, t=2) are the adopted
+	// OWASP low-memory work factor.
 	defaultArgon2Time    = 2
 	defaultArgon2Memory  = 19456
 	defaultArgon2Threads = 1
 
 	// Bounds on values read from stored argon2id hashes, keeping verification
-	// CPU- and memory-bounded against a corrupted or hostile hash. The memory
-	// ceiling matches the 1 GiB deployment: an unbound value lets a corrupted
-	// hash allocate gigabytes and OOM the process.
+	// CPU- and memory-bounded against a corrupted or hostile hash — an unbound
+	// memory value lets one hash allocate gigabytes and OOM the process.
 	maxArgon2Memory  = 64 * 1024 // KiB == 64 MiB
 	maxArgon2Time    = 10
 	maxArgon2Threads = 8
@@ -53,16 +49,10 @@ const (
 // successful login rehashes them to argon2id (ShouldRehash).
 //
 // argon2id allocates defaultArgon2Memory per derivation. Semaphore is an
-// optional weighted gate — when set, each hash/verify acquires a slot and
-// releases it when done, capping how many derivations run at once. Nil means
-// unbounded.
-//
-// Bounding concurrency converts CPU pressure into a queue, so the wait must be
-// abandonable: a single derivation costs tens to hundreds of ms, meaning a
-// backlog of N requests makes the tail wait N*per-op/slots. The HTTP server's
-// WriteTimeout and the per-IP login rate limit bound how long a caller can sit
-// in that queue, but both are loose — so the methods take a context and stop
-// waiting once the caller goes away.
+// optional weighted gate capping how many derivations run at once; nil means
+// unbounded. A single derivation costs tens to hundreds of ms, so the wait must
+// be abandonable: these methods take a context and stop waiting once the caller
+// goes away.
 type PasswordHasher struct {
 	Random    RandomSource
 	Semaphore chan struct{}
@@ -183,11 +173,10 @@ func (h PasswordHasher) ShouldRehash(encodedHash string) bool {
 	return uint32(t) != wantT || uint32(m) != wantM || uint8(threads) != wantThreads
 }
 
-// verifyPBKDF2 verifies a legacy pbkdf2-sha512-v1 hash. Production accounts from
-// before the argon2id switch are all this format; they verify here until the
-// next successful login rehashes them (ShouldRehash returns true for them).
-// The iteration count is read from the stored hash and bounded so a corrupted
-// count cannot turn one login into a CPU-burning DoS.
+// verifyPBKDF2 verifies a legacy pbkdf2-sha512-v1 hash until the next successful
+// login rehashes it (ShouldRehash returns true). The iteration count is read
+// from the stored hash and bounded so a corrupted count cannot turn one login
+// into a CPU-burning DoS.
 func (h PasswordHasher) verifyPBKDF2(ctx context.Context, password, encodedHash string) error {
 	parts := strings.Split(encodedHash, "$")
 	if len(parts) != 4 {

@@ -1,33 +1,19 @@
--- An admin action can now be performed either directly through the console or by a
--- delegated third-party client acting on an administrator's behalf, and audit_logs
--- records only the administrator. Without this column the two are indistinguishable:
--- "user 42 deleted an account" reads identically whether the person clicked a button
--- or a machine credential did it for them.
+-- The OAuth client that performed an admin or self-service action. Admin
+-- actions likewise run through delegated third-party clients as well as the
+-- console, so without this column the two are indistinguishable in the trail.
 --
--- Nullable, and NULL is meaningful rather than unknown: it means no OAuth credential
--- authorized this action. That covers the unauthenticated flows (login, registration,
--- password reset) and the background workers, which have no azp to record and for
--- which naming a client would be an invention, not a fact. Rows written before this
--- migration are also NULL. audit_logs is retained for 90 days, so that ambiguity
--- ages out on its own rather than needing a backfill.
+-- Nullable: NULL means no OAuth credential authorized the action (login,
+-- registration, reset, the background workers, pre-migration rows), and the
+-- 90-day retention ages those NULLs out on its own.
 --
--- Note for future edits: the migration runner splits statements on semicolons, and it
--- does not understand comments. A semicolon anywhere above this line would cut the
--- file mid-comment and the remainder would be parsed as SQL.
+-- Plain VARCHAR(255) with no foreign key, so an audit row outlives the
+-- registration it names. Named actor_client_id because resource_id already
+-- holds a client primary key for the admin_oauth_client_* actions and detail
+-- carries a client_id for the OAuth token endpoint. No index yet: about one
+-- delegated client exists and idx_audit_logs_action_created covers the common
+-- filters. Add one when the filter is in use at volume.
 --
--- Plain VARCHAR(255) matching oauth_clients.client_id, deliberately without a foreign
--- key. An audit row must outlive the registration it names: ON DELETE SET NULL would
--- silently rewrite history to "no credential" when a client is deregistered, and
--- RESTRICT would make deregistering a client fail on its own audit trail.
---
--- Named actor_client_id rather than client_id because this table already carries
--- client identities in two other roles: resource_id holds the oauth_client primary
--- key for the admin_oauth_client_* actions, and detail carries a client_id for the
--- OAuth token endpoint. A bare client_id here would be genuinely ambiguous between
--- the actor and the subject.
---
--- No index yet. The query this anticipates is "everything this client did", but
--- cardinality is currently about one delegated client, idx_audit_logs_action_created
--- already narrows the common filters, and the table is capped at 90 days of rows. Add
--- one when the filter is actually in use at volume, justified by an EXPLAIN.
+-- The migration runner splits statements on semicolons and does not understand
+-- comments. A semicolon anywhere above this line would cut the file mid-comment
+-- and the remainder would be parsed as SQL.
 ALTER TABLE audit_logs ADD COLUMN actor_client_id VARCHAR(255);

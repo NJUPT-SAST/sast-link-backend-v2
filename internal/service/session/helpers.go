@@ -33,12 +33,9 @@ type issuedPair struct {
 	refresh      *model.OAuthRefreshToken
 }
 
-// issuePair signs a session token pair through the shared issuer.
-//
-// The issuer is shared with the OAuth token endpoint so both paths produce
-// identical token metadata. Errors are translated to session errors here, since
-// every failure at this layer is a server-side signing or configuration fault
-// rather than anything the caller submitted.
+// issuePair signs a session token pair through the same issuer as the OAuth
+// token endpoint, translating signing or configuration faults into session
+// errors.
 func (s Service) issuePair(user *model.User, client *model.OAuthClient, sequence int, familyID string, requestedScopes []string) (*issuedPair, error) {
 	if user == nil || client == nil || s.JWT == nil || s.RefreshTokens == nil || s.Tokens == nil {
 		return nil, newError(ErrInternal, "会话服务依赖未配置", nil)
@@ -88,10 +85,8 @@ func normalizeIdentifier(identifier string) string {
 
 // validHTTPURL reports whether value is an absolute http/https URL with a host.
 //
-// The scheme allowlist is the point: blog_url and github_url are rendered as
-// links on the public card, so accepting an arbitrary URL would let a user store
-// javascript: or data: and turn every viewer of their card into a target. A
-// relative or scheme-less value is rejected too, since it would resolve against
+// The scheme allowlist prevents stored javascript:/data: URLs on the public
+// card, and rejecting relative or scheme-less values stops resolution against
 // whichever site embeds the card.
 func validHTTPURL(value string) bool {
 	parsed, err := url.Parse(value)
@@ -142,10 +137,8 @@ func generateBindTicket() (string, error) {
 	return prefix + hex.EncodeToString(bytes[:]), nil
 }
 
-// PostgreSQL's default unique-index names for the "user" table. The table
-// carries two unique constraints, so a bare SQLSTATE 23505 check cannot tell
-// which column collided — reporting "邮箱已被注册" for a student-ID clash sends the
-// user looking at the wrong field.
+// PostgreSQL's default unique-index names for the "user" table, so a bare
+// SQLSTATE 23505 can be mapped to the collided column.
 const (
 	userLoginEmailConstraint = "user_login_email_key"
 	userStudentIDConstraint  = "user_student_id_key"
@@ -154,9 +147,9 @@ const (
 	// identity would end up holding the same address.
 	userLoginEmailIsIdentityConstraint = "ck_user_login_email_not_identity"
 	identityIsLoginEmailConstraint     = "ck_identities_provider_id_not_login_email"
-	// V001's global uniqueness on a third-party account. Registration can hit it
-	// when the OAuth callback saw the provider account unbound but someone bound
-	// it during the 15-minute registration_state window.
+	// V001's global uniqueness on a third-party account, hit when a provider
+	// account gets bound during the 15-minute registration_state window after
+	// the OAuth callback saw it unbound.
 	identityProviderConstraint = "uq_identities_provider_provider_id"
 )
 
@@ -166,9 +159,8 @@ func isDuplicateError(err error) bool {
 }
 
 // duplicateConstraint returns the violated unique constraint's name, or "" when
-// err is not a unique violation. Thin wrapper over the repository helper so the
-// classification exists once; the mapping onto this service's error type stays
-// local.
+// err is not a unique violation; it wraps the repository helper so the
+// classification exists once.
 func duplicateConstraint(err error) string {
 	return repository.DuplicateConstraint(err)
 }
@@ -215,11 +207,11 @@ func profileDTO(user *model.User) UserProfileDTO {
 		StudentID:   user.StudentID,
 		College:     string(user.College),
 		Major:       user.Major,
-		// The flag comes from the row (PostgreSQL computes it), while the field list
-		// is derived here. The two are kept in lockstep by
-		// TestGeneratedFlagMatchesIncompleteFields rather than by one deriving the
-		// other, so a drift between V010 and internal/validate fails a test instead
-		// of quietly producing a prompt with no fields named.
+		// The flag comes from the row (PostgreSQL computes it) while the field list
+		// is derived here; the two are kept in lockstep by
+		// TestGeneratedFlagMatchesIncompleteFields, so a drift between V010 and
+		// internal/validate fails a test instead of quietly producing a prompt with
+		// no fields named.
 		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
 		IncompleteFields: validate.IncompleteProfileFields(
 			user.Name, user.PhoneNumber, user.QQNumber, user.Major, user.StudentID),
@@ -271,14 +263,13 @@ func (s Service) audit(ctx context.Context, userID *int64, action, resource stri
 	}
 	// The audit survives the caller disconnecting: the action already committed,
 	// so the row must be written regardless of what the request does afterwards.
-	// Every other service's audit uses the same detached-context shape.
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
 	defer cancel()
 	return s.Audit.Create(auditCtx, entry)
 }
 
 // buildAuditLog materialises the shared audit fields (including the JSON detail)
-// once, so the synchronous s.audit path and the outbox-enqueue path cannot drift.
+// once, shared by the synchronous s.audit path and the outbox-enqueue path.
 func buildAuditLog(
 	now time.Time,
 	userID *int64,
@@ -326,10 +317,9 @@ func buildAuditLog(
 	}, nil
 }
 
-// buildAuditEntry materialises the shared audit fields for the paths that write
-// their audit inside the token transaction (login, refresh success). The same
-// buildAuditLog helper backs the synchronous s.audit path, so the two cannot
-// drift.
+// buildAuditEntry materialises the shared audit fields for paths that write
+// their audit inside the token transaction (login, refresh success), backed by
+// the same buildAuditLog helper as s.audit.
 func (s Service) buildAuditEntry(
 	userID *int64,
 	action, resource string,
@@ -343,12 +333,9 @@ func (s Service) buildAuditEntry(
 	return buildAuditLog(s.now(), userID, action, resource, resourceID, actorClientID, success, errCode, clientIP, userAgent, detail)
 }
 
-// actorClientID resolves what to record as the acting client on the /user
-// surface: the token's azp when present, otherwise the console. This mirrors
-// adminclient.actorClientID so the console session and a delegated user:*
-// token produce the same attribution shape, and a legacy azp-less console
-// token (which only ever predates the claim) still names the built-in client
-// rather than NULL.
+// actorClientID resolves the acting client on the /user surface: the token's
+// azp when present, otherwise the console, so a legacy azp-less console token
+// names the built-in client rather than NULL.
 func (s Service) actorClientID(tokenClientID string) string {
 	if strings.TrimSpace(tokenClientID) != "" {
 		return strings.TrimSpace(tokenClientID)

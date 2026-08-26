@@ -36,10 +36,8 @@ func PKCEChallengeS256(verifier string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
-// VerifyPKCES256 verifies S256-only PKCE input. The comparison is constant
-// time: the verifier is a secret, and although the challenge is public (it
-// rides the authorization URL), a timing-observable comparison of its digest
-// leaks nothing worth leaking.
+// VerifyPKCES256 verifies S256-only PKCE input; the comparison is constant time
+// because the verifier is a secret.
 func VerifyPKCES256(verifier, challenge, method string) error {
 	if method != pkceMethodS256 {
 		return ErrInvalidInput
@@ -55,10 +53,8 @@ func VerifyPKCES256(verifier, challenge, method string) error {
 }
 
 // IsValidPKCEChallenge reports whether a code challenge is a well-formed S256
-// digest: 43 base64url characters. Length alone is not enough — the authorize
-// leg accepts any 43-byte string today, and a challenge no verifier can produce
-// yields a code that is guaranteed to fail at redemption. Refusing malformed
-// challenges at authorize time turns that into a fixable client error.
+// digest: 43 base64url characters, so a challenge no verifier can produce fails
+// at authorize time as a fixable client error rather than at redemption.
 func IsValidPKCEChallenge(challenge string) bool {
 	if len(challenge) != base64.RawURLEncoding.EncodedLen(sha256.Size) {
 		return false
