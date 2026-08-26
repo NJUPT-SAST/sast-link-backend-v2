@@ -168,6 +168,7 @@ func requestView(request model.AlumniRequest) RequestView {
 		DepartmentNote: request.DepartmentNote,
 		Note:           request.Note,
 		Status:         string(request.Status),
+		Intent:         string(request.Intent),
 		RejectReason:   request.RejectReason,
 		CreatedUserID:  request.CreatedUserID,
 		ReviewedBy:     request.ReviewedBy,

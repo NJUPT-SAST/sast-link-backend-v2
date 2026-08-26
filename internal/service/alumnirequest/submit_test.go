@@ -272,8 +272,12 @@ func TestSubmitReportsOccupiedIdentifiers(t *testing.T) {
 			wantCode: errcode.CodeEmailAlreadyRegistered,
 		},
 		{
-			name:     "student id taken",
-			users:    &fakeUsers{occupiedIDs: map[string]bool{"B20040101": true}},
+			name: "student id taken",
+			users: func() *fakeUsers {
+				users := &fakeUsers{}
+				users.seedAccount("B20040101", "someone.else@njupt.edu.cn")
+				return users
+			}(),
 			wantCode: errcode.CodeStudentIDOccupied,
 		},
 	}
@@ -421,8 +425,9 @@ func TestSubmitAuditsFailures(t *testing.T) {
 	t.Parallel()
 
 	audit := &fakeAudit{}
-	service := newService(&fakeRequests{},
-		&fakeUsers{occupiedIDs: map[string]bool{"B20040101": true}}, audit, &fakeCaptcha{})
+	taken := &fakeUsers{}
+	taken.seedAccount("B20040101", "someone.else@njupt.edu.cn")
+	service := newService(&fakeRequests{}, taken, audit, &fakeCaptcha{})
 
 	if _, err := service.Submit(context.Background(), validSubmit()); err == nil {
 		t.Fatal("Submit() error = nil, want a conflict")
@@ -492,4 +497,86 @@ func TestSubmitRefusesAPersonalEmailWithATicketPending(t *testing.T) {
 		*audit.entries[0].ErrCode != errcode.CodeAlumniRequestPending {
 		t.Fatalf("audit entries = %+v, want one failed submission with the pending code", audit.entries)
 	}
+}
+
+// A recovery submission names an existing account. Its student ID must resolve
+// to one, its login email must match the registration on record, and both
+// checks run before the captcha-adjacent occupancy queries — the same
+// fail-fast-late ordering every other input error follows.
+func TestSubmitRecoveryIntent(t *testing.T) {
+	t.Parallel()
+
+	recoverInput := func() SubmitInput {
+		input := validSubmit()
+		input.Intent = string(model.AlumniRequestIntentRecover)
+		return input
+	}
+
+	t.Run("an unknown intent is refused", func(t *testing.T) {
+		t.Parallel()
+		input := validSubmit()
+		input.Intent = "hijack"
+		service := newService(&fakeRequests{}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+		_, err := service.Submit(context.Background(), input)
+		if err == nil {
+			t.Fatal("Submit() with an unknown intent error = nil")
+		}
+		assertInvalidInput(t, err, "intent")
+	})
+
+	t.Run("blank intent defaults to provision", func(t *testing.T) {
+		t.Parallel()
+		requests := &fakeRequests{}
+		users := &fakeUsers{}
+		service := newService(requests, users, &fakeAudit{}, &fakeCaptcha{})
+
+		if _, err := service.Submit(context.Background(), validSubmit()); err != nil {
+			t.Fatalf("Submit() error = %v", err)
+		}
+		if requests.created.Intent != model.AlumniRequestIntentProvision {
+			t.Fatalf("stored intent = %q, want provision", requests.created.Intent)
+		}
+	})
+
+	t.Run("a student id without an account redirects to provision", func(t *testing.T) {
+		t.Parallel()
+		service := newService(&fakeRequests{}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+		_, err := service.Submit(context.Background(), recoverInput())
+		if !errors.Is(err, ErrRecoverNoTarget) {
+			t.Fatalf("error = %v, want ErrRecoverNoTarget", err)
+		}
+	})
+
+	t.Run("a mismatched login email is refused", func(t *testing.T) {
+		t.Parallel()
+		users := &fakeUsers{}
+		users.seedAccount("B20040101", "someone.else@njupt.edu.cn")
+		service := newService(&fakeRequests{}, users, &fakeAudit{}, &fakeCaptcha{})
+
+		_, err := service.Submit(context.Background(), recoverInput())
+		if !errors.Is(err, ErrLoginEmailMismatch) {
+			t.Fatalf("error = %v, want ErrLoginEmailMismatch", err)
+		}
+	})
+
+	t.Run("a matching target stores a recover ticket", func(t *testing.T) {
+		t.Parallel()
+		requests := &fakeRequests{}
+		users := &fakeUsers{}
+		users.seedAccount("B20040101", "b20040101@njupt.edu.cn")
+		service := newService(requests, users, &fakeAudit{}, &fakeCaptcha{})
+
+		result, err := service.Submit(context.Background(), recoverInput())
+		if err != nil {
+			t.Fatalf("Submit() error = %v", err)
+		}
+		if result.RequestID == 0 || requests.created == nil {
+			t.Fatal("recovery submission did not create a ticket")
+		}
+		if requests.created.Intent != model.AlumniRequestIntentRecover {
+			t.Fatalf("stored intent = %q, want recover", requests.created.Intent)
+		}
+	})
 }

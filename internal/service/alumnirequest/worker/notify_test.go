@@ -319,19 +319,21 @@ func waitFor(t *testing.T, condition func() bool) {
 func TestRunReconcilesTheQueueOnStartup(t *testing.T) {
 	requests := &fakeRequests{listRows: []model.AlumniRequest{
 		{ID: 11, PersonalEmail: "alice@example.com", Name: "甲",
-			Status: model.AlumniRequestStatusApproved},
+			Status: model.AlumniRequestStatusApproved, Intent: model.AlumniRequestIntentProvision},
 		{ID: 12, PersonalEmail: "bob@example.com", Name: "乙",
 			Status: model.AlumniRequestStatusRejected, RejectReason: "请补齐资料"},
+		{ID: 13, PersonalEmail: "carol@example.com", Name: "丙",
+			Status: model.AlumniRequestStatusApproved, Intent: model.AlumniRequestIntentRecover},
 	}}
 	mailer := &fakeMailer{}
 	worker := alumnirequestworker.New(requests, mailer,
 		"https://link.sast.fun/reset", "link@sast.fun")
 
-	delivered := make(chan struct{}, 2)
+	delivered := make(chan struct{}, 3)
 	mailer.onCalled = func() { delivered <- struct{}{} }
 	stop := runWorker(t, worker)
 
-	for range 2 {
+	for range 3 {
 		select {
 		case <-delivered:
 		case <-time.After(3 * time.Second):
@@ -340,20 +342,22 @@ func TestRunReconcilesTheQueueOnStartup(t *testing.T) {
 	}
 	stop()
 
-	if mailer.count() != 2 {
-		t.Fatalf("sent %d, want 2 reconciled notifications", mailer.count())
+	if mailer.count() != 3 {
+		t.Fatalf("sent %d, want 3 reconciled notifications", mailer.count())
 	}
-	if requests.attemptCount() != 2 {
-		t.Fatalf("attempts %d, want 2 claims before the sends", requests.attemptCount())
+	if requests.attemptCount() != 3 {
+		t.Fatalf("attempts %d, want 3 claims before the sends", requests.attemptCount())
 	}
-	if got := mailer.recipientAt(0); got != "alice@example.com" {
-		t.Fatalf("first recipient = %q, want alice@example.com", got)
-	}
-	if got := mailer.resultAt(0); !got.Approved {
-		t.Fatalf("first result.Approved = false, want true for an approved ticket")
+	if got := mailer.resultAt(0); !got.Approved || got.Recovered {
+		t.Fatalf("first result = %+v, want a plain approval", got)
 	}
 	if got := mailer.resultAt(1); got.Approved || got.RejectReason != "请补齐资料" {
 		t.Fatalf("second result = %+v, want a rejection carrying the reason", got)
+	}
+	// A recovered ticket reads as approved to the mailer but selects the
+	// restore-access copy, not the new-account one.
+	if got := mailer.resultAt(2); !got.Approved || !got.Recovered {
+		t.Fatalf("third result = %+v, want an approved recovery", got)
 	}
 }
 

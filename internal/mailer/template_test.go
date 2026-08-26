@@ -108,3 +108,41 @@ func TestVerificationCopy(t *testing.T) {
 		t.Error("verificationCopy(\"bogus\"): want error, got nil")
 	}
 }
+
+// The recovery wording is its own branch inside the approval copy: the account
+// existed all along and a personal email has just been bound to it, so "账号已
+// 开通" would read as a second account.
+func TestAlumniResultRecoveryCopy(t *testing.T) {
+	recovered := approvedData()
+	recovered.Recovered = true
+
+	subject, title := alumniResultCopy(true, true)
+	if subject != "SAST Link 账号访问方式已恢复" {
+		t.Fatalf("subject = %q, want the recovery subject", subject)
+	}
+
+	html, err := renderAlumniResultHTML(recovered)
+	if err != nil {
+		t.Fatalf("renderAlumniResultHTML: %v", err)
+	}
+	if !strings.Contains(html, title) || !strings.Contains(html, "你的账号访问方式已恢复") {
+		t.Errorf("recovered html does not use the restore-access copy")
+	}
+	if strings.Contains(html, "账号申请已通过，账号已开通") {
+		t.Errorf("recovered html leaks the new-account copy")
+	}
+
+	text := renderAlumniResultText(recovered)
+	if !strings.Contains(text, "访问方式已恢复") {
+		t.Errorf("recovered text does not use the restore-access copy")
+	}
+
+	plain := approvedData()
+	htmlPlain, err := renderAlumniResultHTML(plain)
+	if err != nil {
+		t.Fatalf("renderAlumniResultHTML(provision): %v", err)
+	}
+	if !strings.Contains(htmlPlain, "账号申请已通过，账号已开通") {
+		t.Errorf("provision approval lost its copy after the recovery branch landed")
+	}
+}

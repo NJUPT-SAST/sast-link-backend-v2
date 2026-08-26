@@ -23,6 +23,33 @@ func (s AlumniRequestStatus) Valid() bool {
 	}
 }
 
+// AlumniRequestIntent is what approval does with a ticket. TEXT in the schema
+// (V012) rather than an enum type: written once at submission, never mutated,
+// and the rules live here.
+type AlumniRequestIntent string
+
+const (
+	// AlumniRequestIntentProvision opens a new account — the original and only
+	// behavior through V011.
+	AlumniRequestIntentProvision AlumniRequestIntent = "provision"
+	// AlumniRequestIntentRecover restores access to the account the student ID
+	// already holds: approval binds PersonalEmail as that account's other_mail
+	// identity instead of provisioning. The dead-end it serves is the alumnus
+	// whose school mailbox died before they ever bound anything: they need
+	// access restored to account #1, not a second account.
+	AlumniRequestIntentRecover AlumniRequestIntent = "recover"
+)
+
+// Valid reports whether i is a defined intent value.
+func (i AlumniRequestIntent) Valid() bool {
+	switch i {
+	case AlumniRequestIntentProvision, AlumniRequestIntentRecover:
+		return true
+	default:
+		return false
+	}
+}
+
 // AlumniRequest persists one alumni account-request ticket.
 //
 // It carries two addresses: LoginEmail is the original @njupt.edu.cn or @sast.fun
@@ -42,9 +69,13 @@ type AlumniRequest struct {
 	JoinYear       string
 	DepartmentNote string
 	Note           string
-	Status         AlumniRequestStatus `gorm:"type:alumni_request_status_enum;not null;default:(-)"`
-	RejectReason   string
-	// CreatedUserID is the provisioned account, set when the ticket is approved.
+	// Intent selects what approval does; defaults to provision both in the
+	// schema (old rows read back as provision) and at submission.
+	Intent       AlumniRequestIntent `gorm:"not null;default:'provision'"`
+	Status       AlumniRequestStatus `gorm:"type:alumni_request_status_enum;not null;default:(-)"`
+	RejectReason string
+	// CreatedUserID is the account approval acted on: provisioned for a
+	// provision ticket, recovered (the existing account) for a recover one.
 	// NULL both before approval and after that account is closed, since the FK is
 	// ON DELETE SET NULL so ticket history outlives the account.
 	CreatedUserID *int64

@@ -91,6 +91,34 @@ var (
 	// observable outcome as ErrPending (one open request per identity), so it
 	// reuses CodeAlumniRequestPending with its own message.
 	ErrEmailPending = &Error{Kind: KindConflict, Code: errcode.CodeAlumniRequestPending}
+	// ErrRecoverNoTarget is a recovery submission whose student ID has no
+	// account: the applicant needs the provision flow, not recovery. 400 so a
+	// client can offer the switch instead of leaving them on a form that cannot
+	// succeed.
+	ErrRecoverNoTarget = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
+	// ErrLoginEmailMismatch is a recovery submission whose login_email does not
+	// name the account its student ID points at. The school address is guessable,
+	// so this is data integrity rather than authentication — but it must match
+	// for approval to touch the right account.
+	ErrLoginEmailMismatch = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
+	// ErrStaleRecoverTicket is the same disagreement surfaced from inside the
+	// approval transaction (the row could have drifted after the pre-check, or
+	// the pre-check was skipped). A 422 telling the reviewer to reject and ask
+	// for a fresh submission.
+	ErrStaleRecoverTicket = &Error{Kind: KindStateConflict, Code: errcode.CodeValidationFailed}
+	// ErrAccountClosedForRecover is an approval whose target account is
+	// soft-deleted: no access can be restored on a closed account.
+	ErrAccountClosedForRecover = &Error{Kind: KindStateConflict, Code: errcode.CodeValidationFailed}
+	// ErrIdentityLimitReached names the per-account cap on additional email binds
+	// a recovery approval would exceed. Same observable outcome as the
+	// self-service bind cap and the admin rescue bind, so it reuses
+	// CodeIdentityLimitReached.
+	ErrIdentityLimitReached = &Error{Kind: KindConflict, Code: errcode.CodeIdentityLimitReached}
+	// ErrTargetVanished is a recovery approval whose student ID stopped resolving
+	// to an account between submission and approval: a concurrent removal or
+	// import drift. A plain conflict — the reviewer re-checks the queue rather
+	// than retrying blind.
+	ErrTargetVanished = &Error{Kind: KindConflict, Code: errcode.CodeConflict}
 	// ErrAlreadyReviewed is a second verdict on a ticket that has one. What a
 	// double-clicked approve button sees.
 	ErrAlreadyReviewed = &Error{Kind: KindStateConflict, Code: errcode.CodeAlumniRequestReviewed}

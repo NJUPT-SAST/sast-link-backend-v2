@@ -118,6 +118,7 @@ func (w *Notifier) reconcileBacklog(ctx context.Context) {
 			Recipient:    row.PersonalEmail,
 			Name:         row.Name,
 			Approved:     row.Status == model.AlumniRequestStatusApproved,
+			Recovered:    row.Intent == model.AlumniRequestIntentRecover,
 			RejectReason: row.RejectReason,
 		}) {
 			return
@@ -145,6 +146,7 @@ func (w *Notifier) process(ctx context.Context, job alumnirequest.NotificationJo
 	err := w.Mailer.SendAlumniRequestResult(ctx, job.Recipient, mailer.AlumniResult{
 		Name:         job.Name,
 		Approved:     job.Approved,
+		Recovered:    job.Recovered,
 		RejectReason: job.RejectReason,
 		ResetURL:     w.ResetURL,
 		SupportEmail: w.SupportEmail,

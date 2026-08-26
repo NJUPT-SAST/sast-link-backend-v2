@@ -820,3 +820,150 @@ func TestAlumniRequestListUnnotifiedReviewed(t *testing.T) {
 		}
 	})
 }
+
+// TestAlumniRequestRecoveryApproval pins the recovery path end to end at the
+// repository level: approval binds the ticket's personal email to the account
+// its student ID already names, writes created_user_id, and never provisions.
+func TestAlumniRequestRecoveryApproval(t *testing.T) {
+	database := setupDatabase(t)
+	requests := repository.NewAlumniRequest(database)
+	ctx := context.Background()
+
+	t.Run("binds and records without provisioning", func(t *testing.T) {
+		existing := testUser("recovered-b20040215@njupt.edu.cn")
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed existing user: %v", err)
+		}
+
+		request := testAlumniRequest(existing.StudentID)
+		// The ticket's login email must name the seeded account, exactly as a real
+		// recovery submission must.
+		request.LoginEmail = existing.LoginEmail
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		approved, err := requests.ApproveAlumniRequestRecover(ctx, request.ID,
+			mustUserID(t, database), time.Now().UTC())
+		if err != nil {
+			t.Fatalf("ApproveAlumniRequestRecover() error = %v", err)
+		}
+		if approved.Status != model.AlumniRequestStatusApproved {
+			t.Fatalf("status = %s, want approved", approved.Status)
+		}
+		if approved.CreatedUserID == nil || *approved.CreatedUserID != existing.ID {
+			t.Fatalf("created_user_id = %v, want the recovered account %d",
+				approved.CreatedUserID, existing.ID)
+		}
+
+		var count int64
+		if err := database.Model(&model.Identity{}).
+			Where("user_id = ? AND provider = ? AND provider_id = ?",
+				existing.ID, model.LoginMethodOtherMail, request.PersonalEmail).
+			Count(&count).Error; err != nil {
+			t.Fatalf("count bound identity: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("bound identity count = %d, want 1", count)
+		}
+	})
+
+	t.Run("a case-differing student id still reaches the account", func(t *testing.T) {
+		// The folded lookup is what makes a resubmission with b24040525-style
+		// casing resolve instead of reporting a missing target.
+		existing := testUser("folded-recover@njupt.edu.cn")
+		existing.StudentID = "b24040525"
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed lowercase user: %v", err)
+		}
+
+		request := testAlumniRequest("B24040525")
+		request.LoginEmail = existing.LoginEmail
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		approved, err := requests.ApproveAlumniRequestRecover(ctx, request.ID,
+			mustUserID(t, database), time.Now().UTC())
+		if err != nil {
+			t.Fatalf("ApproveAlumniRequestRecover(folded) error = %v", err)
+		}
+		if approved.CreatedUserID == nil || *approved.CreatedUserID != existing.ID {
+			t.Fatalf("created_user_id = %v, want %d", approved.CreatedUserID, existing.ID)
+		}
+	})
+
+	t.Run("a mismatched login email refuses the approval", func(t *testing.T) {
+		existing := testUser("mismatch-b20040216@njupt.edu.cn")
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed user: %v", err)
+		}
+
+		request := testAlumniRequest(existing.StudentID)
+		request.LoginEmail = "not-the-record-b20040216@njupt.edu.cn"
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		_, err := requests.ApproveAlumniRequestRecover(ctx, request.ID,
+			mustUserID(t, database), time.Now().UTC())
+		if !errors.Is(err, repository.ErrLoginEmailMismatch) {
+			t.Fatalf("error = %v, want ErrLoginEmailMismatch", err)
+		}
+		stored, getErr := requests.Get(ctx, request.ID)
+		if getErr != nil || stored.Status != model.AlumniRequestStatusPending {
+			t.Fatalf("ticket state after refusal: status=%v err=%v, want still pending",
+				stored.Status, getErr)
+		}
+	})
+
+	t.Run("a closed account is refused", func(t *testing.T) {
+		users := repository.NewUser(database)
+		existing := testUser("closed-b20040217@njupt.edu.cn")
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed user: %v", err)
+		}
+		if _, err := users.SoftDeleteAndRevokeSessions(ctx, existing.ID, time.Now().UTC()); err != nil {
+			t.Fatalf("close account: %v", err)
+		}
+
+		request := testAlumniRequest(existing.StudentID)
+		request.LoginEmail = existing.LoginEmail
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		_, err := requests.ApproveAlumniRequestRecover(ctx, request.ID,
+			mustUserID(t, database), time.Now().UTC())
+		if !errors.Is(err, repository.ErrAccountClosed) {
+			t.Fatalf("error = %v, want ErrAccountClosed", err)
+		}
+	})
+
+	t.Run("a misdirected provision approval refuses a recover ticket", func(t *testing.T) {
+		// The service dispatches on intent; the repository guards keep a wrong
+		// call from provisioning beside a recovery target.
+		existing := testUser("guarded-b20040218@njupt.edu.cn")
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed user: %v", err)
+		}
+
+		request := testAlumniRequest(existing.StudentID)
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		_, err := requests.ApproveAlumniRequest(ctx, request.ID, mustUserID(t, database),
+			time.Now().UTC(), func(ticket *model.AlumniRequest) (*model.User, *model.Profile, *model.Identity, error) {
+				user, profile, identity := provisionFrom(ticket)
+				return user, profile, identity, nil
+			})
+		if !errors.Is(err, repository.ErrInvalidArgument) {
+			t.Fatalf("error = %v, want ErrInvalidArgument for an intent mismatch", err)
+		}
+	})
+}

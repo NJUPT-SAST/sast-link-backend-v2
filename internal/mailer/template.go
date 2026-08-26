@@ -35,6 +35,9 @@ type alumniResultData struct {
 	// Approved selects the copy. Both outcomes are mailed: a rejection with no
 	// notification leaves the applicant waiting for something that already happened.
 	Approved bool
+	// Recovered selects the restore-access wording inside the approval branch:
+	// the account existed all along, a personal email has just been bound to it.
+	Recovered bool
 	// RejectReason is what the applicant has to correct before resubmitting. Only
 	// read when Approved is false.
 	RejectReason string
@@ -73,6 +76,13 @@ func renderVerificationHTML(data verificationEmailData) (string, error) {
 // builds a multipart/alternative message and a client that prefers text would
 // otherwise receive an empty part.
 func renderAlumniResultText(data alumniResultData) string {
+	if data.Approved && data.Recovered {
+		return fmt.Sprintf(
+			"%s 你好，你的账号访问方式已恢复：你的个人邮箱已绑定到学号对应的 SAST Link 账号。\n\n"+
+				"请访问 %s 设置新密码。填写邮箱时请使用你在申请中填写的个人邮箱，"+
+				"原学号邮箱已无法用于收信。\n\n设置完成后即可登录。",
+			data.Name, data.ResetURL)
+	}
 	if data.Approved {
 		return fmt.Sprintf(
 			"%s 你好，你的 SAST Link 账号申请已通过，账号已开通。\n\n"+
@@ -201,13 +211,17 @@ const verificationContentTemplate = `{{define "content"}}
               <p class="text-muted" style="margin:0;font-size:13px;line-height:1.7;color:rgba(0,0,0,0.55);">验证码在 {{.TTLMinutes}} 分钟内有效。请勿将验证码发给其他人。若非本人操作，可忽略本邮件。</p>
 {{end}}`
 
-// alumniResultContentTemplate carries both verdicts.
+// alumniResultContentTemplate carries both verdicts; the approval branch splits
+// again on Recovered for restore-access wording.
 //
 // The approval copy states which address to use on the reset page, because the
 // login email is the deactivated school mailbox — the reset code has to go to
 // the personal address instead.
 const alumniResultContentTemplate = `{{define "content"}}
-{{- if .Approved}}
+{{- if .Recovered}}
+              <p class="text-muted" style="margin:0 0 14px;font-size:15px;line-height:1.75;color:rgba(0,0,0,0.55);">{{.Name}} 你好，你的账号访问方式已恢复：你的个人邮箱已绑定到学号对应的 SAST Link 账号。</p>
+              <p class="text-muted" style="margin:0;font-size:15px;line-height:1.75;color:rgba(0,0,0,0.55);">请点击下面的按钮设置登录密码。填写邮箱时请使用你在申请中填写的<strong class="text-main" style="color:#0a0a0a;">个人邮箱</strong>，原学号邮箱已无法用于收信。</p>
+{{- else if .Approved}}
               <p class="text-muted" style="margin:0 0 14px;font-size:15px;line-height:1.75;color:rgba(0,0,0,0.55);">{{.Name}} 你好，你的 SAST Link 账号申请已通过，账号已开通。</p>
               <p class="text-muted" style="margin:0;font-size:15px;line-height:1.75;color:rgba(0,0,0,0.55);">请点击下面的按钮设置登录密码。填写邮箱时请使用你在申请中填写的<strong class="text-main" style="color:#0a0a0a;">个人邮箱</strong>，原学号邮箱已无法用于收信。</p>
               <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:26px 0 24px;">

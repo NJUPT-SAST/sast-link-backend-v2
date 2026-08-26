@@ -402,6 +402,26 @@ func (r *UserRepository) ExistsAsEmailAnywhere(ctx context.Context, email string
 	return exists, nil
 }
 
+// FindLoginEmailByStudentID resolves a student ID to the login email of the
+// account holding it. The lookup folds case and surrounding whitespace exactly
+// like ExistsByStudentID, so a recovery ticket's pre-check compares the same
+// bytes the approval transaction will re-check against the locked row.
+func (r *UserRepository) FindLoginEmailByStudentID(ctx context.Context, studentID string) (string, bool, error) {
+	var loginEmail string
+	err := r.database.WithContext(ctx).
+		Select("login_email").
+		Model(&model.User{}).
+		Where("lower(btrim(student_id)) = lower(btrim(?))", studentID).
+		Take(&loginEmail).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("find login email by student id: %w", err)
+	}
+	return loginEmail, true, nil
+}
+
 // ProfileUpdate carries the self-service field changes for one user. A nil
 // pointer means "leave unchanged"; a non-nil pointer to the zero value means
 // "write that value". Identity and permission columns (login_email, role, state,

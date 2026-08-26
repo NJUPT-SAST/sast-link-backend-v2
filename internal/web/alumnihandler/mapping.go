@@ -33,23 +33,26 @@ var (
 // use for it — copying it onto a read surface would widen who can see a network
 // identifier tied to a named individual.
 type requestDTO struct {
-	ID             int64      `json:"id"`
-	Name           string     `json:"name"`
-	StudentID      string     `json:"student_id"`
-	LoginEmail     string     `json:"login_email"`
-	PersonalEmail  string     `json:"personal_email"`
-	PhoneNumber    string     `json:"phone_number"`
-	QQNumber       string     `json:"qq_number"`
-	College        string     `json:"college"`
-	Major          string     `json:"major"`
-	JoinYear       string     `json:"join_year"`
-	DepartmentNote string     `json:"department_note"`
-	Note           string     `json:"note"`
-	Status         string     `json:"status"`
-	RejectReason   string     `json:"reject_reason"`
-	CreatedUserID  *int64     `json:"created_user_id"`
-	ReviewedBy     *int64     `json:"reviewed_by"`
-	ReviewedAt     *time.Time `json:"reviewed_at"`
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	StudentID      string `json:"student_id"`
+	LoginEmail     string `json:"login_email"`
+	PersonalEmail  string `json:"personal_email"`
+	PhoneNumber    string `json:"phone_number"`
+	QQNumber       string `json:"qq_number"`
+	College        string `json:"college"`
+	Major          string `json:"major"`
+	JoinYear       string `json:"join_year"`
+	DepartmentNote string `json:"department_note"`
+	Note           string `json:"note"`
+	Status         string `json:"status"`
+	// Intent is provision or recover; a recovery card needs the reviewer's full
+	// attention before approve.
+	Intent        string     `json:"intent"`
+	RejectReason  string     `json:"reject_reason"`
+	CreatedUserID *int64     `json:"created_user_id"`
+	ReviewedBy    *int64     `json:"reviewed_by"`
+	ReviewedAt    *time.Time `json:"reviewed_at"`
 	// NotifiedAt is null until the result email is confirmed sent, which is what the
 	// console filters on to find the notification backlog.
 	NotifiedAt     *time.Time `json:"notified_at"`
@@ -81,6 +84,7 @@ func mapRequest(view alumnirequest.RequestView) requestDTO {
 		DepartmentNote: view.DepartmentNote,
 		Note:           view.Note,
 		Status:         view.Status,
+		Intent:         view.Intent,
 		RejectReason:   view.RejectReason,
 		CreatedUserID:  view.CreatedUserID,
 		ReviewedBy:     view.ReviewedBy,

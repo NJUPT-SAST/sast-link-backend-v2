@@ -52,17 +52,31 @@ func (s Service) Get(ctx context.Context, requestID int64) (*RequestView, error)
 	return &view, nil
 }
 
-// Approve provisions the account and records the verdict in one transaction. The
-// generated password is discarded here — never returned, emailed or audited; the
-// alumnus sets their own through the reset flow, which accepts the bound personal
-// email. Two audit rows are written: the verdict against the ticket and the account
-// creation against the user, so the trail contains no account nobody appears to
-// have created.
+// Approve executes the verdict a ticket's intent calls for: provisioning for a
+// provision ticket (the V011 path), access restoration for a recovery one. The
+// intent is read here, from the stored ticket, before either repository method
+// runs — intent is written once at submission and never mutated, so a pre-lock
+// read cannot disagree with what the locked transaction will see.
 func (s Service) Approve(ctx context.Context, input ReviewInput) (*ApproveResult, error) {
 	if input.AdminUserID <= 0 {
 		return nil, newError(ErrInvalidInput, "缺少审批人信息", nil)
 	}
 
+	ticket, err := s.Requests.Get(ctx, input.RequestID)
+	if err != nil {
+		mapped := s.mapLookupError(ctx, err)
+		s.auditReview(ctx, input, actionApprove, false, errorCode(mapped), nil)
+		return nil, mapped
+	}
+	if ticket.Intent == model.AlumniRequestIntentRecover {
+		return s.approveRecover(ctx, input)
+	}
+	return s.approveProvision(ctx, input)
+}
+
+// approveProvision is the original approval: mint an account with a discarded
+// password and a retired_sast state.
+func (s Service) approveProvision(ctx context.Context, input ReviewInput) (*ApproveResult, error) {
 	var provisioned *model.User
 	approved, err := s.Requests.ApproveAlumniRequest(ctx, input.RequestID, input.AdminUserID, s.now(),
 		func(request *model.AlumniRequest) (*model.User, *model.Profile, *model.Identity, error) {
@@ -98,6 +112,43 @@ func (s Service) Approve(ctx context.Context, input ReviewInput) (*ApproveResult
 
 	return &ApproveResult{
 		UserID:         provisioned.ID,
+		LoginEmail:     approved.LoginEmail,
+		NotifyEnqueued: enqueued,
+	}, nil
+}
+
+// approveRecover binds the ticket's personal email onto the account the student
+// ID already names, restoring a way in. One audit row carries recovered, the
+// target and the bound address: no admin_user_create line — nothing was created,
+// and writing one would put an uncreated account into the trail. The generated
+// password machinery is never touched, so there is no credential to discard.
+func (s Service) approveRecover(ctx context.Context, input ReviewInput) (*ApproveResult, error) {
+	approved, err := s.Requests.ApproveAlumniRequestRecover(ctx, input.RequestID, input.AdminUserID, s.now())
+	if err != nil {
+		mapped := s.mapReviewError(ctx, err, "审批失败")
+		s.auditReview(ctx, input, actionApprove, false, errorCode(mapped), nil)
+		return nil, mapped
+	}
+
+	target := *approved.CreatedUserID
+	s.auditReview(ctx, input, actionApprove, true, 0, map[string]any{
+		"recovered":      true,
+		"student_id":     approved.StudentID,
+		"login_email":    approved.LoginEmail,
+		"target_user_id": target,
+		"bound_email":    approved.PersonalEmail,
+	})
+
+	enqueued := s.enqueueNotification(NotificationJob{
+		RequestID: approved.ID,
+		Recipient: approved.PersonalEmail,
+		Name:      approved.Name,
+		Approved:  true,
+		Recovered: true,
+	})
+
+	return &ApproveResult{
+		UserID:         target,
 		LoginEmail:     approved.LoginEmail,
 		NotifyEnqueued: enqueued,
 	}, nil
@@ -244,6 +295,15 @@ func (s Service) mapReviewError(ctx context.Context, err error, message string) 
 		return newError(ErrAlreadyReviewed, "该申请已被处理", err)
 	case errors.Is(err, repository.ErrStudentIDExists):
 		return newError(ErrStudentIDOccupied, "学号已被占用", err)
+	case errors.Is(err, repository.ErrRecoverTargetMissing):
+		return newError(ErrTargetVanished, "该学号当前没有对应账号，请刷新后核对工单", err)
+	case errors.Is(err, repository.ErrAccountClosed):
+		return newError(ErrAccountClosedForRecover, "该学号的账号已注销，无法恢复访问方式", err)
+	case errors.Is(err, repository.ErrLoginEmailMismatch):
+		return newError(ErrStaleRecoverTicket,
+			"工单中的 login_email 与该学号现有账号的登录邮箱不一致，请驳回后由申请人重新提交", err)
+	case errors.Is(err, repository.ErrIdentityLimitExceeded):
+		return newError(ErrIdentityLimitReached, "该账号的邮箱绑定数量已达上限", err)
 	}
 	// A typed error from the provision callback is already classified and travels
 	// back unchanged.

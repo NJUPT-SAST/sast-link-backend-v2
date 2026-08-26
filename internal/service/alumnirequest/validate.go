@@ -40,6 +40,7 @@ func fieldError(refused *validate.FieldError) error {
 
 // validatedSubmit holds the normalized submission.
 type validatedSubmit struct {
+	intent         model.AlumniRequestIntent
 	name           string
 	studentID      string
 	loginEmail     string
@@ -61,6 +62,16 @@ type validatedSubmit struct {
 // reimplementation would be a third copy of the rule.
 func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 	var result validatedSubmit
+
+	// Blank means provision so every pre-V012 client keeps its exact behavior.
+	intent := model.AlumniRequestIntent(strings.TrimSpace(input.Intent))
+	if intent == "" {
+		intent = model.AlumniRequestIntentProvision
+	}
+	if !intent.Valid() {
+		return validatedSubmit{}, newError(ErrInvalidInput, "intent 取值非法", nil)
+	}
+	result.intent = intent
 
 	required := []struct {
 		field  string

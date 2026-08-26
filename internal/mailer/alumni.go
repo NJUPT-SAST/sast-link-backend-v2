@@ -18,6 +18,9 @@ type AlumniResult struct {
 	Name string
 	// Approved selects the copy.
 	Approved bool
+	// Recovered selects the restore-access copy inside the approval branch: the
+	// account already existed and a personal email has just been bound to it.
+	Recovered bool
 	// RejectReason is required when Approved is false: a rejection with no
 	// explanation gives the applicant nothing to correct.
 	RejectReason string
@@ -46,7 +49,7 @@ func (m *Mailer) SendAlumniRequestResult(ctx context.Context, to string, result 
 		return fmt.Errorf("mailer: reset url is required for an approval")
 	}
 
-	subject, title := alumniResultCopy(result.Approved)
+	subject, title := alumniResultCopy(result.Approved, result.Recovered)
 	data := alumniResultData{
 		layoutData: layoutData{
 			Subject: subject,
@@ -55,6 +58,7 @@ func (m *Mailer) SendAlumniRequestResult(ctx context.Context, to string, result 
 		},
 		Name:         result.Name,
 		Approved:     result.Approved,
+		Recovered:    result.Recovered,
 		RejectReason: result.RejectReason,
 		ResetURL:     result.ResetURL,
 		SupportEmail: result.SupportEmail,
@@ -67,8 +71,11 @@ func (m *Mailer) SendAlumniRequestResult(ctx context.Context, to string, result 
 }
 
 // alumniResultCopy returns the subject and the in-mail heading for a verdict.
-func alumniResultCopy(approved bool) (string, string) {
+func alumniResultCopy(approved, recovered bool) (string, string) {
 	if approved {
+		if recovered {
+			return "SAST Link 账号访问方式已恢复", "账号访问方式已恢复"
+		}
 		return "SAST Link 账号申请已通过", "账号申请已通过"
 	}
 	return "SAST Link 账号申请未通过", "账号申请未通过"

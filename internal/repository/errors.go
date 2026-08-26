@@ -38,4 +38,18 @@ var (
 	// name can classify, so the bound-check must happen first, under the same
 	// advisory lock that serializes the insert.
 	ErrIdentityLimitExceeded = errors.New("repository: other_mail identity limit reached")
+	// ErrAccountClosed reports that an account exists but its state is
+	// is_deleted. Kept distinct from ErrStateConflict, which on this package's
+	// review paths means "the ticket already carries a verdict" — collapsing
+	// them would tell a reviewer that a recovery target was already reviewed.
+	ErrAccountClosed = errors.New("repository: account is deleted")
+	// ErrLoginEmailMismatch reports that a recovery ticket's login_email does not
+	// match the login email registered on the account its student ID names. The
+	// pre-submission check compares the same pair outside any transaction; this
+	// is the same decision re-made against the locked row inside it.
+	ErrLoginEmailMismatch = errors.New("repository: login email does not match the account")
+	// ErrRecoverTargetMissing reports that a student ID which passed the
+	// pre-submission existence check no longer resolves to an account inside the
+	// approval transaction (removed concurrently, or imported data drift).
+	ErrRecoverTargetMissing = errors.New("repository: no account for this student id")
 )

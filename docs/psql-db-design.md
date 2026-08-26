@@ -504,7 +504,24 @@ CREATE TABLE alumni_requests (
 
 CREATE UNIQUE INDEX uq_alumni_requests_pending_student
     ON alumni_requests (lower(btrim(student_id))) WHERE status = 'pending';
+```
 
+### intent 两种意图（V012）
+
+V012 加列 `intent TEXT NOT NULL DEFAULT 'provision'`，不用 enum 类型：提交时写一次、从不修改、规则在
+`internal/model` 的 `Valid()`。两种意图共用同一张表、同一个 partial unique index（一个学号不能同时挂一张
+provision 单和一张 recover 单）和同一条投递链路：
+
+| intent | 审批动作 | 提交端占用检查差异 |
+|--------|----------|--------------------|
+| `provision` | 开新号（含生成的密码哈希与 `retired_sast` 状态） | 学号**必须不存在**；两个地址都不能已被任何账号占用 |
+| `recover` | 给该学号现有账号直绑 `personal_email` 恢复访问，不建号 | 学号**必须存在**且 `login_email` 与账号登记一致；仅检查个人邮箱占用 |
+
+recover 是比开新号更敏感的动作：它把一个能收重置验证码的邮箱绑到现役账号上。技术护栏在审批事务内：先锁工单
+行再锁 user 行（顺序与其它写入不构成环），锁定后重验登录邮箱一致性；已有第三方绑定一概不动（解绑永远需要密
+码）；每账号 ≤2 的 V001 触发器是自然闸门。安全下限仍是审批纪律——控制台须以高危操作呈现。
+
+```sql
 CREATE INDEX idx_alumni_requests_status_created
     ON alumni_requests (status, created_at DESC);
 
