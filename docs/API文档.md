@@ -1798,7 +1798,8 @@ PUT /admin/users/:id
   "login_email": "b2404****@njupt.edu.cn",
   "role": "member",
   "state": "on_sast",
-  "email_type": "njupt_email"
+  "email_type": "njupt_email",
+  "personal_email": "zhangsan@qq.com"
 }
 ```
 
@@ -1809,8 +1810,9 @@ PUT /admin/users/:id
 - `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。
 - `role` 实际发生变化时，同一事务内递增 `token_version` 并撤销该用户全部 Token，响应 `message` 变为 `"用户信息更新成功，已撤销该用户的全部 Token"`。仅提交与当前值相同的 `role` 不算变化，不触发撤销。
 - `state` 可在 `njupter` / `on_sast` / `retired_sast` 之间任意修改（供管理员纠错），但不接受 `is_deleted`。
+- `personal_email` 提供时，在**同一事务**内将地址直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（与建号时的绑定同一语义，是已有账号的救援通道，§1.8/1.9）。不可与 `login_email` 相同（含本次修改后的值），不得已被其他账号占用，且每账号 `other_mail` 绑定总数不超过 2 个；不可对已注销用户绑定。
 
-**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
+**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
 
 **Response** `200`:
 

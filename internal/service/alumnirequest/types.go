@@ -31,6 +31,10 @@ type Requests interface {
 	Create(ctx context.Context, request *model.AlumniRequest) error
 	Get(ctx context.Context, requestID int64) (*model.AlumniRequest, error)
 	List(ctx context.Context, filter repository.AlumniRequestFilter) ([]model.AlumniRequest, int64, error)
+	// EmailHasPendingTicket reports whether a ticket awaiting review already
+	// carries this address, so a submission cannot accumulate several pending
+	// tickets under one personal email.
+	EmailHasPendingTicket(ctx context.Context, email string) (bool, error)
 	// ApproveAlumniRequest locks the ticket, provisions the account through the
 	// callback, and writes the verdict in one transaction.
 	ApproveAlumniRequest(

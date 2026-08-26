@@ -368,9 +368,17 @@ func (r *UserRepository) ExistsByLoginEmail(ctx context.Context, email string) (
 }
 
 // ExistsByStudentID reports whether a user with the given student ID exists.
+//
+// The comparison folds case and surrounding whitespace, matching the alumni
+// pending-ticket index (lower(btrim(student_id))). user.student_id's unique
+// constraint is case-sensitive under the default collation, so a plain equality
+// would let a variant spelling of an existing ID pass the occupancy checks and
+// be provisioned beside it.
 func (r *UserRepository) ExistsByStudentID(ctx context.Context, studentID string) (bool, error) {
 	var count int64
-	if err := r.database.WithContext(ctx).Model(&model.User{}).Where("student_id = ?", studentID).Count(&count).Error; err != nil {
+	if err := r.database.WithContext(ctx).Model(&model.User{}).
+		Where("lower(btrim(student_id)) = lower(btrim(?))", studentID).
+		Count(&count).Error; err != nil {
 		return false, fmt.Errorf("count user by student id: %w", err)
 	}
 	return count > 0, nil

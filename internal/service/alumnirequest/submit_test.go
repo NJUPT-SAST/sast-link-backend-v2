@@ -459,3 +459,37 @@ func assertInvalidInput(t *testing.T, err error, field string) {
 func uniqueViolation(constraint string) error {
 	return repository.NewUniqueViolationForTest(constraint)
 }
+
+// A pending ticket is not an account, so the account-occupancy checks cannot see
+// it; without this guard the same personal email could accumulate several open
+// tickets under different student IDs, and the first approval would bind the
+// address, leaving every other one stuck.
+func TestSubmitRefusesAPersonalEmailWithATicketPending(t *testing.T) {
+	t.Parallel()
+
+	requests := &fakeRequests{pendingEmail: true}
+	users := &fakeUsers{}
+	audit := &fakeAudit{}
+	service := newService(requests, users, audit, &fakeCaptcha{})
+
+	_, err := service.Submit(context.Background(), validSubmit())
+	if err == nil {
+		t.Fatal("Submit() with a pending ticket on the email error = nil, want a refusal")
+	}
+	if !errors.Is(err, ErrEmailPending) {
+		t.Fatalf("error = %v, want ErrEmailPending", err)
+	}
+	if requests.created != nil {
+		t.Fatal("a refused submission must not create a ticket")
+	}
+	if requests.pendingEmailArg != "zhangsan@example.com" {
+		t.Fatalf("pending-email check ran on %q, want the lowercased personal email", requests.pendingEmailArg)
+	}
+
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	if len(audit.entries) != 1 || audit.entries[0].ErrCode == nil ||
+		*audit.entries[0].ErrCode != errcode.CodeAlumniRequestPending {
+		t.Fatalf("audit entries = %+v, want one failed submission with the pending code", audit.entries)
+	}
+}

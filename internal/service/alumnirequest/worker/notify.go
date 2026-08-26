@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest"
 )
 
@@ -26,6 +27,10 @@ type Requests interface {
 	MarkNotifyAttempt(ctx context.Context, requestID int64) error
 	// MarkNotified records a confirmed delivery.
 	MarkNotified(ctx context.Context, requestID int64, now time.Time) error
+	// ListUnnotifiedReviewed returns reviewed tickets whose result email was
+	// never attempted (notify_attempts = 0), so a restarted process can re-queue
+	// what its in-memory queue lost.
+	ListUnnotifiedReviewed(ctx context.Context, limit int) ([]model.AlumniRequest, error)
 }
 
 // Mailer delivers the result email.
@@ -73,17 +78,49 @@ func (w *Notifier) EnqueueAlumniNotification(job alumnirequest.NotificationJob) 
 	}
 }
 
-// Run consumes the queue until ctx is cancelled.
+// Run consumes the queue until ctx is cancelled. On startup it first re-queues
+// the notifications the previous process's in-memory queue lost to its restart.
 func (w *Notifier) Run(ctx context.Context) error {
 	if w == nil || w.jobs == nil || w.Requests == nil || w.Mailer == nil {
 		return fmt.Errorf("alumni notification worker requires queue, requests and mailer")
 	}
+	w.reconcileBacklog(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case job := <-w.jobs:
 			w.process(ctx, job)
+		}
+	}
+}
+
+// reconcileBacklog re-queues notifications the in-memory queue lost to a
+// restart. Only untouched jobs (notify_attempts = 0) are picked up: a job that
+// was attempted but unconfirmed sits in the console backlog for the resend
+// endpoint, since process death after a send must not become a duplicate email.
+// The attempt is counted by process, not here — notify_attempts stays "sends
+// attempted", and a claim-then-queue here would double-count every reconciled
+// job. Two instances reconciling the same rows in the same instant can both
+// enqueue; the window is a cold-start millisecond with an un-consumed job in
+// one queue, and a duplicate email beats a permanent off-by-two counter.
+func (w *Notifier) reconcileBacklog(ctx context.Context) {
+	const reconcileBatch = 32
+	rows, err := w.Requests.ListUnnotifiedReviewed(ctx, reconcileBatch)
+	if err != nil {
+		slog.ErrorContext(ctx, "alumni notification reconcile failed",
+			"operation", "alumni_request_notify", "stage", "reconcile", "error", err)
+		return
+	}
+	for _, row := range rows {
+		if !w.EnqueueAlumniNotification(alumnirequest.NotificationJob{
+			RequestID:    row.ID,
+			Recipient:    row.PersonalEmail,
+			Name:         row.Name,
+			Approved:     row.Status == model.AlumniRequestStatusApproved,
+			RejectReason: row.RejectReason,
+		}) {
+			return
 		}
 	}
 }

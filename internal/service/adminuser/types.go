@@ -149,7 +149,12 @@ type UpdateUserInput struct {
 	Role        *string
 	State       *string
 	EmailType   *string
-	Batch       bool
+	// PersonalEmail, when set, binds the address as an other_mail identity on the
+	// account in the same transaction as any field changes. The rescue path for an
+	// alumnus whose school mailbox died: one bound address lets the reset flow
+	// reach them again.
+	PersonalEmail *string
+	Batch         bool
 	// AdminUserID is the authenticated administrator, for the audit trail and for
 	// the self-demotion guard.
 	AdminUserID int64

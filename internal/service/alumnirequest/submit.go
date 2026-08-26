@@ -109,13 +109,30 @@ func (s Service) checkOccupancy(ctx context.Context, validated validatedSubmit) 
 		return newError(ErrEmailOccupied, "邮箱已被占用", nil)
 	}
 
+	// A pending ticket is not an account, so ExistsAsEmailAnywhere cannot see it;
+	// the first approval would bind the address and leave every later ticket stuck,
+	// so refuse the overlap up front.
+	pending, err := s.Requests.EmailHasPendingTicket(ctx, validated.personalEmail)
+	if err != nil {
+		return internalError(ctx, "check alumni request pending email",
+			"查询待审申请失败", err)
+	}
+	if pending {
+		return newError(ErrEmailPending, "该邮箱已有待审申请，请等待处理", nil)
+	}
+
 	exists, err := s.Users.ExistsByStudentID(ctx, validated.studentID)
 	if err != nil {
 		return internalError(ctx, "check alumni request student id occupancy",
 			"查询学号占用情况失败", err)
 	}
 	if exists {
-		return newError(ErrStudentIDOccupied, "学号已被占用", nil)
+		// The applicant is likely the owner of that account: a graduated member
+		// whose school mailbox died does not need a second account, they need
+		// access restored to the first. The message names the recovery routes so
+		// a rejected submission does not read as a spelling problem.
+		return newError(ErrStudentIDOccupied,
+			"该学号已有账号。若这是您本人且无法登录（如毕业邮箱已停用），请尝试 GitHub/飞书登录，或联系 link@sast.fun 恢复访问", nil)
 	}
 	return nil
 }

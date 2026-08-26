@@ -2379,6 +2379,15 @@ paths:
                   description: |
                     登录邮箱。域名限 @njupt.edu.cn / @sast.fun，会被规范化为小写；
                     修改后触发器 auto_set_email_type 自动重算 email_type。
+                personal_email:
+                  type: string
+                  format: email
+                  maxLength: 255
+                  description: |
+                    提供时在同一事务内直绑为 other_mail 登录身份（管理员背书、免邮箱
+                    验证），绑定后可用于登录与密码重置——已有账号的救援通道。不可与
+                    login_email 相同（含本次修改后的值），不得已被其他账号占用，且每
+                    账号 other_mail 绑定总数不超过 2 个（40905）；不可对已注销用户绑定。
         required: true
       responses:
         "200":
@@ -2404,7 +2413,7 @@ paths:
           description: 资源不存在（404xx）
         "409":
           $ref: "#/components/responses/Conflict"
-          description: 学号或邮箱已被占用（40901 / 40902）
+          description: 学号或邮箱已被占用、绑定数量已达上限（40901 / 40902 / 40905）
         "422":
           $ref: "#/components/responses/Unprocessable"
           description: state 为 is_deleted，或目标用户已注销（42200）

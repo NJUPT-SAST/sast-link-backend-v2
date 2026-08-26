@@ -242,6 +242,8 @@ func (s Service) mapReviewError(ctx context.Context, err error, message string) 
 		return newError(ErrNotFound, "建号申请不存在", err)
 	case errors.Is(err, repository.ErrStateConflict):
 		return newError(ErrAlreadyReviewed, "该申请已被处理", err)
+	case errors.Is(err, repository.ErrStudentIDExists):
+		return newError(ErrStudentIDOccupied, "学号已被占用", err)
 	}
 	// A typed error from the provision callback is already classified and travels
 	// back unchanged.

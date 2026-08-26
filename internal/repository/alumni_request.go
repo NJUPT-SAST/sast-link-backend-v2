@@ -128,6 +128,27 @@ func (r *AlumniRequestRepository) listQuery(ctx context.Context, filter AlumniRe
 	return query
 }
 
+// EmailHasPendingTicket reports whether a ticket awaiting review already carries
+// the address as its personal or login email. The student-ID partial unique index
+// cannot cover the email columns, so without this check the same personal email
+// could accumulate several pending tickets under different student IDs — and the
+// first approval would bind the address, leaving every other one stuck.
+func (r *AlumniRequestRepository) EmailHasPendingTicket(ctx context.Context, email string) (bool, error) {
+	if email == "" {
+		return false, nil
+	}
+	var exists bool
+	err := r.database.WithContext(ctx).Raw(`
+		SELECT EXISTS (
+			SELECT 1 FROM alumni_requests
+			WHERE status = ? AND (personal_email = ? OR login_email = ?)
+		)`, model.AlumniRequestStatusPending, email, email).Scan(&exists).Error
+	if err != nil {
+		return false, fmt.Errorf("check pending ticket email: %w", err)
+	}
+	return exists, nil
+}
+
 // AlumniProvision is what the service layer builds from a locked ticket: the rows
 // to insert for the approved account. It is a callback rather than pre-built
 // arguments because the password hash must be derived from the locked ticket
@@ -170,6 +191,20 @@ func (r *AlumniRequestRepository) ApproveAlumniRequest(
 		request, err := lockPendingRequest(transaction, requestID)
 		if err != nil {
 			return err
+		}
+
+		// The generic student-id unique constraint is case-sensitive, so a ticket
+		// whose ID differs from an existing account's only by case (the import
+		// produced both B24040525 and b24040525) would provision beside it. Check
+		// the folded comparison here, under the ticket lock, before provisioning.
+		var foldedExists bool
+		if rawErr := transaction.Raw(
+			`SELECT EXISTS (SELECT 1 FROM "user" WHERE lower(btrim(student_id)) = lower(btrim(?)))`,
+			request.StudentID).Scan(&foldedExists).Error; rawErr != nil {
+			return fmt.Errorf("check folded student id conflict: %w", rawErr)
+		}
+		if foldedExists {
+			return ErrStudentIDExists
 		}
 
 		user, profile, identity, err := provision(request)
@@ -269,6 +304,29 @@ func lockPendingRequest(transaction *gorm.DB, requestID int64) (*model.AlumniReq
 		return nil, ErrStateConflict
 	}
 	return &request, nil
+}
+
+// ListUnnotifiedReviewed returns reviewed tickets whose result email was never
+// attempted, oldest review first, capped at limit. A restart loses whatever the
+// in-memory notification queue had not sent yet; notify_attempts = 0 identifies
+// exactly those untouched jobs, and the partial index on (status <> pending,
+// notified_at IS NULL) serves the query.
+func (r *AlumniRequestRepository) ListUnnotifiedReviewed(ctx context.Context, limit int) ([]model.AlumniRequest, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("%w: limit must be positive", ErrInvalidArgument)
+	}
+	rows := make([]model.AlumniRequest, 0, limit)
+	err := r.database.WithContext(ctx).
+		Select("id", "personal_email", "name", "status", "reject_reason").
+		Where("status <> ? AND notified_at IS NULL AND notify_attempts = 0",
+			model.AlumniRequestStatusPending).
+		Order("reviewed_at ASC").
+		Limit(limit).
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list unnotified reviewed alumni requests: %w", err)
+	}
+	return rows, nil
 }
 
 // MarkNotifyAttempt increments the delivery counter before a send is attempted,

@@ -51,22 +51,23 @@ func normalizeBatchIDs(ids []int64, limit int, tooManyMessage string) ([]int64, 
 // detail, so the log reads the same way regardless of map iteration.
 var userFieldOrder = []string{
 	"name", "phone_number", "qq_number", "student_id", "college", "major",
-	"login_email", "role", "state", "email_type",
+	"login_email", "role", "state", "email_type", "personal_email",
 }
 
 // validatedUpdate is the outcome of checking an UpdateUserInput.
 type validatedUpdate struct {
-	name        *string
-	phoneNumber *string
-	qqNumber    *string
-	studentID   *string
-	major       *string
-	college     *model.College
-	loginEmail  *string
-	role        *model.UserRole
-	state       *model.UserState
-	emailType   *model.EmailType
-	changed     []string
+	name          *string
+	phoneNumber   *string
+	qqNumber      *string
+	studentID     *string
+	major         *string
+	college       *model.College
+	loginEmail    *string
+	role          *model.UserRole
+	state         *model.UserState
+	emailType     *model.EmailType
+	personalEmail *string
+	changed       []string
 }
 
 // validateUpdate checks every present field and returns the applied names in
@@ -163,6 +164,15 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 		present["email_type"] = true
 	}
 
+	personalEmail, err := validateUpdatePersonalEmail(input.PersonalEmail, loginEmail)
+	if err != nil {
+		return validatedUpdate{}, err
+	}
+	if personalEmail != nil {
+		result.personalEmail = personalEmail
+		present["personal_email"] = true
+	}
+
 	result.changed = make([]string, 0, len(present))
 	for _, field := range userFieldOrder {
 		if present[field] {
@@ -221,6 +231,32 @@ func emailTypeForDomain(email string) model.EmailType {
 		return model.EmailTypeSAST
 	}
 	return model.EmailTypeNJUpt
+}
+
+// validateUpdatePersonalEmail checks a personal email being bound to an existing
+// account. Same rules as the create path: no domain restriction — a third-party
+// mailbox is the entire point — and refused when it equals the login_email in
+// effect after this write. When login_email is not being changed, the current
+// value lives in the database and the caller compares against the loaded row
+// instead; the V005 trigger covers the race.
+func validateUpdatePersonalEmail(raw, newLoginEmail *string) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	email := strings.ToLower(strings.TrimSpace(*raw))
+	if email == "" {
+		return nil, newError(ErrInvalidInput, "personal_email 不能为空", nil)
+	}
+	if utf8.RuneCountInString(email) > validate.MaxLoginEmailLength {
+		return nil, newError(ErrInvalidInput, "personal_email 长度超出限制", nil)
+	}
+	if !validate.EmailFormat(email) {
+		return nil, newError(ErrInvalidInput, "personal_email 格式非法", nil)
+	}
+	if newLoginEmail != nil && email == *newLoginEmail {
+		return nil, newError(ErrInvalidInput, "personal_email 不能与 login_email 相同", nil)
+	}
+	return &email, nil
 }
 
 func validRole(role model.UserRole) bool {

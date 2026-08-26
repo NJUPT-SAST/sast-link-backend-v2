@@ -120,6 +120,16 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		return nil, closedErr
 	}
 
+	// The bound address must also differ from the login email already on the row:
+	// validateUpdate only compared against a login_email being replaced in this same
+	// request. The V005 trigger would reject the pair anyway, but naming the field
+	// in a 400 reads better than a collision at insert time.
+	if validated.personalEmail != nil && strings.EqualFold(*validated.personalEmail, current.LoginEmail) {
+		equalErr := newError(ErrInvalidInput, "personal_email 不能与 login_email 相同", nil)
+		s.auditUpdate(ctx, input, false, errorCode(equalErr), nil)
+		return nil, equalErr
+	}
+
 	// The role-change test here exists only to refuse self-demotion outright; the
 	// repository re-judges the change against the locked row and arms the last-admin
 	// guard and the session revocation itself.
@@ -130,16 +140,17 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 	}
 
 	entries, sessionsRevoked, err := s.Users.UpdateAdminUser(ctx, input.UserID, repository.AdminUserUpdate{
-		Name:        validated.name,
-		PhoneNumber: validated.phoneNumber,
-		QQNumber:    validated.qqNumber,
-		StudentID:   validated.studentID,
-		Major:       validated.major,
-		College:     validated.college,
-		LoginEmail:  validated.loginEmail,
-		Role:        validated.role,
-		State:       validated.state,
-		EmailType:   validated.emailType,
+		Name:          validated.name,
+		PhoneNumber:   validated.phoneNumber,
+		QQNumber:      validated.qqNumber,
+		StudentID:     validated.studentID,
+		Major:         validated.major,
+		College:       validated.college,
+		LoginEmail:    validated.loginEmail,
+		Role:          validated.role,
+		State:         validated.state,
+		EmailType:     validated.emailType,
+		PersonalEmail: validated.personalEmail,
 		// A role change invalidates sessions: a demoted account's live refresh tokens
 		// must not keep minting tokens for a session meant to end.
 	}, s.now())
@@ -345,6 +356,8 @@ func (s Service) mapWriteError(ctx context.Context, err error) error {
 		return newError(ErrStateConflict, "用户已注销，请先恢复后再编辑", nil)
 	case errors.Is(err, repository.ErrLastAdmin):
 		return newError(ErrProtected, "系统中至少需要保留一名管理员", nil)
+	case errors.Is(err, repository.ErrIdentityLimitExceeded):
+		return newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
 	}
 	return s.mapUniqueViolation(ctx, err, "更新用户失败")
 }

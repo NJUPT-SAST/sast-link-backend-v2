@@ -35,6 +35,11 @@ type fakeRequests struct {
 	rejectErr   error
 	rejected    *model.AlumniRequest
 	rejectedFor string
+	// pendingEmail is the fake's answer to EmailHasPendingTicket; the query's
+	// input is recorded in pendingEmailArg.
+	pendingEmail    bool
+	pendingEmailErr error
+	pendingEmailArg string
 	// provisioned captures what the approval callback built, which is how the tests
 	// check the role, state and identity the account was created with.
 	provisioned *model.User
@@ -71,6 +76,14 @@ func (f *fakeRequests) List(
 		return nil, 0, f.listErr
 	}
 	return f.listRows, f.listTotal, nil
+}
+
+func (f *fakeRequests) EmailHasPendingTicket(_ context.Context, email string) (bool, error) {
+	f.pendingEmailArg = email
+	if f.pendingEmailErr != nil {
+		return false, f.pendingEmailErr
+	}
+	return f.pendingEmail, nil
 }
 
 func (f *fakeRequests) ApproveAlumniRequest(

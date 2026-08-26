@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest"
 	alumnirequestworker "github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest/worker"
 )
@@ -20,6 +21,9 @@ type fakeRequests struct {
 	attempts int
 	notified int
 	markErr  error
+	// listRows feeds the startup reconcile.
+	listRows []model.AlumniRequest
+	listErr  error
 }
 
 func (f *fakeRequests) MarkNotifyAttempt(_ context.Context, _ int64) error {
@@ -36,6 +40,15 @@ func (f *fakeRequests) MarkNotified(_ context.Context, _ int64, _ time.Time) err
 	f.calls = append(f.calls, "notified")
 	f.notified++
 	return nil
+}
+
+func (f *fakeRequests) ListUnnotifiedReviewed(_ context.Context, _ int) ([]model.AlumniRequest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.listRows, nil
 }
 
 func (f *fakeRequests) sequence() []string {
@@ -296,4 +309,74 @@ func waitFor(t *testing.T, condition func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition was never met")
+}
+
+// TestRunReconcilesTheQueueOnStartup pins the restart self-heal: a process that
+// died with reviewed-but-untouched tickets re-queues them on boot, so an
+// applicant whose result email was lost to a crash is served without an admin
+// noticing a backlog. Each row is claimed (attempt counted) before being queued,
+// which is what stops a second instance from double-sending the same row.
+func TestRunReconcilesTheQueueOnStartup(t *testing.T) {
+	requests := &fakeRequests{listRows: []model.AlumniRequest{
+		{ID: 11, PersonalEmail: "alice@example.com", Name: "甲",
+			Status: model.AlumniRequestStatusApproved},
+		{ID: 12, PersonalEmail: "bob@example.com", Name: "乙",
+			Status: model.AlumniRequestStatusRejected, RejectReason: "请补齐资料"},
+	}}
+	mailer := &fakeMailer{}
+	worker := alumnirequestworker.New(requests, mailer,
+		"https://link.sast.fun/reset", "link@sast.fun")
+
+	delivered := make(chan struct{}, 2)
+	mailer.onCalled = func() { delivered <- struct{}{} }
+	stop := runWorker(t, worker)
+
+	for range 2 {
+		select {
+		case <-delivered:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("reconciled notification not delivered; sent %d", mailer.count())
+		}
+	}
+	stop()
+
+	if mailer.count() != 2 {
+		t.Fatalf("sent %d, want 2 reconciled notifications", mailer.count())
+	}
+	if requests.attemptCount() != 2 {
+		t.Fatalf("attempts %d, want 2 claims before the sends", requests.attemptCount())
+	}
+	if got := mailer.recipientAt(0); got != "alice@example.com" {
+		t.Fatalf("first recipient = %q, want alice@example.com", got)
+	}
+	if got := mailer.resultAt(0); !got.Approved {
+		t.Fatalf("first result.Approved = false, want true for an approved ticket")
+	}
+	if got := mailer.resultAt(1); got.Approved || got.RejectReason != "请补齐资料" {
+		t.Fatalf("second result = %+v, want a rejection carrying the reason", got)
+	}
+}
+
+// TestRunReconcileFailureIsLoggedNotFatal pins that a broken backlog read leaves
+// the worker running: delivery of later jobs must not depend on the reconcile.
+func TestRunReconcileFailureIsLoggedNotFatal(t *testing.T) {
+	requests := &fakeRequests{listErr: errors.New("boom")}
+	mailer := &fakeMailer{}
+	worker := alumnirequestworker.New(requests, mailer,
+		"https://link.sast.fun/reset", "link@sast.fun")
+	stop := runWorker(t, worker)
+
+	if !worker.EnqueueAlumniNotification(alumnirequest.NotificationJob{
+		RequestID: 21, Recipient: "carol@example.com", Name: "丙", Approved: true,
+	}) {
+		t.Fatal("enqueue failed")
+	}
+	delivered := make(chan struct{}, 1)
+	mailer.onCalled = func() { delivered <- struct{}{} }
+	select {
+	case <-delivered:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("job not delivered after a failed reconcile; sent %d", mailer.count())
+	}
+	stop()
 }

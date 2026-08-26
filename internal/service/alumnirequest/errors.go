@@ -87,6 +87,10 @@ var (
 	// ticket per applicant. A rejected applicant may correct and resubmit, so this
 	// says "your application is still open", not "you already applied".
 	ErrPending = &Error{Kind: KindConflict, Code: errcode.CodeAlumniRequestPending}
+	// ErrEmailPending is a pending ticket already carrying this address. Same
+	// observable outcome as ErrPending (one open request per identity), so it
+	// reuses CodeAlumniRequestPending with its own message.
+	ErrEmailPending = &Error{Kind: KindConflict, Code: errcode.CodeAlumniRequestPending}
 	// ErrAlreadyReviewed is a second verdict on a ticket that has one. What a
 	// double-clicked approve button sees.
 	ErrAlreadyReviewed = &Error{Kind: KindStateConflict, Code: errcode.CodeAlumniRequestReviewed}

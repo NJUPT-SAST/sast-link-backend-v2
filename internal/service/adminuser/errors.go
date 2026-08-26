@@ -76,10 +76,15 @@ var (
 	// to change, and both columns are unique so either can lose a race.
 	ErrStudentIDOccupied = &Error{Kind: KindConflict, Code: errcode.CodeStudentIDOccupied}
 	ErrEmailOccupied     = &Error{Kind: KindConflict, Code: errcode.CodeEmailAlreadyRegistered}
-	ErrConflict          = &Error{Kind: KindConflict, Code: errcode.CodeConflict}
-	ErrStateConflict     = &Error{Kind: KindStateConflict, Code: errcode.CodeValidationFailed}
-	ErrProtected         = &Error{Kind: KindProtected, Code: errcode.CodeForbidden}
-	ErrInternal          = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	// ErrIdentityLimitReached names the per-account cap on additional email
+	// bindings. Same observable outcome as the self-service bind cap, so it
+	// reuses CodeIdentityLimitReached rather than minting a second code for one
+	// outcome.
+	ErrIdentityLimitReached = &Error{Kind: KindConflict, Code: errcode.CodeIdentityLimitReached}
+	ErrConflict             = &Error{Kind: KindConflict, Code: errcode.CodeConflict}
+	ErrStateConflict        = &Error{Kind: KindStateConflict, Code: errcode.CodeValidationFailed}
+	ErrProtected            = &Error{Kind: KindProtected, Code: errcode.CodeForbidden}
+	ErrInternal             = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 )
 
 // newError builds a typed error carrying sentinel's Kind and Code. The message is a
