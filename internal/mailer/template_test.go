@@ -68,6 +68,24 @@ func TestRenderVerificationHTML(t *testing.T) {
 	}
 }
 
+// The set-password button's label is an <a> with inline color:#ffffff. Dark mode
+// must recolor the anchor itself — a color on the wrapping td is inherited by
+// nothing, and the label would stay white on the lightened button (white-on-
+// white). The mobile rule turns the td block-level, which voids its HTML align
+// attribute; text-align re-centers the label.
+func TestAlumniResultButtonRules(t *testing.T) {
+	html, err := renderAlumniResultHTML(approvedData())
+	if err != nil {
+		t.Fatalf("renderAlumniResultHTML: %v", err)
+	}
+	if !strings.Contains(html, `.actionbtn a{color:#0a0a0a!important;}`) {
+		t.Errorf("rendered html: dark mode does not recolor the button label")
+	}
+	if !strings.Contains(html, `.actionbtn{display:block!important;text-align:center!important;}`) {
+		t.Errorf("rendered html: mobile rule does not keep the button label centered")
+	}
+}
+
 func TestVerificationCopy(t *testing.T) {
 	for _, purpose := range []VerificationPurpose{
 		VerificationPurposeRegister,
