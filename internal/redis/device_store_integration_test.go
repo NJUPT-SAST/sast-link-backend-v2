@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,14 +13,21 @@ import (
 
 func TestDeviceKeys(t *testing.T) {
 	keys := NewKeys("sast-link:test")
-	if got, want := keys.Devices(42), "sast-link:test:devices:42"; got != want {
+	if got, want := keys.Devices(42), "sast-link:test:{dev}:devices:42"; got != want {
 		t.Fatalf("Devices key = %q, want %q", got, want)
 	}
-	if got, want := keys.Device("family-1"), "sast-link:test:device:family-1"; got != want {
+	if got, want := keys.Device("family-1"), "sast-link:test:{dev}:device:family-1"; got != want {
 		t.Fatalf("Device key = %q, want %q", got, want)
 	}
 	if devices, device := keys.Devices(1), keys.Device("1"); devices == device {
 		t.Fatalf("Devices and Device keys collided: %q", devices)
+	}
+	// All three device keys must share one {dev} hash tag so the Lua scripts
+	// that touch several keys per call stay on a single Redis Cluster slot.
+	for _, key := range []string{keys.Devices(42), keys.Device("family-1")} {
+		if !strings.Contains(key, "{dev}") {
+			t.Fatalf("device key %q lacks the {dev} hash tag", key)
+		}
 	}
 }
 

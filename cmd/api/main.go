@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	_ "go.uber.org/automaxprocs" // calibrate GOMAXPROCS to the container's cgroup CPU quota
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
@@ -22,6 +23,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/alumnihandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
@@ -77,6 +79,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create router: %w", err)
 	}
+	// Application metrics: the middleware observes every request (registered
+	// outermost, so it wraps the other middleware too) and /metrics exposes the
+	// default Prometheus registry. Like /health it is an anonymous scrape surface,
+	// deliberately outside every auth gate.
+	router.Use(middleware.Metrics())
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	// pprof is fail-closed: only an explicit development environment or PPROF_ENABLED enables it.
 	if cfg.AppEnv == "development" || cfg.EnablePprof {
 		registerProfiling(router)

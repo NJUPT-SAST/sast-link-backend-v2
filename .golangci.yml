@@ -12,7 +12,7 @@ linters:
   settings:
     gosec:
       excludes:
-        - G104
+
     govet:
       disable:
         - fieldalignment
