@@ -42,8 +42,38 @@ jobs:
         with:
           version: v2.12.2
 
-  test:
-    name: test
+  # The test suite is split in two parallel jobs: packages whose tests start
+  # Testcontainers (internal/testutil importers) and packages that run without
+  # external services. The integration batch provisions a PostgreSQL 16 and a
+  # Redis container per package, which dominates the wall time; unit tests no
+  # longer wait behind it. The batch partition is computed by a shared script,
+  # not hardcoded here, and asserted by test-split below. Both jobs keep
+  # -race -shuffle=on -covermode=atomic, so the split only changes what runs
+  # in parallel, never how a package is tested.
+  test-unit:
+    name: test (unit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run unit tests
+        # -pgo=off: the test build must not pick up cmd/api/default.pgo. PGO +
+        # -race/-cover on the same package is a known source of linker
+        # "fingerprint mismatch" flake; tests don't need profile-guided
+        # optimization (it only shapes the production binary).
+        run: |
+          # The substitution must split: go test takes one package per argument.
+          # shellcheck disable=SC2046
+          go test -race -shuffle=on -pgo=off -coverprofile=coverage-unit.out -covermode=atomic $(bash scripts/split-test-packages.sh unit)
+
+  test-integration:
+    name: test (integration)
     runs-on: ubuntu-latest
     # Wider than the go test -timeout below: with the two close, the runner kills
     # the step and the panic dump that names the stuck test never gets written.
@@ -56,15 +86,68 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run tests
-        # -pgo=off: the test build must not pick up cmd/api/default.pgo (PGO +
-        # -race/-cover on the same package is a known linker "fingerprint
-        # mismatch" flake; tests don't need profile-guided optimization).
+      - name: Run integration tests
+        # -pgo=off: the test build must not pick up cmd/api/default.pgo. PGO +
+        # -race/-cover on the same package is a known source of linker
+        # "fingerprint mismatch" flake; tests don't need profile-guided
+        # optimization (it only shapes the production binary).
         #
-        # -timeout 25m: integration suites provision a PostgreSQL container per
-        # test through Testcontainers and already exceed go test's 10-minute
-        # default, whose failure reads as a hung test (no `--- FAIL` line).
-        run: go test -race -shuffle=on -pgo=off -timeout 25m -coverprofile=coverage.out -covermode=atomic ./...
+        # -timeout 25m raises go test's per-package default of 10 minutes.
+        # internal/repository provisions a PostgreSQL container per test through
+        # Testcontainers and is already past that default on a developer machine;
+        # the integration suites in internal/migration and the handler packages
+        # are the same shape. A default-timeout failure is especially misleading
+        # here: the panic reports "test timed out" with no `--- FAIL` line, so it
+        # reads as a hung test rather than as a package that needed more wall
+        # clock than Go allows by default.
+        #
+        # This is a ceiling, not a budget. If a package genuinely deadlocks, the
+        # dump still arrives — 15 minutes later than before, but with the
+        # goroutine trace that identifies it.
+        run: |
+          # The substitution must split: go test takes one package per argument.
+          # shellcheck disable=SC2046
+          go test -race -shuffle=on -pgo=off -timeout 25m -coverprofile=coverage-integration.out -covermode=atomic $(bash scripts/split-test-packages.sh integration)
+
+  # Aggregation gate. The check name stays `test`, so branch protection keeps
+  # working unchanged; deploy.yml gates on the whole run's conclusion, which
+  # this job participates in, so nothing there moves either.
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [test-unit, test-integration]
+    steps:
+      - run: echo "unit and integration tests passed"
+
+  # Asserts the two batches partition ./... exactly: nothing missed (a package
+  # would silently stop being tested) and nothing duplicated (a package's
+  # coverage counters would be double-counted if the profiles were ever
+  # merged). Cheap enough to run as its own job; a failure means the shared
+  # script needs attention, not the test suites.
+  test-split:
+    name: test-split
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Unit and integration packages partition ./...
+        run: |
+          set -euo pipefail
+          unit=$(bash scripts/split-test-packages.sh unit | sort)
+          integration=$(bash scripts/split-test-packages.sh integration | sort)
+          all=$(go list ./... | sort)
+          missing=$(comm -23 <(printf '%s\n' "$all") <(printf '%s\n%s\n' "$unit" "$integration" | sort -u))
+          duplicated=$(comm -12 <(printf '%s\n' "$unit") <(printf '%s\n' "$integration"))
+          test -z "$missing" || { echo "::error::packages missed by the split: $missing"; exit 1; }
+          test -z "$duplicated" || { echo "::error::packages in both batches: $duplicated"; exit 1; }
+          echo "unit=$(echo "$unit" | wc -l), integration=$(echo "$integration" | wc -l), total=$(echo "$all" | wc -l)"
 
   build:
     name: build

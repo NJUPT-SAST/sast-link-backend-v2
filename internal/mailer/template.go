@@ -123,7 +123,9 @@ const layoutTemplate = `<!doctype html>
       .content{padding:24px 20px 28px!important;}
       .footer{padding:16px 20px!important;}
       .codebox{padding:16px 20px!important;font-size:26px!important;letter-spacing:6px!important;}
-      .actionbtn{display:block!important;}
+      /* display:block makes the td block-level, which voids the HTML align
+         attribute; text-align keeps the button label centered on small screens. */
+      .actionbtn{display:block!important;text-align:center!important;}
     }
     @media (prefers-color-scheme: dark){
       .mail-body{background-color:#060606!important;}
@@ -133,7 +135,11 @@ const layoutTemplate = `<!doctype html>
       .text-main{color:#ffffff!important;}
       .text-muted{color:rgba(255,255,255,0.55)!important;}
       .codebox{background:rgba(255,255,255,0.06)!important;border-color:rgba(255,255,255,0.18)!important;color:#ffffff!important;}
-      .actionbtn{background:#ffffff!important;color:#0a0a0a!important;border-color:#ffffff!important;}
+      /* The button text lives in an <a> with inline color:#ffffff, which would
+         otherwise stay white on the lightened button. The td's own color is
+         useless (no text node), so the link is targeted directly. */
+      .actionbtn{background:#ffffff!important;border-color:#ffffff!important;}
+      .actionbtn a{color:#0a0a0a!important;}
       .footer{color:rgba(255,255,255,0.4)!important;}
       .logo-light{display:none!important;}
       .logo-dark{display:block!important;}
