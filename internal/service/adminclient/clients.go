@@ -12,6 +12,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // newClientID generates a public client identifier server-side; accepting one from
@@ -243,7 +244,7 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	// Both sides of the revocation are reported: live access tokens plus the revoked
 	// refresh families.
 	total := len(entries) + int(revokedRefresh)
-	s.deliverBlacklist(ctx, entries, now)
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
 	s.auditUpdate(ctx, input, true, 0, total, &current.ClientID, &reason)
 	return &UpdateClientResult{RevokedTokens: total}, nil
 }
@@ -299,7 +300,7 @@ func (s Service) DeleteClient(ctx context.Context, input DeleteClientInput) (*De
 	// Both sides of the revocation are reported: live access tokens plus the revoked
 	// refresh families.
 	total := len(entries) + int(revokedRefresh)
-	s.deliverBlacklist(ctx, entries, now)
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
 	s.auditDelete(ctx, input, current, true, 0, total)
 	return &DeleteClientResult{RevokedTokens: total}, nil
 }

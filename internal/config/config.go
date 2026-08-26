@@ -434,7 +434,68 @@ func (c *Config) validateThirdPartyLogin() error {
 }
 
 // ValidateAPIAuth validates auth settings required by cmd/api endpoints.
+//
+// The checks are split into per-domain steps that run in source order: each
+// returns the first error it finds and the walk stops there, preserving the
+// original single-switch precedence exactly.
 func (c *Config) ValidateAPIAuth() error {
+	if err := c.validateAuth(); err != nil {
+		return err
+	}
+	if err := c.validateRateLimits(); err != nil {
+		return err
+	}
+	if err := c.validateOAuth(); err != nil {
+		return err
+	}
+	if err := c.validateArgon2(); err != nil {
+		return err
+	}
+	if err := c.validateAuthStateCache(); err != nil {
+		return err
+	}
+	if err := c.validateRetention(); err != nil {
+		return err
+	}
+	if err := c.validateAlumniIntake(); err != nil {
+		return err
+	}
+	if err := c.validateSMTP(); err != nil {
+		return err
+	}
+	if err := c.validateOAuthLoginTTLs(); err != nil {
+		return err
+	}
+	if err := c.validateUploadAvatar(); err != nil {
+		return err
+	}
+	if err := c.validateThirdPartyLogin(); err != nil {
+		return err
+	}
+	// Storage is optional but all-or-nothing. The shape check runs on the API
+	// startup path (not on Load, which cmd/migrate also uses) so a half-filled
+	// STORAGE_* group fails at boot, not on the first upload.
+	if err := c.validateStorage(); err != nil {
+		return err
+	}
+	normalizedProxies, err := normalizeTrustedProxies(c.TrustedProxies)
+	if err != nil {
+		return err
+	}
+	c.TrustedProxies = normalizedProxies
+	// Canonicalized here so both consumers of this one value agree: the JWT
+	// manager's iss claim and the base the discovery document concatenates endpoint
+	// URLs onto. Discovery strips a trailing slash while the signer does not, and
+	// OIDC requires the two to be byte-identical, so a trailing slash would get
+	// every ID Token rejected. Trimming once at the boundary keeps that impossible.
+	c.JWTIssuer = strings.TrimRight(strings.TrimSpace(c.JWTIssuer), "/")
+	return nil
+}
+
+// validateAuth checks the fail-fast set of the auth domain: JWT signing material,
+// the refresh-token HMAC secret, token expiries, the internal client name and the
+// HSTS staleness floor.
+func (c *Config) validateAuth() error {
 	switch {
 	case strings.TrimSpace(c.JWTSecretKey) == "":
 		return fmt.Errorf("JWT_SECRET_KEY is required")
@@ -457,6 +518,14 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("INTERNAL_OAUTH_CLIENT_ID is required")
 	case c.HSTSMaxAge < minimumHSTSMaxAge:
 		return fmt.Errorf("HSTS_MAX_AGE must be at least %d seconds", minimumHSTSMaxAge)
+	}
+	return nil
+}
+
+// validateRateLimits checks the per-endpoint throttles shared across the auth,
+// OAuth-provider and self-service surfaces.
+func (c *Config) validateRateLimits() error {
+	switch {
 	case c.RateLimitLoginRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_LOGIN_RPM must be positive")
 	case c.RateLimitLoginWindow < time.Second:
@@ -523,6 +592,14 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_CARD_RPM must be positive")
 	case c.RateLimitCardWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_CARD_WINDOW must be at least 1s")
+	}
+	return nil
+}
+
+// validateOAuth checks the provider-facing settings: the consent URL and the two
+// consent/authorization-code TTLs.
+func (c *Config) validateOAuth() error {
+	switch {
 	// The consent URL has no default: guessing one would redirect every third-party
 	// authorization to a page that does not exist, surfacing only mid-flow.
 	case strings.TrimSpace(c.OAuthConsentURL) == "":
@@ -543,6 +620,14 @@ func (c *Config) ValidateAPIAuth() error {
 	// human reading a consent screen.
 	case c.OAuthAuthorizeRequestTTL > maxOAuthAuthorizeRequestTTL:
 		return fmt.Errorf("OAUTH_AUTHORIZE_REQUEST_TTL must not exceed %s", maxOAuthAuthorizeRequestTTL)
+	}
+	return nil
+}
+
+// validateArgon2 keeps the password-hashing parameters inside both the memory
+// lane floor and internal/auth's verify bounds.
+func (c *Config) validateArgon2() error {
+	switch {
 	case c.Argon2Concurrency <= 0:
 		return fmt.Errorf("ARGON2_CONCURRENCY must be positive")
 	case c.Argon2Time < 1 || c.Argon2Memory < 8*uint32(max(c.Argon2Threads, uint8(1))):
@@ -552,11 +637,26 @@ func (c *Config) ValidateAPIAuth() error {
 		// hashes VerifyPassword refuses — a silent total lockout at the first
 		// rehash-on-login.
 		return fmt.Errorf("ARGON2_* must not exceed the verify bounds in internal/auth (TIME≤10, MEMORY≤65536 KiB, THREADS≤8)")
-	// Bounded because this is how long a non-revoking state change (an account
-	// state edit or a restore) stays invisible to the middleware; revocation
-	// itself is covered by the tombstone, not by this value.
+	}
+	return nil
+}
+
+// validateAuthStateCache bounds how long a non-revoking state change stays
+// invisible to the middleware; revocation itself is covered by the tombstone, not
+// by this value.
+func (c *Config) validateAuthStateCache() error {
+	switch {
 	case c.AuthStateCacheTTL > time.Minute:
 		return fmt.Errorf("AUTH_STATE_CACHE_TTL must not exceed 1m (it bounds how long a state change that does not revoke stays unseen)")
+	}
+	return nil
+}
+
+// validateRetention checks the cleanup worker's windows, including the two
+// floors: access-token metadata must outlive the JWT it describes, and audit
+// history may not be trimmed below what PRD §9 promises.
+func (c *Config) validateRetention() error {
+	switch {
 	case c.RetentionInterval < time.Minute:
 		return fmt.Errorf("RETENTION_INTERVAL must be at least 1m")
 	case c.RetentionBatchSize <= 0:
@@ -575,6 +675,14 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RETENTION_AUDIT_LOG_AGE must be at least %s", minAuditLogRetention)
 	case c.RetentionAlumniRequestAge <= 0:
 		return fmt.Errorf("RETENTION_ALUMNI_REQUEST_AGE must be positive")
+	}
+	return nil
+}
+
+// validateAlumniIntake checks the human-verification (Turnstile) and rate-limit
+// settings in front of POST /alumni-requests, the one unauthenticated write.
+func (c *Config) validateAlumniIntake() error {
+	switch {
 	case c.TurnstileTimeout <= 0:
 		return fmt.Errorf("TURNSTILE_TIMEOUT must be positive")
 	// A control character here would silently never match and disable the intake
@@ -588,6 +696,14 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_ALUMNI_REQUEST_RPM must be positive")
 	case c.RateLimitAlumniRequestWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_ALUMNI_REQUEST_WINDOW must be at least 1s")
+	}
+	return nil
+}
+
+// validateSMTP checks the mailer settings at boot so a missing value fails
+// startup instead of a runtime mail failure on the first registration.
+func (c *Config) validateSMTP() error {
+	switch {
 	// SMTP backs registration, password reset and email binding. Validating it
 	// at boot turns a missing value into a startup failure instead of a runtime
 	// "邮件发送失败" on the first user who tries to register.
@@ -601,37 +717,32 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("SMTP_MAX_CONCURRENT must be positive")
 	case (strings.TrimSpace(c.SMTPUser) == "") != (strings.TrimSpace(c.SMTPPass) == ""):
 		return fmt.Errorf("SMTP_USERNAME and SMTP_PASSWORD must be set together")
+	}
+	return nil
+}
+
+// validateOAuthLoginTTLs checks the TTLs of the fail-closed Redis values the
+// third-party login flow owns (state, registration_state, login_code).
+func (c *Config) validateOAuthLoginTTLs() error {
+	switch {
 	case c.OAuthLoginStateTTL <= 0:
 		return fmt.Errorf("OAUTH_LOGIN_STATE_TTL must be positive")
 	case c.OAuthLoginRegistrationStateTTL <= 0:
 		return fmt.Errorf("OAUTH_LOGIN_REGISTRATION_STATE_TTL must be positive")
 	case c.OAuthLoginCodeTTL <= 0:
 		return fmt.Errorf("OAUTH_LOGIN_CODE_TTL must be positive")
+	}
+	return nil
+}
+
+// validateUploadAvatar checks the per-user throttle on PUT /user/avatar.
+func (c *Config) validateUploadAvatar() error {
+	switch {
 	case c.RateLimitUploadAvatarRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_UPLOAD_AVATAR_RPM must be positive")
 	case c.RateLimitUploadAvatarWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_UPLOAD_AVATAR_WINDOW must be at least 1s")
 	}
-	if err := c.validateThirdPartyLogin(); err != nil {
-		return err
-	}
-	// Storage is optional but all-or-nothing. The shape check runs on the API
-	// startup path (not on Load, which cmd/migrate also uses) so a half-filled
-	// STORAGE_* group fails at boot, not on the first upload.
-	if err := c.validateStorage(); err != nil {
-		return err
-	}
-	normalizedProxies, err := normalizeTrustedProxies(c.TrustedProxies)
-	if err != nil {
-		return err
-	}
-	c.TrustedProxies = normalizedProxies
-	// Canonicalized here so both consumers of this one value agree: the JWT
-	// manager's iss claim and the base the discovery document concatenates endpoint
-	// URLs onto. Discovery strips a trailing slash while the signer does not, and
-	// OIDC requires the two to be byte-identical, so a trailing slash would get
-	// every ID Token rejected. Trimming once at the boundary keeps that impossible.
-	c.JWTIssuer = strings.TrimRight(strings.TrimSpace(c.JWTIssuer), "/")
 	return nil
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 type fixedClock struct{ value time.Time }
@@ -1190,7 +1191,7 @@ func TestSessionRequestsRejectOversizedJSON(t *testing.T) {
 	service := &fakeService{}
 	router := gin.New()
 	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
-	body := `{"login_email":"pt@sast.fun","password":"` + strings.Repeat("a", int(maxJSONRequestBodyBytes)) + `"}`
+	body := `{"login_email":"pt@sast.fun","password":"` + strings.Repeat("a", int(webutil.MaxJSONRequestBodyBytes)) + `"}`
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/login", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()

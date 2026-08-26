@@ -20,7 +20,12 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauthlogin"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
+
+// decodeStrictJSON is the shared strict body decoder, kept here under its
+// historical lowercase name so the call sites in this package did not change.
+var decodeStrictJSON = webutil.DecodeStrictJSON
 
 // Service is the use-case surface this handler drives.
 type Service interface {
@@ -231,11 +236,7 @@ type exchangeCodeRequest struct {
 func (h Handler) ExchangeCode(c *gin.Context) {
 	var request exchangeCodeRequest
 	if err := decodeStrictJSON(c, &request); err != nil {
-		response.Error(c, &response.BusinessError{
-			HTTPStatus: http.StatusBadRequest,
-			Code:       errcode.CodeBadRequest,
-			Message:    "请求参数错误",
-		})
+		response.Error(c, webutil.BadRequest())
 		return
 	}
 	result, err := h.Service.ExchangeCode(c.Request.Context(), oauthlogin.ExchangeCodeInput{

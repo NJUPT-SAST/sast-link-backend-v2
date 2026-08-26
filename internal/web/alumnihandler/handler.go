@@ -6,35 +6,25 @@
 package alumnihandler
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
-	"mime"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gin-gonic/gin/binding"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
-// maxJSONRequestBodyBytes caps a request body. The submission carries a dozen
-// short strings plus a captcha token, so this is generous; the point is that an
-// unauthenticated endpoint must not let a caller choose how much it reads.
-const maxJSONRequestBodyBytes = 64 << 10
-
-var (
-	errInvalidJSONContentType = errors.New("alumnihandler: content type must be application/json")
-	errTrailingJSONValue      = errors.New("alumnihandler: unexpected trailing JSON value")
-)
+// decodeStrictJSON is the shared strict body decoder, kept here under its
+// historical lowercase name so the call sites in this package did not change.
+var decodeStrictJSON = webutil.DecodeStrictJSON
 
 // RequestService is the account-request use cases this handler exposes.
 type RequestService interface {
@@ -309,27 +299,25 @@ func decodeOptionalStrictJSON(c *gin.Context, destination any) error {
 	if c.Request.Body == nil {
 		return nil
 	}
-	body, err := readJSONBody(c)
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, webutil.MaxJSONRequestBodyBytes))
 	if err != nil {
 		return err
 	}
 	if len(body) == 0 {
 		return nil
 	}
-	if err := requireJSONContentType(c); err != nil {
+	if err := webutil.RequireJSONContentType(c); err != nil {
 		return err
 	}
-	return decodeJSONBytes(body, destination)
+	return webutil.DecodeStrictJSONBytes(body, destination)
 }
 
 // parseID reads a positive numeric :id. A non-numeric path segment is a 404
 // rather than a 400: it names no ticket.
 func parseID(c *gin.Context) (int64, bool) {
-	value, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || value <= 0 {
-		return 0, false
-	}
-	return value, true
+	// Delegate to web.ParsePositiveID rather than reimplementing it: it rejects
+	// non-digits (including a "+" prefix) and values <= 0 in a single rule.
+	return web.ParsePositiveID(c.Param("id"))
 }
 
 // parseOptionalBool accepts only "true" and "false".
@@ -352,69 +340,14 @@ func parseOptionalBool(raw string) (*bool, error) {
 	}
 }
 
-// decodeStrictJSON applies the shared request-body policy: exact content type, a
-// size cap, no unknown fields, and no trailing values.
-//
-// DisallowUnknownFields matters most on the submission: it refuses a body
-// naming status, reviewed_by or created_user_id outright, so a submitter cannot
-// appear to set a field only the reviewer may write.
-func decodeStrictJSON(c *gin.Context, destination any) error {
-	if err := requireJSONContentType(c); err != nil {
-		return err
-	}
-	body, err := readJSONBody(c)
-	if err != nil {
-		return err
-	}
-	return decodeJSONBytes(body, destination)
-}
-
-func requireJSONContentType(c *gin.Context) error {
-	mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		return errInvalidJSONContentType
-	}
-	return nil
-}
-
-func readJSONBody(c *gin.Context) ([]byte, error) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBodyBytes)
-	return io.ReadAll(c.Request.Body)
-}
-
-func decodeJSONBytes(body []byte, destination any) error {
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return errTrailingJSONValue
-	}
-	return binding.Validator.ValidateStruct(destination)
-}
-
 func internalError() error {
-	return &response.BusinessError{
-		HTTPStatus: http.StatusInternalServerError,
-		Code:       errcode.CodeInternal,
-		Message:    "服务器内部错误",
-	}
+	return webutil.InternalError()
 }
 
 func badRequest() error {
-	return &response.BusinessError{
-		HTTPStatus: http.StatusBadRequest,
-		Code:       errcode.CodeBadRequest,
-		Message:    "请求参数错误",
-	}
+	return webutil.BadRequest()
 }
 
 func notFound() error {
-	return &response.BusinessError{
-		HTTPStatus: http.StatusNotFound,
-		Code:       errcode.CodeAlumniRequestNotFound,
-		Message:    "建号申请不存在",
-	}
+	return webutil.NotFound(errcode.CodeAlumniRequestNotFound, errcode.Messages[errcode.CodeAlumniRequestNotFound])
 }

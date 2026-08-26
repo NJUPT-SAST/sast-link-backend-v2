@@ -14,7 +14,12 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
+
+// decodeStrictJSON is the shared strict body decoder, kept here under its
+// historical lowercase name so the call sites in this package did not change.
+var decodeStrictJSON = webutil.DecodeStrictJSON
 
 type Service interface {
 	Login(ctx context.Context, input session.LoginInput) (*session.LoginResult, error)
@@ -646,7 +651,7 @@ func expiresIn(now, expiry time.Time) int64 {
 }
 
 func badRequest() error {
-	return &response.BusinessError{HTTPStatus: http.StatusBadRequest, Code: errcode.CodeBadRequest, Message: "请求参数错误"}
+	return webutil.BadRequest()
 }
 
 func unauthorized() error {
@@ -654,7 +659,7 @@ func unauthorized() error {
 }
 
 func internalError() error {
-	return &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"}
+	return webutil.InternalError()
 }
 
 // setSessionCookie writes the httpOnly session cookie for a freshly issued

@@ -10,6 +10,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // Clock is the service's time source.
@@ -44,16 +45,6 @@ func (s Service) now() time.Time {
 	}
 	// UTC, so audit timestamps stay uniform with every other row's Z suffix.
 	return clock.Now().UTC()
-}
-
-// actorClientID resolves what to record as the acting client: the token's azp when
-// present, otherwise the console. ProtectedClientID doubles as the console identity,
-// so the two names cannot drift apart.
-func (s Service) actorClientID(tokenClientID string) string {
-	if tokenClientID != "" {
-		return tokenClientID
-	}
-	return strings.TrimSpace(s.ProtectedClientID)
 }
 
 func (s Service) newClientID() (string, error) {
@@ -152,9 +143,9 @@ func (s Service) audit(ctx context.Context, params auditParams) {
 		Resource:      auditResource,
 		ResourceID:    params.ResourceID,
 		Success:       &success,
-		ClientIP:      nullableString(params.ClientIP),
-		UserAgent:     nullableString(params.UserAgent),
-		ActorClientID: nullableString(s.actorClientID(params.ActorClientID)),
+		ClientIP:      shared.NullableString(params.ClientIP),
+		UserAgent:     shared.NullableString(params.UserAgent),
+		ActorClientID: shared.NullableString(shared.ActorClientID(params.ActorClientID, s.ProtectedClientID)),
 		CreatedAt:     s.now(),
 	}
 	if params.ErrCode != 0 {
@@ -179,35 +170,4 @@ func (s Service) audit(ctx context.Context, params auditParams) {
 		slog.ErrorContext(auditCtx, "record admin oauth client audit",
 			"action", action, "error", err)
 	}
-}
-
-// deliverBlacklist clears the auth-state cache entries for the revoked access
-// tokens. The durable delivery is the outbox row written in the revoking
-// transaction (the worker retries until it lands); this synchronous call closes
-// the stale window immediately so a just-revoked token is rejected on the next
-// request rather than riding out the cache TTL.
-func (s Service) deliverBlacklist(ctx context.Context, entries []model.BlacklistEntry, now time.Time) {
-	if s.Blacklist == nil || len(entries) == 0 {
-		return
-	}
-	jtis := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.ExpiresAt.Sub(now) <= 0 {
-			continue
-		}
-		jtis = append(jtis, entry.TokenID)
-	}
-	if len(jtis) == 0 {
-		return
-	}
-	if err := s.Blacklist.DeleteAuthStates(ctx, jtis); err != nil {
-		slog.WarnContext(ctx, "invalidate client revocation auth-state cache", "count", len(jtis), "error", err)
-	}
-}
-
-func nullableString(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 // cardDTO is the public card payload. Per PRD §10.1 the card endpoint returns
@@ -55,5 +56,5 @@ func (h Handler) Card(c *gin.Context) {
 // is 40401, while a missing binding record is the generic 40400 so it cannot be
 // told apart from a record belonging to someone else.
 func notFound(code int, message string) error {
-	return &response.BusinessError{HTTPStatus: http.StatusNotFound, Code: code, Message: message}
+	return webutil.NotFound(code, message)
 }

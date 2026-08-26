@@ -332,20 +332,3 @@ func (s Service) buildAuditEntry(
 ) (*model.AuditLog, error) {
 	return buildAuditLog(s.now(), userID, action, resource, resourceID, actorClientID, success, errCode, clientIP, userAgent, detail)
 }
-
-// actorClientID resolves the acting client on the /user surface: the token's
-// azp when present, otherwise the console, so a legacy azp-less console token
-// names the built-in client rather than NULL.
-func (s Service) actorClientID(tokenClientID string) string {
-	if strings.TrimSpace(tokenClientID) != "" {
-		return strings.TrimSpace(tokenClientID)
-	}
-	return strings.TrimSpace(s.InternalClientID)
-}
-
-func nullableString(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
-}

@@ -96,3 +96,60 @@ const (
 	// to hide the entry point instead of offering a form that cannot succeed.
 	CodeAlumniRequestUnavailable = 50301 // 申请通道暂不可用
 )
+
+// Messages is the canonical user-facing message for each business code. Handler
+// maps reference it instead of copying the literals into their own switches,
+// which is how "邮件发送失败" vs "邮件发送失败，请稍后重试" previously drifted
+// (audit finding #12). A handler may still override a code's message for a
+// specific surface — it then owns a comment saying why.
+//
+//nolint:gosec // Localized error copy, not credentials; G101 flags the map shape.
+var Messages = map[int]string{
+	CodeBadRequest:              "请求参数错误",
+	CodeVerificationCodeWrong:   "验证码错误",
+	CodeVerificationCodeExpired: "验证码已过期",
+	CodeEmailDomainNotAllowed:   "邮箱域名不允许",
+	CodeCaptchaFailed:           "人机校验未通过",
+
+	CodeUnauthenticated:       "未登录",
+	CodeAccessTokenExpired:    "Access Token 已过期",
+	CodeAccessTokenInvalid:    "Access Token 无效或已被撤销",
+	CodeRegisterTicketInvalid: "Register-Ticket 无效或已过期",
+	CodeBindTicketInvalid:     "Bind-Ticket 无效或已过期",
+	CodePasswordInvalid:       "密码错误",
+	CodeUnknownIdentifier:     "登录邮箱不存在",
+	CodeLoginCodeInvalid:      "login_code 无效或已过期",
+	CodeConcurrentRefresh:     "刷新请求冲突，请重试",
+
+	CodeForbidden:          "无权限",
+	CodeAccountDeleted:     "账号已注销",
+	CodeLarkTenantRequired: "非 SAST 企业飞书用户",
+
+	CodeNotFound:              "资源不存在",
+	CodeUserNotFound:          "用户不存在",
+	CodeClientNotFound:        "OAuth 客户端不存在",
+	CodeAlumniRequestNotFound: "建号申请不存在",
+
+	CodeConflict:               "资源已存在",
+	CodeEmailAlreadyRegistered: "邮箱已被注册",
+	CodeStudentIDOccupied:      "学号已被占用",
+	CodeIdentityOccupied:       "第三方账号已被其他用户绑定",
+	CodeIdentityAlreadyBound:   "该类型账号已绑定",
+	CodeIdentityLimitReached:   "第三方邮箱绑定数量已达上限",
+	CodeAlumniRequestPending:   "该学号已有待审申请",
+
+	CodeValidationFailed:      "业务校验失败",
+	CodePasswordTooShort:      "密码长度不足",
+	CodePasswordUnchanged:     "新旧密码相同",
+	CodeAvatarRejected:        "头像未通过内容审核",
+	CodeAlumniRequestReviewed: "申请已被处理",
+
+	CodeRateLimited: "请求过于频繁",
+
+	CodeInternal:                 "服务器内部错误",
+	CodeEmailDeliveryFailed:      "邮件发送失败",
+	CodeObjectUploadFailed:       "对象存储上传失败",
+	CodeDatabaseFailed:           "数据库错误",
+	CodeDependencyUnavailable:    "依赖服务暂不可用",
+	CodeAlumniRequestUnavailable: "申请通道暂不可用",
+}

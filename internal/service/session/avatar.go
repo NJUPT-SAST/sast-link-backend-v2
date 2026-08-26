@@ -19,6 +19,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // maxAvatarSize is the PUT /user/avatar upload ceiling (1MB); the reader is
@@ -113,7 +114,7 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 			return nil, cleanup(newError(ErrDependencyUnavailable, "头像审核服务暂不可用，请稍后重试", auditErr))
 		}
 		if verdict.Sensitive {
-			if err := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), nullableString(s.actorClientID(input.ActorClientID)), false, errcode.CodeAvatarRejected,
+			if err := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), false, errcode.CodeAvatarRejected,
 				input.ClientIP, input.UserAgent, map[string]any{"label": verdict.Label}); err != nil {
 				slog.Error("audit avatar rejection", "user_id", input.UserID, "error", err)
 			}
@@ -146,7 +147,7 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 		}
 	}
 
-	if auditErr := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), nullableString(s.actorClientID(input.ActorClientID)), true, 0,
+	if auditErr := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), true, 0,
 		input.ClientIP, input.UserAgent, map[string]any{"avatar_url": avatarURL}); auditErr != nil {
 		slog.Error("audit avatar upload", "user_id", input.UserID, "error", auditErr)
 	}

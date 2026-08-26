@@ -10,6 +10,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
@@ -55,7 +56,7 @@ func (s Service) UpdateProfile(ctx context.Context, input UpdateProfileInput) (*
 		return nil, newError(ErrInternal, "更新用户资料失败", err)
 	}
 
-	if auditErr := s.audit(ctx, &input.UserID, "update_profile", "user", resourceID(input.UserID), nullableString(s.actorClientID(input.ActorClientID)), true, 0,
+	if auditErr := s.audit(ctx, &input.UserID, "update_profile", "user", resourceID(input.UserID), shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), true, 0,
 		input.ClientIP, input.UserAgent, map[string]any{"changed_fields": changed}); auditErr != nil {
 		slog.Error("audit update profile", "user_id", input.UserID, "error", auditErr)
 	}

@@ -17,34 +17,36 @@ func mapServiceError(err error) error {
 	message := defaultMessage(serviceErr.Kind)
 	switch serviceErr.Code {
 	case errcode.CodeRegisterTicketInvalid:
-		message = "Register-Ticket 无效或已过期"
+		message = errcode.Messages[errcode.CodeRegisterTicketInvalid]
 	case errcode.CodeConcurrentRefresh:
-		message = "刷新请求冲突，请重试"
+		message = errcode.Messages[errcode.CodeConcurrentRefresh]
 	case errcode.CodeBindTicketInvalid:
-		message = "Bind-Ticket 无效或已过期"
+		message = errcode.Messages[errcode.CodeBindTicketInvalid]
 	case errcode.CodeVerificationCodeWrong:
-		message = "验证码错误"
+		message = errcode.Messages[errcode.CodeVerificationCodeWrong]
 	case errcode.CodeVerificationCodeExpired:
-		message = "验证码已过期"
+		message = errcode.Messages[errcode.CodeVerificationCodeExpired]
 	case errcode.CodeEmailDomainNotAllowed:
-		message = "邮箱域名不允许"
+		message = errcode.Messages[errcode.CodeEmailDomainNotAllowed]
 	case errcode.CodeEmailAlreadyRegistered:
-		message = "邮箱已被注册"
+		message = errcode.Messages[errcode.CodeEmailAlreadyRegistered]
 	case errcode.CodeStudentIDOccupied:
-		message = "学号已被占用"
+		message = errcode.Messages[errcode.CodeStudentIDOccupied]
 	case errcode.CodeIdentityOccupied:
+		// The bind flow names the mailbox, more specific than the canonical
+		// "third-party account" wording; both stay reachable.
 		message = "该邮箱已被绑定或占用"
 	case errcode.CodeIdentityAlreadyBound:
-		message = "该类型账号已绑定"
+		message = errcode.Messages[errcode.CodeIdentityAlreadyBound]
 	case errcode.CodeIdentityLimitReached:
-		message = "第三方邮箱绑定数量已达上限"
+		message = errcode.Messages[errcode.CodeIdentityLimitReached]
 	case errcode.CodePasswordTooShort:
-		message = "密码长度不足"
+		message = errcode.Messages[errcode.CodePasswordTooShort]
 	case errcode.CodePasswordUnchanged:
-		message = "新旧密码相同"
+		message = errcode.Messages[errcode.CodePasswordUnchanged]
 	case errcode.CodeUserNotFound:
 		// The KindNotFound default would contradict this code's own meaning.
-		message = "用户不存在"
+		message = errcode.Messages[errcode.CodeUserNotFound]
 	case errcode.CodeNotFound:
 		// The service error carries the right message for either the unbind or
 		// the device-logout path; stamping one here would mislabel the other.
@@ -54,12 +56,11 @@ func mapServiceError(err error) error {
 	case errcode.CodeValidationFailed:
 		// Only ErrLastLoginMethod raises this; the default would drop the rule
 		// it broke.
-		// it broke.
 		message = "不能解绑唯一的登录方式"
 	case errcode.CodeAvatarRejected:
 		// A policy verdict, not a malformed request; the generic default would
 		// mislabel it.
-		message = "头像未通过内容审核"
+		message = errcode.Messages[errcode.CodeAvatarRejected]
 	}
 	var status int
 	switch serviceErr.Kind {
@@ -72,6 +73,8 @@ func mapServiceError(err error) error {
 	case session.KindUserDeleted:
 		status = http.StatusForbidden
 	case session.KindEmailFailed:
+		// "请稍后重试" is a handler-side UX addition over errcode's canonical
+		// "邮件发送失败", deliberately not folded into errcode.
 		message = "邮件发送失败，请稍后重试"
 		status = http.StatusInternalServerError
 	case session.KindObjectUploadFailed:
@@ -84,6 +87,7 @@ func mapServiceError(err error) error {
 	case session.KindNotFound:
 		status = http.StatusNotFound
 	case session.KindDependencyUnavailable:
+		// Same UX addition as KindEmailFailed.
 		message = "依赖服务暂不可用，请稍后重试"
 		status = http.StatusServiceUnavailable
 	case session.KindInternal:
