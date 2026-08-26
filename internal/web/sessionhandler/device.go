@@ -59,11 +59,11 @@ func (h Handler) ListDevices(c *gin.Context) {
 }
 
 // LogoutDevice revokes one device's whole token family and drops its device
-// record. The device ID is an opaque UUID (the family ID), so any string that
+// record. The device ID is an opaque UUID (the family ID), so a string that
 // does not name a device of the caller answers 40400 rather than 400 — the
-// distinction would confirm nothing useful and might help probe other users'
-// sessions. The parameter is trimmed first so an encoded blank (e.g. %20)
-// takes the same 40400 path as a missing one instead of a 40000.
+// error never confirms whether someone else's device exists. The parameter is
+// trimmed first so an encoded blank (%20) takes the same 40400 path as a
+// missing one.
 func (h Handler) LogoutDevice(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {

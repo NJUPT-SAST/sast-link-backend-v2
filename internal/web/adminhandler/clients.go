@@ -25,9 +25,9 @@ func (h Handler) ListClients(c *gin.Context) {
 
 // createClientRequest is a registration submission.
 //
-// There is no client_id field: the identifier is generated server-side, and because
-// the decoder rejects unknown fields, a request trying to choose one is refused
-// rather than silently ignored. Same for client_secret.
+// There is no client_id or client_secret field: the identifiers are generated
+// server-side, and the strict decoder refuses any request that tries to supply
+// one.
 type createClientRequest struct {
 	ClientName   string   `json:"client_name" binding:"required"`
 	ClientType   string   `json:"client_type" binding:"required"`
@@ -63,11 +63,9 @@ func (h Handler) CreateClient(c *gin.Context) {
 		response.Error(c, mapServiceError(err))
 		return
 	}
-	// The only response in the service that carries a plaintext client_secret, which
-	// is shown once and never retrievable again. A 201 is already not cacheable by
-	// default, but no-store is what keeps the secret out of an intermediary or browser
-	// cache regardless of what a proxy decides the default is — the same reason
-	// /oauth/token and /userinfo set it.
+	// The only response that carries a plaintext client_secret, shown once and
+	// never retrievable again; no-store keeps it out of an intermediary or browser
+	// cache.
 	c.Header("Cache-Control", "no-store")
 	response.Created(c, createdClientDTO{
 		clientDTO:    mapClient(result.Client),
@@ -75,14 +73,11 @@ func (h Handler) CreateClient(c *gin.Context) {
 	})
 }
 
-// updateClientRequest is a partial update.
-//
-// Pointers so an omitted field is left alone rather than being read as "clear it".
-// client_id / client_secret / client_type / id have no field here, and the strict
-// decoder turns an attempt to send one into a 400 — an operator cannot choose
-// their own identifier, and client_type is immutable because flipping it without
-// reissuing a secret would create a credential-less third_party client. The
-// remaining fields are validated in the service.
+// updateClientRequest is a partial update. Pointers so an omitted field is left
+// alone rather than read as "clear it". client_id / client_type have no field
+// here, so the strict decoder refuses an attempt to send one; client_type is
+// immutable because flipping it without reissuing a secret would create a
+// credential-less third_party client.
 type updateClientRequest struct {
 	ClientName   *string   `json:"client_name"`
 	RedirectURIs *[]string `json:"redirect_uris"`
@@ -128,8 +123,8 @@ func (h Handler) UpdateClient(c *gin.Context) {
 	}
 	message := "客户端信息更新成功"
 	if result.RevokedTokens > 0 {
-		// Say so: the administrator disabled a client and every session it held was cut,
-		// which is a larger consequence than "updated" conveys.
+		// Say so: every session the client held was just cut, a larger consequence
+		// than "updated" conveys.
 		message = "客户端信息更新成功，已撤销该客户端的全部 Token"
 	}
 	response.Ok(c, messageResponse{Message: message})
@@ -165,8 +160,8 @@ func (h Handler) DeleteClient(c *gin.Context) {
 	}
 	message := "客户端已删除"
 	if result.RevokedTokens > 0 {
-		// Say so: the administrator deleted a client and every session it held was cut,
-		// which is a larger consequence than "deleted" conveys.
+		// Say so: every session the client held was just cut, a larger consequence
+		// than "deleted" conveys.
 		message = "客户端已删除，已撤销该客户端的全部 Token"
 	}
 	response.Ok(c, messageResponse{Message: message})

@@ -12,9 +12,8 @@ import (
 const (
 	auditResourceRequest = "alumni_request"
 	// auditResourceUser is recorded alongside the approval so the account creation
-	// itself appears in the audit trail. Approval does not go through
-	// adminuser.CreateUser, which is what would otherwise write it, so an
-	// account created here would be one nobody appears to have created.
+	// appears in the audit trail — approval does not route through
+	// adminuser.CreateUser, which is what would otherwise write it.
 	auditResourceUser = "user"
 
 	actionSubmit             = "alumni_request_submit"
@@ -66,24 +65,18 @@ type AuditLogRepository interface {
 	Create(ctx context.Context, entry *model.AuditLog) error
 }
 
-// PasswordHasher hashes the generated initial password. The approved account
-// needs a hash because the V001 password column is NOT NULL, and the alumnus sets
-// their real password through the self-service reset flow.
+// PasswordHasher hashes the generated initial password; the alumnus sets their real
+// password through the self-service reset flow.
 type PasswordHasher interface {
 	HashPassword(ctx context.Context, password string) (string, error)
 }
 
-// CaptchaVerifier is the human-verification check in front of submission.
-//
-// A service-layer port rather than HTTP middleware for two reasons: the verdict
-// belongs in the same audit record as the submission, and the check has to run
-// after field validation. A middleware necessarily runs before the handler decodes
-// the body, and a Turnstile token is single-use — burning it on a request that
-// then fails a length check means the applicant must solve the challenge again to
-// fix a typo.
-//
-// Implementations must distinguish a rejected token from an inability to check;
-// see mapCaptchaError.
+// CaptchaVerifier is the human-verification check in front of submission. A
+// service-layer port rather than middleware: the verdict belongs in the same audit
+// record as the submission, and the check must run after field validation so a
+// single-use token is not burned on a submission that then fails a length check.
+// Implementations must distinguish a rejected token from an inability to check; see
+// mapCaptchaError.
 type CaptchaVerifier interface {
 	Verify(ctx context.Context, token, remoteIP string) error
 }
@@ -99,12 +92,9 @@ type EndpointLimiter interface {
 	Allow(ctx context.Context, endpoint, subject string) (LimitResult, error)
 }
 
-// NotificationDispatcher hands result-email work to the background worker.
-//
-// Enqueue is non-blocking and returns false when the queue is full, which the
-// caller reports as notify_enqueued rather than failing the review: an approval
-// that already committed must not be reported as a failure because an email did
-// not fit in a channel.
+// NotificationDispatcher hands result-email work to the background worker. Enqueue
+// is non-blocking and returns false when the queue is full, which the caller reports
+// as notify_enqueued rather than failing the review.
 type NotificationDispatcher interface {
 	EnqueueAlumniNotification(job NotificationJob) bool
 }
@@ -163,11 +153,8 @@ type ListResult struct {
 	PageSize int
 }
 
-// RequestView is a ticket as the console sees it.
-//
-// ClientIP is deliberately absent. It identifies the submitter's network and
-// reviewing a ticket has no use for it, so it stays in the table for abuse
-// tracing rather than being copied onto a read surface.
+// RequestView is a ticket as the console sees it. ClientIP is deliberately absent:
+// it stays in the table for abuse tracing, not on a read surface.
 type RequestView struct {
 	ID             int64
 	Name           string
@@ -207,13 +194,10 @@ type ReviewInput struct {
 	UserAgent     string
 }
 
-// ApproveResult reports the provisioned account.
-//
-// Deliberately not adminuser.CreateUserResult, which carries InitialPassword.
-// The generated password is discarded here: the alumnus sets their own through
-// the reset flow, so the plaintext must not exist beyond the hash. Reusing a
-// struct that has the field would put one careless JSON tag between it and the
-// wire.
+// ApproveResult reports the provisioned account. Deliberately not
+// adminuser.CreateUserResult, which carries InitialPassword: the generated password
+// is discarded here, so a struct with the field would risk putting one careless JSON
+// tag between it and the wire.
 type ApproveResult struct {
 	UserID     int64
 	LoginEmail string

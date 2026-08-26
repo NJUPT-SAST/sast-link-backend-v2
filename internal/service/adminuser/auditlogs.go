@@ -8,11 +8,8 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
-// ListAuditLogs returns a filtered page of audit entries.
-//
-// A read of the audit trail is not itself audited: recording every query would
-// grow the table faster than the queries that inspect it, and PRD §4.13 lists only
-// write operations.
+// ListAuditLogs returns a filtered page of audit entries; reads are not themselves
+// audited.
 func (s Service) ListAuditLogs(ctx context.Context, input ListAuditLogsInput) (*ListAuditLogsResult, error) {
 	if s.Audit == nil {
 		return nil, newError(ErrInternal, "审计日志仓储未配置", nil)
@@ -20,8 +17,7 @@ func (s Service) ListAuditLogs(ctx context.Context, input ListAuditLogsInput) (*
 	if input.UserID != nil && *input.UserID <= 0 {
 		return nil, newError(ErrInvalidInput, "user_id 取值非法", nil)
 	}
-	// An inverted window matches nothing, which reads as "no activity" rather than as
-	// the mistake it is.
+	// An inverted window is refused, not silently matched empty.
 	if input.StartTime != nil && input.EndTime != nil && input.EndTime.Before(*input.StartTime) {
 		return nil, newError(ErrInvalidInput, "end_time 不得早于 start_time", nil)
 	}
@@ -65,8 +61,8 @@ func (s Service) ListAuditLogs(ctx context.Context, input ListAuditLogsInput) (*
 				}
 			}
 		} else {
-			// Best-effort must not be silent: without this log an operator cannot tell a
-			// genuinely missing user (null name, intended) from a broken lookup.
+			// Best-effort must not be silent: a log distinguishes a missing user (null name,
+			// intended) from a broken lookup.
 			slog.WarnContext(ctx, "attach audit user display names",
 				"count", len(ids), "error", err)
 		}

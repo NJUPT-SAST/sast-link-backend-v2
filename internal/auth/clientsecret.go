@@ -16,17 +16,11 @@ const (
 
 // ClientSecretHasher generates and verifies OAuth client secrets.
 //
-// This deliberately does not reuse PasswordHasher. PBKDF2 at 600k iterations
-// exists to make a low-entropy, human-chosen password expensive to guess; it
-// costs ~380ms per derivation. A client secret is 32 bytes from crypto/rand, so
-// there is no dictionary to walk and no work factor worth buying — the only
-// attack is exhausting a 256-bit space. Running PBKDF2 on it would add nothing
-// but would put a 380ms CPU-bound step on every /oauth/token request from every
-// third-party client, turning the token endpoint into the service's bottleneck.
-//
-// A plain SHA-256 over a high-entropy secret is the same reasoning used for
-// storing API keys: the hash protects against database disclosure (the stored
-// value cannot be replayed as a credential) and the comparison is constant time.
+// A client secret is 32 bytes from crypto/rand, so a plain SHA-256 hash suffices:
+// there is no dictionary to walk and PBKDF2 would only add a CPU-bound step to
+// every /oauth/token request. The hash protects against database disclosure (a
+// leaked hash cannot be replayed as the credential) and compares in constant
+// time.
 type ClientSecretHasher struct {
 	Random RandomSource
 }
@@ -52,9 +46,9 @@ func HashClientSecret(secret string) string {
 // VerifyClientSecret compares a presented secret against a stored hash in
 // constant time.
 //
-// An empty presented secret is rejected before hashing: a client that sends no
-// client_secret at all must fail authentication rather than be compared against
-// the hash of the empty string, which a misconfigured row could plausibly hold.
+// An empty presented secret is rejected before hashing, so a client that sends
+// no client_secret at all fails authentication rather than matching a
+// misconfigured row's hash of the empty string.
 func VerifyClientSecret(secret, encodedHash string) error {
 	if secret == "" {
 		return ErrInvalidInput

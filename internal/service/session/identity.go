@@ -33,10 +33,9 @@ func (s Service) ListIdentities(ctx context.Context, input ListIdentitiesInput) 
 //
 //  1. The identity is resolved scoped to its owner, so a foreign ID reads as
 //     missing and cannot be probed.
-//  2. The password is verified before anything is deleted. A stolen access token
-//     alone must not be enough to strip login methods off an account.
-//  3. The binding must not be the caller's last remaining login method. The login
-//     email is not an identities row, so a user who has one always passes; the
+//  2. The password is verified before anything is deleted, so a stolen access
+//     token alone cannot strip login methods off an account.
+//  3. The binding must not be the caller's last remaining login method; the
 //     check exists for accounts whose only credential is a bound address.
 func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) (*UnbindIdentityResult, error) {
 	if input.UserID <= 0 {
@@ -48,22 +47,13 @@ func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) 
 	if input.Password == "" {
 		return nil, newError(ErrInvalidInput, "password 不能为空", nil)
 	}
-	// Throttled before the password check, so repeated wrong-password attempts
-	// consume the budget too. The old cooldown was claimed only after the password
-	// verified, which meant it did nothing against guessing.
-	//
-	// Deliberately rate limiting rather than reusing Failures (LoginFailureStore):
-	// its keys are shared with password login, so guessing here would lock the
-	// victim's login — a token holder could deny them the front door. It also
-	// answers with "登录已被锁定", which is wrong on this endpoint. Slowing the
-	// endpoint to 3/min already leaves brute force with no practical value; an
-	// accumulating lockout would need its own key namespace and error code, at
-	// which point it is not a reuse.
+	// Throttle before the password check: repeated wrong-password attempts must
+	// consume the budget too, and a cooldown claimed only after the password
+	// verifies does nothing against guessing.
 	if err := s.checkEndpointLimit(ctx, s.UnbindLimiter, "unbind", "user:"+strconv.FormatInt(input.UserID, 10)); err != nil {
 		return nil, err
 	}
-	// Only the password hash, state, and id are read here; the Profile/Identities
-	// preloads of FindByID would be pure waste on this rate-limited path.
+	// Only the password hash, state, and id are read here.
 	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
@@ -94,7 +84,7 @@ func (s Service) UnbindIdentity(ctx context.Context, input UnbindIdentityInput) 
 
 	// The last-login-method guard runs inside the deleting transaction under a
 	// lock on the user row, so two concurrent unbinds cannot both pass a stale
-	// snapshot and delete the account into having no way to sign in.
+	// snapshot and delete the account's last way to sign in.
 	if deleteErr := s.Identities.DeleteIdentityGuardingLoginMethod(ctx, input.IdentityID, input.UserID); deleteErr != nil {
 		if errors.Is(deleteErr, repository.ErrNotFound) {
 			return nil, newError(ErrIdentityNotFound, "绑定记录不存在", nil)

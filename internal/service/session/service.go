@@ -21,8 +21,7 @@ const (
 	defaultAccessTTL  = time.Hour
 	defaultRefreshTTL = 30 * 24 * time.Hour
 	// verificationTTL bounds email verification codes and the tickets derived
-	// from them (Register-Ticket / Bind-Ticket), per the API contract's 5-minute
-	// one-time semantics.
+	// from them (Register-Ticket / Bind-Ticket).
 	verificationTTL = 5 * time.Minute
 	// maxOtherMailBindings is the per-user cap on other_mail identities.
 	maxOtherMailBindings = 2
@@ -48,25 +47,19 @@ type Service struct {
 	VerificationCode VerificationCodeStore
 	RegisterTicket   RegisterTicketStore
 	BindTicket       BindTicketStore
-	// OAuthRegistration reads the identity parked by an OAuth callback. A nil
-	// value disables OAuth-completed registration, which is what a deployment
-	// with no third-party providers configured wants.
+	// OAuthRegistration reads the identity parked by an OAuth callback; a nil
+	// value disables OAuth-completed registration.
 	OAuthRegistration OAuthRegistrationStore
-	// UnbindLimiter is separate from Limiter because checkEndpointLimit reads the
-	// quota off the instance, not the endpoint name — sharing one would give unbind
-	// the login budget.
+	// UnbindLimiter throttles unbind per user, kept separate from Limiter.
 	UnbindLimiter EndpointLimiter
-	// RegisterLimiter throttles POST /auth/register per caller IP. A valid
-	// Register-Ticket is required to reach the write, so this bounds cost rather
-	// than guessing: every accepted call runs an argon2id derivation.
+	// RegisterLimiter throttles POST /auth/register, keyed on the
+	// Register-Ticket; every accepted call runs an argon2id derivation.
 	RegisterLimiter EndpointLimiter
-	// CardLimiter throttles the unauthenticated GET /card/:id per caller IP. The
-	// path parameter is a sequential user ID, so an uncapped endpoint is a scrape
-	// of every public card.
+	// CardLimiter throttles the unauthenticated GET /card/:id per caller IP; the
+	// sequential user ID makes an uncapped endpoint a scrape of every public card.
 	CardLimiter EndpointLimiter
-	// RefreshLimiter throttles POST /auth/refresh per caller IP. The endpoint is
-	// unauthenticated and each call runs several DB statements, so without a cap a
-	// single source can amplify DB work for free (see config.RateLimitRefreshRPM).
+	// RefreshLimiter throttles POST /auth/refresh per caller IP, bounding DB
+	// amplification from an unauthenticated endpoint.
 	RefreshLimiter   EndpointLimiter
 	ForgotPasswords  ForgotPasswordDispatcher
 	InternalClientID string
@@ -79,24 +72,20 @@ type Service struct {
 
 	// AvatarStore persists avatar objects; AvatarAuditor reviews them. Both are
 	// optional: a nil store means object storage is not configured and avatar
-	// upload answers 50002, keeping every other endpoint alive on a deployment
-	// without storage.
+	// upload answers 50002.
 	AvatarStore   objectstore.ObjectStore
 	AvatarAuditor objectstore.AvatarAuditor
-	// AvatarLimiter throttles PUT /user/avatar per caller. Separate from
-	// Limiter because checkEndpointLimit reads the quota off the instance, not
-	// the endpoint name.
+	// AvatarLimiter throttles PUT /user/avatar per caller.
 	AvatarLimiter EndpointLimiter
 
-	// Devices persists per-user device records in Redis (PRD §6.1). Device
-	// records are operational state, so every session-flow write through this
-	// port is fail-open: a hiccup must not fail a login, refresh, logout or
-	// password change. DeviceOwnedBy is the exception and fails closed, gating
+	// Devices persists per-user device records in Redis. Device records are
+	// operational state, so every session-flow write through this port is
+	// fail-open: a hiccup must not fail a login, refresh, logout or password
+	// change. DeviceOwnedBy is the exception and fails closed, gating
 	// "logout a specific device" against cross-user family revokes.
 	Devices DeviceStore
-	// DeviceLimiter throttles DELETE /user/devices/:id per user, like the unbind
-	// limiter — the subject is the user, not the IP, because the device list
-	// belongs to an authenticated account.
+	// DeviceLimiter throttles DELETE /user/devices/:id per user, with the user
+	// as the subject rather than the IP.
 	DeviceLimiter EndpointLimiter
 }
 
@@ -108,8 +97,6 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	if err := s.checkEndpointLimit(ctx, s.Limiter, "login", loginLimitSubject(input, identifier)); err != nil {
 		return nil, err
 	}
-	// Lean lookup: the login response serializes only scalar user fields, so the
-	// Profile/Identities preloads would be two dead SQL statements per login.
 	user, err := s.Users.FindAuthUserByLoginIdentifier(ctx, identifier)
 	if errors.Is(err, repository.ErrNotFound) {
 		failureKey := loginFailureKey(nil, identifier)
@@ -132,35 +119,32 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		return nil, newError(ErrUserDeleted, "用户已注销", nil)
 	}
 	if passwordErr := s.Passwords.VerifyPassword(ctx, input.Password, user.PasswordHash); passwordErr != nil {
-		// A cancelled or timed-out caller never proved anything about the password,
-		// so it must not be recorded as a failed attempt: doing so would let a
-		// client that disconnects mid-login drive its own account into the lockout
-		// window.
+		// A cancelled or timed-out caller proved nothing about the password, so it
+		// must not count as a failed attempt — that would let a disconnecting client
+		// drive its own account into the lockout window.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, newError(ErrDependencyUnavailable, "密码校验被中断", passwordErr)
 		}
 		return nil, s.failLogin(ctx, user, input, failureKey, ErrPasswordInvalid, "密码错误", passwordErr)
 	}
 	// Rehash a stale hash in place once the password is proven, so a KDF parameter
-	// change (scheme, work factor) reaches existing accounts on their next login
-	// instead of verifying at the old cost forever. This is an optimization, not an
-	// auth gate: a failed write keeps the old hash and the login still succeeds.
+	// change (scheme, work factor) reaches existing accounts on their next login.
+	// It is an optimization, not an auth gate: a failed write keeps the old hash
+	// and the login still succeeds.
 	if s.Passwords.ShouldRehash(user.PasswordHash) {
 		newHash, hashErr := s.Passwords.HashPassword(ctx, input.Password)
 		if hashErr != nil {
 			slog.WarnContext(ctx, "rehash password on login failed", "user_id", user.ID, "error", hashErr)
 		} else if updateErr := s.Users.UpdatePasswordHash(ctx, user.ID, user.PasswordHash, newHash); updateErr != nil {
-			// The rehash is guarded on the hash this login verified: a concurrent
-			// password change/reset that landed in between wins, and the skipped
-			// rehash must not surface as a failure.
+			// The rehash is guarded on the hash this login verified, so a concurrent
+			// password change/reset that landed in between wins and the skipped rehash
+			// does not surface as a failure.
 			if !errors.Is(updateErr, repository.ErrRehashSkipped) {
 				slog.WarnContext(ctx, "persist rehashed password failed", "user_id", user.ID, "error", updateErr)
 			}
 		}
 	}
-	// The built-in client is resolved only after the password verifies: a wrong
-	// password is exactly the pattern an endpoint is hammered with, and probing
-	// it must not make every attempt hit oauth_clients as well.
+	// The built-in client is resolved only after the password verifies.
 	client, err := s.findInternalClient(ctx)
 	if err != nil {
 		return nil, err
@@ -170,9 +154,8 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		return nil, err
 	}
 	// Build the audit row before the token transaction so a marshal error fails
-	// before any write; the row then rides the same commit as the token pair, so
-	// the session and its audit are atomic at the cost of a single fsync, and no
-	// compensate-on-audit branch is needed.
+	// before any write; the row then rides the same commit as the token pair,
+	// making the session and its audit atomic.
 	var audit *model.AuditLog
 	if s.Audit != nil {
 		audit, err = s.buildAuditEntry(&user.ID, "login", "session", nil, nil, true, 0,
@@ -186,25 +169,23 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	}
 	if s.Failures != nil {
 		if resetErr := s.Failures.Reset(ctx, failureKey); resetErr != nil {
-			// A stale counter can lock this identifier until its 15min window
-			// expires, which is strictly better than revoking a valid session
-			// and refusing every login for as long as Redis is unavailable.
+			// A stale counter can lock this identifier until its 15-minute window
+			// expires, which is better than refusing every login for as long as Redis
+			// is unavailable.
 			slog.WarnContext(ctx, "reset login failures unavailable", "error", resetErr)
 		}
 	}
 	// Device registration happens after every compensable step: the family is
 	// committed and audited by this point, so a failed record write only costs a
-	// WARN and the device shows up on the next login. Registering before the
-	// audit would leave an orphan record for every session the compensate path
-	// revokes.
+	// WARN and the device shows up on the next login.
 	if s.Devices != nil {
 		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}
 		// Eviction revokes the displaced family even when the record write
-		// partially failed: the set already made room, and leaving the old
-		// session live would create an invisible, unmanageable ghost session.
+		// partially failed: leaving the old session live would create an
+		// invisible, unmanageable ghost session.
 		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	}
 	return &LoginResult{
@@ -222,8 +203,8 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	if strings.TrimSpace(input.RefreshToken) == "" {
 		return nil, newError(ErrInvalidInput, "刷新参数无效", nil)
 	}
-	// Unauthenticated and DB-heavy, so it is throttled before any lookup — the
-	// limiter must bound the amplification, not sit behind the work it exists to cap.
+	// Throttled before any lookup: the limiter must bound the amplification, not
+	// sit behind the work it exists to cap.
 	if err := s.checkEndpointLimit(ctx, s.RefreshLimiter, "refresh", strings.TrimSpace(input.ClientIP)); err != nil {
 		return nil, err
 	}
@@ -241,18 +222,17 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	if current.RevokedAt != nil {
 		// Within the grace window this is a benign concurrent refresh (the winning
 		// rotation preserved the family) and must not be cut, or the winning tab
-		// would be logged out. Beyond the window it is a true replay of a
-		// long-dead token: cut the family, which also invalidates the cached
-		// auth-state entries for every sibling token.
+		// would be logged out. Beyond it, a true replay — cut the family, which
+		// also invalidates the cached auth-state entries for every sibling token.
 		if !repository.IsWithinRefreshGrace(*current.RevokedAt, s.now()) {
 			entries, revokeErr := s.Tokens.RevokeFamily(ctx, current.FamilyID, s.now())
 			if revokeErr != nil {
 				return nil, newError(ErrInternal, "撤销被重放的 Refresh Token 家族失败", revokeErr)
 			}
 			s.deliverBlacklist(ctx, entries, s.now())
-			// Replay kills the whole family, and the family is the device record:
-			// without the cleanup the device list keeps showing a session that can
-			// no longer authenticate. Fail-open — the revoke already committed.
+			// Replay kills the whole family, and the family is the device record;
+			// without the cleanup the device list would keep showing a session that
+			// can no longer authenticate. Fail-open — the revoke already committed.
 			if s.Devices != nil {
 				if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
 					slog.WarnContext(ctx, "remove device on replay revoke failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
@@ -303,36 +283,18 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		return nil, err
 	}
 	// The refresh proves the device is alive; update last_seen without extending
-	// the device TTL, so an abandoned device ages out instead of being kept
-	// alive by refreshes. A refresh of an already-expired record resurrects it
-	// (it is clearly still in use), which re-enters the per-user cap: the
-	// displaced family is revoked exactly like login eviction. Fail-open: the
-	// rotated pair is already committed.
+	// the device TTL, so an abandoned device ages out. A refresh of an expired
+	// record resurrects it, which re-enters the per-user cap and evicts exactly
+	// like a login. Fail-open: the rotated pair is already committed.
 	//
-	// The touch runs BEFORE the rotation commit: a terminating path (logout of
+	// The touch runs before the rotation commit so a terminating path (logout of
 	// the device, replay revoke, password change) that interleaves with this
-	// refresh always removes the record after the touch, so it can never be
-	// resurrected with a fresh TTL by a refresh whose family was just revoked.
-	// Running it after the commit would open exactly that window — the
-	// resurrect branch re-registers the record and the terminated session stays
-	// visible (and occupying a cap slot) until a manual delete or the TTL.
-	//
-	// The touch's eviction side-effect is deferred until AFTER the rotation
-	// commits, though: revoking the displaced family is the "最多 5 台" cap
-	// enforcement, and it must only fire for a refresh that actually landed. A
-	// refresh whose family was revoked between the pre-checks above and the
-	// rotate (a concurrent logout or eviction) still resurrects and evicts
-	// through the touch — the resurrect branch cannot know the family is doomed —
-	// but revoking a different, healthy device's family as collateral for a
-	// rotation that then fails would log the user out of a session they never
-	// touched. Deferring the revoke makes a doomed refresh non-destructive.
-	//
-	// The residual cost of deferral: the touch already removed the displaced
-	// device's record from the set, and skipping the family revoke leaves that
-	// device briefly invisible in the list while its session stays live — a
-	// ghost that reappears on its own next refresh (the resurrect branch
-	// re-registers it). Acceptable: strictly better than logging the user out
-	// of a device they never touched, and it self-heals.
+	// refresh always removes the record after the touch — the refresh can never
+	// resurrect a family that was just revoked. Its eviction side-effect runs
+	// after the commit, so a doomed refresh never revokes a healthy device's
+	// family as collateral; the residual cost is a self-healing ghost (the
+	// displaced record is dropped while its session still lives), which is better
+	// than logging the user out of a device they never touched.
 	var evicted string
 	if s.Devices != nil {
 		evicted, err = s.Devices.TouchDevice(ctx, current.UserID, current.FamilyID, input.UserAgent, input.ClientIP, s.now())
@@ -340,10 +302,9 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			slog.WarnContext(ctx, "touch device failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", err)
 		}
 	}
-	// The success audit rides the rotation transaction, so the refresh waits on
-	// one fsync instead of two. A build failure (practically unreachable — the
-	// detail map is constant) logs and drops the success row; there is no
-	// synchronous fallback.
+	// The success audit rides the rotation transaction, committing with the
+	// rotation. A build failure (practically unreachable — the detail map is
+	// constant) logs and drops the success row.
 	var audit *model.AuditLog
 	if s.Audit != nil {
 		audit, err = s.buildAuditEntry(&current.UserID, "refresh", "session", &current.FamilyID, nil, true, 0,
@@ -358,20 +319,18 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			// A benign concurrent refresh: another request in this family already
 			// rotated, and the repository preserved the family. The presented token
 			// is dead, but the device record belongs to the still-live family and
-			// must not be dropped — removing it would leave the winning session
-			// invisible in the device list and free its cap slot.
+			// must not be dropped, or the winning session becomes invisible in the
+			// device list.
 			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeConcurrent, input)
 			return nil, newError(ErrConcurrentRefresh, "刷新请求冲突，请重试", rotateErr)
 		}
 		if errors.Is(rotateErr, repository.ErrTokenReplay) || errors.Is(rotateErr, repository.ErrTokenExpired) || errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) || errors.Is(rotateErr, repository.ErrNotFound) {
 			// RotateRefreshToken already cut the family in its own transaction and
-			// enqueued the blacklist outbox rows. A second RevokeFamily here would
-			// find no live token (the refresh token outlives every access token, so
-			// an expired one means the whole family is dead) and deliver nothing.
-			// ErrNotFound is the same shape — the presented row vanished between the
-			// pre-read and the rotation (a concurrent deletion) — and mapping it to
-			// 500 would tell the caller nothing actionable about a session that is
-			// simply gone.
+			// enqueued the blacklist outbox rows; a second RevokeFamily here would
+			// find no live token (the refresh token outlives every access token) and
+			// deliver nothing. ErrNotFound is the same shape — the row vanished
+			// between pre-read and rotation — and a 500 would tell the caller
+			// nothing actionable.
 			// The repository cut the family; drop the device record so the list
 			// stops showing a session that can no longer authenticate.
 			if s.Devices != nil {
@@ -385,7 +344,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		return nil, newError(ErrInternal, "轮换 Refresh Token 失败", rotateErr)
 	}
 	// The rotation committed: the refresh is real, so the touch's displaced
-	// device (if any) must be evicted exactly like a login eviction. revokeEvictedDevice
+	// device (if any) must be evicted exactly like a login eviction; revokeEvictedDevice
 	// no-ops on an empty ID (a live-record touch that evicted nothing).
 	s.revokeEvictedDevice(ctx, current.UserID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	return &RefreshResult{
@@ -415,23 +374,19 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 	}
 	now := s.now()
 	// A revoked access token is a dead session — the handler maps this to an
-	// idempotent success. An *expired* one is not dead in the family sense: it
-	// still names a live refresh family, and logout is family-wide revocation, so
-	// a stale tab whose 1h access token ran out must still revoke the family its
-	// refresh tokens outlive. This mirrors oauth.familyByAccessJTI, which likewise
-	// revokes an expired access token's family rather than treating expiry as
-	// "nothing to revoke".
+	// idempotent success. An *expired* one still names a live refresh family, and
+	// logout is family-wide revocation, so a stale tab whose 1h access token ran
+	// out must still revoke the family its refresh tokens outlive.
 	if access.RevokedAt != nil {
 		return nil, newError(ErrInvalidToken, "会话已失效", nil)
 	}
 	// The family to revoke is the authenticated session's own — the access
 	// token's family. The body/cookie refresh token is deliberately not required
-	// to match: in the stale-tab case (the cookie carries a newer login's
-	// family) requiring a match made logout report "已登出" without revoking
-	// anything.
+	// to match: in the stale-tab case the cookie may carry a newer login's
+	// family.
 	if access.FamilyID == nil {
 		// An internal session always carries a family; a missing one is a server
-		// anomaly, not a successful logout — surface it rather than lie.
+		// anomaly, not a successful logout.
 		return nil, newError(ErrInternal, "Access Token 无会话家族", nil)
 	}
 	familyID := *access.FamilyID
@@ -458,8 +413,6 @@ func (s Service) Profile(ctx context.Context, input ProfileInput) (*ProfileResul
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidInput, "用户资料参数无效", nil)
 	}
-	// Two-query profile load (user+profile JOIN + lean identities) instead of
-	// FindByID's three.
 	user, err := s.Users.FindProfileByID(ctx, input.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return nil, newError(ErrInvalidToken, "用户资料身份主体无效", nil)
@@ -524,8 +477,8 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 		return nil, newError(ErrInternal, "生成 Register-Ticket 失败", err)
 	}
 	if err := s.RegisterTicket.SaveRegisterTicket(ctx, ticket, email, verificationTTL); err != nil {
-		// The code already matched and was consumed; without a ticket the user has
-		// to restart, so make sure the spent code cannot be reused either.
+		// The code already matched and was consumed; without a ticket the user must
+		// restart, so the spent code must not be reusable.
 		s.discardCode(ctx, purpose, email)
 		return nil, newError(ErrDependencyUnavailable, "保存 Register-Ticket 失败", err)
 	}
@@ -535,14 +488,14 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 	return &VerifyRegisterCodeResult{RegisterTicket: ticket, Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
 }
 
-// resolveRegistrationIdentity consumes a parked OAuth identity and enforces PRD
-// §4.5's double binding.
+// resolveRegistrationIdentity consumes a parked OAuth identity and enforces the
+// registration_state/oauth_state double binding.
 //
-// The stored oauth_state must equal the one the caller submitted. That is the
-// whole point of the pair: a leaked registration_state is not enough, because the
-// attacker would also need the state value the victim's browser carried through
-// the redirect chain. A mismatch is reported the same way as a missing state so
-// the caller cannot tell which half was wrong.
+// The stored oauth_state must equal the one the caller submitted: a leaked
+// registration_state alone is not enough, because the attacker would also need the
+// state value the victim's browser carried through the redirect chain. A mismatch
+// is reported the same way as a missing state so the caller cannot tell which half
+// was wrong.
 func (s Service) resolveRegistrationIdentity(
 	ctx context.Context,
 	registrationState string,
@@ -560,18 +513,15 @@ func (s Service) resolveRegistrationIdentity(
 	if !found {
 		return nil, newError(ErrInvalidInput, "registration_state 无效或已过期", nil)
 	}
-	// A stored state must be non-empty before it is compared. Two empty strings
-	// compare equal, so a payload written without one would satisfy the pairing
-	// against an empty submitted value and turn the double binding off. Callers
-	// currently reject that shape before reaching here and the callback never
-	// stores an empty state, but neither guarantee belongs to this function, and
-	// the failure mode is silent.
+	// A stored state must be non-empty before comparison: two empty strings
+	// compare equal and would turn the double binding off. Callers reject that
+	// shape today, but neither guarantee belongs to this function and the failure
+	// mode is silent.
 	if payload.OAuthState == "" || payload.ProviderID == "" || payload.Provider == "" {
 		return nil, newError(ErrInvalidInput, "registration_state 内容不完整", nil)
 	}
-	// Constant-time comparison is unnecessary here: both values are already
-	// known to the caller, and the timing of a string compare reveals nothing
-	// they did not submit.
+	// Constant-time comparison is unnecessary: both values are already known to
+	// the caller, so the timing reveals nothing they did not submit.
 	if payload.OAuthState != oauthState {
 		return nil, newError(ErrInvalidInput, "registration_state 与 oauth_state 不匹配", nil)
 	}
@@ -596,9 +546,9 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if ticket == "" {
 		return nil, newError(ErrRegisterTicketInvalid, "Register-Ticket 不能为空", nil)
 	}
-	// The third-party OAuth branch needs both halves of PRD §4.5's double
-	// binding. Shape is checked before the ticket is read so a malformed request
-	// does not burn the one-time ticket.
+	// The third-party OAuth branch needs both halves of the double binding.
+	// Shape is checked before the ticket is read so a malformed request does not
+	// burn the one-time ticket.
 	registrationState := strings.TrimSpace(input.RegistrationState)
 	oauthState := strings.TrimSpace(input.OAuthState)
 	if (registrationState == "") != (oauthState == "") {
@@ -623,9 +573,8 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
 	}
 
-	// Read the ticket first and only spend it once every rejectable condition has
-	// been checked: a recoverable error such as an occupied student ID must not
-	// cost the user their one-time ticket and force a new send-code round trip.
+	// Read the ticket without spending it until every rejectable condition has
+	// passed: an occupied student ID must not cost the user their one-time ticket.
 	email, found, err := s.RegisterTicket.PeekRegisterTicket(ctx, ticket)
 	if err != nil {
 		return nil, newError(ErrDependencyUnavailable, "读取 Register-Ticket 失败", err)
@@ -652,26 +601,19 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return nil, newError(ErrStudentIDOccupied, "学号已被占用", nil)
 	}
 
-	// Throttled here rather than at the top of the function: the cap exists to
-	// bound argon2id derivations, and this is the last point before the flow starts
-	// spending things. Every rejection above — a short password, a bad college, an
-	// occupied student ID — costs nothing to produce, so charging quota for it
-	// would let a user lock themselves out by mistyping their own form. It still
-	// precedes the registration_state consumption below, so a throttled call
-	// spends neither one-time credential.
-	//
-	// The subject is the Register-Ticket, not the caller IP. The ticket is one
-	// verified email address, which is what the derivation cost should be metered
-	// against; an IP key would put an entire campus NAT behind a single counter.
+	// Throttled here, the last point before the flow starts spending credentials:
+	// rejections above cost nothing, so charging quota for them would let a user
+	// lock themselves out by mistyping. The subject is the Register-Ticket, not the
+	// caller IP — an IP key would put an entire campus NAT behind a single counter.
 	if err = s.checkEndpointLimit(ctx, s.RegisterLimiter, "register", "ticket:"+ticket); err != nil {
 		return nil, err
 	}
 
 	// The parked OAuth identity is resolved last among the rejectable checks, so
 	// an email or student-ID clash does not consume the one-time
-	// registration_state. Once consumed it is gone even on a later failure: the
-	// pair was presented, and leaving it live would let a leaked
-	// registration_state be retried against other OAuth states.
+	// registration_state. Once consumed it is gone even on a later failure:
+	// leaving it live would let a leaked registration_state be retried against
+	// other OAuth states.
 	var oauthIdentity *model.Identity
 	if registrationState != "" {
 		oauthIdentity, err = s.resolveRegistrationIdentity(ctx, registrationState, oauthState)
@@ -704,12 +646,10 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	}
 	var pair *issuedPair
 
-	// Account, profile and initial session share one PostgreSQL transaction. The
-	// pair is built after INSERT assigns user.ID; any signing or token persistence
-	// failure rolls the account back and leaves the Register-Ticket retryable.
-	// The account, its profile, the optional third-party binding and the initial
-	// session all commit together, so registering through GitHub or Lark cannot
-	// leave an account whose binding failed to persist.
+	// Account, profile, optional third-party binding and initial session share one
+	// PostgreSQL transaction: the pair is built after INSERT assigns user.ID, and
+	// any signing or token persistence failure rolls the account back and leaves
+	// the Register-Ticket retryable.
 	if createErr := s.Users.CreateRegistrationWithIdentity(ctx, user, profile, oauthIdentity, func(created *model.User) (*model.OAuthAccessToken, *model.OAuthRefreshToken, error) {
 		issued, issueErr := s.issuePair(created, client, 0, "", sessionScopes)
 		if issueErr != nil {
@@ -719,38 +659,35 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return issued.access, issued.refresh, nil
 	}); createErr != nil {
 		// A unique violation here means the pre-flight checks raced a concurrent
-		// registration. The table has two unique constraints, so dispatch on the
-		// constraint name: reporting "邮箱已被注册" for a student-ID clash points the
-		// user at the wrong field.
+		// registration; dispatch on the constraint name so the reply points at the
+		// right field.
 		switch constraint := duplicateConstraint(createErr); constraint {
 		case userStudentIDConstraint:
 			return nil, newError(ErrStudentIDOccupied, "学号已被占用", createErr)
 		case userLoginEmailConstraint, userLoginEmailIsIdentityConstraint:
-			// The second name comes from V005: the address is already bound as
-			// someone's other_mail identity. From the registrant's side that is the
-			// same outcome as a taken login email, and saying more would reveal that
-			// another account has it bound.
+			// The second name comes from V005: the address is already bound as someone's
+			// other_mail identity. It is the same outcome as a taken login email, and
+			// saying more would reveal that another account holds it.
 			return nil, newError(ErrEmailAlreadyRegistered, "邮箱已被注册", createErr)
 		case identityProviderConstraint:
-			// The OAuth callback saw this provider account unbound, but up to 15
-			// minutes pass before registration completes, and someone else can
-			// bind it in that window. Naming the real cause matters: the
-			// registrant's own fields are all fine, and the generic conflict
-			// message would send them hunting through their email and student ID.
+			// The OAuth callback saw this provider account unbound, but someone else can
+			// bind it in the ~15-minute registration window. Naming the cause matters:
+			// the registrant's own fields are fine, and a generic conflict would send
+			// them hunting.
 			return nil, newError(ErrIdentityOccupied, "该第三方账号已被其他用户绑定", createErr)
 		case "":
 		default:
-			// An unmapped unique constraint. Report a generic conflict rather than
-			// guessing a field, and log the name so the mapping can be added.
+			// An unmapped unique constraint; report a generic conflict and log the name
+			// so the mapping can be added.
 			slog.ErrorContext(ctx, "unmapped unique violation on register", "constraint", constraint)
 			return nil, newError(ErrConflict, "注册信息与现有账号冲突", createErr)
 		}
 		return nil, newError(ErrInternal, "创建用户失败", createErr)
 	}
 
-	// The account exists, so the ticket has served its purpose. A failure here
-	// leaves a live ticket whose email is already registered; the next attempt is
-	// rejected by the email-exists check, so it cannot create a second account.
+	// The account exists, so the ticket has served its purpose; a failure leaves a
+	// live ticket whose email is already registered, and the email-exists check
+	// blocks a second account.
 	if consumeErr := s.RegisterTicket.ConsumeRegisterTicket(ctx, ticket); consumeErr != nil {
 		slog.WarnContext(ctx, "consume register ticket after account creation", "user_id", user.ID, "error", consumeErr)
 	}
@@ -758,8 +695,8 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if auditErr := s.audit(ctx, &user.ID, "register", "session", nil, nil, true, 0, input.ClientIP, input.UserAgent, map[string]any{"login_email": email}); auditErr != nil {
 		slog.Error("audit register", "user_id", user.ID, "error", auditErr)
 	}
-	// Registration is the user's first login, so the initial session registers
-	// as a device exactly like a password login. Fail-open: the account and its
+	// Registration is the user's first login, so the initial session registers as
+	// a device exactly like a password login. Fail-open: the account and its
 	// session already committed.
 	if s.Devices != nil {
 		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
@@ -768,10 +705,9 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		}
 		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	}
-	// The registration transaction inserts user, profile and any third-party
-	// binding but does not reload them, so the in-memory user still has an empty
-	// Profile and Identities — which would make this response disagree with a
-	// Login response for the same account. Read the aggregate back.
+	// The registration transaction does not reload the aggregate, so the in-memory
+	// user has empty Profile and Identities — which would disagree with a Login
+	// response. Read the aggregate back.
 	reloaded, reloadErr := s.Users.FindByID(ctx, user.ID)
 	if reloadErr != nil {
 		slog.ErrorContext(ctx, "reload registered user", "user_id", user.ID, "error", reloadErr)
@@ -820,7 +756,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
 	// Validate everything possible before consuming the one-time code, so a
-	// rejected request does not force the user to request a fresh code.
+	// rejected request does not force a fresh code.
 	if len(input.Password) < 8 {
 		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
 	}
@@ -835,13 +771,13 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 		return nil, newError(ErrInternal, "查询账号失败", err)
 	}
 	if user.State == model.UserStateDeleted {
-		// A deleted account may still resolve through a bound other_mail identity.
-		// Reject it here, matching the login path's behavior for closed accounts.
+		// A deleted account may still resolve through a bound other_mail identity;
+		// reject it here, matching the login path's behavior for closed accounts.
 		return nil, newError(ErrUserDeleted, "用户已注销", nil)
 	}
 	// Distinguish "differs from the old password" from "could not check": a
-	// cancelled verification returns non-nil too, which would otherwise be read as
-	// a successful difference check.
+	// cancelled verification returns non-nil too, which would otherwise read as a
+	// successful difference check.
 	switch sameErr := s.Passwords.VerifyPassword(ctx, input.Password, user.PasswordHash); {
 	case sameErr == nil:
 		return nil, newError(ErrPasswordUnchanged, "新密码不能与旧密码相同", nil)
@@ -855,7 +791,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	now := s.now()
 	// The password rewrite and the session revocation share one transaction:
 	// reporting success while live refresh tokens survive would contradict the
-	// "请重新登录" contract, so a revocation failure must fail the whole call.
+	// "请重新登录" contract, so a revocation failure fails the whole call.
 	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now)
 	if err != nil {
 		return nil, newError(ErrInternal, "重置密码并撤销会话失败", err)
@@ -863,7 +799,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	s.deliverBlacklist(ctx, entries, now)
 	s.clearLoginFailures(ctx, user, email)
 	// Same device cleanup as ChangePassword: reset revokes every session, so the
-	// device set must not survive it.
+	// device set must not survive.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
 			slog.WarnContext(ctx, "remove all devices on password reset failed", "user_id", user.ID, "error", err)
@@ -920,9 +856,9 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	}
 	s.deliverBlacklist(ctx, entries, now)
 	s.clearLoginFailures(ctx, user, user.LoginEmail)
-	// Every session of the user was just revoked, so the device set must die
-	// with it (PRD §6.1: 设备记录清除). Fail-open: the revocation is durable in
-	// PostgreSQL and a leftover device record cannot authenticate anything.
+	// Every session of the user was just revoked, so the device set must die with
+	// it. Fail-open: the revocation is durable in PostgreSQL and a leftover device
+	// record cannot authenticate anything.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
 			slog.WarnContext(ctx, "remove all devices on password change failed", "user_id", user.ID, "error", err)
@@ -950,9 +886,8 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	}
 	if _, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, email); findErr == nil {
 		// The conflict response must not reveal who owns the address: a distinct
-		// "already bound to you" error lets any authenticated caller enumerate
-		// other users' bindings. Every occupied email gets the same reply; the
-		// caller refreshes their own binding list through GET /user/profile.
+		// "already bound to you" error would let any authenticated caller enumerate
+		// other users' bindings, so every occupied email gets the same reply.
 		return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", nil)
 	} else if !errors.Is(findErr, repository.ErrNotFound) {
 		return nil, newError(ErrInternal, "查询第三方绑定记录失败", findErr)
@@ -1003,7 +938,7 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	}
 	// Read the ticket without consuming it: a wrong verification code must not
 	// cost the user their Bind-Ticket, or every typo forces a fresh send-code
-	// round trip. The ticket is consumed only once the binding is about to happen.
+	// round trip.
 	payload, found, err := s.BindTicket.PeekBindTicket(ctx, ticket)
 	if err != nil {
 		return nil, newError(ErrDependencyUnavailable, "读取 Bind-Ticket 失败", err)
@@ -1018,9 +953,9 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	if verifyErr := s.verifyCode(ctx, purpose, payload.Email, input.Code); verifyErr != nil {
 		return nil, verifyErr
 	}
-	// The code matched, so the ticket has served its purpose. Consuming it here
-	// also serializes concurrent requests replaying the same ticket: only the
-	// caller that removes the key proceeds to insert the identity.
+	// The code matched, so the ticket has served its purpose; consuming it also
+	// serializes concurrent requests replaying the same ticket — only the caller
+	// that removes the key proceeds.
 	consumed, err := s.BindTicket.ConsumeBindTicket(ctx, ticket)
 	if err != nil {
 		s.discardCode(ctx, purpose, payload.Email)
@@ -1049,9 +984,9 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 		if errors.Is(err, repository.ErrLimitExceeded) {
 			return nil, newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
 		}
-		// Covers both the identities unique index and the V005 trigger that rejects
-		// an address already serving as somebody's login email. The reply stays
-		// deliberately vague about which one it was, and about who holds it.
+		// Covers both the identities unique index and the V005 trigger rejecting an
+		// address already serving as a login email; the reply stays deliberately vague
+		// about which and whose.
 		if isDuplicateError(err) {
 			return nil, newError(ErrIdentityOccupied, "该邮箱已被绑定或占用", err)
 		}
@@ -1066,21 +1001,20 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	}, nil
 }
 
-// checkEndpointLimit throttles one endpoint against one subject. The limiter is a
-// parameter because each endpoint carries its own quota on its own instance; the
-// endpoint name only scopes the Redis key.
+// checkEndpointLimit throttles one endpoint against one subject; the limiter is a
+// parameter because each endpoint carries its own quota, and the endpoint name
+// only scopes the Redis key.
 func (s Service) checkEndpointLimit(ctx context.Context, limiter EndpointLimiter, endpoint, subject string) error {
-	// An empty subject (a request without a usable client IP) has nothing to key
-	// the window on; the Redis limiter rejects it, which this helper would
-	// otherwise read as "limiter unavailable" and log a WARN per request.
+	// An empty subject has nothing to key the window on; skip rather than let the
+	// Redis limiter read as "unavailable" and WARN per request.
 	if limiter == nil || strings.TrimSpace(subject) == "" {
 		return nil
 	}
 	result, err := limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
-		// Redis-backed throttling has no durable fallback. Rejecting every
-		// request would take the endpoint down entirely, so allow the call and
-		// rely on argon2id cost plus alerting during the outage.
+		// Redis-backed throttling has no durable fallback: rejecting every request
+		// would take the endpoint down entirely, so allow the call and rely on
+		// argon2id cost plus alerting during the outage.
 		slog.WarnContext(ctx, "endpoint limiter unavailable, allowing request", "endpoint", endpoint, "error", err)
 		return nil
 	}
@@ -1092,10 +1026,9 @@ func (s Service) checkEndpointLimit(ctx context.Context, limiter EndpointLimiter
 
 // checkEmailLimit throttles verification-code sending on two independent
 // dimensions: the target email (stops repeated mail to one inbox) and the
-// caller IP (stops one attacker fanning out across many addresses to drain
-// SMTP quota). Limiter outages fail open per the Redis degradation policy
-// (PRD §6.0): the flow still fails closed at the Redis code store when Redis
-// is fully down, so degradation only matters for transient limiter errors.
+// caller IP (stops fanning out across many addresses). Limiter outages fail
+// open; the flow still fails closed at the Redis code store when Redis is fully
+// down.
 func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) error {
 	if s.EmailLimiter != nil {
 		result, err := s.EmailLimiter.Allow(ctx, "send_email", "email:"+email)
@@ -1135,17 +1068,16 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 		return
 	}
 	if err := s.Blacklist.DeleteAuthStates(ctx, jtis); err != nil {
-		// The same-transaction outbox row guarantees a worker retry, so a
-		// failed synchronous delivery is expected degradation, not an error.
+		// The same-transaction outbox row guarantees a worker retry, so a failed
+		// synchronous delivery is expected degradation, not an error.
 		slog.WarnContext(ctx, "deliver auth-state invalidation, outbox worker will retry", "count", len(jtis), "error", err)
 	}
 }
 
 // verifyCode checks a submitted email code. The store keeps the code alive
-// through a bounded number of wrong guesses, so a mistyped digit no longer burns
-// it — a wrong guess used to delete the valid code, which let anyone who knew an
-// address invalidate its code at will. Once the budget is spent the store drops
-// the code and the caller sees the expired outcome.
+// through a bounded number of wrong guesses — a mistyped digit must not burn it,
+// because deleting on a wrong guess would let anyone who knows an address
+// invalidate its code at will. Once the budget is spent the store drops the code.
 func (s Service) verifyCode(ctx context.Context, purpose, email, code string) error {
 	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, email, code)
 	if err != nil {
@@ -1160,9 +1092,9 @@ func (s Service) verifyCode(ctx context.Context, purpose, email, code string) er
 	return newError(ErrVerificationCodeWrong, "验证码错误", nil)
 }
 
-// hashError classifies a password-derivation failure. Hashing queues behind a
-// concurrency gate, so a cancelled caller gets ctx.Err() rather than a genuine
-// fault; reporting that as a 500 would blame the server for a client that left.
+// hashError classifies a password-derivation failure; a cancelled caller gets
+// ctx.Err() rather than a genuine fault, so a 500 would blame the server for a
+// client that left.
 func (s Service) hashError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return newError(ErrDependencyUnavailable, "密码哈希计算被中断", err)
@@ -1179,10 +1111,9 @@ func (s Service) discardCode(ctx context.Context, purpose, email string) {
 }
 
 // clearLoginFailures releases the lockout after a successful password reset or
-// change. Login records failures under "user:<id>" once the account is known and
-// under "identifier:<email>" before that, so both keys must be cleared or a
-// locked-out user stays locked for the rest of the window — defeating the very
-// recovery path they just completed. Failures are logged, not returned: the
+// change. Failures are keyed by user ID once the account is known and by
+// identifier before that, so both keys must be cleared or a locked-out user stays
+// locked for the rest of the window. Reset failures are logged, not returned: the
 // password is already changed, and a stale counter expires on its own.
 func (s Service) clearLoginFailures(ctx context.Context, user *model.User, email string) {
 	if s.Failures == nil || user == nil {
@@ -1237,43 +1168,38 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 	return newError(sentinel, message, cause)
 }
 
-// Refresh audit outcomes. These name why a rotation ended, which the action and
-// error code alone cannot: every failure carries the same invalid-token code, and
-// only some of them mean an attack.
+// Refresh audit outcomes, naming why a rotation ended: the action and error code
+// alone cannot — every failure carries the same invalid-token code and only some
+// mean an attack.
 const (
 	// refreshOutcomeRotated is a successful rotation.
 	refreshOutcomeRotated = "rotated"
-	// refreshOutcomeReplayed is a presented token that was already revoked or
-	// rotated. This is the replay defense firing, and it revoked the whole
-	// family — the one outcome here that needs to be searchable on its own.
+	// refreshOutcomeReplayed is a presented token already revoked or rotated — the
+	// replay defense firing, which revoked the whole family.
 	refreshOutcomeReplayed = "refresh_replayed"
 	// refreshOutcomeConcurrent is a presented token already rotated by a sibling
-	// request within the 30s grace window. The family is preserved, so this is a
-	// benign multi-tab cold-start, not a replay — audited separately with the
-	// concurrent-refresh code so reviewers are not misled into treating routine
-	// tab races as replay attacks.
+	// request within the 30s grace window — a benign multi-tab cold-start, not a
+	// replay, audited separately so reviewers are not misled into treating tab
+	// races as replay attacks.
 	refreshOutcomeConcurrent = "concurrent_refresh"
-	// refreshOutcomeExpired is a token that aged out. Benign on its own, but it
-	// has to be in the log for refresh_replayed to be meaningful: without the
-	// mundane outcomes recorded, a replay row cannot be told apart from the
-	// failures nobody wrote down.
+	// refreshOutcomeExpired is a token that aged out — benign on its own, but it
+	// must be recorded for refresh_replayed to be meaningful: without the mundane
+	// outcomes, a replay row cannot be told apart from unrecorded failures.
 	refreshOutcomeExpired = "expired"
-	// refreshOutcomeClientMismatch is a token presented against a client other
-	// than the one it was issued to. Not reachable through the first-party flow,
-	// so it means either a misrouted client or a token being probed.
+	// refreshOutcomeClientMismatch is a token presented against a client other than
+	// the one it was issued to; not reachable through the first-party flow, so it
+	// means a misrouted client or a probed token.
 	refreshOutcomeClientMismatch = "client_mismatch"
 )
 
-// auditRefresh records a refresh rotation outcome. Failures mean the token
-// family was revoked as a replay defense, so they carry the invalid-token code;
-// the audit itself is fail-open like every other audit call in this service.
+// auditRefresh records a refresh rotation outcome. Failures carry the
+// invalid-token code because the family was revoked as a replay defense; the
+// audit itself is fail-open like every other audit call in this service.
 //
-// The outcome is recorded because the action and error code alone do not say why
-// a rotation failed: every failed row carries the same invalid-token code, and
-// the name is what separates a replay — a leaked token, family cut in response —
-// from an ordinary rejection. True replays share the oauth service's
-// refresh_replayed name and the benign in-grace variant shares concurrent_refresh,
-// so a reviewer can filter both token paths with one query.
+// The outcome separates a replay — a leaked token, family cut in response — from
+// an ordinary rejection, since every failed row carries the same invalid-token
+// code. The names match the oauth service's refresh_replayed and
+// concurrent_refresh so a reviewer can filter both token paths with one query.
 func (s Service) auditRefresh(
 	ctx context.Context,
 	userID int64,
@@ -1286,8 +1212,8 @@ func (s Service) auditRefresh(
 	if !success {
 		errCode = errcode.CodeAccessTokenInvalid
 		if outcome == refreshOutcomeConcurrent {
-			// A benign concurrent refresh keeps the family; the audit code should
-			// match the 40108 the client actually sees, not the replay code.
+			// A benign concurrent refresh keeps the family; the audit code should match
+			// the 40108 the client sees, not the replay code.
 			errCode = errcode.CodeConcurrentRefresh
 		}
 	}
@@ -1303,8 +1229,7 @@ func (s Service) findInternalClient(ctx context.Context) (*model.OAuthClient, er
 		return nil, newError(ErrInternal, "内置 OAuth 客户端未配置", nil)
 	}
 	// The internal client is immutable and startup-validated, so the repository
-	// serves it from a process-local cache after the first load — no DB round trip
-	// per login/refresh.
+	// serves it from a process-local cache after the first load.
 	client, err := s.Clients.FindActiveInternalClient(ctx, clientID)
 	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
 		return nil, newError(ErrInternal, "内置 OAuth 客户端不可用", err)

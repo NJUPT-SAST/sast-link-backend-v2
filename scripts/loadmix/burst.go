@@ -33,14 +33,14 @@ func cmdBurst(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*dur)*time.Second)
 	defer cancel()
 
-	// Readers and login workers must not share accounts. Both loops used to index
-	// the pool from 0, so reader i and login worker i drove the same user: the
-	// login worker's back-to-back logins fill that account's 5-device cap, and
-	// every login past it evicts the oldest family — which is the one the reader
-	// holds. The reader then gets a 401 and re-logins, so the run reports
-	// hundreds of "errors" that are the harness competing with itself and a read
-	// p99 inflated by re-login latency rather than by KDF contention, which is
-	// the whole point of the measurement.
+	// Readers and login workers must not share accounts: index both loops from
+	// 0 and reader i and login worker i drive the same user — the login
+	// worker's back-to-back logins fill that account's 5-device cap, and every
+	// login past it evicts the oldest family, the one the reader holds. The
+	// reader then gets a 401 and re-logins, so the run reports hundreds of
+	// "errors" that are the harness competing with itself and a read p99
+	// inflated by re-login latency rather than by KDF contention, which is the
+	// whole point of the measurement.
 	//
 	// Give the logins a disjoint window of the pool. Overlap is unavoidable once
 	// the two counts exceed the pool, so warn instead of silently measuring the

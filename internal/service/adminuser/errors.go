@@ -1,12 +1,8 @@
 // Package adminuser implements the administrative user-management and audit-log
 // use cases without HTTP concerns.
 //
-// Kept separate from package adminclient even though both serve the admin
-// console: that package's audit resource, not-found code and 404 message are all
-// fixed to OAuth clients, so folding user management in would mean parameterizing
-// each of them and letting two unrelated 404 semantics share one mapping. The
-// dependency sets do not overlap either — this service needs the user and token
-// repositories and none of the client-secret machinery.
+// Kept separate from package adminclient: that package's audit resource and 404
+// semantics are fixed to OAuth clients, and the dependency sets do not overlap.
 package adminuser
 
 import (
@@ -86,21 +82,14 @@ var (
 	ErrInternal          = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 )
 
-// newError builds a typed error carrying sentinel's Kind and Code.
-//
-// The message is always a literal at the call site and never interpolates caller
-// input: descriptions reach the client verbatim, so echoing a submitted value
-// back would make this a reflection point. The cause travels in Err for the logs.
+// newError builds a typed error carrying sentinel's Kind and Code. The message is a
+// literal at the call site, never caller input; the cause travels in Err for the logs.
 func newError(sentinel *Error, message string, cause error) error {
 	return &Error{Kind: sentinel.Kind, Code: sentinel.Code, Message: message, Err: cause}
 }
 
-// internalError builds a KindInternal error and logs the cause.
-//
-// The client is deliberately told nothing beyond a generic message, so unless the
-// cause is logged here it is discarded entirely: the HTTP layer replaces it, the
-// request logger records only the status, and a repeatedly failing admin write leaves
-// nothing to diagnose from.
+// internalError builds a KindInternal error and logs the cause, which would
+// otherwise be discarded entirely: the client gets only a generic message.
 func internalError(ctx context.Context, operation, message string, cause error) error {
 	slog.ErrorContext(ctx, operation, "error", cause)
 	return newError(ErrInternal, message, cause)

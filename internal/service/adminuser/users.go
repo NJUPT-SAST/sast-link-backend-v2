@@ -11,19 +11,14 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
-// ListUsers returns a filtered page of accounts.
-//
-// A read, so nothing is audited: PRD §4.13 lists only write operations, matching
-// adminclient.ListClients. Soft-deleted accounts are included — the console needs
-// to find one in order to restore it.
+// ListUsers returns a filtered page of accounts; reads are not audited, and
+// soft-deleted accounts are included so the console can restore them.
 func (s Service) ListUsers(ctx context.Context, input ListUsersInput) (*ListUsersResult, error) {
 	if s.Users == nil {
 		return nil, newError(ErrInternal, "用户仓储未配置", nil)
 	}
-	// The keyword becomes three unindexable ILIKE predicates plus a matching COUNT(*)
-	// over the table, so an unbounded one lets any reader make the database do
-	// arbitrary work per request. Nothing here is rate limited. The bound is the widest
-	// column it is matched against; anything longer cannot match a stored value.
+	// An unbounded keyword becomes unindexable ILIKE predicates over the whole
+	// table, so it is capped at the widest matched column.
 	if !validate.WithinLength(input.Keyword, validate.MaxNameLength) {
 		return nil, newError(ErrInvalidInput, fieldTooLongMessage("keyword"), nil)
 	}
@@ -90,19 +85,10 @@ func (s Service) GetUser(ctx context.Context, userID int64) (*UserDetail, error)
 	return &detail, nil
 }
 
-// UpdateUser applies a partial administrative edit.
-//
-// Two guards beyond field validation, neither of which the written contract
-// specifies:
-//
-// An administrator cannot change their own role. Self-demotion is unrecoverable
-// through this API — the endpoint that would undo it is the one just given up —
-// so it needs a second administrator or direct database access to fix.
-//
-// The last active administrator cannot be demoted. That check is a count over
-// other rows, so it lives in the repository transaction where it can be
-// serialized; doing it here would let two concurrent demotions both observe a
-// safe count.
+// UpdateUser applies a partial administrative edit with two extra guards: an
+// administrator cannot change their own role (self-demotion is unrecoverable), and
+// the last active administrator cannot be demoted — a count over other rows, so the
+// repository serializes it inside its transaction to stop concurrent demotions.
 func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*UpdateUserResult, error) {
 	if s.Users == nil {
 		return nil, newError(ErrInternal, "用户仓储未配置", nil)
@@ -126,21 +112,17 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		s.auditUpdate(ctx, input, false, errorCode(err), nil)
 		return nil, err
 	}
-	// A closed account is edited by restoring it first. UpdateAdminUser excludes
-	// them in SQL as well; checking here is what turns that into a 422 explaining
-	// the order rather than a 404 on a user the console can see.
+	// A closed account must be restored before editing; checking here turns the SQL
+	// exclusion into a 422 explaining the order.
 	if current.State == model.UserStateDeleted {
 		closedErr := newError(ErrStateConflict, "用户已注销，请先恢复后再编辑", nil)
 		s.auditUpdate(ctx, input, false, errorCode(closedErr), nil)
 		return nil, closedErr
 	}
 
-	// Whether this edit is a role change is judged again inside the repository's
-	// transaction, against the locked row. This comparison exists only to decide
-	// whether to refuse the request outright: an administrator editing their own
-	// account may change everything except the role, and that is a fact about the
-	// caller rather than about the stored row, so a stale read cannot weaken it. The
-	// last-admin guard and the session revocation are the repository's to arm.
+	// The role-change test here exists only to refuse self-demotion outright; the
+	// repository re-judges the change against the locked row and arms the last-admin
+	// guard and the session revocation itself.
 	if validated.role != nil && *validated.role != current.Role && input.UserID == input.AdminUserID {
 		selfErr := newError(ErrProtected, "不可修改自己的角色", nil)
 		s.auditUpdate(ctx, input, false, errorCode(selfErr), nil)
@@ -158,52 +140,36 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		Role:        validated.role,
 		State:       validated.state,
 		EmailType:   validated.emailType,
-		// The role is what invalidates a session: an access token carries the role it was
-		// signed with, and although the auth middleware reads the role from the database
-		// on every request, a demoted account's live refresh tokens would otherwise keep
-		// minting tokens for a session the administrator meant to end.
+		// A role change invalidates sessions: a demoted account's live refresh tokens
+		// must not keep minting tokens for a session meant to end.
 	}, s.now())
 	if err != nil {
 		mapped := s.mapWriteError(ctx, err)
-		// No field was applied, so the entry records none. Logging the attempted set on a
-		// rolled-back transaction would read as though the edit had landed.
+		// The write failed, so the audit records no changed fields; a rolled-back
+		// entry reading as landed would be a lie.
 		s.auditUpdate(ctx, input, false, errorCode(mapped), nil)
 		return nil, mapped
 	}
 	s.deliverBlacklist(ctx, entries, s.now())
-	// A role change that revoked sessions also clears the device set: the
-	// user's every session was just cut, and the device list must not keep
-	// showing logins that can no longer authenticate. Fail-open — the revoke
-	// is durable in PostgreSQL and a leftover record expires on its own.
-	//
-	// The gate is the repository's authoritative flag, not len(entries): the
-	// entries only collect still-live access tokens for blacklist delivery, so
-	// a demotion of a user idle for over an hour revokes every refresh token
-	// while returning zero entries.
+	// A role change that revoked sessions also clears the device set, so it stops
+	// showing logins that can no longer authenticate; fail-open, since the revoke is
+	// durable and a leftover record expires on its own. The gate is the repository's
+	// authoritative flag, not len(entries), which only counts still-live access
+	// tokens.
 	if sessionsRevoked && s.Devices != nil {
 		if err := s.Devices.RemoveAllDevices(ctx, input.UserID); err != nil {
 			slog.WarnContext(ctx, "remove all devices on admin update failed", "user_id", input.UserID, "error", err)
 		}
 	}
 	s.auditUpdate(ctx, input, true, 0, validated.changed)
-	// Report what the transaction actually revoked rather than what this layer
-	// predicted: the repository judges the role change against the locked row, so its
-	// answer is the only one that matches what happened. That authoritative flag is
-	// sessionsRevoked, not len(entries) — the entries only collect still-live access
-	// tokens for blacklist delivery, so a demotion of a user idle for over an hour
-	// revokes every refresh token while returning zero entries, and reporting
-	// "no sessions revoked" for that would contradict the device-set cleanup above.
+	// Report the repository's authoritative flag, not this layer's prediction:
+	// sessionsRevoked, not len(entries).
 	return &UpdateUserResult{ChangedFields: validated.changed, RevokedSessions: sessionsRevoked}, nil
 }
 
-// GetUsersByIDs returns the full records of the requested ids, in request
-// order, with duplicates collapsed to their first occurrence.
-//
-// Order preservation is the point of the endpoint: the caller holds a list
-// (mailing-batch targets, grading sheets) and reads the details back aligned
-// with it. A missing id is silently absent rather than an error — SQL does not
-// promise IN-list order and the caller diffs its own list, so an explicit
-// per-id error here would only double the work.
+// GetUsersByIDs returns the full records of the requested ids, in request order,
+// with duplicates collapsed to their first occurrence; a missing id is silently
+// absent rather than an error.
 func (s Service) GetUsersByIDs(ctx context.Context, input GetUsersByIDsInput) ([]UserDetail, error) {
 	if s.Users == nil {
 		return nil, newError(ErrInternal, "用户仓储未配置", nil)
@@ -231,15 +197,10 @@ func (s Service) GetUsersByIDs(ctx context.Context, input GetUsersByIDsInput) ([
 	return details, nil
 }
 
-// UpdateUserRoles applies one role change to every id, independently, and
-// reports each outcome.
-//
-// Deliberately not atomic: the caller needs to retry or alert on the failures
-// (PRD-style batch semantics), and each item already runs its own transaction
-// with its own guards — the self-demotion refusal, the last-admin check against
-// the advisory lock, the closed-account state check, and the session revocation
-// on an actual role change. Reusing UpdateUser per item means the batch cannot
-// bypass a guard the single-user endpoint honors.
+// UpdateUserRoles applies one role change to every id, independently, and reports
+// each outcome. Deliberately not atomic: each item runs its own UpdateUser
+// transaction with its own guards, so the batch cannot bypass a guard the
+// single-user endpoint honors.
 func (s Service) UpdateUserRoles(ctx context.Context, input UpdateUserRolesInput) (*UpdateUserRolesResult, error) {
 	if s.Users == nil {
 		return nil, newError(ErrInternal, "用户仓储未配置", nil)
@@ -271,8 +232,7 @@ func (s Service) UpdateUserRoles(ctx context.Context, input UpdateUserRolesInput
 			results = append(results, result)
 			continue
 		}
-		// A failure carries the reason and no role: the role was not applied, and
-		// echoing it back would read as an outcome.
+		// A failure carries the reason and no role, since the role was not applied.
 		result.Role = ""
 		result.Reason = roleUpdateReason(updateErr)
 		results = append(results, result)
@@ -308,9 +268,8 @@ func (s Service) DeleteUser(ctx context.Context, input TargetUserInput) error {
 	if input.UserID <= 0 {
 		return newError(ErrNotFound, "用户不存在", nil)
 	}
-	// Closing your own account through the admin console locks you out of the very
-	// endpoint that would reopen it, so it is refused for the same reason as
-	// self-demotion.
+	// Closing your own account is refused, like self-demotion: it locks you out of
+	// the very endpoint that would reopen it.
 	if input.UserID == input.AdminUserID {
 		err := newError(ErrProtected, "不可注销自己的账号", nil)
 		s.auditTarget(ctx, input, actionDeleteUser, false, errorCode(err))
@@ -323,9 +282,8 @@ func (s Service) DeleteUser(ctx context.Context, input TargetUserInput) error {
 		return mapped
 	}
 	s.deliverBlacklist(ctx, entries, s.now())
-	// Closing the account cut every session; clear the device records so the
-	// (deleted) user leaves no ghost logins behind. Fail-open — the user is
-	// already gone.
+	// Clear the device records so the closed account leaves no ghost logins behind;
+	// fail-open — the user is already gone.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveAllDevices(ctx, input.UserID); err != nil {
 			slog.WarnContext(ctx, "remove all devices on user delete failed", "user_id", input.UserID, "error", err)
@@ -381,9 +339,8 @@ func (s Service) mapWriteError(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, repository.ErrNotFound):
 		return newError(ErrNotFound, "用户不存在", nil)
-	// The account was closed between this request's read and its write. The row still
-	// exists and the console is displaying it, so this is the same 422 the pre-flight
-	// check reports rather than a 404 on a visible user.
+	// The account was closed between read and write; the row still exists, so it is
+	// the same 422 the pre-flight check reports rather than a 404 on a visible user.
 	case errors.Is(err, repository.ErrStateConflict):
 		return newError(ErrStateConflict, "用户已注销，请先恢复后再编辑", nil)
 	case errors.Is(err, repository.ErrLastAdmin):
@@ -412,16 +369,15 @@ func (s Service) auditUpdate(
 	errCode int,
 	changed []string,
 ) {
-	// Field names only, never their values: a login_email or student_id written into
-	// audit detail outlives the request and is readable by every administrator.
+	// Field names only, never their values, which would outlive the request readable
+	// by every administrator.
 	detail := map[string]any{}
 	if len(changed) > 0 {
 		detail["changed_fields"] = changed
 	}
 	if input.Batch {
-		// The batch role-update endpoint reuses this audit path per item; the marker
-		// tells a mass promotion apart from an individual edit without a second action
-		// name to maintain.
+		// Marks a batch role-update edit, so the log reads a mass promotion apart
+		// from an individual edit.
 		detail["batch"] = true
 	}
 	s.audit(ctx, auditParams{

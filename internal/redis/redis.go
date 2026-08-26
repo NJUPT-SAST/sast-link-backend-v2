@@ -9,11 +9,8 @@ import (
 )
 
 // New returns a go-redis client configured with the provided address, password,
-// and database index. The client is tuned for a 1-core deployment: no retries (a
-// fail-open Redis dependency must not turn a transient blip into a 10ms+ tail
-// that has no effect on the outcome), a small idle pool to keep connections hot
-// across bursts, and explicit short timeouts so a wedged Redis fails the request
-// fast instead of hanging it.
+// and database index, tuned for a 1-core deployment with no retries, a small
+// idle pool, and short timeouts.
 func New(addr, password string, db int) (*redis.Client, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr:         addr,

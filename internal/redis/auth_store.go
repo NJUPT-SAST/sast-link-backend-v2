@@ -104,24 +104,20 @@ func (k Keys) LoginCode(code string) string {
 }
 
 // AuthState returns the per-token auth-state cache key. The middleware stores the
-// DB-authoritative revocation/role state here for a short TTL so authenticated
-// requests can skip the per-request DB query; revocation paths write a tombstone
-// (not a delete) so a stale refill cannot re-seed a revoked token's cache.
+// DB-authoritative revocation/role state here under a short TTL, and revocation
+// paths write a tombstone so a stale refill cannot re-seed a revoked token's cache.
 func (k Keys) AuthState(jti string) string {
 	return k.join("auth", "authstate", dynamicKeySegment(jti))
 }
 
 // authStateTombstone is written by the revocation paths in place of a delete.
-// PutAuthState (SET NX) refuses to overwrite it, which closes the write race
-// where a request that read the DB just before a revoking transaction commits
-// would otherwise re-seed a pre-revocation blob with a fresh TTL. GetAuthState
-// reads it as a miss so the middleware falls back to the DB.
+// PutAuthState (SET NX) refuses to overwrite it, closing the stale-refill write
+// race, and GetAuthState reads it as a miss so the middleware falls back to the DB.
 var authStateTombstone = []byte("__revoked__")
 
 // defaultAuthStateTombstoneTTL is used when Store.AuthStateTombstoneTTL is zero.
-// It must outlive the longest in-flight request (bounded by the server
-// WriteTimeout), so a slow request's stale PUT cannot land after the tombstone
-// expires and admit the revoked token.
+// It must outlive the server WriteTimeout so a slow request's stale PUT cannot
+// land after the tombstone expires and admit the revoked token.
 const defaultAuthStateTombstoneTTL = 15 * time.Second
 
 // RateLimit returns a fixed-window rate-limiter key.
@@ -139,10 +135,9 @@ type Store struct {
 	Client Cmdable
 	Keys   Keys
 	// AuthStateTombstoneTTL overrides the tombstone lifetime used by
-	// DeleteAuthStates. When zero, defaultAuthStateTombstoneTTL is used. The
-	// value must exceed the server's WriteTimeout so an in-flight request that
-	// read the DB before a revocation cannot re-seed the cache after the
-	// tombstone expires.
+	// DeleteAuthStates; when zero, defaultAuthStateTombstoneTTL is used. The
+	// value must exceed the server's WriteTimeout so an in-flight request cannot
+	// re-seed the cache after the tombstone expires.
 	AuthStateTombstoneTTL time.Duration
 }
 
@@ -168,12 +163,9 @@ func (s Store) GetAuthState(ctx context.Context, jti string) ([]byte, bool, erro
 	return data, true, nil
 }
 
-// PutAuthState stores a per-token auth-state blob with a TTL. The TTL bounds how
-// long a state change without an explicit revocation can take to surface. SET NX
-// refuses to overwrite a revocation tombstone: without it, a request that read
-// the DB just before a revoking transaction committed could re-seed a
-// pre-revocation blob with a fresh TTL after the revocation, admitting the token
-// until that TTL expired.
+// PutAuthState stores a per-token auth-state blob with a TTL. SET NX refuses to
+// overwrite a revocation tombstone, so a request that read the DB just before a
+// revoking transaction committed cannot re-seed a pre-revocation blob.
 func (s Store) PutAuthState(ctx context.Context, jti string, data []byte, ttl time.Duration) error {
 	if s.Client == nil || jti == "" || len(data) == 0 || ttl <= 0 {
 		return fmt.Errorf("put auth state: %w", ErrInvalidArgument)
@@ -186,9 +178,8 @@ func (s Store) PutAuthState(ctx context.Context, jti string, data []byte, ttl ti
 
 // DeleteAuthStates writes a short-lived tombstone for a set of JTIs, used by the
 // revocation delivery so a revoked token's cache cannot admit it once the DB says
-// revoked. The tombstone (not a delete) is what makes the write race impossible:
-// PutAuthState's SET NX refuses to overwrite it, so no stale refill can land
-// after a revocation.
+// revoked; PutAuthState's SET NX refuses to overwrite the tombstone, so no stale
+// refill can land after a revocation.
 func (s Store) tombstoneTTL() time.Duration {
 	if s.AuthStateTombstoneTTL > 0 {
 		return s.AuthStateTombstoneTTL
@@ -316,8 +307,7 @@ func (s Store) GetDelRawOneTime(ctx context.Context, key string) (string, error)
 
 // SaveVerificationCode stores a numeric verification code for the given purpose
 // and email, resetting the failed-attempt counter so a freshly issued code
-// always starts with a full attempt budget. Without the reset, exhausted
-// attempts from a previous code would kill the new one on its first use.
+// always starts with a full attempt budget.
 func (s Store) SaveVerificationCode(ctx context.Context, purpose, email, code string, ttl time.Duration) error {
 	if s.Client == nil || purpose == "" || email == "" || code == "" || ttl <= 0 {
 		return fmt.Errorf("save verification code: %w", ErrInvalidArgument)
@@ -345,12 +335,9 @@ return 1
 `
 
 // verificationCodeAttemptScript compares a submitted code against the stored one
-// and deletes the key only on a match or once the attempt budget is spent.
-//
-// A plain GETDEL would let one wrong guess burn the valid code (a trivial denial
-// of service against any known address), while never deleting on mismatch would
-// turn a 6-digit code into an unlimited brute-force target. Bounding the
-// attempts keeps a typo recoverable and caps the guess space at ARGV[2]/10^6.
+// and deletes the key only on a match or once the attempt budget is spent, so a
+// single wrong guess cannot burn the valid code while the spent budget caps the
+// guess space.
 //
 // The attempt counter shares the code's remaining TTL, so it cannot outlive the
 // code or be reset by re-submitting.
@@ -382,8 +369,8 @@ end
 return {2, limit - attempts}
 `
 
-// maximumVerificationCodeAttempts bounds guesses per issued code. Five leaves
-// room for typos while capping the brute-force success rate at 5-in-a-million.
+// maximumVerificationCodeAttempts bounds guesses per issued code: five leaves
+// room for typos while capping brute-force success.
 const maximumVerificationCodeAttempts = 5
 
 // VerificationCodeAttempt returns the key holding the failed-attempt counter for
@@ -499,9 +486,7 @@ return {tonumber(count), redis.call("PTTL", KEYS[1])}
 `
 
 // GetLoginFailures reads the current password-login failure counter without
-// mutating it. The count and TTL come from one Lua call instead of GET + PTTL,
-// which shaves a round trip off every login attempt (the lockout check runs on
-// both the success and failure paths).
+// mutating it, returning the count and TTL in one Lua call.
 func (s Store) GetLoginFailures(ctx context.Context, email string) (LoginFailureState, error) {
 	if s.Client == nil || email == "" {
 		return LoginFailureState{}, fmt.Errorf("get login failures: %w", ErrInvalidArgument)

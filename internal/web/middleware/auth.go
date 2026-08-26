@@ -38,9 +38,7 @@ type Principal struct {
 type JWTVerifier interface {
 	VerifyAccessToken(token string) (*auth.TokenClaims, error)
 	// VerifyExpiredAccessToken verifies everything VerifyAccessToken does except
-	// the expiry, returning an expired token's claims. Logout relies on it: a
-	// stale tab whose access token has run out must still be able to end its
-	// session, because the expired token names a live refresh family.
+	// the expiry, returning an expired token's claims.
 	VerifyExpiredAccessToken(token string) (*auth.TokenClaims, error)
 }
 
@@ -72,12 +70,10 @@ type Authenticator struct {
 	// InternalClientID is the built-in first-party client. Only tokens issued to it
 	// may authenticate on the internal API.
 	//
-	// Every access token carries this service as its audience, because the internal
-	// API is the resource server for first-party sessions and third-party grants
-	// alike. The audience therefore cannot tell them apart, and a third-party token
-	// would otherwise be a full session credential: an openid-only grant reaching
-	// PUT /user/profile or the email-binding endpoints is account takeover. The azp
-	// claim carries the issuing client and this field is what it is pinned to.
+	// Every access token carries this service as its audience, so the audience cannot
+	// tell a first-party session from a third-party grant; the azp claim is pinned to
+	// this field, or an openid-only grant would act as a full session credential
+	// (account takeover).
 	//
 	// Required. An empty value rejects every request rather than admitting all of
 	// them, so a deployment that forgets to set it fails loudly instead of silently
@@ -102,13 +98,9 @@ func (a Authenticator) RequireAuth() gin.HandlerFunc {
 // its principal. Tokens issued to any client other than InternalClientID are
 // rejected.
 //
-// Exported so endpoints that answer in a non-standard error format can reuse the
-// exact same validation instead of reimplementing it. The token checks — signature,
-// auth-state cache, DB revocation, token_version, account state — must not diverge
-// between paths.
-//
-// The returned error is a *response.BusinessError, so a caller that wants the
-// standard envelope can pass it straight to response.Error.
+// Exported so endpoints with a non-standard error format reuse the same validation
+// instead of reimplementing it. The returned error is a *response.BusinessError, so
+// a caller that wants the standard envelope can pass it to response.Error.
 func (a Authenticator) Authenticate(ctx context.Context, header string) (Principal, error) {
 	principal, err := a.authenticate(ctx, header)
 	if err != nil {
@@ -122,9 +114,9 @@ func (a Authenticator) Authenticate(ctx context.Context, header string) (Princip
 
 // AuthenticateAnyClient validates a token regardless of which client it was issued
 // to. It is for OAuth-facing endpoints that must serve third-party tokens by
-// design — OIDC UserInfo is the only one — and must never back an internal
+// design (OIDC UserInfo is the only one); it must never back an internal
 // endpoint, where a third-party token acting as a session credential is account
-// takeover. Prefer Authenticate.
+// takeover.
 func (a Authenticator) AuthenticateAnyClient(ctx context.Context, header string) (Principal, error) {
 	return a.authenticate(ctx, header)
 }
@@ -150,10 +142,9 @@ func (a Authenticator) requireScopedAuth(
 // RequireAdminAuth authenticates the /admin endpoints, admitting an internal
 // console token or any token that carries an admin scope.
 //
-// It exists as a separate gate rather than a relaxation of RequireAuth so the
-// default stays fail-closed: every other internal route keeps rejecting
-// third-party tokens outright, and widening this one cannot widen those by
-// accident. Pair it with RequireDelegatedScope — this method proves *which client*
+// A separate gate rather than a relaxation of RequireAuth keeps the default
+// fail-closed: every route that does not opt in keeps rejecting third-party
+// tokens. Pair it with RequireDelegatedScope — this method proves *which client*
 // may speak for an administrator, not *what* it may do.
 func (a Authenticator) RequireAdminAuth() gin.HandlerFunc {
 	return a.requireScopedAuth(a.AuthenticateAdminDelegated)
@@ -164,22 +155,13 @@ func (a Authenticator) RequireAdminAuth() gin.HandlerFunc {
 // when it carries an admin scope; every other client is rejected exactly as
 // Authenticate would reject it.
 //
-// The admin scope in the token IS the capability marker, and it is not
-// self-asserted. Any token can only carry one if scope.ContainsAll passed against
-// that client's registered scopes at authorize time, and the grant door refuses
-// the capability scopes for public (first_party) registrations outright
-// (adminclient.checkCapabilityScopeGrant, mirrored at authorize by
-// oauth.checkScopeForClient). So "this token has admin:read" already proves "the
-// console granted this confidential (third_party) registration administrative
-// capability". No client-type lookup is needed on the request path: the grant door
-// is what enforces confidential-only.
-//
-// The token's subject is still the end user, and /admin's role gate reads that
-// user's role from the database row on every request — RequireRole is what answers
-// "is this user allowed". An ordinary member holding an admin-scoped token is
-// refused there, and a demotion cuts the capability off on the next request, so
-// this method proves *which client may speak*, never that the subject may act. Pair
-// it with RequireDelegatedScope for what the credential may do.
+// The admin scope is not self-asserted: it can only appear if the console granted
+// the registration that scope, which also refuses the capability scopes for
+// first_party clients, so "this token has admin:read" already proves an
+// administrator granted it. The subject's role is read from the database row on
+// every request, so a demotion cuts the capability off on the next request; this
+// method proves *which client may speak*, never that the subject may act. Pair it
+// with RequireDelegatedScope for what the credential may do.
 func (a Authenticator) AuthenticateAdminDelegated(ctx context.Context, header string) (Principal, error) {
 	return a.authenticateScoped(ctx, header,
 		func(p Principal) bool { return scope.ContainsAdmin(p.Scopes) },
@@ -189,11 +171,10 @@ func (a Authenticator) AuthenticateAdminDelegated(ctx context.Context, header st
 // RequireUserAuth authenticates the /user endpoints, admitting an internal
 // console token or any other token that carries a self-service scope.
 //
-// It exists as a separate gate rather than a relaxation of RequireAuth so the
-// default stays fail-closed: every route that does not opt in keeps rejecting
-// non-console tokens outright, and widening this one cannot widen those by
-// accident. Pair it with RequireDelegatedScope — this method proves *which
-// client* may act on a user's own record, not *what* it may do.
+// A separate gate rather than a relaxation of RequireAuth keeps the default
+// fail-closed: every route that does not opt in keeps rejecting non-console
+// tokens. Pair it with RequireDelegatedScope — this method proves *which client*
+// may act on a user's own record, not *what* it may do.
 func (a Authenticator) RequireUserAuth() gin.HandlerFunc {
 	return a.requireScopedAuth(a.AuthenticateUserScoped)
 }
@@ -203,13 +184,11 @@ func (a Authenticator) RequireUserAuth() gin.HandlerFunc {
 // when it carries a self-service scope; every other client is rejected exactly as
 // Authenticate would reject it.
 //
-// The user scope in the token IS the self-service marker, and it is not
-// self-asserted. Any token can only carry one if scope.ContainsAll passed against
-// that client's registered scopes at authorize time, so "this token has user:read"
-// already proves "the console granted this registration access to the /user
-// surface". No client-type lookup happens on the request path: the user scopes
-// carry no type constraint — the /user surface operates on the token subject's own
-// record, so an application holding them is never a look-up-anyone credential.
+// The user scope is not self-asserted: it can only appear if the console granted
+// the registration that scope at authorize time. No client-type lookup happens on
+// the request path — every /user endpoint operates on the token subject's own
+// record, so an application holding a user scope is never a look-up-anyone
+// credential.
 func (a Authenticator) AuthenticateUserScoped(ctx context.Context, header string) (Principal, error) {
 	return a.authenticateScoped(ctx, header,
 		func(p Principal) bool { return scope.ContainsUser(p.Scopes) },
@@ -228,18 +207,12 @@ func (a Authenticator) RequireUserLogoutAuth() gin.HandlerFunc {
 // AuthenticateUserScoped does; an expired one is re-parsed through the RFC 7009
 // expired-token path and admitted on its claims alone.
 //
-// Why expire is forgiven here and nowhere else: logout is family-wide
-// revocation, and an expired access token still names a live refresh family
-// whose tokens outlive it by weeks. A stale tab whose access token ran out (1h
-// TTL) must be able to end its session without re-authenticating. Signature,
-// issuer, audience, and the required-claim set all stay verified — the only
-// thing relaxed is the clock, so an attacker-chosen jti cannot revoke an
-// arbitrary family — and the service layer confirms the jti resolves to a real
-// token row (an idempotent success when the row is gone) before it touches a
-// family. The auth-state cache is deliberately skipped on the expired path: the
-// cache is short-TTL and can no longer be satisfied for a token past its
-// expiry, and the authoritative row check belongs to the service, which
-// performs it.
+// Expire is forgiven only here: an expired access token still names a live
+// refresh family, so a stale tab can end its session without re-authenticating.
+// Signature, issuer, audience and the required claims stay verified — only the
+// clock is relaxed, so an attacker-chosen jti cannot revoke an arbitrary family —
+// and the service layer confirms the jti resolves to a real token row before it
+// touches a family.
 func (a Authenticator) AuthenticateUserLogout(ctx context.Context, header string) (Principal, error) {
 	token, ok := strictBearerToken(header)
 	if !ok {
@@ -275,8 +248,7 @@ func (a Authenticator) AuthenticateUserLogout(ctx context.Context, header string
 // authenticateScoped is the shared core of the two scoped-surface authenticators:
 // validate the token, exempt the console session unconditionally, and otherwise
 // require the capability predicate to pass. A missing InternalClientID fails
-// closed before the scoped branch — a deployment that forgot it must refuse every
-// scoped token rather than admit all of them.
+// closed before the scoped branch.
 func (a Authenticator) authenticateScoped(
 	ctx context.Context,
 	header string,
@@ -293,8 +265,7 @@ func (a Authenticator) authenticateScoped(
 // applyScopedPolicy decides whether an already-authenticated principal may act
 // on a scoped surface: the console session is exempt unconditionally, every
 // other client must carry the capability scope. A missing InternalClientID
-// fails closed before the scoped branch — a deployment that forgot it must
-// refuse every scoped token rather than admit all of them.
+// fails closed before the scoped branch.
 func (a Authenticator) applyScopedPolicy(
 	principal Principal,
 	carriesCapability func(Principal) bool,
@@ -303,8 +274,8 @@ func (a Authenticator) applyScopedPolicy(
 	if strings.TrimSpace(a.InternalClientID) == "" {
 		return Principal{}, backendError()
 	}
-	// An absent azp is a first-party session token predating the claim; those are
-	// only ever issued to the built-in client.
+	// An absent azp identifies a first-party session token; only the built-in
+	// client ever mints a token without an azp.
 	if principal.ClientID == "" || principal.ClientID == a.InternalClientID {
 		return principal, nil
 	}
@@ -318,18 +289,13 @@ func (a Authenticator) applyScopedPolicy(
 // allowed scopes. It must be chained after RequireAdminAuth or RequireUserAuth,
 // which put the Principal in the context.
 //
-// The internal console token is exempt. It carries exactly the three session
-// scopes and neither an admin nor a user scope will ever be minted for it, so
-// gating it here would break the console outright; on the /admin routes its
-// ceiling is the role gate, on /user routes there is no further ceiling beyond
-// being a valid session. What this gate bounds is the scoped client — admin or
-// user — whose registered scopes are the only thing distinguishing "may read the
-// directory" from "may delete accounts", or "may view my profile" from "may
-// change my password".
+// The internal console token is exempt (it carries only the three session scopes);
+// what this gate bounds is the scoped client whose registered scopes distinguish
+// "may read the directory" from "may delete accounts", or "may view my profile"
+// from "may change my password".
 //
-// An empty allowed set rejects every request, for the same reason RequireRole
-// fails closed: a wiring slip must surface as a visible 403, not as an endpoint
-// that quietly accepts any scope.
+// An empty allowed set rejects every request, like RequireRole: a wiring slip
+// must surface as a visible 403, not as an endpoint that quietly accepts any scope.
 func (a Authenticator) RequireDelegatedScope(allowed ...string) gin.HandlerFunc {
 	permitted := make(map[string]struct{}, len(allowed))
 	for _, name := range allowed {
@@ -342,8 +308,8 @@ func (a Authenticator) RequireDelegatedScope(allowed ...string) gin.HandlerFunc 
 			c.Abort()
 			return
 		}
-		// Mirrors AuthenticateAdminDelegated: an unset internal client cannot be
-		// compared against, so nothing may be exempted from the scope check.
+		// An unset internal client cannot be compared against, so nothing is
+		// exempted from the scope check.
 		if strings.TrimSpace(a.InternalClientID) == "" {
 			response.Error(c, backendError())
 			c.Abort()
@@ -371,8 +337,8 @@ func (a Authenticator) requireInternalClient(principal Principal) error {
 	if strings.TrimSpace(a.InternalClientID) == "" {
 		return backendError()
 	}
-	// An absent azp means a first-party session token predating the claim; those are
-	// only ever issued to the built-in client.
+	// An absent azp identifies a first-party session token; only the built-in
+	// client ever mints a token without an azp.
 	if principal.ClientID != "" && principal.ClientID != a.InternalClientID {
 		return authBusinessError(http.StatusForbidden, errcode.CodeForbidden,
 			"该 Access Token 由第三方客户端签发，不可用于内部接口")
@@ -427,11 +393,9 @@ func (a Authenticator) authenticateClaims(ctx context.Context, claims *auth.Toke
 		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
 	}
 	// The auth-state cache (Redis, short TTL) lets authenticated requests skip the
-	// per-request DB query: on a hit the cached state is the DB-authoritative
-	// answer, on a miss the database is read and the cache populated. The
-	// revocation paths delete the cache entry, so a revoked token cannot be
-	// admitted by a stale cache. Fail-open: a cache error degrades to the
-	// database, exactly like the old blacklist fast-reject it replaces.
+	// per-request DB query, falling back to the database on a miss or error.
+	// Revocation paths write a short-lived tombstone and the SET NX fill refuses to
+	// overwrite it, so a revoked token cannot be admitted by a stale cache.
 	state, err := a.authState(ctx, claims.ID)
 	if errors.Is(err, repository.ErrNotFound) {
 		return Principal{}, authBusinessError(http.StatusUnauthorized, errcode.CodeAccessTokenInvalid, "Access Token 无效或已被撤销")
@@ -453,9 +417,7 @@ func (a Authenticator) authenticateClaims(ctx context.Context, claims *auth.Toke
 
 // principalFromClaims assembles the Principal from verified claims, the parsed
 // scopes, and the DB-backed state row. role/state come from the row, never from
-// claims.Role, which is a snapshot that survives a demotion; a nil state (the
-// expired-token logout path) leaves them empty, and nothing authorizes on
-// Principal.State today.
+// the claims role snapshot, so a demotion lands on the next request.
 func principalFromClaims(claims *auth.TokenClaims, userID int64, scopes []string, state *repository.AccessAuthState) Principal {
 	role, userState := "", ""
 	if state != nil {
@@ -465,13 +427,10 @@ func principalFromClaims(claims *auth.TokenClaims, userID int64, scopes []string
 	return Principal{
 		UserID: userID,
 		JTI:    claims.ID,
-		// The role comes from the database row, not from claims.Role. A JWT carries the
-		// role as it stood at signing time, so an administrator who has just been
-		// demoted would keep administrative access until that token expired. The state
-		// query already joins "user" for state and token_version, so reading role from
-		// the same row costs no extra round trip and makes a demotion effective on the
-		// next request. claims.Role is still validated for presence but is not what
-		// authorization decisions are made on.
+		// The role comes from the database row, not from the claims role snapshot,
+		// so a demotion is effective on the next request; claims.Role is still
+		// validated for presence but is not what authorization decisions are made
+		// on.
 		Role:      role,
 		State:     userState,
 		Scopes:    scopes,
@@ -487,23 +446,11 @@ func principalFromClaims(claims *auth.TokenClaims, userID int64, scopes []string
 // health check.
 //
 // The cache must not admit a revoked token. Every revocation path writes a
-// short-lived tombstone (never a delete) AND enqueues an outbox row the worker
-// retries until it lands, so a cache miss falls back to the authoritative DB
-// revoked_at check. Cache fills use SET NX, which refuses to overwrite a
-// tombstone: a request whose DB read completed before a revoking transaction
-// commits cannot re-seed a pre-revocation blob once the tombstone lands. The
-// tombstone TTL is sized from the server WriteTimeout so it outlives any
-// in-flight request's read-to-PUT gap; "cut access now" operations are effective
-// immediately, with the outbox retry covering a failed synchronous write.
-//
-// A state change that does not revoke the token surfaces only after the cache
-// entry's own TTL (AUTH_STATE_CACHE_TTL), which is what that TTL bounds — not the
-// post-revocation window, which the tombstone covers regardless of it. Two paths
-// land here: an admin edit that moves "user".state without touching role
-// (UpdateAdminUser gates revocation on roleChanged), and RestoreUser. Both leave
-// live tokens valid, so their cached blob keeps the pre-change state for up to one
-// TTL. Nothing authorizes on Principal.State today, so that is currently harmless;
-// a future check that gates on state would inherit this window.
+// short-lived tombstone (never a delete) and cache fills use SET NX, which
+// refuses to overwrite a tombstone, so a request whose DB read completed before a
+// revoking transaction commits cannot re-seed a pre-revocation blob. A state
+// change that does not revoke the token surfaces only after the entry's own TTL;
+// nothing authorizes on Principal.State today, so that is currently harmless.
 func (a Authenticator) authState(ctx context.Context, jti string) (*repository.AccessAuthState, error) {
 	if a.AuthStateCache != nil {
 		data, found, err := a.AuthStateCache.GetAuthState(ctx, jti)

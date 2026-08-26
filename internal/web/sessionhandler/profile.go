@@ -10,13 +10,11 @@ import (
 
 // updateProfileRequest mirrors the PUT /user/profile body. Every field is a
 // pointer so an absent key ("leave unchanged") stays distinguishable from an
-// explicit empty string ("clear this display field"); a value type would collapse
-// both into "".
+// explicit empty string ("clear this display field").
 //
-// Lengths and enum membership are checked by the service, not by binding tags:
-// the documented contract answers with 40000 plus a message naming the field,
-// and a binding failure would collapse every one of them into the same generic
-// error.
+// Lengths and enum membership are checked by the service, not by binding tags,
+// so a violation answers with the documented 40000-plus-message rather than a
+// generic binding failure.
 type updateProfileRequest struct {
 	Name        *string `json:"name"`
 	PhoneNumber *string `json:"phone_number"`

@@ -150,7 +150,7 @@ GET /oauth/lark/callback?code=...&state=...
 2. 302 重定向至注册补全页 `?registration_state=<registration_state>&oauth_state=<oauth_state>&provider=xxx&name=xxx&avatar=xxx`
 3. 用户在注册补全页完成注册，`POST /auth/register` 时传入 `registration_state` + `oauth_state`（两者均从回调重定向的 URL 取）
 
-   > 实现修正：`oauth_state` 由回调一并下发，而非「前端在跳转链中保留」。发起登录的页面在跳转到 provider 时已被卸载，回调是一次全新的顶层导航，前端没有任何途径仍然持有那个 state（本服务不设 cookie）。这不削弱双重绑定：其目的是让单独泄露的 `registration_state`（被分享的 URL、日志、referrer）不可兑换，而能读到这次回调重定向的攻击者本就同时掌握两个值。
+   > `oauth_state` 由回调一并下发：发起登录的页面在跳转到 provider 时已被卸载，回调是一次全新的顶层导航，前端没有任何途径仍然持有那个 state（本服务不设 cookie）。这不削弱双重绑定：其目的是让单独泄露的 `registration_state`（被分享的 URL、日志、referrer）不可兑换，而能读到这次回调重定向的攻击者本就同时掌握两个值。
 4. 服务端 GetDel 消费 `registration_state`，校验其内的 `oauth_state` 与传入的 `oauth_state` 匹配 → 注册成功 + 自动创建 identities 绑定
 
 **安全约束 — 防账号接管**：
@@ -496,7 +496,7 @@ Payload: {
 
 | 规则 | 理由 |
 | ------ | ------ |
-| 不可修改自己的 `role` | 自我降权不可自行恢复 —— 能撤销该操作的端点正是被交出的那一个 |
+| 不可修改自己的 `role` | 自我降权不可自行恢复：降权后失去改回自己角色的权限 |
 | 不可注销自己的账号 | 同上，注销后无法调用恢复端点 |
 | 不可降权或注销最后一名活跃管理员 | 系统将无人可管理，只能直连数据库恢复 |
 
@@ -635,7 +635,7 @@ sastlink:device:{device_id}   Hash          {ua, ip, login_time, last_seen}
 - **登录**：生成 `device_id`（UUID v4）→ `ZADD devices:{uid} {ts} {device_id}` → `HSET device:{device_id} ...`。两个 key TTL 均为 30d
 - **淘汰**：`ZCARD` > 5 → `ZREMRANGEBYRANK 0 0`（移除最旧 1 条），对应 device Hash 同步删除，**并撤销被淘汰设备的全部 token（RevokeFamily）**——「最多 5 台同时登录」是会话级约束：被淘汰设备的 refresh token 立即失效，不会留下列表不可见、无法登出的幽灵会话
 - **登出**：仅删除当前 `device_id`（`ZREM` + `DEL`），不影响其他设备
-- **会话终止即清记录**：登出、登出指定设备、修改/重置密码、刷新重放/轮换失败/过期、淘汰撤销均同步清除设备记录（fail-open）；管理员**角色降级（触发会话撤销时）与注销账号**亦清空该用户全部设备记录（state 变更本身不撤销会话，故不清；`is_deleted` 状态不接受编辑，注销走 `DELETE /admin/users/:id`）。每次会话终止写审计：`logout` / `logout_device` / `evict_device` / `change_password` / `reset_password` / refresh 三态 outcome（审计 90 天保留，可回溯"谁杀死了我的会话"）
+- **会话终止即清记录**：登出、登出指定设备、修改/重置密码、刷新重放/轮换失败/过期、淘汰撤销均同步清除设备记录（fail-open）；管理员**角色降级（触发会话撤销时）与注销账号**亦清空该用户全部设备记录（state 变更本身不撤销会话，故不清；`is_deleted` 状态不接受编辑，注销走 `DELETE /admin/users/:id`）。每次会话终止写审计：`logout` / `logout_device` / `evict_device` / `change_password` / `reset_password` / refresh 三态 outcome（审计 90 天保留，可回溯「谁杀死了我的会话」）
 - **刷新 Token**：更新对应 device Hash 的 `last_seen` 字段，不续期 TTL（30 天不活跃则记录过期；过期后设备再次刷新视为重新登记，重置 TTL——会话仍在使用就不该变成列表不可见、无法登出的幽灵）
 
 ---

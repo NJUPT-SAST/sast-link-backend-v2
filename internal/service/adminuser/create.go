@@ -9,8 +9,8 @@ import (
 
 // CreateUser creates an account and optionally binds a personal email as an
 // other_mail identity in the same transaction. The initial password is generated
-// because the member is not present to enter one; the plaintext is returned in
-// CreateUserResult and never persisted or audited.
+// because the member is not present to enter one, and the plaintext is returned in
+// CreateUserResult but never persisted or audited.
 func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*CreateUserResult, error) {
 	validated, err := validateCreate(input)
 	if err != nil {
@@ -20,9 +20,9 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 
 	var boundEmail *string
 	if validated.personalEmail != nil {
-		// A bound personal email can be used as a login handle and as a password-reset
-		// target, so it must not already belong to another account. The pre-check
-		// returns ErrEmailOccupied before the unique indexes and V005 trigger can race.
+		// A bound personal email becomes a login handle and a reset target, so it must
+		// not already belong to another account; the pre-check stops the unique indexes
+		// and V005 trigger from racing.
 		boundEmail = validated.personalEmail
 		occupied, existsErr := s.Users.ExistsAsEmailAnywhere(ctx, *validated.personalEmail)
 		if existsErr != nil {

@@ -45,9 +45,10 @@ type Handler struct {
 	// that don't exercise the cookie flow.
 	Cookies *middleware.SessionCookie
 	// StateCookie writes the login-CSRF state cookie at authorize time and reads
-	// it back at callback time. Nil disables the defense — tests that predate it
-	// or deployments that never wired it would fail every third-party login
-	// closed, so wiring it in runtime.go is mandatory for production.
+	// it back at callback time. Nil is not a valid production configuration: the
+	// handler then never writes or reads a state cookie, and the service refuses
+	// every third-party callback for a missing one — wiring it in runtime.go is
+	// mandatory.
 	StateCookie *middleware.SessionCookie
 }
 
@@ -73,11 +74,10 @@ func (h Handler) readStateCookie(c *gin.Context) string {
 
 // RegisterRoutes mounts the third-party OAuth endpoints.
 //
-// The authorize and callback legs are unauthenticated: the browser arriving from
-// GitHub or Lark carries no Authorization header. POST /oauth/exchange-code is
-// likewise unauthenticated — redeeming a login_code is how a session is
-// obtained, so requiring one would be circular. The binding endpoints sit behind
-// the JWT middleware because they attach a provider account to a known caller.
+// The authorize/callback legs and POST /oauth/exchange-code are unauthenticated:
+// redeeming a login_code is how a session is obtained, so requiring one would be
+// circular. The binding endpoints sit behind the JWT middleware because they
+// attach a provider account to a known caller.
 func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	r.GET("/oauth/github", h.authorize(model.LoginMethodGitHub))
 	r.GET("/oauth/github/callback", h.callback(model.LoginMethodGitHub))
@@ -119,12 +119,10 @@ func (h Handler) authorize(name model.LoginMethod) gin.HandlerFunc {
 	}
 }
 
-// callback returns the handler for one provider's callback.
-//
-// Both outcomes are redirects, because the user is in a browser. A failure goes
-// to ErrorRedirect carrying an error code the frontend can translate; it
-// deliberately does not carry the provider's own error text, which can contain
-// arbitrary content.
+// callback returns the handler for one provider's callback. Both outcomes are
+// redirects, because the user is in a browser. A failure goes to ErrorRedirect
+// carrying an error code the frontend can translate; it deliberately does not
+// carry the provider's own error text, which can contain arbitrary content.
 func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		result, err := h.Service.Callback(c.Request.Context(), oauthlogin.CallbackInput{
@@ -150,9 +148,9 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 
 		target, parseErr := url.Parse(result.Redirect)
 		if parseErr != nil || result.Redirect == "" {
-			// The service only returns allow-listed redirects, so this is a
-			// configuration fault rather than user input. Answer in the envelope
-			// instead of redirecting somewhere unvalidated.
+			// The service only returns allow-listed redirects, so this is a configuration
+			// fault rather than user input; answer in the envelope instead of redirecting
+			// somewhere unvalidated.
 			response.Error(c, &response.BusinessError{
 				HTTPStatus: http.StatusInternalServerError,
 				Code:       errcode.CodeInternal,
@@ -163,10 +161,8 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 
 		query := target.Query()
 		if result.Cancelled {
-			// The user declined on the provider's page. The frontend callback
-			// page reads error=access_denied and renders its own "已取消登录"
-			// state — a cancellation is not something the error page should
-			// dress up as a failure.
+			// The user declined on the provider's page; the frontend reads
+			// error=access_denied and renders its own "已取消登录" state.
 			query.Set("error", "access_denied")
 			query.Set("provider", result.Provider)
 		} else if result.Bound {
@@ -176,15 +172,12 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 			// hints so the frontend can prefill the form. The identity itself
 			// stays server-side in Redis.
 			query.Set("registration_state", result.RegistrationState)
-			// The OAuth state travels with it because POST /auth/register
-			// requires both halves of PRD §4.5's double binding, and the page
-			// that started the login was unloaded by the redirect to the
-			// provider — the frontend has no other way to still hold it.
-			//
-			// Emitting it here does not defeat the pairing. Its purpose is that
-			// a registration_state leaked on its own (a shared URL, a log, a
-			// referrer) is not redeemable, and an attacker who can read this
-			// redirect already holds both values plus the session it belongs to.
+			// The OAuth state travels with it because POST /auth/register requires both
+			// halves of the double binding, and the page that started the login was
+			// unloaded by the redirect — the frontend has no other way to still hold it.
+			// Emitting it does not defeat the pairing: a registration_state leaked on its
+			// own is not redeemable, and an attacker who can read this redirect already
+			// holds both values plus the session it belongs to.
 			query.Set("oauth_state", result.OAuthState)
 			query.Set("provider", result.Provider)
 			if result.DisplayName != "" {
@@ -201,8 +194,8 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 
 // redirectFailure sends a failed callback to the frontend error page.
 //
-// When no error page is configured the envelope is used instead. That is worse
-// UX but never worse security: the alternative would be redirecting to an
+// When no error page is configured the envelope is used instead — worse UX but
+// never worse security, since the alternative would be redirecting to an
 // unvalidated location.
 func (h Handler) redirectFailure(c *gin.Context, err error) {
 	mapped := mapServiceError(err)
@@ -219,8 +212,8 @@ func (h Handler) redirectFailure(c *gin.Context, err error) {
 	var business *response.BusinessError
 	if errors.As(mapped, &business) {
 		query.Set("error", strconv.Itoa(business.Code))
-		// The message is this service's own fixed string, not provider text, so
-		// it is safe to pass through for display.
+		// The message is this service's own fixed string, not provider text, so it is
+		// safe to pass through.
 		query.Set("error_description", business.Message)
 	} else {
 		query.Set("error", strconv.Itoa(errcode.CodeInternal))
@@ -314,8 +307,7 @@ func bindMessage(name model.LoginMethod) string {
 // measured from the injected clock so it agrees with the token's exp. A past
 // instant yields 0 rather than a negative number.
 func expiresIn(now, expiresAt time.Time) int {
-	// Ceil so a token expiring in 3599.9s reports 3600, matching the OAuth token
-	// endpoint; truncation would under-report the same TTL by one second.
+	// Ceil so a near-expiry token reports the same TTL as the OAuth token endpoint.
 	seconds := int(math.Ceil(expiresAt.Sub(now).Seconds()))
 	if seconds < 0 {
 		return 0

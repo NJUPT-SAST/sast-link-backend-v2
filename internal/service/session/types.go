@@ -47,7 +47,7 @@ type TokenBlacklist interface {
 // DeviceRecord is one logged-in device of a user, as derived from Redis device
 // state. Device records are operational, not authoritative: they live only in
 // Redis, expire after the device TTL, and may be briefly inconsistent across
-// instance scaling (PRD §6.1).
+// instance scaling.
 type DeviceRecord struct {
 	DeviceID  string
 	UA        string
@@ -68,9 +68,9 @@ type DeviceRecord struct {
 type DeviceStore interface {
 	// RegisterDevice records a login as a device and returns the device ID
 	// evicted to make room ("" when the set stayed within the cap). The caller
-	// must revoke the evicted device's token family: eviction is the "最多 5 台
-	// 同时登录" enforcement, and leaving the family live would create a session
-	// that is invisible in the device list and cannot be logged out.
+	// must revoke the evicted family: eviction is the 5-device-cap enforcement,
+	// and a live family would be a session invisible in the device list and
+	// impossible to log out.
 	RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (evicted string, err error)
 	// TouchDevice updates last_seen for a live record, or resurrects an expired
 	// one with a fresh TTL (ua/ip/login_time re-recorded): a refresh that still
@@ -87,14 +87,13 @@ type DeviceStore interface {
 }
 
 type UserRepository interface {
-	// FindAuthUserByLoginIdentifier is the lean login lookup: matches the
-	// login-email or an other-mail identity, without the Profile/Identities
-	// preloads, which the login response never serializes.
+	// FindAuthUserByLoginIdentifier is the lean login lookup matching the login
+	// email or an other_mail identity, without the Profile/Identities preloads.
 	FindAuthUserByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error)
 	FindByID(ctx context.Context, userID int64) (*model.User, error)
-	// FindProfileByID loads a user for a profile response in two queries
-	// (user+profile JOIN + lean identities), skipping the provider credentials the
-	// response never serializes.
+	// FindProfileByID loads a user for a profile response (user+profile JOIN +
+	// lean identities), skipping the provider credentials the response never
+	// serializes.
 	FindProfileByID(ctx context.Context, userID int64) (*model.User, error)
 	// FindAuthUserByID / FindAuthUserByLoginEmail return the scalar columns
 	// without the Profile/Identities preloads, for auth paths that only need
@@ -116,12 +115,13 @@ type UserRepository interface {
 	// and revokes every live token of the user atomically, returning the
 	// access-token entries still pending revocation delivery.
 	UpdatePasswordAndRevokeSessions(ctx context.Context, userID int64, passwordHash string, revokedAt time.Time) ([]model.BlacklistEntry, error)
-	// UpdatePasswordHash rewrites only the stored hash, for rehash-on-login after a
-	// KDF parameter change. It deliberately does not revoke sessions or bump
-	// token_version; password *changes* must use UpdatePasswordAndRevokeSessions.
-	// The write is guarded on currentHash (the hash the login verified), so a
-	// concurrent password change/reset wins and the rehash is skipped
-	// (repository.ErrRehashSkipped) rather than reverting the credential.
+	// UpdatePasswordHash rewrites only the stored hash for rehash-on-login after a
+	// KDF parameter change; it deliberately does not revoke sessions or bump
+	// token_version, which password *changes* do through
+	// UpdatePasswordAndRevokeSessions. The write is guarded on currentHash (the
+	// hash the login verified), so a concurrent password change/reset wins and
+	// the rehash is skipped (repository.ErrRehashSkipped) rather than reverting
+	// the credential.
 	UpdatePasswordHash(ctx context.Context, userID int64, currentHash, passwordHash string) error
 	// UpdateProfile applies a partial self-service field update across "user" and
 	// profile in one transaction and returns the reloaded aggregate.
@@ -141,15 +141,15 @@ type ClientRepository interface {
 type TokenRepository interface {
 	CreatePair(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
 	// CreatePairWithAudit is CreatePair with the login's audit row written into
-	// audit_logs in the same transaction (nil audit disables it). The session and
-	// its audit then commit atomically on one fsync.
+	// audit_logs in the same transaction (nil audit disables it), so the session
+	// and its audit commit atomically.
 	CreatePairWithAudit(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
 	// RotateRefreshToken rotates currentRefreshTokenHash inside familyID and
 	// returns the family origin's created_at; this service ignores it.
 	RotateRefreshToken(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) (time.Time, error)
 	// RotateRefreshTokenWithAudit is RotateRefreshToken with the refresh's audit
-	// row written into audit_logs in the same transaction (nil audit disables it),
-	// so the rotation and its audit commit atomically on one fsync.
+	// row written into audit_logs in the same transaction (nil audit disables
+	// it), so the rotation and its audit commit atomically.
 	RotateRefreshTokenWithAudit(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) (time.Time, error)
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
@@ -179,10 +179,9 @@ type RegisterTicketStore interface {
 	// PeekRegisterTicket reads the verified email without consuming the ticket, so
 	// a rejectable request does not spend it.
 	PeekRegisterTicket(ctx context.Context, ticket string) (email string, found bool, err error)
-	// ConsumeRegisterTicket deletes the ticket once the account exists. Races
-	// between concurrent registrations are settled by the login_email unique
-	// constraint, not by this delete, so the caller does not need to know whether
-	// it was the one that removed the key.
+	// ConsumeRegisterTicket deletes the ticket once the account exists. Concurrent
+	// registration races are settled by the login_email unique constraint, not by
+	// this delete, so the caller need not know whether it removed the key.
 	ConsumeRegisterTicket(ctx context.Context, ticket string) error
 }
 
@@ -203,12 +202,9 @@ type BindTicketStore interface {
 }
 
 // OAuthRegistrationPayload is the third-party identity parked by the OAuth
-// callback for a user who has no account yet.
-//
-// This mirrors oauthlogin.RegistrationPayload rather than importing it: the
-// OAuth login service already depends on repository and model, and having it
-// import session (or session import it) would couple the two flows in a cycle.
-// The Redis adapter is what keeps the two shapes reading the same key.
+// callback for a user who has no account yet. It mirrors
+// oauthlogin.RegistrationPayload, and the Redis adapter keeps the two shapes
+// reading the same key.
 type OAuthRegistrationPayload struct {
 	Provider       model.LoginMethod `json:"provider"`
 	ProviderID     string            `json:"provider_id"`
@@ -222,9 +218,7 @@ type OAuthRegistrationPayload struct {
 // OAuthRegistrationStore reads the identity parked by an OAuth callback.
 //
 // Fail-closed: Redis holds the only copy, so an unreadable value must reject the
-// registration rather than fall back to creating an unbound account — the user
-// asked to register through a provider and would otherwise get an account with
-// no binding and no way to tell.
+// registration rather than create an unbound account.
 type OAuthRegistrationStore interface {
 	// ConsumeRegistrationState atomically reads and deletes the parked identity.
 	ConsumeRegistrationState(ctx context.Context, state string) (payload OAuthRegistrationPayload, found bool, err error)
@@ -301,9 +295,9 @@ type RefreshResult struct {
 type LogoutInput struct {
 	PrincipalJTI    string
 	PrincipalUserID int64
-	// RefreshToken is deprecated and ignored: logout revokes the authenticated
-	// access token's own family, so no refresh credential is read anymore.
-	// Retained only for call-site/contract compatibility.
+	// RefreshToken is deprecated and ignored: logout revokes the access token's
+	// own family, so no refresh credential is read anymore. Retained only for
+	// call-site/contract compatibility.
 	RefreshToken string
 	// ActorClientID is the azp of the token that authorized the logout; empty
 	// means a legacy console token, resolved to InternalClientID at audit time.
@@ -359,9 +353,9 @@ type RegisterInput struct {
 	College        string
 	Major          string
 	// RegistrationState and OAuthState are the third-party OAuth registration
-	// pair. Both must be present together or both absent: PRD §4.5 binds the
-	// parked identity to the OAuth state it was issued with, so one without the
-	// other is rejected rather than silently ignored.
+	// pair. Both must be present together or both absent: the parked identity is
+	// bound to the OAuth state it was issued with, so one without the other is
+	// rejected rather than silently ignored.
 	RegistrationState string
 	OAuthState        string
 	ClientIP          string
@@ -510,8 +504,8 @@ type CardResult struct {
 	Card CardDTO
 }
 
-// CardDTO is the public display card. Only PRD §4.14's public fields appear
-// here; nothing from the user's identity or permission columns is carried.
+// CardDTO is the public display card; only the public fields appear here,
+// nothing from the user's identity or permission columns.
 type CardDTO struct {
 	ID         int64
 	Nickname   *string
@@ -525,18 +519,16 @@ type CardDTO struct {
 type UpdateProfileResult struct {
 	Profile UserProfileDTO
 	// ChangedFields lists the request fields that were applied, in contract
-	// order. It feeds the update_profile audit detail defined in PRD §4.13.
+	// order; it feeds the update_profile audit detail.
 	ChangedFields []string
 }
 
 // UploadAvatarInput is the PUT /user/avatar request. The file content is passed
 // as a reader so the handler owns multipart parsing while the service owns every
-// size and format rule. Filename is only used for diagnostics.
-//
-// Size is the declared content length from the multipart part header. The
-// service still reads through a LimitReader: the declared size is trusted for
-// nothing beyond an early rejection, because the actual stream is what gets
-// stored.
+// size and format rule; filename is only used for diagnostics. Size is the
+// declared content length from the multipart part header — the service still
+// reads through a LimitReader, trusting the declared size for nothing beyond an
+// early rejection.
 type UploadAvatarInput struct {
 	UserID   int64
 	Filename string
@@ -567,11 +559,10 @@ type UserProfileDTO struct {
 	College     string
 	Major       string
 	// ProfileNeedsCompletion mirrors V010's generated column: the account still
-	// holds values imported from the previous database that no current write path
-	// would accept. IncompleteFields names them, using the JSON field names of
-	// PUT /user/profile so a client can map each one onto the control that fixes
-	// it. Both are display hints for routing to a completion page and are never
-	// an authorization input.
+	// holds imported values no current write path would accept. IncompleteFields
+	// names them using the PUT /user/profile JSON field names, so a client can
+	// map each one onto the control that fixes it. Both are display hints and
+	// never an authorization input.
 	ProfileNeedsCompletion bool
 	IncompleteFields       []string
 	Profile                *ProfileDetailDTO

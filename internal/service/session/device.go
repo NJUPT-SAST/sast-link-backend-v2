@@ -31,21 +31,18 @@ type LogoutDeviceResult struct {
 }
 
 // revokeEvictedDevice revokes the token family of a device evicted by the
-// per-user cap, so "最多 5 台同时登录" (PRD §6.1) holds at the session level,
-// not just in the device list. Fail-open: the new login already happened and a
-// database outage must not be able to block it — the evicted family revoke is
-// best effort, and dropping the record at least removes the session from the
-// device list.
+// per-user cap, so the 5-device cap holds at the session level, not just in the
+// list. Fail-open: a database outage must not block a login that already
+// happened, so the evicted-family revoke is best effort and dropping the record
+// at least clears the device list.
 //
-// The record cleanup runs after the revoke to close a small race: a refresh of
-// the evicted family that passed the DB checks just before the revoke can
+// The record cleanup runs after the revoke to close a race: a refresh of the
+// evicted family that passed the DB checks just before the revoke can
 // resurrect the record (TouchDevice re-registers expired records), and the
 // removal then clears exactly that stale record.
 //
-// The eviction itself is audited: every other session-killing path (logout,
-// logout_device, change_password, reset_password, replay) writes an audit
-// event, and an eviction that silently revoked a session would leave the
-// 90-day audit trail with a gap nobody could explain.
+// The eviction is audited like every other session-killing path, so the 90-day
+// audit trail has no unexplained gap.
 func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted string, now time.Time, clientIP, userAgent string) {
 	if evicted == "" {
 		return
@@ -67,9 +64,9 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 }
 
 // ListDevices returns the caller's logged-in devices, newest first. Device
-// records are Redis-only operational state (PRD §6.1), so an unavailable store
-// degrades to an empty list with a WARN instead of an error: the user loses the
-// view, never the ability to log in again.
+// records are Redis-only operational state, so an unavailable store degrades to
+// an empty list with a WARN instead of an error: the user loses the view, never
+// the ability to log in again.
 func (s Service) ListDevices(ctx context.Context, input ListDevicesInput) (*ListDevicesResult, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidInput, "设备列表参数无效", nil)

@@ -24,8 +24,8 @@ const tokenTypeHintAccess = "access_token"
 // token of a family is ending that session, and leaving the sibling access token
 // live for up to its full TTL would contradict that.
 func (s Service) Revoke(ctx context.Context, input RevokeInput) error {
-	// Shares the token endpoint's limiter: this endpoint also authenticates a client
-	// and resolves a presented token, so it offers the same guessing surface.
+	// Shares the token endpoint's limiter: this endpoint authenticates a client and
+	// resolves a presented token, the same guessing surface.
 	if err := s.checkTokenLimit(ctx, input.ClientIP); err != nil {
 		return err
 	}
@@ -51,10 +51,9 @@ func (s Service) Revoke(ctx context.Context, input RevokeInput) error {
 		return nil
 	}
 
-	// Unlike the replay defenses, this caller reports the outcome to the requester.
-	// RFC 7009's success contract is that the token no longer works; answering 200
-	// for a revocation that did not commit tells the client the session is gone when
-	// it is live for its full TTL, and the client has no reason to retry.
+	// Unlike the replay defenses, this caller reports the outcome: answering 200 for
+	// a revocation that did not commit tells the client the session is gone while it
+	// is still live, and the client has no reason to retry.
 	if revokeErr := s.revokeFamilyErr(ctx, familyID); revokeErr != nil {
 		slog.ErrorContext(ctx, "revoke oauth token family",
 			"security_event", "token_family_revocation_failed",
@@ -68,12 +67,10 @@ func (s Service) Revoke(ctx context.Context, input RevokeInput) error {
 
 // resolveTokenFamily finds the family a presented token belongs to.
 //
-// token_type_hint only reorders the lookups, per RFC 7009 §2.1: a client that
-// guesses wrong must still have its token revoked, so a miss on the hinted type
-// falls through to the other. The client ownership check is what stops one client
-// revoking another's sessions; a token owned by a different client reads as not
-// found, which is also the answer RFC 7009 wants for a token this client cannot
-// act on.
+// token_type_hint only reorders the lookups (RFC 7009 §2.1): a wrong guess must
+// still revoke the token, so a miss on the hinted type falls through to the other.
+// The client ownership check stops one client revoking another's sessions; a token
+// owned by a different client reads as not found.
 func (s Service) resolveTokenFamily(
 	ctx context.Context,
 	token, hint string,
@@ -115,23 +112,18 @@ func (s Service) familyByRefreshToken(ctx context.Context, token string, clientI
 }
 
 // familyByAccessJTI resolves an access token by verifying it and looking up its
-// JTI. The signature is verified rather than the JWT merely decoded: an
-// unverified token's claims are attacker-controlled, and trusting its jti would
-// let anyone revoke an arbitrary family by forging one.
+// JTI. The signature is verified rather than the JWT merely decoded: an unverified
+// token's claims are attacker-controlled, and trusting its jti would let anyone
+// revoke an arbitrary family by forging one.
 //
-// An expired token is still resolved, because revocation here is family-wide: the
-// presented access token being useless does not make its family useless, and its
-// sibling refresh token can stay live for weeks. Treating expiry as not-found made
-// the endpoint answer 200 while revoking nothing — and an expired access token is
-// the ordinary state of a client that has been idle and now wants to log out.
-// VerifyExpiredAccessToken forgives only the expiry; issuer, audience, kid and
-// signature are still enforced, and ownership is decided below against the database
-// row rather than anything the token asserts.
+// An expired token is still resolved, since revocation is family-wide and its
+// sibling refresh token can stay live for weeks. VerifyExpiredAccessToken forgives
+// only the expiry — issuer, audience, kid and signature stay enforced, and
+// ownership is decided below against the database row.
 func (s Service) familyByAccessJTI(ctx context.Context, token string, clientID int64) (string, *int64, bool, error) {
-	// VerifyExpiredAccessToken is the one call that accepts both a live token and
-	// an expired one (forgiving only the clock; signature, issuer, audience and
-	// kid stay enforced), so an expired token does not pay for two full EdDSA
-	// verifies.
+	// VerifyExpiredAccessToken accepts both a live and an expired token (forgiving
+	// only the clock; signature, issuer, audience and kid stay enforced), so one
+	// call covers both cases.
 	claims, err := s.JWT.VerifyExpiredAccessToken(token)
 	if err != nil {
 		return "", nil, false, nil

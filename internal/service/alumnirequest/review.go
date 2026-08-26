@@ -52,19 +52,12 @@ func (s Service) Get(ctx context.Context, requestID int64) (*RequestView, error)
 	return &view, nil
 }
 
-// Approve provisions the account and records the verdict in one transaction.
-//
-// The password is generated and hashed here, then discarded: the plaintext never
-// leaves this function, is not returned, not emailed and not audited. The alumnus
-// sets their own through the password-reset flow, which works because the reset
-// lookup accepts a bound other_mail identity — the personal email this ticket
-// carries.
-//
-// Two audit rows, not one. The approval itself is recorded against the ticket, and
-// the account creation is recorded against the user, because approval does not go
-// through adminuser.CreateUser and that is what would otherwise write it. Without
-// the second row the audit trail contains an account nobody appears to have
-// created.
+// Approve provisions the account and records the verdict in one transaction. The
+// generated password is discarded here — never returned, emailed or audited; the
+// alumnus sets their own through the reset flow, which accepts the bound personal
+// email. Two audit rows are written: the verdict against the ticket and the account
+// creation against the user, so the trail contains no account nobody appears to
+// have created.
 func (s Service) Approve(ctx context.Context, input ReviewInput) (*ApproveResult, error) {
 	if input.AdminUserID <= 0 {
 		return nil, newError(ErrInvalidInput, "缺少审批人信息", nil)
@@ -91,9 +84,9 @@ func (s Service) Approve(ctx context.Context, input ReviewInput) (*ApproveResult
 		"login_email": approved.LoginEmail,
 		"user_id":     provisioned.ID,
 	})
-	// The account-creation row names the user as its resource and the ticket as its
-	// provenance, so a reader of the user's audit history can see where the account
-	// came from without joining anything.
+	// The account-creation row names the ticket as provenance, so a reader of the
+	// user's audit history can see where the account came from without joining
+	// anything.
 	s.auditAccountCreation(ctx, input, provisioned, approved)
 
 	enqueued := s.enqueueNotification(NotificationJob{
@@ -110,13 +103,10 @@ func (s Service) Approve(ctx context.Context, input ReviewInput) (*ApproveResult
 	}, nil
 }
 
-// buildAccount maps a locked ticket onto the rows to insert.
-//
-// Runs inside the approval transaction, so it must not perform its own database
-// work: the hash is CPU-bound and the repository does the writing. Argon2id at
-// the configured cost holds the ticket's row lock for the duration, which is
-// acceptable because the lock only contends with a second reviewer acting on the
-// same ticket.
+// buildAccount maps a locked ticket onto the rows to insert. It runs inside the
+// approval transaction, so it must not perform its own database work; the argon2id
+// hash holds the ticket row lock only long enough to contend with a second review
+// of the same ticket.
 func (s Service) buildAccount(
 	ctx context.Context,
 	request *model.AlumniRequest,
@@ -133,9 +123,9 @@ func (s Service) buildAccount(
 	}
 
 	user := &model.User{
-		// A graduated member: member role, retired_sast state. Both are the console's
-		// provisioning defaults, and neither is taken from the submission — a ticket
-		// must not be able to ask for a role.
+		// Member role and retired_sast state, both the console's provisioning defaults
+		// and never taken from the submission — a ticket must not be able to ask for
+		// a role.
 		Role:         model.UserRoleMember,
 		State:        model.UserStateRetiredSAST,
 		Name:         request.Name,
@@ -191,16 +181,12 @@ func (s Service) Reject(ctx context.Context, input ReviewInput) (*ReviewResult, 
 	return &ReviewResult{NotifyEnqueued: enqueued}, nil
 }
 
-// ResendNotification re-queues the result email for a reviewed ticket.
-//
-// Exists because the delivery path is a bounded queue plus SMTP, and both can
-// fail after the review has committed. The approval email is the applicant's only
-// instruction to go and set a password, so a lost one leaves a usable account
-// nobody can sign in to.
-//
-// Deliberately allowed even when notified_at is already set: an administrator
-// asking for a resend has information the system does not, usually that the
-// applicant never received it.
+// ResendNotification re-queues the result email for a reviewed ticket; the
+// delivery path is a bounded queue plus SMTP, and both can fail after the review
+// has committed. The approval email is the applicant's only instruction to set a
+// password, so a lost one leaves a usable account nobody can sign in to. Allowed
+// even when notified_at is already set, since an administrator asking for a resend
+// knows something the system does not.
 func (s Service) ResendNotification(ctx context.Context, input ReviewInput) (*ReviewResult, error) {
 	request, err := s.Requests.Get(ctx, input.RequestID)
 	if err != nil {
@@ -228,11 +214,8 @@ func (s Service) ResendNotification(ctx context.Context, input ReviewInput) (*Re
 }
 
 // enqueueNotification hands the email to the worker, reporting whether it fit in
-// the queue.
-//
-// Never an error: the review has already committed, and failing the response
-// because a channel was full would tell the reviewer their action did not happen
-// when it did. A false answer routes them to the resend endpoint instead.
+// the queue. Never an error: the review has already committed, so a false answer
+// routes the reviewer to the resend endpoint.
 func (s Service) enqueueNotification(job NotificationJob) bool {
 	if s.Notifier == nil {
 		return false
@@ -248,17 +231,11 @@ func (s Service) mapLookupError(ctx context.Context, err error) error {
 	return internalError(ctx, "get alumni request", "查询建号申请失败", err)
 }
 
-// mapReviewError translates an approve or reject failure.
-//
-// ErrStateConflict is what the row lock produces for a ticket that already
-// carries a verdict — the second half of a double-clicked approve. It is reported
-// as such rather than as a generic conflict so the console can say "already
-// handled" instead of implying the reviewer did something wrong.
-//
-// A unique violation reaching here means the pre-submission occupancy check lost
-// a race with a registration: the ticket was clean when it was filed and the
-// account appeared in between. The reviewer needs to know which field, hence the
-// constraint-name classification rather than a generic conflict.
+// mapReviewError translates an approve or reject failure. ErrStateConflict is what
+// the row lock produces for a second verdict (the second half of a double-clicked
+// approve). A unique violation reaching here means the pre-submission occupancy
+// check lost a race with a registration, so the constraint name tells the reviewer
+// which field.
 func (s Service) mapReviewError(ctx context.Context, err error, message string) error {
 	switch {
 	case errors.Is(err, repository.ErrNotFound):
@@ -266,9 +243,8 @@ func (s Service) mapReviewError(ctx context.Context, err error, message string) 
 	case errors.Is(err, repository.ErrStateConflict):
 		return newError(ErrAlreadyReviewed, "该申请已被处理", err)
 	}
-	// A typed error from the provision callback travels back unchanged: it was
-	// already classified (hash failure, password generation) and re-wrapping would
-	// bury an internal cause under a conflict message.
+	// A typed error from the provision callback is already classified and travels
+	// back unchanged.
 	var typed *Error
 	if errors.As(err, &typed) {
 		return err

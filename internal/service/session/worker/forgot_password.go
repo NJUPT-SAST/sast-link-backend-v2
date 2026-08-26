@@ -20,9 +20,7 @@ const (
 
 type ForgotPasswordUsers interface {
 	// FindAuthUserByLoginIdentifier returns the scalar columns without preloads;
-	// the worker only needs the account ID. It accepts a login email or an
-	// other_mail identity so password reset works for accounts with only a bound
-	// personal email.
+	// it accepts a login email or an other_mail identity.
 	FindAuthUserByLoginIdentifier(ctx context.Context, identifier string) (*model.User, error)
 }
 
@@ -35,7 +33,7 @@ type ForgotPasswordAudit interface {
 }
 
 // ForgotPassword dispatches account-sensitive reset email work outside the
-// anonymous request path. Enqueue is deliberately non-blocking and bounded.
+// anonymous request path; enqueue is non-blocking and bounded.
 type ForgotPassword struct {
 	jobs   chan session.ForgotPasswordJob
 	Users  ForgotPasswordUsers

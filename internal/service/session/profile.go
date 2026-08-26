@@ -21,11 +21,10 @@ var profileFieldOrder = []string{
 }
 
 // UpdateProfile applies a partial self-service edit to the caller's own record.
-//
-// Only the fields PRD §4.9 assigns to the user are accepted; login_email, role,
-// state and email_type have no entry in UpdateProfileInput at all, so no request
-// shape can reach them. Every present field is validated before the write, since
-// a partial failure would leave the user table updated and profile untouched.
+// Only the fields PRD §4.9 assigns to the user are accepted: login_email, role,
+// state and email_type have no entry in the input, so no request can reach
+// them. Every present field is validated before the write, so a partial failure
+// cannot leave the user table updated and profile untouched.
 func (s Service) UpdateProfile(ctx context.Context, input UpdateProfileInput) (*UpdateProfileResult, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
@@ -43,9 +42,8 @@ func (s Service) UpdateProfile(ctx context.Context, input UpdateProfileInput) (*
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}
 	if err != nil {
-		// student_id is unique, so a concurrent registration or edit can collide.
-		// Dispatch on the constraint name rather than reporting a generic conflict:
-		// the user needs to know which field to change.
+		// student_id is unique, so a concurrent registration or edit can collide;
+		// dispatch on the constraint name so the user knows which field to change.
 		switch constraint := duplicateConstraint(err); constraint {
 		case userStudentIDConstraint:
 			return nil, newError(ErrStudentIDOccupied, "学号已被占用", err)
@@ -165,8 +163,8 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 	if input.Department != nil {
 		department := model.Department(strings.TrimSpace(*input.Department))
 		// An empty department clears the column; any other value must be a real
-		// department_enum member or PostgreSQL would reject it as an invalid enum
-		// input, which reaches the client as a 500 rather than a field error.
+		// department_enum member, or PostgreSQL rejects it as a 500 rather than a
+		// field error.
 		if department != "" && !department.Valid() {
 			return update, nil, newError(ErrInvalidInput, "部门不在枚举范围内", nil)
 		}

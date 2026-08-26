@@ -26,11 +26,9 @@ type verificationEmailData struct {
 
 // alumniResultData is the account-request verdict email.
 //
-// There is deliberately no password field. The approved account's initial
-// password is generated, hashed and discarded at approval time; the applicant
-// sets their own through the reset flow. Leaving the field out of the struct is
-// what makes "we never mail a password" a property of the type rather than a
-// habit of the caller.
+// No password field, deliberately: the approved account's initial password is
+// generated, hashed and discarded at approval time, so "we never mail a
+// password" is a property of the type rather than a habit of the caller.
 type alumniResultData struct {
 	layoutData
 	Name string
@@ -206,8 +204,8 @@ const verificationContentTemplate = `{{define "content"}}
 // alumniResultContentTemplate carries both verdicts.
 //
 // The approval copy states which address to use on the reset page, because the
-// obvious choice is wrong: the account's login email is the deactivated school
-// mailbox, and the reset code has to go to the personal address instead.
+// login email is the deactivated school mailbox — the reset code has to go to
+// the personal address instead.
 const alumniResultContentTemplate = `{{define "content"}}
 {{- if .Approved}}
               <p class="text-muted" style="margin:0 0 14px;font-size:15px;line-height:1.75;color:rgba(0,0,0,0.55);">{{.Name}} 你好，你的 SAST Link 账号申请已通过，账号已开通。</p>

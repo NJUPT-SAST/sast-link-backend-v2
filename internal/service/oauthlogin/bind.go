@@ -13,13 +13,13 @@ import (
 //
 // This is the only path by which an existing account gains a third-party
 // binding. A registration_state must never be accepted here: it proves that
-// somebody completed a provider callback, not which SAST account is acting, so
+// somebody completed a provider callback, not which account is acting, so
 // honouring it would let a leaked state bind an attacker's GitHub to a victim's
 // account. The caller is identified by their Bearer token and nothing else.
 //
-// No OAuth state is involved. The caller passes the provider code directly, and
+// No OAuth state is involved: the caller passes the provider code directly and
 // the request is already authenticated, so there is no cross-site request to
-// protect against with a state parameter.
+// protect against.
 func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidInput, "身份主体无效", nil)
@@ -48,20 +48,18 @@ func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error)
 		return nil, providerError(err)
 	}
 
-	// Check for an existing owner before inserting. The unique constraint would
-	// catch it anyway, but the pre-check distinguishes "someone else has it"
-	// (40903) from "you already have one" (40904); a bare constraint violation
-	// cannot tell those apart and both would read as a generic conflict.
+	// Check for an existing owner before inserting so "someone else has it"
+	// (40903) is told apart from "you already have one" (40904); a bare
+	// constraint violation cannot.
 	existing, err := s.Identities.FindByProviderID(ctx, input.Provider, identity.ProviderID)
 	if err != nil && !isNotFound(err) {
 		return nil, newError(ErrInternal, "查询第三方绑定失败", err)
 	}
 	if existing != nil {
 		if existing.UserID == input.UserID {
-			// Already bound to this same caller. Refresh the stored credentials
-			// so a re-bind is idempotent rather than an error the user cannot
-			// act on, then report the conflict: V001 caps this provider at one
-			// row per user, so there is nothing to add.
+			// Already bound to this same caller: refresh the stored credentials so a
+			// re-bind is idempotent, then report the conflict, since this provider caps
+			// at one row per user.
 			if updateErr := s.Identities.UpdateProviderCredentials(ctx, existing.ID,
 				credentialUpdate(ctx, identity)); updateErr != nil {
 				slog.WarnContext(ctx, "refresh identity on repeated bind",
@@ -93,10 +91,9 @@ func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error)
 
 // bindWriteError maps an insert failure onto the right conflict code.
 //
-// The pre-check above can be raced: two concurrent binds of the same provider
-// account both see no owner, and the loser lands here. The mapping has to hold
-// under that race, which is why the constraint violation is dispatched rather
-// than reported generically.
+// The pre-check above can be raced: two concurrent binds both see no owner, and
+// the loser lands here, so the mapping must dispatch on the constraint rather
+// than report generically.
 func (s Service) bindWriteError(
 	ctx context.Context,
 	input BindInput,
@@ -113,21 +110,20 @@ func (s Service) bindWriteError(
 	default:
 		switch constraint := duplicateConstraint(err); constraint {
 		case identityProviderConstraint:
-			// Lost the race on (provider, provider_id): another user bound this
-			// account between the pre-check and the insert.
+			// Lost the race on (provider, provider_id): another user bound this account
+			// between the pre-check and the insert.
 			s.auditBind(ctx, input, providerID, false, ErrIdentityOccupied.Code)
 			return newError(ErrIdentityOccupied, "该第三方账号已被其他用户绑定", err)
 		case identityUserGitHubConstraint, identityUserLarkConstraint:
-			// Lost the race on the per-user partial unique index: a concurrent
-			// request bound this same provider to this same caller.
+			// Lost the race on the per-user partial unique index: a concurrent request
+			// bound this same provider to this same caller.
 			s.auditBind(ctx, input, providerID, false, ErrIdentityAlreadyBound.Code)
 			return newError(ErrIdentityAlreadyBound, "该类型账号已绑定，不可重复绑定", err)
 		case "":
 			return newError(ErrInternal, "创建第三方绑定失败", err)
 		default:
-			// An unmapped unique constraint. Report a generic conflict rather
-			// than guessing which field collided, and log the name so the
-			// mapping can be extended.
+			// An unmapped unique constraint; report a generic conflict and log the name
+			// so the mapping can be extended.
 			slog.ErrorContext(ctx, "unmapped unique violation on oauth bind",
 				"constraint", constraint, "provider", string(input.Provider))
 			return newError(ErrIdentityOccupied, "第三方绑定与现有记录冲突", err)
@@ -135,11 +131,10 @@ func (s Service) bindWriteError(
 	}
 }
 
-// PostgreSQL's unique-index names for the identities table, from V001. A bare
-// SQLSTATE 23505 check cannot tell them apart, and they map to different
-// business codes: the global (provider, provider_id) index means somebody else
-// owns the account (40903), while the per-user partial indexes mean the caller
-// already has one (40904).
+// PostgreSQL's unique-index names for the identities table, from V001. They
+// map to different business codes: the global (provider, provider_id) index
+// means somebody else owns the account (40903), while the per-user partial
+// indexes mean the caller already has one (40904).
 const (
 	identityProviderConstraint   = "uq_identities_provider_provider_id"
 	identityUserGitHubConstraint = "uq_identities_user_github"
@@ -147,9 +142,8 @@ const (
 )
 
 // duplicateConstraint returns the violated unique constraint's name, or "" when
-// err is not a unique violation. Thin wrapper over the repository helper so the
-// classification exists once; the mapping onto this service's error type stays
-// local.
+// err is not a unique violation; it wraps the repository helper so the
+// classification exists once.
 func duplicateConstraint(err error) string {
 	return repository.DuplicateConstraint(err)
 }
@@ -172,7 +166,7 @@ func (s Service) auditBind(
 }
 
 // logAuditFailure records an audit write failure. Audit rows are a trail, not a
-// gate: losing one must not fail the user's request, but it must be visible.
+// gate: losing one must not fail the request, but it must be visible.
 func logAuditFailure(ctx context.Context, action string, err error) {
 	slog.ErrorContext(ctx, "audit write failed", "action", action, "error", err)
 }

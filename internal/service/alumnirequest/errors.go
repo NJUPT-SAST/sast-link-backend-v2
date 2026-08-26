@@ -1,13 +1,10 @@
 // Package alumnirequest implements the alumni account-request use cases without
 // HTTP concerns.
 //
-// Kept separate from package adminuser even though approval provisions an
-// account through the same repository call: the surfaces have opposite trust
-// properties. Submission is the service's only unauthenticated write, so its
-// error copy must not carry console semantics and its inputs are stricter than
-// the console's — major is mandatory here because a blank one is what V010's
-// generated column flags as an incomplete profile, which would send every
-// approved alumnus straight to a completion page on first login.
+// Kept separate from package adminuser: submission is this service's only
+// unauthenticated write, so its error copy carries no console semantics and its
+// inputs are stricter — major is mandatory here, since a blank one flags the
+// approved account incomplete.
 package alumnirequest
 
 import (
@@ -81,10 +78,9 @@ var (
 	ErrInvalidInput = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
 	ErrEmailDomain  = &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed}
 	ErrNotFound     = &Error{Kind: KindNotFound, Code: errcode.CodeAlumniRequestNotFound}
-	// ErrEmailOccupied deliberately reuses CodeEmailAlreadyRegistered rather than
-	// taking a code of its own. The outcome a client must handle is identical to the
-	// console's, and errcode's rule is that the constant set is exactly what clients
-	// can observe: two codes for one observable outcome is drift waiting to happen.
+	// ErrEmailOccupied reuses the console's CodeEmailAlreadyRegistered rather than
+	// taking a code of its own: the outcome a client must handle is identical, and
+	// two codes for one observable outcome is drift waiting to happen.
 	ErrEmailOccupied     = &Error{Kind: KindConflict, Code: errcode.CodeEmailAlreadyRegistered}
 	ErrStudentIDOccupied = &Error{Kind: KindConflict, Code: errcode.CodeStudentIDOccupied}
 	// ErrPending is the partial unique index on a pending student_id: one open
@@ -103,21 +99,15 @@ var (
 	ErrInternal    = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 )
 
-// newError builds a typed error carrying sentinel's Kind and Code.
-//
-// The message is always a literal at the call site and never interpolates caller
-// input: descriptions reach the client verbatim, and this service's submit path
-// is unauthenticated, so echoing a submitted value back would make an anonymous
-// endpoint a reflection point.
+// newError builds a typed error carrying sentinel's Kind and Code. The message is a
+// literal at the call site, never caller input — an anonymous submit path must not
+// reflect submissions back.
 func newError(sentinel *Error, message string, cause error) error {
 	return &Error{Kind: sentinel.Kind, Code: sentinel.Code, Message: message, Err: cause}
 }
 
-// internalError builds a KindInternal error and logs the cause.
-//
-// The client is told nothing beyond a generic message, so unless the cause is
-// logged here it is discarded entirely: the HTTP layer replaces it and the
-// request logger records only the status.
+// internalError builds a KindInternal error and logs the cause, which would
+// otherwise be discarded entirely: the client gets only a generic message.
 func internalError(ctx context.Context, operation, message string, cause error) error {
 	slog.ErrorContext(ctx, operation, "error", cause)
 	return newError(ErrInternal, message, cause)

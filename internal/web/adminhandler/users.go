@@ -19,10 +19,9 @@ func (h Handler) ListUsers(c *gin.Context) {
 		response.Error(c, badRequest())
 		return
 	}
-	// Tri-state: absent means "no filter", so the default list is unchanged. An
-	// unrecognized value is a 400 rather than false, since needs_completion=ture
-	// would otherwise list the healthy accounts — the opposite of the backlog the
-	// caller asked for — and look like it worked.
+	// Tri-state: absent means "no filter". An unrecognized value is a 400 rather
+	// than false, since needs_completion=ture would otherwise list the healthy
+	// accounts and look like it worked.
 	needsCompletion, err := parseOptionalBool(c.Query("needs_completion"))
 	if err != nil {
 		response.Error(c, badRequest())
@@ -57,9 +56,9 @@ func (h Handler) ListUsers(c *gin.Context) {
 // createUserRequest is the body of POST /admin/users.
 //
 // Optional fields default instead of staying unchanged because a new account has
-// no prior value. college defaults to "其他", major to "", role to member, state
-// to retired_sast. personal_email, when set, is bound as an other_mail identity
-// in the same transaction without the email verification of self-service binding.
+// no prior value (college to "其他", major to "", role to member, state to
+// retired_sast). personal_email, when set, is bound as an other_mail identity in
+// the same transaction, skipping the email verification of self-service binding.
 type createUserRequest struct {
 	Name          string  `json:"name"`
 	PhoneNumber   string  `json:"phone_number"`
@@ -138,13 +137,12 @@ func (h Handler) GetUser(c *gin.Context) {
 	response.Ok(c, mapUserDetail(*detail))
 }
 
-// updateUserRequest is a partial administrative edit.
-//
-// Pointers so an omitted field is left alone rather than being read as "clear it".
-// There is no password, token_version or profile field: a credential rewrite is
-// not an edit, the version counter is the service's to bump, and display fields
-// belong to the user's own PUT /user/profile. The strict decoder turns an attempt
-// to send one into a 400 instead of ignoring it silently.
+// updateUserRequest is a partial administrative edit. Pointers so an omitted
+// field is left alone rather than read as "clear it". There is no password,
+// token_version or profile field: a credential rewrite is not an edit, the
+// version counter is the service's to bump, and display fields belong to the
+// user's own PUT /user/profile. The strict decoder turns an attempt to send one
+// into a 400.
 type updateUserRequest struct {
 	Name        *string `json:"name"`
 	PhoneNumber *string `json:"phone_number"`
@@ -198,19 +196,16 @@ func (h Handler) UpdateUser(c *gin.Context) {
 	}
 	message := "用户信息更新成功"
 	if result.RevokedSessions {
-		// Say so: a role change cut every session the user held, which is a larger
-		// consequence than "updated" conveys.
+		// Say so: a role change cut every session the user held.
 		message = "用户信息更新成功，已撤销该用户的全部 Token"
 	}
 	response.Ok(c, messageResponse{Message: message})
 }
 
 // GetUsersByIDs returns the full records of the requested user ids, in request
-// order, with duplicates collapsed.
-//
-// The ids arrive comma-separated in the query string: a batch of up to 100 ids
-// stays well inside URL limits, and a GET keeps the response cacheable and the
-// permission surface identical to GET /admin/users/:id.
+// order, with duplicates collapsed. The ids arrive comma-separated so a batch of
+// up to 100 stays well inside URL limits, and a GET keeps the permission surface
+// identical to GET /admin/users/:id.
 func (h Handler) GetUsersByIDs(c *gin.Context) {
 	ids, ok := parseIDList(c.Query("ids"))
 	if !ok {

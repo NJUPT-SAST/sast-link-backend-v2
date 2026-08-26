@@ -1,40 +1,35 @@
 name: Deploy
 
 # Build the image, push it to Tencent Container Registry (TCR), then have the
-# server pull it from TCR's internal network. The tar-over-scp variant in the SOP
-# is not used: the runner's upload path to the server measures ~2.2 Mbps, and this
-# image carries two Go binaries.
+# server pull it from TCR's internal network. The tar-over-scp variant is not
+# used: the runner's upload path to the server measures ~2.2 Mbps for an image
+# carrying two Go binaries.
 #
 # This workflow deploys ONE container: api. PostgreSQL and Redis are pre-existing
-# containers on the server, shared with other services and owned by another stack.
-# Nothing here starts, restarts, or waits on them — every compose call passes
+# containers on the server, owned by another stack — every compose call passes
 # --no-deps so a deploy can never recreate a store other services depend on. The
-# server's compose file declares neither service and reaches them over an external
-# network; the repository's docker-compose.yml (which provisions its own) is for
-# local development only.
+# repository's docker-compose.yml (which provisions its own) is for local
+# development only.
 #
 # Schema migrations run automatically, before the API container is replaced. A
-# deploy IS this project's maintenance window — it is a single-container swap on a
-# scheduled push — and the manual procedure never took a fresh dump either, so
-# gating migrations behind a dispatch input bought no safety while costing a real
-# failure mode: a binary built against V00N silently serving a V00N-1 schema, with
-# /health reporting ok because it only probes connectivity.
+# deploy is the project's scheduled maintenance opportunity: a single-container
+# swap on a scheduled push. The manual procedure never took a fresh dump either,
+# so gating migrations behind a dispatch input bought no safety while costing a
+# real failure mode: a binary built against V00N silently serving a V00N-1 schema,
+# with /health reporting ok because it only probes connectivity.
 #
 # What still protects the schema:
 #   - golang-migrate refuses Up() on a dirty version (ErrDirty), so an interrupted
 #     migration halts the deploy instead of compounding
-#   - the migration step precedes `compose up api` and any failure exits non-zero,
-#     so a failed migration never gets a new binary stacked on top of it
+#   - the migration step precedes `compose up api` and any failure exits non-zero
 #   - `environment: production` keeps whatever approval rule that environment holds
-#   - skip_migration below is the escape hatch for a deploy that must not touch
-#     the schema
+#   - skip_migration below is the escape hatch
 #
-# Two consequences worth knowing. Migrations apply while the OLD binary is still
-# serving, so a destructive change (dropped or renamed column) breaks it for the
-# seconds until the swap — forward-only additive migrations are the assumption,
-# which is also what the absence of a `down` command implies. And a migration
-# taking a heavy lock (a bare CREATE INDEX blocks writes on its table) stalls
-# traffic for its duration; prefer CONCURRENTLY on anything large.
+# Two consequences. Migrations apply while the OLD binary still serves, so a
+# destructive change (dropped or renamed column) breaks it until the swap —
+# forward-only additive migrations are the assumption (hence no `down` command).
+# And a migration taking a heavy lock (a bare CREATE INDEX blocks writes on its
+# table) stalls traffic for its duration; prefer CONCURRENTLY on anything large.
 
 on:
   push:
@@ -57,42 +52,32 @@ on:
 permissions:
   contents: read
 
-# One deploy at a time. cancel-in-progress is off on purpose: cancelling a run
-# mid-SSH would leave the server between tag rotation and `compose up`.
+# One deploy at a time. cancel-in-progress off: cancelling mid-SSH would leave the
+# server between tag rotation and `compose up`.
 concurrency:
   group: deploy-production
   cancel-in-progress: false
 
 env:
   SERVICE_NAME: sast-link-backend-v2
-  # Local image name on the server, matching every other service already deployed
-  # there (sast/sast-people-next:current, sast/sast-goprint:current, ...) and their
-  # :current / :backup rotation. The repository's docker-compose.yml names
-  # sastlink-api:current instead, but that file provisions its own PostgreSQL and
-  # Redis and is for local development only — the server's compose file is separate.
-  # Every pulled image is retagged to this, so the compose file and the rollback
-  # procedure stay independent of the registry.
+  # Local image name on the server, matching every other service's :current /
+  # :backup rotation. Every pulled image is retagged to this, so the compose file
+  # and the rollback procedure stay independent of the registry.
   IMAGE_NAME: sast/sast-link-backend-v2
   TCR_HOST: ccr.ccs.tencentyun.com
 
 jobs:
-  # Deploying is gated on CI having passed for THIS commit. The required status
-  # checks on main gate merging, which is a different thing: they say a pull
-  # request was green, not that the commit now on main is. Nothing connected the
-  # two, so `push: main` started this workflow in parallel with CI and never
-  # looked at the result — and since the deploy now also migrates the schema, an
-  # untested commit could take the database with it.
+  # Deploying is gated on CI having passed for THIS commit: the required checks on
+  # main only say a pull request was green, not that the merged commit is — and an
+  # untested commit would migrate the schema on the way out.
   #
-  # A gate job rather than an `on: workflow_run` trigger, for two reasons. First,
-  # workflow_run sets GITHUB_SHA to the default branch's newest commit rather than
-  # the head_sha of the run that triggered it, so two pushes in quick succession
-  # can deploy a commit CI never saw. Second, workflow_run would leave
-  # workflow_dispatch ungated, and that is the path that can aim at any commit at
-  # all.
+  # A gate job rather than an `on: workflow_run` trigger: workflow_run resolves
+  # GITHUB_SHA to the default branch's newest commit (not the triggering run's
+  # head_sha), and it would leave workflow_dispatch ungated — the one path that
+  # can aim at any commit.
   #
-  # This relies on ci.yml running on `push: main`, not only on pull requests:
-  # without a run keyed to the merged commit's SHA there is nothing to find and
-  # every deploy would wait out the timeout. Both changes ship together.
+  # This relies on ci.yml running on `push: main`: without a run keyed to the
+  # merged SHA there is nothing to find and every deploy waits out the timeout.
   verify:
     name: verify CI
     runs-on: ubuntu-latest
@@ -115,10 +100,8 @@ jobs:
             exit 0
           fi
 
-          # Poll rather than fail fast on a missing run: a push to main starts CI
-          # and this workflow at the same moment, so "no run yet" is the normal
-          # first observation, not an error. Only a completed non-success, or the
-          # timeout, stops the deploy.
+          # Poll rather than fail fast on a missing run: a push starts CI and this
+          # workflow together, so "no run yet" is the normal first observation.
           attempt=0
           while [ "${attempt}" -lt 60 ]; do
             attempt=$((attempt + 1))
@@ -186,13 +169,13 @@ jobs:
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
-          # The server is amd64; naming it keeps the runner from ever emitting a
-          # multi-arch index the pull step would have to resolve.
+          # The server is amd64; naming the platform avoids a multi-arch index the
+          # pull step would have to resolve.
           platforms: linux/amd64
           push: true
           tags: ${{ env.TCR_HOST }}/${{ vars.TCR_NAMESPACE }}/${{ env.SERVICE_NAME }}:${{ steps.vars.outputs.sha_short }}
-          # TCR personal edition stores a plain image manifest. Attestations would
-          # add an OCI index that `docker pull` on the server may not resolve.
+          # TCR personal edition stores a plain manifest; attestations would add an
+          # OCI index the server's `docker pull` may not resolve.
           provenance: false
           sbom: false
           cache-from: type=gha
@@ -207,16 +190,13 @@ jobs:
           port: ${{ vars.SERVER_SSH_PORT || 22 }}
           command_timeout: 20m
           envs: SKIP_MIGRATION,SKIP_ROLLBACK,TCR_USERNAME,TCR_PASSWORD
-          # No script_stop: it is not an input of this action version and was
-          # rejected with "Unexpected input(s) 'script_stop'". The script sets
-          # `set -eu` itself, which is what actually stops it on the first error.
+          # No script_stop (the action rejects the input); the script's own `set
+          # -eu` stops it on the first error.
           script: |
-            # -eu only. `set -o pipefail` is not POSIX, and this runs under whatever
-            # login shell the deploy user has, so no pipeline here may rely on the
-            # exit status of a non-final stage: the health probe is guarded by `if`,
-            # and the two migration-version pipelines are guarded by a `test -n` on
-            # the captured value, which fails whenever the CLI stage produced no
-            # parseable version.
+            # -eu only: `set -o pipefail` is not POSIX and the deploy user's login
+            # shell is unknown, so no pipeline may rely on a non-final stage's exit
+            # status — the health probe is guarded by `if`, the version pipelines by
+            # `test -n` on the captured value.
             set -eu
 
             SERVICE_DIR="/data/${{ env.SERVICE_NAME }}"
@@ -229,23 +209,19 @@ jobs:
             echo "deploy start: ${NEW_TAG}"
 
             # Authenticate to TCR on every run rather than relying on a one-time
-            # manual `docker login`. Docker reads the INVOKING user's
-            # ~/.docker/config.json, so a credential stored for root does nothing
-            # for this deploy user — that mismatch is what made the first run fail
-            # with "unauthorized" even though the push had succeeded. Logging in
-            # here keeps the server's required state to "the SSH key works", with
-            # no undocumented on-disk credential to recreate when an account is
-            # rebuilt. The private repository is deliberate: the image needs no
+            # manual `docker login`: Docker reads the invoking user's
+            # ~/.docker/config.json, so a root-stored credential does nothing for
+            # this deploy user. The repository is private — the image needs no
             # secrets to run, but there is no reason to publish build output.
             #
-            # The trap drops the credential on EVERY exit path, not just the happy
-            # one — four of the paths below exit 1, and without this the token
-            # would be left at rest in the deploy user's home after any failure.
+            # The trap drops the credential on every exit path — six of the paths
+            # below exit 1, and without this the token would be left at rest in
+            # the deploy user's home after any failure.
             trap 'docker logout "${{ env.TCR_HOST }}" >/dev/null 2>&1 || true' EXIT
             echo "${TCR_PASSWORD}" \
               | docker login "${{ env.TCR_HOST }}" -u "${TCR_USERNAME}" --password-stdin
 
-            # TCR personal edition is shared storage; a just-pushed tag can be
+            # TCR personal edition is shared storage: a just-pushed tag can be
             # briefly invisible.
             for attempt in 1 2 3; do
               docker pull "${REMOTE_IMAGE}:${NEW_TAG}" && break
@@ -262,8 +238,8 @@ jobs:
             # SQL embedded in the version being deployed.
             if docker image inspect "${IMAGE_NAME}:current" >/dev/null 2>&1; then
               ROLLBACK_AVAILABLE=1
-              # Keep exactly one backup. `docker rmi` only drops the tag here;
-              # the tag being retagged below still references the same image.
+              # Keep exactly one backup: `docker rmi` only drops the tag, and the
+              # tag retagged below still references the same image.
               if docker image inspect "${IMAGE_NAME}:backup" >/dev/null 2>&1; then
                 docker rmi "${IMAGE_NAME}:backup" >/dev/null || true
               fi
@@ -276,24 +252,21 @@ jobs:
             docker tag "${IMAGE_NAME}:${NEW_TAG}" "${IMAGE_NAME}:current"
 
             # PostgreSQL and Redis are pre-existing containers this deploy does not
-            # own, so nothing here starts, stops, or waits on them. The server's
-            # compose file declares neither service and joins their network as
-            # external; see the deploy notes for that file's shape.
+            # own, so nothing here starts, stops, or waits on them.
             #
             # This version query doubles as the connectivity preflight: it opens a
-            # real connection to the external PostgreSQL using the same DB_* values
-            # the API will use, so a wrong host, password, or network alias fails
-            # here — before the api container is replaced — rather than showing up
-            # as an unexplained health-check timeout.
+            # real connection with the same DB_* values the API will use, so a
+            # wrong host, password, or alias fails before the api container is
+            # replaced.
             #
-            # Assigned rather than wrapped in "echo $(...)": under set -e a command
-            # substitution inside echo still leaves echo's own exit status 0, so a
-            # wrapped failure would pass silently. An assignment propagates it.
+            # Assigned rather than "echo $(...)": under set -e a command
+            # substitution inside echo leaves echo's own status 0, so a wrapped
+            # failure would pass silently.
             #
-            # Only the version=N token is kept, so compose's own progress output
-            # cannot leak into the before/after comparison. An unparseable result is
-            # a hard failure: that comparison decides whether an image rollback is
-            # still safe, and "" = "" would falsely claim the schema never moved.
+            # Only the version=N token is kept so compose's progress output cannot
+            # leak into the comparison. An unparseable result is a hard failure:
+            # "" = "" would falsely claim the schema never moved, and that
+            # comparison decides whether a rollback is safe.
             echo "reading migration state"
             VERSION_BEFORE=$(docker compose run --rm --no-deps migrate \
               /usr/local/bin/migrate version 2>/dev/null | grep -o 'version=[0-9]*' | head -1)
@@ -301,10 +274,9 @@ jobs:
               echo "could not read migration version, aborting"; exit 1; }
             echo "  before: ${VERSION_BEFORE}"
 
-            # MIGRATED records whether the schema actually moved, which is not the
-            # same as whether the step ran: the common case is ErrNoChange (nothing
-            # pending), and that deploy stays image-rollback-safe. Only a real
-            # version change forfeits the rollback.
+            # MIGRATED records whether the schema actually moved, not whether the
+            # step ran: ErrNoChange (nothing pending) stays image-rollback-safe;
+            # only a real version change forfeits it.
             MIGRATED=0
             if [ "${SKIP_MIGRATION:-false}" = "true" ]; then
               echo "skip_migration=true, leaving the schema untouched"
@@ -328,24 +300,19 @@ jobs:
             echo "starting api"
             # --no-deps everywhere in this script, for two independent reasons:
             #
-            # 1. PostgreSQL and Redis are shared containers owned by another stack.
-            #    A dependency edge would let this deploy recreate or restart a store
-            #    that other services are also using.
-            # 2. If the server's compose file keeps an `api.depends_on.migrate` edge,
-            #    compose would run the migrate service, whose command is a bare
-            #    `migrate up` — refused under APP_ENV=production
-            #    ("migration up in production requires --confirm-production") — then
-            #    watch it exit non-zero and never start api. Migrations are handled
-            #    by the explicit step above, which passes the confirmation flag.
+            # 1. PostgreSQL and Redis are shared containers owned by another stack —
+            #    a dependency edge would let this deploy restart a store others use.
+            # 2. An `api.depends_on.migrate` edge would run the migrate service with
+            #    a bare `migrate up`, which production refuses without
+            #    --confirm-production, and then never start api. Migrations are
+            #    handled by the explicit step above.
             docker compose up -d --no-deps api
 
-            # /health reports db and redis separately. redis=degraded is a healthy
-            # response by design (PostgreSQL alone can serve authenticated
-            # traffic), so the gate is status=ok, not a whole-body match.
-            #
-            # Probed from inside the container via the image's own wget (alpine
-            # busybox). That keeps the check independent of the host's published
-            # port, so it still works if the port mapping is ever changed.
+            # /health reports db and redis separately; redis=degraded is a healthy
+            # response by design (PostgreSQL alone can serve authenticated traffic),
+            # so the gate is status=ok, not a whole-body match. Probed from inside
+            # the container via the image's own wget, keeping the check independent
+            # of the host's published port.
             HEALTHY=0
             for attempt in $(seq 1 20); do
               if docker compose exec -T api wget -qO- http://127.0.0.1:8080/health 2>/dev/null | grep -q '"status":"ok"'; then
@@ -385,9 +352,8 @@ jobs:
         env:
           SKIP_MIGRATION: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_migration || false }}
           SKIP_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_rollback || false }}
-          # Forwarded to the remote shell via `envs:` above so the credential is
-          # never interpolated into the script text. ssh-action masks values it
-          # passes this way in its own logging, and GitHub masks the secrets in
-          # the job log regardless.
+          # Forwarded to the remote shell via `envs:` so the credential is never
+          # interpolated into the script text; ssh-action masks values passed this
+          # way.
           TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
           TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}

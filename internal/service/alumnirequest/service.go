@@ -35,9 +35,9 @@ type Service struct {
 	// the limiter call, which is only appropriate in tests.
 	SubmitRateLimit int
 	// ConsoleClientID is the built-in first-party client, recorded as the actor when
-	// a review request carries no azp. Same contract as adminuser.Service: naming it
-	// explicitly keeps NULL in actor_client_id meaning exactly one thing, that no
-	// OAuth credential authorized the action.
+	// a review request carries no azp. Naming it explicitly keeps NULL in
+	// actor_client_id meaning exactly one thing: no OAuth credential authorized the
+	// action.
 	ConsoleClientID string
 }
 
@@ -60,9 +60,8 @@ func (s Service) actorClientID(tokenClientID string) string {
 
 // auditParams describes one audit row.
 type auditParams struct {
-	// UserID is the reviewer. Nil for a submission, which is unauthenticated —
-	// there is no subject to attribute it to, and inventing one would misattribute
-	// the action.
+	// UserID is the reviewer. Nil for a submission, which is unauthenticated and has
+	// no subject to attribute it to.
 	UserID        *int64
 	ActorClientID string
 	Action        string
@@ -96,8 +95,8 @@ func (s Service) audit(ctx context.Context, params auditParams) {
 		entry.ResourceID = &resourceID
 	}
 	// A submission carries no OAuth credential, so actorClientID is not consulted
-	// for it: attributing an anonymous request to the console client would claim a
-	// credential authorized something no credential touched.
+	// for it — attributing it to the console client would claim a credential
+	// authorized something no credential touched.
 	if params.UserID != nil {
 		entry.ActorClientID = nullableString(s.actorClientID(params.ActorClientID))
 	}
@@ -114,9 +113,8 @@ func (s Service) audit(ctx context.Context, params auditParams) {
 		}
 		entry.Detail = model.JSONB(encoded)
 	}
-	// Detached like adminuser.Service.audit: an action that already committed must
-	// still be recorded when the caller goes away, or the audit log loses exactly
-	// the events an aborted request produced.
+	// Detached so an action that already committed is still recorded when the caller
+	// disconnects.
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
 	defer cancel()
 	if err := s.Audit.Create(auditCtx, entry); err != nil {
@@ -126,13 +124,9 @@ func (s Service) audit(ctx context.Context, params auditParams) {
 }
 
 // mapCaptchaError translates a verifier error into this service's vocabulary.
-//
-// The split is the whole reason the port exists. ErrUnavailable means the check
-// could not be made, which is a 503 and a signal to hide the entry point;
-// anything else means the token was rejected, which is a 400 and a cue to solve
-// the challenge again. Collapsing them would either tell a submitter they failed
-// a challenge that never ran, or hide a missing secret behind what looks like
-// user error.
+// ErrUnavailable means the check could not be made (503, hide the entry point);
+// anything else means the token was rejected (400, solve again). Collapsing them
+// would report a challenge failure that never ran, or hide a missing secret.
 func mapCaptchaError(err error) error {
 	if errors.Is(err, turnstile.ErrUnavailable) {
 		return newError(ErrUnavailable, "申请通道暂不可用，请稍后再试", err)
@@ -140,11 +134,8 @@ func mapCaptchaError(err error) error {
 	return newError(ErrCaptcha, "人机校验未通过，请重试", err)
 }
 
-// checkLimit applies one fixed-window bucket.
-//
-// Fail-open on a Redis error, per the PRD's rate-limit class: losing the counter
-// widens the window, while failing closed would let a Redis outage take down the
-// only intake path graduated members have. The captcha is still in front of it.
+// checkLimit applies one fixed-window bucket. Fail-open on a Redis error: losing
+// the counter only widens the window, and the captcha is still in front.
 func (s Service) checkLimit(ctx context.Context, subject string) error {
 	if s.Limiter == nil || s.SubmitRateLimit <= 0 {
 		return nil

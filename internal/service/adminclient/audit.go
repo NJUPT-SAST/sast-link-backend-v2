@@ -18,11 +18,9 @@ const (
 	actionDeleteClient       = "admin_oauth_client_delete"
 )
 
-// auditRotateSecret records a secret rotation attempt. The new plaintext never
-// appears here — like auditCreate, only the fact that a rotation was attempted is
-// durable. clientID is nil when the target could not be resolved (an unknown id);
-// the refusals that precede the write are recorded too, so a leaked-secret
-// incident review finds the probes, not just the successful rotations.
+// auditRotateSecret records a secret rotation attempt — refusals included — without
+// ever writing the new plaintext. clientID is nil when the target could not be
+// resolved (an unknown id).
 func (s Service) auditRotateSecret(ctx context.Context, input RotateClientSecretInput, clientID *string, success bool, errCode int) {
 	s.audit(ctx, auditParams{
 		AdminUserID:   input.AdminUserID,
@@ -36,11 +34,8 @@ func (s Service) auditRotateSecret(ctx context.Context, input RotateClientSecret
 	})
 }
 
-// auditCreate records a registration attempt.
-//
-// The generated client_secret never appears here. An audit row is long-lived and
-// widely readable, so writing the plaintext into it would defeat the point of
-// storing only a hash.
+// auditCreate records a registration attempt; the generated client_secret is never
+// written to the audit record.
 func (s Service) auditCreate(
 	ctx context.Context,
 	input CreateClientInput,
@@ -53,9 +48,8 @@ func (s Service) auditCreate(
 		"client_name": input.ClientName,
 		"client_type": input.ClientType,
 	}
-	// A registration that arrives holding a capability scope is worth finding in the
-	// audit log without cross-referencing the row it created. Recorded from the
-	// submitted scopes, so a rejected attempt is flagged too.
+	// Capability scopes are flagged from the submitted scopes, so a rejected attempt
+	// is marked too.
 	if scope.ContainsAdmin(input.Scopes) {
 		detail["admin_scope"] = true
 	}
@@ -78,13 +72,9 @@ func (s Service) auditCreate(
 	})
 }
 
-// auditUpdate records an update attempt, naming which fields were touched.
-//
-// Field names rather than values: a redirect_uris list is long and the useful
-// question after the fact is which properties an administrator changed and whether
-// the change cut existing sessions.
-// reason is what the update did to the client's granted capability, or nil when the
-// request was rejected before the stored row could be compared against it.
+// auditUpdate records an update attempt, naming which fields were touched (names,
+// not values). reason is what the update did to the client's granted capability, or
+// nil when the request was rejected before the stored row could be compared.
 func (s Service) auditUpdate(
 	ctx context.Context,
 	input UpdateClientInput,
@@ -104,10 +94,6 @@ func (s Service) auditUpdate(
 	if input.IsActive != nil {
 		changed = append(changed, "is_active")
 	}
-	// grant_types and scopes were missing here while they were the two fields an
-	// administrator could not meaningfully change. They now carry delegated
-	// administration, so an audit row that omitted them would lose exactly the events
-	// worth reviewing.
 	if input.GrantTypes != nil {
 		changed = append(changed, "grant_types")
 	}
@@ -121,15 +107,11 @@ func (s Service) auditUpdate(
 	if revokedTokens > 0 {
 		detail["revoked_tokens"] = revokedTokens
 	}
-	// Values, not just field names, for the capability change alone: "which scopes did
-	// this client stop holding" is the question a review of an administrative incident
-	// starts from, and it cannot be answered from a field name plus a later snapshot.
+	// The capability change is recorded by value, not just name: which scopes a client
+	// lost is the question an incident review starts from.
 	if reason != nil {
-		// The added admin scopes are named by value, not reported as a bare boolean:
-		// promoting a client from admin:read to admin:write grants a real capability
-		// and the audit must say which one. 0->admin records the full list too, so the
-		// field is always a list when present. The user scopes get the same treatment
-		// for the same reason.
+		// Added capability scopes are named by value so the audit says which one was
+		// granted; the user scopes get the same treatment.
 		if len(reason.AdminScopesAdded) > 0 {
 			detail["admin_scope_granted"] = reason.AdminScopesAdded
 		}
@@ -160,12 +142,9 @@ func (s Service) auditUpdate(
 }
 
 // auditDelete records a deregistration attempt. current is the resolved row, nil
-// when the target could not be resolved (an unknown id) and the attempt therefore
-// names nothing. The client_name and capability flags come from that row — the
-// client_id (ResourceID) survives the row's deletion, so an audit reader tracing a
-// deregistration can still see which identifier it was known by. Refusals (the
-// built-in client, an unknown id) are recorded too, like every other rejection on
-// this service's paths.
+// when an unknown id leaves nothing to name; refusals are recorded too. The
+// client_name and capability flags come from that row so an audit reader can still
+// see which identifier the client was known by.
 func (s Service) auditDelete(
 	ctx context.Context,
 	input DeleteClientInput,

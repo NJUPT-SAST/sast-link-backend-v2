@@ -157,8 +157,9 @@ func TestAuthorizeAcceptsExtraSpacesInScope(t *testing.T) {
 	}
 }
 
-// PRD §4.10: a third-party client is confined to the scopes it registered, while
-// a first-party client may ask for anything supported.
+// PRD §4.10 pins every client, the built-in first-party one included, to the
+// scopes its registration grants; the restriction is exercised here with a
+// confidential client whose registration is narrower than the supported set.
 func TestAuthorizeEnforcesThirdPartyScopeRegistration(t *testing.T) {
 	h := newHarness(t)
 
@@ -177,8 +178,8 @@ func TestAuthorizeEnforcesThirdPartyScopeRegistration(t *testing.T) {
 		t.Fatalf("Authorize() within registered scope error = %v", err)
 	}
 
-	// The first-party client registered the same three scopes but is not confined
-	// to them by the client-type rule.
+	// The first-party client is pinned to its registration like every other
+	// client type: the request is exactly its registered set, no exemption involved.
 	firstParty := validAuthorizeInput(t)
 	firstParty.Scope = "openid profile email"
 	if _, err := h.service.Authorize(context.Background(), firstParty); err != nil {

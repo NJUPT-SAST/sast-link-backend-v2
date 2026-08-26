@@ -24,8 +24,8 @@ const (
 	defaultRequestTTL        = 10 * time.Minute
 	authorizationCodePrefix  = "ac_"
 	authorizeRequestIDPrefix = "ar_"
-	// revocationTimeout bounds the compensating revocation of a replayed family,
-	// which must not be abandoned just because the caller disconnected.
+	// revocationTimeout bounds the compensating family revocation, which must not be
+	// abandoned just because the caller disconnected.
 	revocationTimeout = 5 * time.Second
 )
 
@@ -129,33 +129,29 @@ func (s Service) issuer() tokenissue.Issuer {
 	return tokenissue.Issuer{JWT: s.JWT, Refresh: s.RefreshTokens, Clock: s.Clock}
 }
 
-// checkAuthorizeLimit throttles the authorize endpoint. Fail-open per PRD §6.0:
-// the limiter guards against stash flooding, and refusing every authorization
-// during a Redis blip would take third-party login down entirely.
+// checkAuthorizeLimit throttles the authorize endpoint. Fail-open per PRD §6.0: a
+// Redis blip refusing every authorization would take third-party login down.
 func (s Service) checkAuthorizeLimit(ctx context.Context, clientIP string) error {
 	return s.checkLimit(ctx, s.AuthorizeLimiter, "authorize", "ip:"+clientIP)
 }
 
 // checkTokenLimit throttles the token and revocation endpoints per caller IP.
 //
-// Also fail-open, and for the same reason as authorize: PostgreSQL is
-// authoritative for every credential these endpoints check, so a lost counter
-// only widens the rate window, while refusing every token request during a Redis
-// outage would break refresh for every client at once.
+// Fail-open like authorize: PostgreSQL stays authoritative for every credential,
+// so a lost counter only widens the rate window, while refusing every token
+// request during a Redis outage would break refresh for every client.
 //
-// The cap is per IP rather than per client_id, because the unauthenticated
-// failure modes — guessing a client_secret, replaying refresh tokens — are exactly
-// the ones where the client_id is attacker-chosen and therefore worthless as a
-// throttling key.
+// Keyed per IP rather than client_id, because the unauthenticated failure modes —
+// guessing a client_secret, replaying refresh tokens — are exactly the ones where
+// the client_id is attacker-chosen and worthless as a throttling key.
 func (s Service) checkTokenLimit(ctx context.Context, clientIP string) error {
 	return s.checkLimit(ctx, s.TokenLimiter, "oauth_token", "ip:"+clientIP)
 }
 
 // checkConsentInfoLimit throttles the consent-info peek per user. The endpoint is
 // authenticated, so it keys on the user rather than the caller IP: campus egress
-// shares one NAT IP, and an IP budget would let one student exhaust the whole
-// campus's. Same fail-open rationale as the others — a Redis blip must not take
-// the consent page down.
+// shares one NAT IP. Fail-open like the others, so a Redis blip does not take the
+// consent page down.
 func (s Service) checkConsentInfoLimit(ctx context.Context, userID int64) error {
 	return s.checkLimit(ctx, s.ConsentInfoLimiter, "consent_info", "user:"+strconv.FormatInt(userID, 10))
 }
@@ -171,10 +167,8 @@ func (s Service) checkGrantsListLimit(ctx context.Context, userID int64) error {
 	return s.checkLimit(ctx, s.GrantsLimiter, "oauth_grants_list", "user:"+strconv.FormatInt(userID, 10))
 }
 
-// checkGrantsRevokeLimit throttles the authorized-apps revoke per user. It gets a
-// budget of its own rather than sharing the list's, so opening the list a few
-// dozen times cannot exhaust the budget the destructive revoke needs: the one
-// action a user may want to take in a hurry is cutting a misbehaving app's access.
+// checkGrantsRevokeLimit throttles the authorized-apps revoke per user, under its
+// own budget so reading the list cannot starve the destructive revoke.
 func (s Service) checkGrantsRevokeLimit(ctx context.Context, userID int64) error {
 	return s.checkLimit(ctx, s.GrantsLimiter, "oauth_grants_revoke", "user:"+strconv.FormatInt(userID, 10))
 }
@@ -196,11 +190,10 @@ func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoi
 	return nil
 }
 
-// deliverBlacklist clears the auth-state cache entries for the revoked access
-// tokens. The durable delivery is the outbox row written in the revoking
-// transaction (the worker retries until it lands); this synchronous call closes
-// the stale window immediately so a just-revoked token is rejected on the next
-// request rather than riding out the cache TTL.
+// deliverBlacklist clears the auth-state cache for revoked access tokens. The
+// durable delivery is the outbox row written in the revoking transaction; this
+// synchronous call closes the stale window so a just-revoked token is rejected on
+// the next request rather than riding out the cache TTL.
 func (s Service) deliverBlacklist(ctx context.Context, entries []model.BlacklistEntry, now time.Time) {
 	if s.Blacklist == nil || len(entries) == 0 {
 		return
@@ -220,20 +213,12 @@ func (s Service) deliverBlacklist(ctx context.Context, entries []model.Blacklist
 	}
 }
 
-// revokeFamily revokes a token family, discarding the outcome.
-//
-// For callers where the failure changes no response: a replay defense, whose
-// request already fails and whose requester is the suspected attacker, or a
-// compensating cleanup that is already returning an error of its own. Propagating
-// here would revoke nothing extra — the database is what is unavailable.
-//
-// A failure is still a security event to alert on rather than noise: until the
-// revocation succeeds the suspect family stays valid for up to its full refresh
-// TTL. Alert on security_event.
-//
-// Callers that report the revocation to the requester must use revokeFamilyErr
-// instead; answering "revoked" for a revocation that did not happen is worse than
-// answering with an error.
+// revokeFamily revokes a token family, discarding the outcome, for callers whose
+// response cannot change either way (a replay defense already failing, or a
+// compensating cleanup already erroring). A failure is still logged as a
+// security_event: until it succeeds the suspect family stays valid for up to its
+// full refresh TTL. Callers that report the outcome must use revokeFamilyErr, so
+// a revocation that did not commit is not answered as if it had.
 func (s Service) revokeFamily(ctx context.Context, familyID string) {
 	if err := s.revokeFamilyErr(ctx, familyID); err != nil {
 		slog.ErrorContext(ctx, "revoke oauth token family",
@@ -243,11 +228,9 @@ func (s Service) revokeFamily(ctx context.Context, familyID string) {
 }
 
 // revokeFamilyErr revokes a token family and delivers its blacklist entries,
-// returning whether the revocation actually committed.
-//
-// It runs on a context detached from the caller: several callers are replay
-// defenses, and a client that disconnects right after replaying a code must not be
-// able to leave the compromised family alive by hanging up.
+// returning whether the revocation actually committed. It runs on a context
+// detached from the caller, so a client that disconnects right after replaying a
+// code cannot leave the compromised family alive by hanging up.
 func (s Service) revokeFamilyErr(ctx context.Context, familyID string) error {
 	if strings.TrimSpace(familyID) == "" {
 		return nil
@@ -263,21 +246,13 @@ func (s Service) revokeFamilyErr(ctx context.Context, familyID string) error {
 	return nil
 }
 
-// audit records an OAuth audit event. Failures on this detached path are logged,
-// never returned: losing an audit row must not fail an otherwise valid
-// authorization. The in-transaction audits (authorization-code grant and refresh
-// rotation) are the deliberate exception — they ride the token transaction and a
-// failure there fails the operation.
 // buildAuditEntry materialises the shared oauth audit fields, so the synchronous
 // s.audit path and the same-transaction token-rotation audit cannot drift.
-// buildAuditEntry assembles an audit row.
 //
-// actorClientID is passed separately from resourceID rather than aliased onto it.
-// On the client-addressed endpoints (authorize / token / revoke) the two are the
-// same OAuth client_id, but they answer different questions — resourceID is what
-// the action was about, actorClientID is whose credential authorized it — and
-// RevokeGrant is the case that separates them: the subject is the client being
-// revoked, while the actor is the console client the signed-in user is holding.
+// actorClientID is passed separately from resourceID: resourceID is what the
+// action was about, actorClientID is whose credential authorized it. They differ
+// on RevokeGrant, where the subject is the client being revoked and the actor is
+// the console client the signed-in user holds.
 func (s Service) buildAuditEntry(
 	userID *int64,
 	action string,
@@ -325,7 +300,10 @@ func (s Service) buildAuditEntry(
 }
 
 // audit records an OAuth event whose subject and actor are the same client, which
-// is every client-addressed endpoint. Use auditAs when they differ.
+// is every client-addressed endpoint. Failures on this detached path are logged,
+// never returned, so a lost audit row cannot fail a valid authorization; the
+// in-transaction audits ride the token transaction and fail the operation instead.
+// Use auditAs when subject and actor differ.
 func (s Service) audit(
 	ctx context.Context,
 	userID *int64,
@@ -360,9 +338,8 @@ func (s Service) auditAs(
 		slog.ErrorContext(ctx, "marshal oauth audit detail", "action", action, "error", err)
 		return
 	}
-	// Detached like the revocation above: an audit row for a completed action must
-	// survive the caller going away, or the log would silently lose exactly the
-	// events an aborted request produced.
+	// Detached like the revocation above, so an audit row survives the caller
+	// going away.
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revocationTimeout)
 	defer cancel()
 	if err := s.Audit.Create(auditCtx, entry); err != nil {

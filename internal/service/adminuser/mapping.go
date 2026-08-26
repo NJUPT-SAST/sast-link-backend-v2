@@ -20,9 +20,8 @@ func userListItem(row repository.AdminUserRow) UserListItem {
 		College:     string(row.College),
 		Major:       row.Major,
 
-		// The flag is the row's own generated value; the field list is derived from
-		// the same columns through the shared rule, so the console shows exactly
-		// what the user's own completion page would.
+		// The flag is the row's own generated value; the field list comes from the same
+		// shared rule the user's own completion page uses.
 		ProfileNeedsCompletion: row.ProfileNeedsCompletion,
 		IncompleteFields: incompleteFields(
 			row.Name, row.PhoneNumber, row.QQNumber, row.Major, row.StudentID),
@@ -102,9 +101,8 @@ func auditLogItem(entry model.AuditLog) AuditLogItem {
 		ActorClientID: entry.ActorClientID,
 		CreatedAt:     entry.CreatedAt,
 	}
-	// success is NOT NULL with a default in V001, so a null can only come from a row
-	// written before that column existed. Reporting it as false would label a
-	// historical success as a failure, and the column's default is true.
+	// success is NOT NULL with a default of true, so a null predates the column and
+	// must not read as a failure.
 	item.Success = entry.Success == nil || *entry.Success
 	return item
 }
@@ -126,11 +124,9 @@ func normalizePaging(page, pageSize, defaultSize int) (int, int) {
 }
 
 // incompleteFields names the required fields an account still has to fill in,
-// normalizing nil to an empty slice so the JSON field is always an array.
-//
-// It delegates to internal/validate rather than re-deriving the rule: a second
-// copy that is even slightly different would show the console one set of missing
-// fields while the user's own completion page shows another.
+// normalizing nil to an empty slice so the JSON field is always an array. It
+// delegates to internal/validate so the console and the user's completion page
+// cannot drift apart.
 func incompleteFields(name, phoneNumber, qqNumber, major, studentID string) []string {
 	fields := validate.IncompleteProfileFields(name, phoneNumber, qqNumber, major, studentID)
 	if fields == nil {

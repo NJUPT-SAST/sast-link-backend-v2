@@ -22,9 +22,8 @@ step()  { printf "\n${GREEN}==== %s ====${NC}\n" "$*"; }
 json()  { echo "$1" | jq .; }
 code()  { echo "$1" | jq -r '.code // empty'; }
 
-# 容器名默认对齐 docker-compose.yml，那里起的容器叫 sastlink-compose-{postgres,redis}。
-# psql 与 redis-cli 都是 docker exec 进容器执行的，不走宿主端口，所以这里只需要容器名。
-# 连自建容器时用环境变量覆盖，例如 PG_CONTAINER=sastlink-postgres。
+# 容器名默认对齐 docker-compose.yml (sastlink-compose-{postgres,redis})；psql/redis-cli
+# 都经 docker exec 进容器执行，不走宿主端口。连自建容器时用 PG_CONTAINER 等环境变量覆盖。
 PG_CONTAINER="${PG_CONTAINER:-sastlink-compose-postgres}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-sastlink-compose-redis}"
 # 端口在 source .env 后用 APP_PORT 覆盖，这里先留默认。
@@ -62,9 +61,8 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
 fi
 set -a; source .env; set +a
 API_PORT="${APP_PORT:-8080}"
-# 这几个必须在 source .env 之后取值。放在文件开头会读到空值：REDIS_PREFIX 会退回
-# "sastlink" 而实际前缀来自 .env，于是脚本注入的验证码键与服务读取的键不是同一个，
-# 而 psql/redis-cli 的凭据也会变成硬编码的猜测。
+# 必须在 source .env 之后取值，否则 REDIS_KEY_PREFIX 退回 "sastlink" 导致注入的验证码
+# 键与服务读取的键不一致，psql/redis-cli 凭据也变成硬编码猜测。
 REDIS_PREFIX="${REDIS_KEY_PREFIX:-sastlink}"
 DB_USER_NAME="${DB_USER:-sastlink}"
 DB_NAME_VALUE="${DB_NAME:-sastlink}"
@@ -93,9 +91,8 @@ api_form()  { curl -s -X POST "http://localhost:$API_PORT$1" -H 'Content-Type: a
 api_put_auth() { curl -s -X PUT "http://localhost:$API_PORT$1" -H "Authorization: Bearer $2" -H 'Content-Type: application/json' -d "$3"; }
 api_delete_auth() { curl -s -X DELETE "http://localhost:$API_PORT$1" -H "Authorization: Bearer $2" -H 'Content-Type: application/json' -d "$3"; }
 psql()      { docker exec -i "$PG_CONTAINER" psql -U "$DB_USER_NAME" -d "$DB_NAME_VALUE" -tAc "$1"; }
-# compose 用 --requirepass 起 Redis，因此 redis-cli 必须带 -a，否则每条命令都以
-# NOAUTH 失败。这里的失败是静默的（redis_del 有 || true，验证码读取有 || echo ""），
-# 表现为注册卡在等验证码，所以密码必须传进去。
+# compose 用 --requirepass 起 Redis，redis-cli 必须带 -a 否则命令以 NOAUTH 失败——
+# 而这些失败是静默的，表现成注册卡在等验证码。
 redis_cli() { docker exec "$REDIS_CONTAINER" redis-cli ${REDIS_PASS_VALUE:+-a "$REDIS_PASS_VALUE"} --no-auth-warning "$@"; }
 redis_del() { redis_cli DEL "$@" >/dev/null 2>&1 || true; }
 redis_key() { echo "${REDIS_PREFIX}:verify:register:$1"; }
@@ -110,7 +107,7 @@ clear_limits() {
             "${REDIS_PREFIX}:ratelimit:%3A%3A1:login"
 }
 
-# 清掉登录限流计数：一轮里登好几次，不清会撞 5/min 上限。IPv6 回环 key 是编码过的。
+# 清掉登录限流计数，避免一轮多次登录撞上限；IPv6 回环 key 是编码过的。
 clear_login_limits() {
   redis_del "${REDIS_PREFIX}:ratelimit:127.0.0.1:login" \
             "${REDIS_PREFIX}:ratelimit:%3A%3A1:login"
@@ -134,9 +131,8 @@ else
     info "A.1 Redis 注入验证码 123456"
     redis_cli SET "$(redis_key "$TEST_EMAIL")" 123456 PX 300000 >/dev/null
   fi
-  # redis-cli 把 NOAUTH 之类的错误写到 stdout 并且仍以 0 退出，所以 || echo "" 兜不住：
-  # 不校验的话 CODE 会变成 "NOAUTH Authentication required." 并被当作验证码发出去。
-  # 验证码固定是 6 位数字，用它作为判据。
+  # redis-cli 把 NOAUTH 等错误写到 stdout 且仍以 0 退出，|| echo "" 兜不住；验证码固定
+  # 是 6 位数字，不校验会导致 "NOAUTH Authentication required." 被当作验证码发出。
   CODE=$(redis_cli GET "$(redis_key "$TEST_EMAIL")" 2>/dev/null || echo "")
   if [[ ! "$CODE" =~ ^[0-9]{6}$ ]]; then
     err "未读到验证码，Redis 返回：${CODE:-（空）}"
@@ -172,8 +168,8 @@ api_get "/.well-known/jwks.json" | jq .keys? >/dev/null && ok "jwks"
 
 PKCE_VERIFIER=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
 PKCE_CHALLENGE=$(printf '%s' "$PKCE_VERIFIER" | openssl dgst -sha256 -binary | openssl base64 | tr '+/' '-_' | tr -d '=')
-# 登录落地页。provider 回调先由后端 /oauth/{lark,github}/callback 处理，再 302 到这里。
-# 缺了它登录后没地方回，直接报错。
+# 登录落地页：provider 回调经后端 /oauth/{lark,github}/callback 处理后 302 到这里；
+# 缺了它脚本直接报错。
 if [[ -z "${OAUTH_LOGIN_REDIRECTS:-}" ]]; then
   err "缺少 OAUTH_LOGIN_REDIRECTS（登录落地页，逗号分隔）；请检查 .env"
   exit 1
@@ -197,9 +193,9 @@ get_query_param() {
   [[ -z "$value" ]] && value=$(printf '%s' "$url" | sed -n "s/^${key}=\([^&]*\).*/\1/p")
   printf '%s' "$value"
 }
-# authorize builds the first-leg URL. The scope is a parameter rather than a
-# constant so a caller can drive the delegated-administration client, whose grant is
-# "openid admin:read admin:write" and which would be rejected with the default set.
+# First-leg authorize URL; scope is a parameter so a caller can drive the
+# delegated-administration client (grant "openid admin:read admin:write", rejected
+# with the default set).
 authorize() {
   local client_id="$1"
   local scope="${2:-openid profile email}"

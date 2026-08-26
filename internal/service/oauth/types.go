@@ -28,7 +28,7 @@ type EndpointLimiter interface {
 
 // TokenBlacklist invalidates the auth-state cache entries for revoked access
 // tokens. Revocation is authoritative in PostgreSQL; this clears the short-TTL
-// cache so the middleware's next request re-checks the database immediately.
+// cache so the middleware re-checks the database on the next request.
 type TokenBlacklist interface {
 	DeleteAuthStates(ctx context.Context, jtis []string) error
 }
@@ -37,10 +37,9 @@ type TokenBlacklist interface {
 // user's consent decision.
 //
 // Every field the code will be built from is captured here rather than re-read
-// from the consent request. The consent call is authenticated but the parameters
-// it echoes are not trusted: if the client, scope or PKCE challenge could be
-// changed between the two legs, a caller could consent to one request and mint a
-// code for another.
+// from the consent request, whose echoed parameters are not trusted: a changed
+// client, scope or PKCE challenge between legs would let a caller consent to one
+// request and mint a code for another.
 type AuthorizeRequestPayload struct {
 	ClientID string `json:"client_id"`
 	// ClientName is captured at authorize time from the verified client record
@@ -80,10 +79,7 @@ type UserRepository interface {
 // ClientRepository resolves OAuth clients.
 //
 // Only the active-client lookup is needed: every OAuth request authenticates its
-// caller, and a deactivated client must not authenticate. Resolving a client by
-// primary key would be for reading an existing token row's owner, which no flow
-// here does — the token endpoints compare the row's client_id against the
-// authenticated client rather than looking it up.
+// caller, and a deactivated client must not authenticate.
 type ClientRepository interface {
 	FindActiveByClientID(ctx context.Context, clientID string) (*model.OAuthClient, error)
 }
@@ -97,10 +93,9 @@ type AuthorizationRepository interface {
 	CreateWithGrant(ctx context.Context, authorization *model.OAuthAuthorization) error
 	// Consume marks a code used under a row lock. On replay it returns
 	// repository.ErrAuthorizationReplayed together with the record, whose family
-	// ID the caller must revoke. The second return is the owning user's
-	// token_version snapshot taken inside the consume transaction: the
-	// redemption's token-pair write must verify against it, so a bulk revocation
-	// committing between consume and write refuses the pair.
+	// the caller must revoke. The second return is the owning user's token_version
+	// snapshot taken inside the consume transaction, which the pair write verifies
+	// against so a revocation committing between the two refuses the pair.
 	Consume(ctx context.Context, code string, now time.Time) (*model.OAuthAuthorization, int64, error)
 	// ListGrantsByUser returns the applications a user has authorized.
 	ListGrantsByUser(ctx context.Context, userID int64) ([]repository.OAuthGrant, error)
@@ -114,35 +109,28 @@ type AuthorizationRepository interface {
 type TokenRepository interface {
 	CreatePair(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) error
 	// CreatePairWithAudit is CreatePair with the token-issuance audit row written
-	// into audit_logs in the same transaction (nil audit disables it), so the pair
-	// and its audit commit atomically on one fsync.
+	// in the same transaction, so the pair and its audit commit atomically.
 	CreatePairWithAudit(ctx context.Context, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
 	// CreatePairWithUserAndClientLock is CreatePairWithAudit inside a transaction
 	// that first locks the owning user's and issuing client's rows and refuses
 	// (ErrUserStateChanged / ErrClientInactive / ErrClientScopeChanged /
-	// ErrNotFound) when the state the code was issued under changed: the user's
-	// token_version no longer matches the Consume snapshot, the client is no
-	// longer active, or its scopes no longer contain the pair's. The
-	// authorization-code redemption passes the version snapshot taken by Consume,
-	// so a bulk revocation (password change, demotion, account close) or a client
-	// disable / scope narrowing committing between consume and write cannot be
-	// outlived by the pair.
+	// ErrNotFound) when the code's state changed: the user's token_version no
+	// longer matches the Consume snapshot, the client is inactive, or its scopes no
+	// longer contain the pair's. A bulk revocation or client disable/narrowing
+	// between consume and write cannot be outlived by the pair.
 	CreatePairWithUserAndClientLock(ctx context.Context, userID int64, clientID int64, expectedTokenVersion int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
 	// RotateRefreshToken rotates currentRefreshTokenHash inside familyID and
-	// returns the family origin's created_at, i.e. when the user actually
-	// authorized. Rotation must not advance the ID Token's auth_time, so it is
-	// read off the sequence-0 row rather than the rotated one.
+	// returns the family origin's created_at, so rotation does not advance the ID
+	// Token's auth_time: it is read off the sequence-0 row.
 	RotateRefreshToken(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) (time.Time, error)
 	// RotateRefreshTokenWithAudit is RotateRefreshToken with the token-issuance
-	// audit row written into audit_logs in the same transaction (nil audit
-	// disables it), so the rotation and its audit commit atomically on one fsync.
+	// audit row written in the same transaction, so rotation and audit commit
+	// atomically.
 	RotateRefreshTokenWithAudit(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) (time.Time, error)
 	// RotateRefreshTokenWithAuditCapped is RotateRefreshTokenWithAudit with a cap
-	// on the family's total life (measured from its origin, the moment of first
-	// authorization). A rotated refresh expiry is clamped to origin+maxLifetime,
-	// and a family past the cap is revoked so the client must re-authorize. Zero
-	// disables the cap. Only capability-scoped (admin/user) families pass a
-	// nonzero value.
+	// on the family's total life measured from its origin: a rotated refresh expiry
+	// is clamped to origin+maxLifetime and a family past the cap is revoked, so the
+	// client must re-authorize. Zero disables the cap.
 	RotateRefreshTokenWithAuditCapped(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog, maxLifetime time.Duration) (time.Time, error)
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
@@ -244,7 +232,7 @@ type TokenResult struct {
 	ExpiresIn    int
 	Scope        string
 	// IDToken is set only for grants carrying the openid scope, which for this
-	// service is every grant; it stays a separate field so the handler can omit it.
+	// service is every grant; it is separate so the handler can omit it.
 	IDToken string
 }
 
@@ -276,7 +264,7 @@ type UserInfoResult struct {
 	PreferredUsername string `json:"preferred_username,omitempty"`
 	UpdatedAt         int64  `json:"updated_at,omitempty"`
 	// Role is this service's own claim rather than an OIDC one, gated by the profile
-	// scope and mirroring auth.IDTokenClaims.Role so the two endpoints cannot disagree.
+	// scope and mirroring auth.IDTokenClaims.Role.
 	Role          string `json:"role,omitempty"`
 	Email         string `json:"email,omitempty"`
 	EmailVerified *bool  `json:"email_verified,omitempty"`

@@ -1,13 +1,11 @@
 #!/bin/bash
-# Builds the sastlink-allinone:test bench image. Cross-compiles the api and
-# migrate binaries for the container's architecture, then builds the image from
-# this directory. The api binary is built with PGO auto so cmd/api/default.pgo is
-# honored when present.
+# Builds the sastlink-allinone:test bench image: cross-compiles api and migrate
+# for the container architecture, then builds the image from this directory (api
+# built with -pgo=auto so cmd/api/default.pgo is honored).
 #
-# The target arch is read from the Docker daemon rather than hardcoded. A binary
-# built for the wrong arch either fails to exec or runs under QEMU emulation, and
-# an emulated run still produces plausible-looking latency numbers — the worst
-# outcome for a bench harness. Override with BENCH_GOARCH if needed.
+# Target arch is read from the Docker daemon rather than hardcoded: an emulated
+# wrong-arch binary still produces plausible latency numbers — the worst outcome
+# for a bench harness. Override with BENCH_GOARCH if needed.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 HERE="$(cd "$(dirname "$0")" && pwd)"

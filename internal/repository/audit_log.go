@@ -35,10 +35,9 @@ type AuditLogFilter struct {
 	Action   string
 	Resource string
 	Success  *bool
-	// ActorClientID filters on the acting OAuth client, answering "everything this
-	// client did". Empty means unfiltered; there is deliberately no way to ask for
-	// actor_client_id IS NULL, which would be a different question ("what happened
-	// without a credential") and is served by filtering on the action instead.
+	// ActorClientID filters on the acting OAuth client; empty means unfiltered.
+	// There is no NULL filter: "what happened without a credential" is served by
+	// filtering on the action instead.
 	ActorClientID string
 	// StartTime and EndTime bound created_at inclusively at the start and
 	// exclusively at the end, so adjacent windows neither overlap nor skip an entry
@@ -49,12 +48,8 @@ type AuditLogFilter struct {
 	Offset    int
 }
 
-// List returns a filtered page of audit entries plus the total matching count.
-//
-// Ordering is created_at DESC with id DESC as a tiebreak. created_at is not
-// unique — a single request writes several entries within the same clock tick —
-// and an offset scan over a non-deterministic order repeats and skips rows across
-// pages.
+// List returns a filtered page of audit entries plus the total matching count,
+// ordered by created_at DESC with id DESC as a tiebreak for stable pagination.
 func (r *AuditLogRepository) List(
 	ctx context.Context,
 	filter AuditLogFilter,
@@ -62,8 +57,7 @@ func (r *AuditLogRepository) List(
 	if filter.Limit <= 0 {
 		return nil, 0, fmt.Errorf("%w: limit must be positive", ErrInvalidArgument)
 	}
-	// Bounded for the reason given on ListAdminUsers: the result slice is sized from
-	// Limit before any row is read, and this method is exported.
+	// Over-cap is refused rather than clamped, matching every paged endpoint.
 	if filter.Limit > validate.MaxPageSize {
 		return nil, 0, fmt.Errorf("%w: limit must not exceed %d",
 			ErrInvalidArgument, validate.MaxPageSize)

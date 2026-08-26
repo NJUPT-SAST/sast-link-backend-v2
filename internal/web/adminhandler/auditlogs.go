@@ -67,8 +67,8 @@ func (h Handler) ListAuditLogs(c *gin.Context) {
 	})
 }
 
-// parseOptionalBool accepts only "true" and "false". strconv.ParseBool would also
-// take "1", "t" and "T", which the contract does not document.
+// parseOptionalBool accepts only "true" and "false"; strconv.ParseBool would
+// also take "1", "t" and "T", which the contract does not document.
 func parseOptionalBool(raw string) (*bool, error) {
 	switch strings.TrimSpace(raw) {
 	case "":
@@ -96,10 +96,9 @@ func parseOptionalInt64(raw string) (*int64, error) {
 	return &value, nil
 }
 
-// parseOptionalTime accepts an RFC 3339 timestamp, which is the ISO 8601 profile
-// the contract documents. A value without an offset is rejected rather than
-// assumed to be UTC: created_at is timestamptz, so guessing the zone would shift
-// the window by hours without saying so.
+// parseOptionalTime accepts an RFC 3339 timestamp, the ISO 8601 profile the
+// contract documents. A value without an offset is rejected rather than assumed
+// to be UTC: guessing the zone would shift the window by hours without saying so.
 func parseOptionalTime(raw string) (*time.Time, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {

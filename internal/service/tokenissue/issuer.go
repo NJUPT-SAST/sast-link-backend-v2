@@ -1,8 +1,6 @@
 // Package tokenissue builds signed access/refresh token pairs and their
-// persistence rows. It exists so the internal session flow and the OAuth token
-// endpoint issue byte-identical token metadata: family linkage, scope
-// normalization and expiry are security-relevant, and two independent copies of
-// this logic would drift.
+// persistence rows, so the internal session flow and the OAuth token endpoint
+// issue byte-identical token metadata.
 package tokenissue
 
 import (
@@ -61,9 +59,7 @@ type Issuer struct {
 
 // Issue signs an access/refresh pair and builds their persistence rows.
 //
-// Nothing is written here: the caller decides which transaction the rows join, so
-// registration can commit the account and its first session together and the
-// OAuth token endpoint can rotate under its own family lock.
+// Nothing is written here: the caller decides which transaction the rows join.
 func (i Issuer) Issue(request Request) (*Pair, error) {
 	if i.JWT == nil || i.Refresh == nil {
 		return nil, ErrNotConfigured
@@ -88,10 +84,9 @@ func (i Issuer) Issue(request Request) (*Pair, error) {
 	}
 	jti := i.newJTI()
 
-	// azp is derived from the client on the request rather than passed in, so no
-	// call site can issue a token that fails to name its authorized party. The
-	// internal middleware rejects any azp other than the built-in client, which is
-	// what stops a third-party token from acting as a session credential.
+	// azp is derived from the client on the request rather than passed in, so every
+	// issued token names its authorized party and a third-party token cannot act as
+	// a session credential.
 	accessToken, err := i.JWT.SignAccessToken(auth.TokenInput{
 		Subject:         strconv.FormatInt(request.User.ID, 10),
 		JTI:             jti,

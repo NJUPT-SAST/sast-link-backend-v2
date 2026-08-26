@@ -20,9 +20,6 @@ type JWTConfig struct {
 }
 
 // NewJWTManager parses Ed25519 key material and constructs a strict JWT manager.
-// EdDSA/Ed25519 signs roughly an order of magnitude faster than the RSA-2048 the
-// service used before — a real cost on the 1c1g deployment, where every
-// login/refresh issues a JWT and every authenticated request verifies one.
 func NewJWTManager(config JWTConfig) (*JWTManager, error) {
 	issuer := strings.TrimSpace(config.Issuer)
 	audience := strings.TrimSpace(config.Audience)

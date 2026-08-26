@@ -16,10 +16,8 @@ import (
 
 const (
 	serverShutdownTimeout = 10 * time.Second
-	// ServerWriteTimeout bounds a single response. It is exported so the
-	// auth-state cache tombstone TTL can be sized to outlive any in-flight
-	// request, preventing a slow request's stale PUT from re-seeding a revoked
-	// token after the tombstone expires.
+	// ServerWriteTimeout bounds a single response; the auth-state cache tombstone
+	// TTL is sized from it so a slow request cannot re-seed a revoked token.
 	ServerWriteTimeout = 10 * time.Second
 )
 
@@ -37,14 +35,9 @@ var newHTTPServer = func(address string, handler http.Handler) httpServer {
 		Addr:              address,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		// ReadTimeout bounds reading the request body: without it a slow body
-		// (e.g. an avatar upload trickling in) can hold a connection open
-		// indefinitely even though the header arrived on time.
+		// ReadTimeout bounds body reads so a slow upload cannot hold a connection open indefinitely.
 		ReadTimeout: 30 * time.Second,
-		// WriteTimeout bounds a single response. The password-hash semaphore
-		// queues requests during an auth storm; without this bound the queue
-		// grows without backpressure and connections pile up. 10s is a generous
-		// ceiling for any legitimate response on a 1-core box.
+		// WriteTimeout bounds a single response so an auth-storm queue cannot pile up connections.
 		WriteTimeout: ServerWriteTimeout,
 		IdleTimeout:  60 * time.Second,
 	}

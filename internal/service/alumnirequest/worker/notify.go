@@ -12,18 +12,12 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest"
 )
 
-// defaultQueueSize bounds the pending notifications, matching
-// sessionworker.ForgotPassword. A bounded queue is what makes Enqueue
-// non-blocking: a full one costs a reviewer the automatic email and is recovered
-// through the resend endpoint, whereas an unbounded one would trade that for
-// unbounded memory.
+// defaultQueueSize bounds the pending notifications; a bounded queue is what makes
+// Enqueue non-blocking.
 const defaultQueueSize = 64
 
-// writeTimeout bounds the delivery-state writes.
-//
-// Detached from the caller's context on purpose: these run after the review
-// committed, and losing the notified_at write because the reviewer's HTTP request
-// ended would leave a delivered email looking undelivered.
+// writeTimeout bounds the delivery-state writes, detached from the caller's context
+// so a delivered email is not left looking undelivered.
 const writeTimeout = 5 * time.Second
 
 // Requests records delivery state.
@@ -101,13 +95,9 @@ func (w *Notifier) now() time.Time {
 	return time.Now().UTC()
 }
 
-// process delivers one notification and records the outcome.
-//
-// The attempt is counted before the send, not after. A process killed mid-send
-// then leaves notify_attempts incremented with notified_at still NULL, which reads
-// as "tried, not confirmed delivered" — the truth. Counting afterwards would
-// discard the evidence that anything was attempted, and the console's backlog view
-// would show the ticket as untouched.
+// process delivers one notification and records the outcome. The attempt is
+// counted before the send, so a process killed mid-send leaves "tried, not
+// confirmed delivered" — the truth — instead of an untouched ticket.
 func (w *Notifier) process(ctx context.Context, job alumnirequest.NotificationJob) {
 	if err := w.markAttempt(ctx, job.RequestID); err != nil {
 		// Logged, not fatal: failing to count the attempt must not stop the email the
@@ -123,9 +113,8 @@ func (w *Notifier) process(ctx context.Context, job alumnirequest.NotificationJo
 		SupportEmail: w.SupportEmail,
 	})
 	if err != nil {
-		// The consequence of landing here on an approval is that the applicant does
-		// not know their account exists, so the log has to name the ticket for a
-		// manual resend.
+		// On an approval a lost email means the applicant does not know their account
+		// exists, so the log names the ticket for a manual resend.
 		logFailure(ctx, job, "smtp", err)
 		return
 	}

@@ -29,11 +29,11 @@ type Config struct {
 	Password string
 	From     string
 	UseTLS   bool
-	// MaxConcurrent caps simultaneous SMTP sends. Each send dials a fresh TCP
+	// MaxConcurrent caps simultaneous SMTP sends: each send dials a fresh TCP
 	// connection and performs a TLS handshake, so an unbounded burst (e.g. a
-	// verification-code storm) exhausts file descriptors and SMTP server
-	// connections. Requests beyond the cap queue until a slot frees.
-	// Non-positive values keep the previous unbounded behavior.
+	// verification-code storm) exhausts file descriptors and SMTP connections.
+	// Requests beyond the cap queue until a slot frees; a non-positive value
+	// disables the cap.
 	MaxConcurrent int
 }
 
@@ -138,10 +138,9 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 		return err
 	}
 	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
-	// Only attempt AUTH when credentials were configured. smtp.PlainAuth with empty
-	// credentials is a non-nil auth that would send `AUTH PLAIN \x00\x00\x00`
-	// against any relay advertising AUTH, and a relay that needs no authentication
-	// (a perfectly legal deployment) would reject the empty login.
+	// Only attempt AUTH when credentials were configured: smtp.PlainAuth with empty
+	// credentials would send an empty AUTH PLAIN, which an unauthenticated relay
+	// would reject.
 	var auth smtp.Auth
 	if strings.TrimSpace(m.cfg.Username) != "" {
 		auth = smtp.PlainAuth("", m.cfg.Username, m.cfg.Password, m.cfg.Host)
@@ -154,9 +153,8 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 }
 
 // sanitizeRecipients validates every recipient and returns the canonical
-// addr-spec forms. Message headers are assembled by string concatenation, so
-// recipients must be proven free of header-breaking characters here rather
-// than trusted to be pre-validated by callers.
+// addr-spec forms, so header-breaking characters cannot reach the
+// concatenated message headers.
 func sanitizeRecipients(to []string) ([]string, error) {
 	sanitized := make([]string, 0, len(to))
 	for _, recipient := range to {
@@ -365,17 +363,15 @@ func sendSMTPTransaction(ctx context.Context, client *smtp.Client, auth smtp.Aut
 		return fmt.Errorf("smtp data: %w", err)
 	}
 	// CodeQL reports go/email-injection here because it cannot follow what
-	// buildMessage does to its inputs. Recipients are validated by
-	// sanitizeRecipients before reaching buildMessage, the subject is Q-encoded,
-	// and bodies are quoted-printable inside a MIME part whose boundary is random
-	// per message. See TestBuildMessageKeepsInjectedHeadersOutOfTheHeaderBlock and
+	// buildMessage does to its inputs; recipients are sanitized first, the subject
+	// is Q-encoded, and bodies are quoted-printable in a MIME part with a random
+	// boundary. See TestBuildMessageKeepsInjectedHeadersOutOfTheHeaderBlock and
 	// TestBuildMessageBodyCannotForgeMimeBoundary, which fail if any of that
-	// changes. The alert is dismissed in the repository's code-scanning settings;
-	// CodeQL has no in-source suppression syntax for default setup.
+	// changes. Dismissed in code-scanning settings (CodeQL has no in-source
+	// suppression).
 	if _, writeErr := w.Write(msg); writeErr != nil {
 		// Close releases the DATA writer so the connection can be torn down; its
-		// error is deliberately dropped because writeErr is the failure worth
-		// reporting and closing after a failed write is expected to fail too.
+		// error is deliberately dropped — writeErr is the failure worth reporting.
 		_ = w.Close()
 		slog.Error("smtp write body failed", "error", writeErr)
 		return fmt.Errorf("smtp write: %w", writeErr)

@@ -20,23 +20,20 @@ const (
 	// Smaller values leave the header present but effectively unenforced.
 	minimumHSTSMaxAge = 31536000
 	maximumTCPPort    = 65535
-	// maxOAuthCodeTTL caps the authorization code lifetime. PRD §4.10 specifies 5
-	// minutes; the ceiling is deliberately loose enough for staging experiments and
-	// still far short of turning a code into a long-lived credential.
+	// maxOAuthCodeTTL caps the authorization code lifetime (PRD §4.10: 5min),
+	// loose enough for staging experiments and far short of a long-lived
+	// credential.
 	maxOAuthCodeTTL = 15 * time.Minute
 	// maxOAuthAuthorizeRequestTTL caps how long a pending consent decision waits.
 	maxOAuthAuthorizeRequestTTL = time.Hour
 	// registerTicketTTL mirrors session.verificationTTL, which bounds the
-	// Register-Ticket. It is duplicated rather than imported because config must
-	// not depend on a service package; the register limiter's window is validated
-	// against it, since a window outliving the ticket leaves a throttled caller
-	// nothing to retry with. Keep the two in step.
+	// Register-Ticket; duplicated rather than imported because config must not
+	// depend on a service package. The register limiter's window is validated
+	// against it; keep the two in step.
 	registerTicketTTL = 5 * time.Minute
-	// minAuditLogRetention is a sanity floor, not the product commitment. Audit
-	// history is operationally useful rather than compliance-bound here, so a
-	// deployment may trim it below the 90 days PRD §9 targets — the default stays at
-	// 90. The floor only rejects values so short that an incident investigation would
-	// find the relevant entries already deleted.
+	// minAuditLogRetention is a sanity floor, not the 90-day product target: it
+	// only rejects values so short that an incident investigation would find the
+	// relevant entries already deleted.
 	minAuditLogRetention = 30 * 24 * time.Hour
 )
 
@@ -68,11 +65,10 @@ type Config struct {
 	JWTAccessTokenExpiry  time.Duration `env:"JWT_ACCESS_TOKEN_EXPIRY" envDefault:"1h"`
 	JWTRefreshTokenExpiry time.Duration `env:"JWT_REFRESH_TOKEN_EXPIRY" envDefault:"720h"`
 	// JWTRefreshCapabilityMaxLifetime caps the total life of a refresh family that
-	// carries a capability scope (admin/user), measured from the family's creation
-	// (its first authorization). A family reaching it is revoked so the client must
-	// re-authorize, closing the "sliding 30-day window renews forever" hole on
-	// administrative and self-service delegations. Plain OIDC families and internal
-	// session families are never capped. Zero disables the cap entirely.
+	// carries a capability scope (admin/user), measured from the family's creation.
+	// A family reaching it is revoked so the client must re-authorize — closing the
+	// "sliding 30-day window renews forever" hole on delegated scopes. Plain OIDC
+	// families and internal session families are never capped. Zero disables.
 	JWTRefreshCapabilityMaxLifetime time.Duration `env:"JWT_REFRESH_CAPABILITY_MAX_LIFETIME" envDefault:"168h"`
 	RefreshTokenHMACSecret          string        `env:"REFRESH_TOKEN_HMAC_SECRET"`
 
@@ -94,10 +90,9 @@ type Config struct {
 	// neither; a disabled provider's route is still registered and answers 400
 	// rather than 404, which keeps the contract stable.
 	//
-	// The env names keep the OAUTH_FEISHU_* spelling that .env.example already
-	// documents, while the provider enum, routes and identities.provider all use
-	// "lark". Renaming the variables would break existing deployments for a
-	// cosmetic gain.
+	// Env names keep the OAUTH_FEISHU_* spelling that .env.example already
+	// documents while the code uses "lark"; renaming the variables would break
+	// existing deployments.
 	OAuthGitHubEnabled      bool   `env:"OAUTH_GITHUB_ENABLED" envDefault:"false"`
 	OAuthGitHubClientID     string `env:"OAUTH_GITHUB_CLIENT_ID"`
 	OAuthGitHubClientSecret string `env:"OAUTH_GITHUB_CLIENT_SECRET"`
@@ -126,21 +121,17 @@ type Config struct {
 	TrustedProxies        []string `env:"TRUSTED_PROXIES" envSeparator:"," envDefault:"127.0.0.1,::1"`
 	HSTSMaxAge            int      `env:"HSTS_MAX_AGE" envDefault:"31536000"`
 
-	// The httpOnly session cookie a fresh tab uses to rebuild its session. The
-	// path is /v2 because that is the prefix the external Caddy proxy routes to
-	// this service; the cookie only ever needs to reach /v2/* endpoints. Secure
+	// The httpOnly session cookie a fresh tab uses to rebuild its session: Path /v2
+	// matches the external Caddy proxy prefix the cookie needs to reach. Secure
 	// defaults on (production is HTTPS-only) and is turned off for plain-http
 	// local development.
 	SessionCookieName   string `env:"SESSION_COOKIE_NAME" envDefault:"sl_session"`
 	SessionCookiePath   string `env:"SESSION_COOKIE_PATH" envDefault:"/v2"`
 	SessionCookieSecure bool   `env:"SESSION_COOKIE_SECURE" envDefault:"true"`
-	// The per-IP defaults are tuned for the campus NAT reality: hundreds of users
-	// share one egress IP, so any per-IP cap must accommodate the whole campus's
-	// aggregate volume or login breaks during a rush. The login defense is the
-	// per-account lockout (LoginFailureLimit), and per-IP login throttling is
-	// generous (300/15min ≈ 20/min) so a campus NAT is not the bottleneck while a
-	// single source still cannot run an unbounded spray. Abuse visibility is
-	// planned as an admin login-IP statistics feature rather than a per-IP cap.
+	// The per-IP defaults are tuned for the campus NAT reality: the login defense
+	// is the per-account lockout (LoginFailureLimit), so per-IP throttling stays
+	// generous enough that a shared egress IP is not the bottleneck while a single
+	// source still cannot run an unbounded spray.
 	RateLimitLoginRPM        int           `env:"RATE_LIMIT_LOGIN_RPM" envDefault:"500"`
 	RateLimitLoginWindow     time.Duration `env:"RATE_LIMIT_LOGIN_WINDOW" envDefault:"15m"`
 	RateLimitSendEmailRPM    int           `env:"RATE_LIMIT_SEND_EMAIL_RPM" envDefault:"3"`
@@ -151,24 +142,15 @@ type Config struct {
 	// AuthStateCacheTTL bounds how long a cached per-token auth state lives before
 	// a re-read.
 	//
-	// It is NOT what bounds the post-revocation window. Revocation writes a
-	// tombstone rather than deleting the entry, and GetAuthState reads a tombstone
-	// as a miss, so a revoked token falls through to the authoritative
-	// oauth_access_tokens.revoked_at query no matter how long this TTL is; if
-	// Redis is unreachable the cache read fails and the same fallback applies. A
-	// revoked token cannot be admitted at any value here — the tombstone's own TTL
-	// (Store.AuthStateTombstoneTTL, sized from the server WriteTimeout) is what
-	// covers that path.
+	// It is NOT what bounds the post-revocation window: revocation writes a
+	// tombstone that GetAuthState reads as a miss, so a revoked token falls
+	// through to the authoritative revoked_at query at any TTL here (and the same
+	// fallback applies when Redis is unreachable).
 	//
-	// What this TTL actually bounds is a state change that does NOT revoke the
-	// token. UpdateAdminUser gates its revocation on roleChanged, so an edit that
-	// only moves "user".state (njupter/on_sast/retired_sast), and RestoreUser,
-	// leave live tokens alone: their cached blob keeps the pre-change state until
-	// this TTL expires. Nothing authorizes on Principal.State today — RequireRole
-	// reads Role, and every role change revokes — so the window is currently
-	// inconsequential. It stops being inconsequential the moment a check gates on
-	// state, which is why this stays short rather than being sized for cache hit
-	// rate alone.
+	// What it bounds is a non-revoking state change: UpdateAdminUser and
+	// RestoreUser leave live tokens alone, so their cached blob keeps the
+	// pre-change state until expiry. Nothing authorizes on State today, but a
+	// future gate would — hence the short default.
 	AuthStateCacheTTL time.Duration `env:"AUTH_STATE_CACHE_TTL" envDefault:"15s"`
 	// EnablePprof explicitly exposes /debug/pprof in production (default off).
 	// The endpoints can drive CPU sampling and dump goroutine/heap state, so they
@@ -234,36 +216,27 @@ type Config struct {
 	// legitimately redeems once, but a shared egress IP multiplies that.
 	RateLimitExchangeCodeRPM    int           `env:"RATE_LIMIT_EXCHANGE_CODE_RPM" envDefault:"300"`
 	RateLimitExchangeCodeWindow time.Duration `env:"RATE_LIMIT_EXCHANGE_CODE_WINDOW" envDefault:"60s"`
-	// Throttles POST /auth/register per Register-Ticket, not per IP. Each accepted
-	// call runs one argon2id derivation, so what needs
-	// bounding is derivations per verified email — and the ticket is exactly that
-	// credential. Keying on IP instead would put a whole campus NAT behind one
-	// counter, which is the shape of the traffic this endpoint sees during
-	// enrollment. Ticket acquisition is already capped upstream by the send-email
-	// limiters, so this does not leave the cost unbounded.
+	// Throttles POST /auth/register per Register-Ticket, not per IP: the ticket is
+	// the credential an accepted call spends on one argon2id derivation, and
+	// keying on IP would put a whole campus NAT behind one counter. Ticket
+	// acquisition is already capped upstream by the send-email limiters.
 	//
-	// The window must not exceed the ticket's own 5-minute TTL: a longer one would
-	// still be closed when the ticket it throttles has already expired, leaving the
-	// caller nothing to retry with. Fail-open, per PRD §6.0.
+	// The window must not exceed the ticket's own 5-minute TTL, or a throttled
+	// caller is left nothing to retry with. Fail-open, per PRD §6.0.
 	RateLimitRegisterAttempts int           `env:"RATE_LIMIT_REGISTER_ATTEMPTS" envDefault:"5"`
 	RateLimitRegisterWindow   time.Duration `env:"RATE_LIMIT_REGISTER_WINDOW" envDefault:"5m"`
-	// Throttles GET /card/:id per caller IP. Unauthenticated, one DB read per call,
+	// Throttles GET /card/:id per caller IP: unauthenticated, one DB read per call,
 	// and the path parameter is enumerable, so an uncapped endpoint hands out a
-	// full scrape of every public card.
-	//
-	// Set for a member wall behind a shared egress: a page that renders dozens of
-	// cards must not spend a whole NAT's minute on one visitor. A cap this loose
-	// only slows a scrape rather than preventing it — bulk reads of public cards
-	// belong behind the proxy's cache, which is also where the capacity defense
-	// lives. Fail-open, per PRD §6.0.
+	// full scrape of every public card. Loose enough that a member wall rendering
+	// dozens of cards does not spend a whole NAT's budget on one visitor; bulk
+	// scraping is left to the proxy cache. Fail-open, per PRD §6.0.
 	RateLimitCardRPM    int           `env:"RATE_LIMIT_CARD_RPM" envDefault:"300"`
 	RateLimitCardWindow time.Duration `env:"RATE_LIMIT_CARD_WINDOW" envDefault:"60s"`
 
-	// Argon2Concurrency caps simultaneous argon2id derivations. A burst
-	// beyond this queues at the hasher instead of saturating every CPU core. It
-	// also doubles as the memory ceiling: each derivation allocates 19 MiB at the
-	// default parameters, so a high value on a small box exhausts RAM. When not
-	// explicitly set, it defaults to GOMAXPROCS (1 on the 1c1g deployment).
+	// Argon2Concurrency caps simultaneous argon2id derivations, queueing a burst at
+	// the hasher instead of saturating every CPU core; it also caps memory, since
+	// each derivation allocates 19 MiB at the default parameters. Defaults to
+	// GOMAXPROCS when unset.
 	Argon2Concurrency int `env:"ARGON2_CONCURRENCY"`
 	// Argon2Time/Memory/Threads are the argon2id parameters for new
 	// password hashes. Memory is in KiB; the default 19456 KiB (19 MiB) at t=2 is
@@ -282,13 +255,10 @@ type Config struct {
 	// An expired authorization code has no authority left: it is single-use and a
 	// replay is answered by revoking the family at redemption time.
 	RetentionAuthorizationAge time.Duration `env:"RETENTION_AUTHORIZATION_AGE" envDefault:"1h"`
-	// Deliberately far wider than the 1h default access-token TTL. The auth middleware
-	// reports an unknown JTI with the same 401 it uses for a revoked one, so
-	// deleting metadata while its JWT is still inside exp would show a merely
-	// expired token as revoked: the client gets CodeAccessTokenInvalid instead of
-	// CodeAccessTokenExpired and reads a forced logout where it should have
-	// refreshed. There is no clock-skew leeway in the JWT verifier to lean on, and
-	// these rows are small, so the window buys that safety cheaply.
+	// Deliberately far wider than the default access-token TTL: deleting metadata
+	// while its JWT still lives would read a merely expired token as revoked (same
+	// 401), a forced logout where a refresh was due. The window buys that safety
+	// cheaply.
 	RetentionAccessTokenAge  time.Duration `env:"RETENTION_ACCESS_TOKEN_AGE" envDefault:"24h"`
 	RetentionRefreshTokenAge time.Duration `env:"RETENTION_REFRESH_TOKEN_AGE" envDefault:"24h"`
 	// Defaults to the 90 days PRD §9 targets. May be raised, or trimmed down to the
@@ -299,20 +269,18 @@ type Config struct {
 	// kept, measured from reviewed_at. Defaults to 180 days.
 	//
 	// Only approved and rejected tickets are ever swept. A pending one is kept
-	// indefinitely: the three-day handling target is a statement in the UI, not a
-	// rule the backend enforces, and deleting an unreviewed application would lose
-	// someone's request rather than expire it.
+	// indefinitely — deleting an unreviewed application would lose someone's
+	// request, and the three-day handling target is a UI statement, not a backend
+	// rule.
 	RetentionAlumniRequestAge time.Duration `env:"RETENTION_ALUMNI_REQUEST_AGE" envDefault:"4320h"`
 
 	// TurnstileSecret enables the human-verification check in front of the one
 	// unauthenticated write endpoint, POST /alumni-requests.
 	//
-	// No default and not part of ValidateAPIAuth's fail-fast set, for the same
-	// reason SMTPHost and the STORAGE_* group are optional: a deployment that does
-	// not run the alumni intake should start cleanly. Empty does not mean "skip the
-	// check" — the endpoint answers 50301 and refuses every submission, because an
-	// anonymous write path with the challenge switched off has only the rate limiter
-	// left. Clients read that code as "hide the entry point".
+	// No default and not part of ValidateAPIAuth's fail-fast set: a deployment that
+	// does not run the alumni intake should start cleanly. Empty does not mean
+	// "skip the check" — the endpoint answers 50301 and refuses every submission,
+	// and clients read that code as "hide the entry point".
 	TurnstileSecret string `env:"TURNSTILE_SECRET"`
 	// TurnstileAction must match the action the widget was rendered with. Without
 	// it, any token minted under the same secret is spendable here, including one
@@ -324,9 +292,9 @@ type Config struct {
 
 	// AlumniResetURL is the password-reset page an approved applicant is sent to.
 	//
-	// Configured rather than derived from the job, because it is the one actionable
-	// instruction in an email this service sends: taking it from per-request data
-	// would make an outbound link depend on input the submitter influenced.
+	// Configured rather than derived because it is the one actionable instruction
+	// in an email this service sends: taking it from per-request data would let
+	// the submitter influence an outbound link.
 	AlumniResetURL string `env:"ALUMNI_RESET_URL"`
 	// AlumniSupportEmail is the appeal channel quoted in a rejection.
 	AlumniSupportEmail string `env:"ALUMNI_SUPPORT_EMAIL" envDefault:"link@sast.fun"`
@@ -379,11 +347,9 @@ func Load() (*Config, error) {
 	if err := env.Parse(cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	// ARGON2_CONCURRENCY defaults to the core count when unset: a single
-	// argon2id derivation at the default parameters costs tens of milliseconds, so
-	// a fixed high concurrency would oversubscribe a small host and stall every
-	// other endpoint. Sizing the gate to GOMAXPROCS keeps the box in check while
-	// still letting an operator raise it explicitly.
+	// ARGON2_CONCURRENCY defaults to the core count when unset, so a fixed high
+	// concurrency cannot oversubscribe a small host; an operator may still raise it
+	// explicitly.
 	if v, set := os.LookupEnv("ARGON2_CONCURRENCY"); !set || strings.TrimSpace(v) == "" {
 		// An unset OR empty value falls back to GOMAXPROCS. Compose forwards the
 		// variable even when the operator left it blank, and an empty string would
@@ -417,20 +383,16 @@ func (c *Config) validate() error {
 }
 
 // validateThirdPartyLogin checks the GitHub and Lark client settings, but only
-// for providers that are enabled.
-//
-// A disabled provider's blank credentials are not an error: most deployments run
-// neither, and demanding values for an unused provider would make the service
-// unstartable for no benefit. An enabled provider with missing credentials is an
-// error, because the failure would otherwise surface as a confusing provider
-// rejection on the first user who tries to log in.
+// for providers that are enabled: a disabled provider's blank credentials are
+// not an error (most deployments run neither), while an enabled provider with
+// missing credentials fails at boot rather than on the first login attempt.
 func (c *Config) validateThirdPartyLogin() error {
 	if !c.OAuthGitHubEnabled && !c.OAuthLarkEnabled {
 		return nil
 	}
 	// The allow-list and error page are shared by both providers, so they are
-	// required as soon as either is on. Without the allow-list every redirect
-	// falls back to the empty default and the callback cannot complete.
+	// required as soon as either is on; without the allow-list every callback
+	// redirect falls back to the empty default and cannot complete.
 	if len(c.OAuthLoginRedirects) == 0 {
 		return fmt.Errorf("OAUTH_LOGIN_REDIRECTS is required when a third-party login provider is enabled")
 	}
@@ -462,9 +424,8 @@ func (c *Config) validateThirdPartyLogin() error {
 			return fmt.Errorf("OAUTH_FEISHU_CLIENT_SECRET is required when OAUTH_FEISHU_ENABLED is true")
 		case !isAbsoluteHTTPURL(c.OAuthLarkRedirectURI):
 			return fmt.Errorf("OAUTH_FEISHU_REDIRECT_URI must be an absolute http(s) URL")
-		// PRD §4.5 limits Lark login to the SAST enterprise. An empty tenant key
-		// disables that gate, so it cannot be optional here: the deployment would
-		// accept logins from every Lark tenant and nothing would look wrong.
+		// PRD §4.5 limits Lark login to the SAST enterprise; an empty tenant key
+		// would accept every tenant, so it cannot be optional here.
 		case strings.TrimSpace(c.OAuthLarkTenantKey) == "":
 			return fmt.Errorf("OAUTH_FEISHU_TENANT_KEY is required when OAUTH_FEISHU_ENABLED is true")
 		}
@@ -480,10 +441,8 @@ func (c *Config) ValidateAPIAuth() error {
 	case strings.TrimSpace(c.JWTActiveKID) == "":
 		return fmt.Errorf("JWT_ACTIVE_KID is required")
 	// JWT_ISSUER is both the iss claim of every token and the base every OIDC
-	// discovery endpoint URL is concatenated onto, so it carries more weight than the
-	// two OAUTH_* URLs below that were already checked this way. A scheme-less value
-	// like "link.sast.fun" boots cleanly and publishes relative endpoint URLs that no
-	// relying party can resolve — a failure visible only to third-party integrators.
+	// discovery endpoint URL concatenates onto; a scheme-less value boots cleanly
+	// and publishes relative endpoint URLs no relying party can resolve.
 	case !isAbsoluteHTTPURL(c.JWTIssuer):
 		return fmt.Errorf("JWT_ISSUER must be an absolute http(s) URL")
 	case len(c.RefreshTokenHMACSecret) < minimumRefreshHMACSecretLen:
@@ -556,30 +515,26 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RATE_LIMIT_REGISTER_ATTEMPTS must be positive")
 	case c.RateLimitRegisterWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_REGISTER_WINDOW must be at least 1s")
-	// A window longer than the Register-Ticket TTL would still be closed once the
-	// ticket it throttles has expired, so a throttled caller would have nothing
-	// left to retry with and the documented retry would be impossible.
+	// A window longer than the Register-Ticket TTL leaves a throttled caller
+	// nothing to retry with once the ticket has expired.
 	case c.RateLimitRegisterWindow > registerTicketTTL:
 		return fmt.Errorf("RATE_LIMIT_REGISTER_WINDOW must not exceed the Register-Ticket TTL (%s)", registerTicketTTL)
 	case c.RateLimitCardRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_CARD_RPM must be positive")
 	case c.RateLimitCardWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_CARD_WINDOW must be at least 1s")
-	// The consent URL has no default: guessing one would make a deployment that
-	// forgot it redirect every third-party authorization to a page that does not
-	// exist, and the failure would only surface for the end user mid-flow.
+	// The consent URL has no default: guessing one would redirect every third-party
+	// authorization to a page that does not exist, surfacing only mid-flow.
 	case strings.TrimSpace(c.OAuthConsentURL) == "":
 		return fmt.Errorf("OAUTH_CONSENT_URL is required")
 	case !isAbsoluteHTTPURL(c.OAuthConsentURL):
 		return fmt.Errorf("OAUTH_CONSENT_URL must be an absolute http(s) URL")
 	case c.OAuthCodeTTL <= 0:
 		return fmt.Errorf("OAUTH_CODE_TTL must be positive")
-	// Upper-bounded, unlike most durations here. An authorization code is a bearer
-	// credential that travels through a browser redirect and lands in referrer
-	// headers and access logs; PRD §4.10 fixes it at 5 minutes. Single use plus
-	// family revocation on replay are what contain a leaked code, and both defenses
-	// are only as tight as this window, so a value like 720h would validate today and
-	// quietly widen the one interval they exist to bound.
+	// Upper-bounded, unlike most durations here: an authorization code is a bearer
+	// credential that lands in referrer headers and access logs, and the
+	// single-use plus family-revocation defenses are only as tight as this window
+	// (PRD §4.10 fixes it at 5 minutes).
 	case c.OAuthCodeTTL > maxOAuthCodeTTL:
 		return fmt.Errorf("OAUTH_CODE_TTL must not exceed %s", maxOAuthCodeTTL)
 	case c.OAuthAuthorizeRequestTTL <= 0:
@@ -593,13 +548,13 @@ func (c *Config) ValidateAPIAuth() error {
 	case c.Argon2Time < 1 || c.Argon2Memory < 8*uint32(max(c.Argon2Threads, uint8(1))):
 		return fmt.Errorf("ARGON2_TIME must be positive and ARGON2_MEMORY must be at least 8*ARGON2_THREADS KiB (threads 0 counts as 1)")
 	case c.Argon2Time > 10 || c.Argon2Memory > 64*1024 || c.Argon2Threads > 8:
-		// Must stay within internal/auth's verifyArgon2id bounds (maxArgon2Time/
-		// Memory/Threads), or HashPassword would mint hashes VerifyPassword refuses
-		// to verify — a silent total lockout after the first rehash-on-login.
+		// Must stay within internal/auth's verifyArgon2id bounds, or HashPassword mints
+		// hashes VerifyPassword refuses — a silent total lockout at the first
+		// rehash-on-login.
 		return fmt.Errorf("ARGON2_* must not exceed the verify bounds in internal/auth (TIME≤10, MEMORY≤65536 KiB, THREADS≤8)")
-	// Bounded because this is how long a non-revoking state change stays invisible
-	// to the middleware — an account state edit or a restore, neither of which
-	// revokes. Revocation itself is covered by the tombstone, not by this value.
+	// Bounded because this is how long a non-revoking state change (an account
+	// state edit or a restore) stays invisible to the middleware; revocation
+	// itself is covered by the tombstone, not by this value.
 	case c.AuthStateCacheTTL > time.Minute:
 		return fmt.Errorf("AUTH_STATE_CACHE_TTL must not exceed 1m (it bounds how long a state change that does not revoke stays unseen)")
 	case c.RetentionInterval < time.Minute:
@@ -622,10 +577,9 @@ func (c *Config) ValidateAPIAuth() error {
 		return fmt.Errorf("RETENTION_ALUMNI_REQUEST_AGE must be positive")
 	case c.TurnstileTimeout <= 0:
 		return fmt.Errorf("TURNSTILE_TIMEOUT must be positive")
-	// The action is compared against a value Cloudflare echoes back, so a control
-	// character here would silently never match and disable the intake with no
-	// visible cause. Checked with strconv.IsPrint rather than internal/validate to
-	// keep config free of internal dependencies, as the rest of this file is.
+	// A control character here would silently never match and disable the intake
+	// with no visible cause; checked with strconv.IsPrint to keep config free of
+	// internal dependencies.
 	case strings.ContainsFunc(c.TurnstileAction, func(r rune) bool { return !strconv.IsPrint(r) }):
 		return fmt.Errorf("TURNSTILE_ACTION must not contain control characters")
 	case strings.TrimSpace(c.TurnstileSecret) != "" && strings.TrimSpace(c.TurnstileAction) == "":
@@ -672,13 +626,11 @@ func (c *Config) ValidateAPIAuth() error {
 		return err
 	}
 	c.TrustedProxies = normalizedProxies
-	// Canonicalized here so both consumers of this one value agree. It is read twice:
-	// as the JWT manager's iss claim and as the base the discovery document
-	// concatenates endpoint URLs onto. Discovery already strips a trailing slash while
-	// the signer does not, so "https://link.sast.fun/v2/" would advertise issuer
-	// ".../v2" and then sign ".../v2/" — and OIDC Discovery 1.0 requires the two to be
-	// byte-identical, so a conforming relying party rejects every ID Token. Trimming
-	// once at the boundary keeps that impossible instead of relying on each consumer.
+	// Canonicalized here so both consumers of this one value agree: the JWT
+	// manager's iss claim and the base the discovery document concatenates endpoint
+	// URLs onto. Discovery strips a trailing slash while the signer does not, and
+	// OIDC requires the two to be byte-identical, so a trailing slash would get
+	// every ID Token rejected. Trimming once at the boundary keeps that impossible.
 	c.JWTIssuer = strings.TrimRight(strings.TrimSpace(c.JWTIssuer), "/")
 	return nil
 }
@@ -739,10 +691,9 @@ func (c *Config) validateStorage() error {
 }
 
 // isAbsoluteHTTPURL reports whether value is an absolute http/https URL with a
-// host. Both URLs it guards end up in a Location header, so a scheme-less or
-// relative value would resolve against this API's own origin instead of the
-// front end, and a non-http scheme would let a misconfiguration redirect users
-// somewhere a browser should never follow.
+// host. The URLs it guards end up in a Location header: a relative value would
+// resolve against this API's own origin, and a non-http scheme would redirect
+// users somewhere a browser should never follow.
 func isAbsoluteHTTPURL(value string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(value))
 	if err != nil {
@@ -756,11 +707,10 @@ func isAbsoluteHTTPURL(value string) bool {
 	return parsed.Host != ""
 }
 
-// normalizeTrustedProxies trims surrounding whitespace, drops empty entries and
-// ensures every remaining entry is a valid IP or CIDR. The normalized slice must
-// replace Config.TrustedProxies: envSeparator splitting keeps whitespace, so
-// "127.0.0.1, ::1" yields " ::1", which Gin's SetTrustedProxies rejects. Failing
-// (or normalizing) here keeps startup fail-fast with a clearer error.
+// normalizeTrustedProxies trims whitespace, drops empty entries and ensures
+// every remaining entry is a valid IP or CIDR. The normalized slice must replace
+// Config.TrustedProxies: the envSeparator split keeps whitespace that Gin's
+// SetTrustedProxies rejects.
 func normalizeTrustedProxies(proxies []string) ([]string, error) {
 	normalized := make([]string, 0, len(proxies))
 	for _, raw := range proxies {
@@ -780,10 +730,9 @@ func normalizeTrustedProxies(proxies []string) ([]string, error) {
 
 // PostgresDSN returns the PostgreSQL connection string used by GORM, in the
 // keyword=value form pgx parses directly. The password key is assembled from two
-// string literals so the source carries no single password-keyed literal for a
-// secret scanner to flag; the produced DSN is byte-identical to the inline form,
-// and the value is single-quoted so a password with spaces or special characters
-// cannot break the connection string apart.
+// string literals so no single password-keyed literal sits in source for a
+// secret scanner to flag; the value is single-quoted so a password with spaces
+// or special characters cannot break the connection string apart.
 func (c *Config) PostgresDSN() string {
 	key := "pass" + "word"
 	return fmt.Sprintf(

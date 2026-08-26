@@ -17,7 +17,7 @@ const maxOutboxDeliveryErrorLength = 1024
 
 // TokenBlacklistOutboxRepository coordinates durable revocation deliveries: the
 // rows ride the revoking transaction and the worker invalidates auth-state cache
-// entries (the name is legacy — the delivery target is no longer a blacklist).
+// entries.
 type TokenBlacklistOutboxRepository struct {
 	database *gorm.DB
 }
@@ -27,18 +27,9 @@ func NewTokenBlacklistOutbox(database *gorm.DB) *TokenBlacklistOutboxRepository 
 	return &TokenBlacklistOutboxRepository{database: database}
 }
 
-// ClaimDue atomically leases up to limit due, unexpired deliveries.
-// Claim leases make concurrent workers safe: each row is returned to one worker
-// until its lease expires, after which it can be retried by another worker.
-//
-// The query's two claim states are served by two partial indexes from V004:
-// idx_token_blacklist_outbox_due (next_delivery_at, expires_at, id) WHERE
-// claim_token IS NULL covers the never-claimed rows, and
-// idx_token_blacklist_outbox_claimed_until (claimed_until) WHERE claim_token
-// IS NOT NULL covers lease-expired retries. The OR joins the two scans, so the
-// ORDER BY cannot ride either index — the due set is bounded by the delivery
-// backlog and the sort is in memory. idx_token_blacklist_outbox_expiry
-// (expires_at, all rows) serves CleanupExpired's delete scan instead.
+// ClaimDue atomically leases up to limit due, unexpired deliveries. The lease
+// makes concurrent workers safe: each row goes to one worker until the lease
+// expires, after which another worker can retry it.
 func (r *TokenBlacklistOutboxRepository) ClaimDue(
 	ctx context.Context,
 	now time.Time,
@@ -93,10 +84,8 @@ func (r *TokenBlacklistOutboxRepository) Ack(ctx context.Context, id int64, clai
 	return result.RowsAffected == 1, nil
 }
 
-// AckMany removes a whole claimed batch in one statement. All rows in a ClaimDue
-// batch share one claim token, so a single DELETE IN covers the ack; this is the
-// worker's steady-state path (a password change can cut hundreds of sessions at
-// once), where per-row DELETEs would serialize dozens of round trips on one core.
+// AckMany removes a whole claimed batch in one statement. All rows in a batch
+// share one claim token, so a single DELETE IN covers the ack.
 func (r *TokenBlacklistOutboxRepository) AckMany(ctx context.Context, ids []int64, claimToken string) (int64, error) {
 	if len(ids) == 0 || claimToken == "" {
 		return 0, nil

@@ -25,10 +25,8 @@ func fieldTooLongMessage(field string) string  { return field + " 长度超出�
 func fieldInvalidMessage(field string) string  { return field + " 含非法字符" }
 
 // fieldError maps a validate.FieldError onto this service's invalid-input error.
-//
 // The rule is shared with the console through internal/validate; the wording is
-// not. An anonymous endpoint must not answer with copy written for
-// administrators.
+// not, since an anonymous endpoint must not answer with console copy.
 func fieldError(refused *validate.FieldError) error {
 	switch refused.Reason {
 	case validate.ReasonRequired:
@@ -55,23 +53,12 @@ type validatedSubmit struct {
 	note           string
 }
 
-// validateSubmit checks a submission.
-//
-// Stricter than the console's provisioning in two ways, both traceable to V010's
-// profile_needs_completion generated column:
-//
-//   - major is required. The console may leave it empty, but an account created
-//     from a ticket with a blank major is flagged incomplete the moment it exists,
-//     and the applicant is sent to a completion page on their first login — for a
-//     field they were never asked for.
-//   - name must not equal student_id. That was the previous database's placeholder
-//     for a missing name, and it is the second shape the generated column treats
-//     as debris.
-//
-// The name/student_id comparison is not written here. It comes from
-// validate.IncompleteProfileFields, whose agreement with the SQL is what
-// TestProfileCompletenessMatchesSQL enforces — a local reimplementation would be
-// a third copy of the rule with nothing checking it against V010.
+// validateSubmit checks a submission, stricter than the console's provisioning in
+// two ways tied to V010's profile_needs_completion column: major is required (a
+// blank one flags the approved account incomplete), and name must not equal
+// student_id (the previous database's placeholder for a missing name). The
+// name/student_id comparison comes from validate.IncompleteProfileFields; a local
+// reimplementation would be a third copy of the rule.
 func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 	var result validatedSubmit
 
@@ -135,15 +122,13 @@ func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 	}
 	result.college = college
 
-	// The completeness rule is checked against the normalized values, which is what
-	// approval will write. Checking the raw input would let "  B24040525  " pass and
-	// then store a name the generated column flags.
+	// The completeness rule runs on the normalized values, which is what approval
+	// will write.
 	if incomplete := validate.IncompleteProfileFields(
 		result.name, result.phoneNumber, result.qqNumber, result.major, result.studentID,
 	); len(incomplete) > 0 {
-		// The only reachable case at this point is name == student_id: the four
-		// blankness checks were already satisfied by RequiredField above. Naming the
-		// field rather than the rule keeps the message actionable.
+		// The only reachable case here is name == student_id; the message names the
+		// field.
 		return validatedSubmit{}, newError(ErrInvalidInput, "name 不能与 student_id 相同", nil)
 	}
 
@@ -151,13 +136,9 @@ func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 }
 
 // validateLoginEmail checks the school address that becomes the account's login
-// identity.
-//
-// The domain allow-list is not relaxed for this flow even though the whole point
-// is that the mailbox no longer receives mail. login_email is what V001's
-// auto_set_email_type trigger derives email_type from, so an address outside the
-// list fails in the database with a bare exception. The applicant's reachable
-// address is carried separately as personal_email.
+// identity. The domain allow-list is not relaxed: login_email is what the V001
+// trigger derives email_type from, and the applicant's reachable address is
+// carried separately as personal_email.
 func validateLoginEmail(raw string) (string, error) {
 	email := strings.ToLower(strings.TrimSpace(raw))
 	if email == "" {
@@ -212,11 +193,8 @@ func validateRejectReason(raw string) (string, error) {
 	return reason, nil
 }
 
-// parseStatus resolves an optional status filter.
-//
-// An unrecognized value is refused rather than ignored. Silently dropping it
-// would answer a filtered query with the unfiltered set, which reads as "there
-// are no pending tickets" when the real answer is "you misspelled pending".
+// parseStatus resolves an optional status filter; an unrecognized value is refused
+// rather than silently returning the unfiltered set.
 func parseStatus(raw *string) (*model.AlumniRequestStatus, error) {
 	if raw == nil {
 		return nil, nil

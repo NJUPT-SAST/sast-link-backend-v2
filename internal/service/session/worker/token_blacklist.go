@@ -29,16 +29,14 @@ type TokenBlacklistOutbox interface {
 
 type AuthStateInvalidator interface {
 	// DeleteAuthStates removes the per-token auth-state cache entries for a set
-	// of JTIs. A single revocation wave (logout, password change) can cut dozens
-	// of sessions at once, so the whole set goes in one pipeline call.
+	// of JTIs in one pipeline call.
 	DeleteAuthStates(ctx context.Context, jtis []string) error
 }
 
 // TokenBlacklist delivers durable JWT revocations from the outbox to the
 // auth-state cache: every revoked JTI's cached state is deleted so the
 // middleware cannot admit a token whose DB row says revoked. The outbox rows are
-// still keyed by token ID; only the Redis delivery target changed from the old
-// JTI blacklist key to the auth-state cache.
+// keyed by token ID, and delivery targets the auth-state cache.
 type TokenBlacklist struct {
 	Outbox          TokenBlacklistOutbox
 	AuthState       AuthStateInvalidator
@@ -57,8 +55,7 @@ func (w TokenBlacklist) Run(ctx context.Context) error {
 	}
 	interval := durationOrDefault(w.Interval, defaultTokenBlacklistInterval)
 	cleanupInterval := durationOrDefault(w.CleanupInterval, defaultTokenBlacklistCleanupRate)
-	// A timer instead of a ticker lets an empty outbox sleep at maxBackoff
-	// instead of waking every second for nothing.
+	// A timer lets an empty outbox sleep at maxBackoff.
 	dueTimer := time.NewTimer(interval)
 	defer dueTimer.Stop()
 	cleanupTicker := time.NewTicker(cleanupInterval)

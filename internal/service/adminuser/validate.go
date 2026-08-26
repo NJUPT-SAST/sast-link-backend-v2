@@ -8,31 +8,23 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
-// Paging bounds. The contract documents a maximum of 100 for the user list and
-// leaves the audit list open; an unbounded page size is a full-table read behind
-// one request, so the same cap applies to both.
+// Paging bounds. An unbounded page size is a full-table read behind one request, so
+// the same cap applies to both lists.
 const (
 	defaultUserPageSize  = 20
 	defaultAuditPageSize = 50
 )
 
-// Batch caps. The query cap is the contract's documented maximum (100); the
-// update cap is higher because its documented use is a recruitment promotion of
-// hundreds of accounts, and each item is an independent single-row transaction.
-// Both are far below what one request could plausibly need, so a caller that
-// hits them is misusing the endpoint, not paging.
+// Batch caps. Both are far below what one request could plausibly need, so a caller
+// that hits them is misusing the endpoint, not paging.
 const (
 	maxBatchQueryIDs  = 100
 	maxBatchUpdateIDs = 500
 )
 
 // normalizeBatchIDs validates a batch id list and collapses duplicates, keeping
-// first-occurrence order.
-//
-// The cap is checked against the submitted length before deduplication, so the
-// response cannot be steered by padding — sending 200 ids, 150 of them
-// duplicates, is still 200 ids. Messages are literals at the call site, so each
-// endpoint names its own bound.
+// first-occurrence order. The cap is checked against the submitted length before
+// deduplication, so padding cannot steer the response.
 func normalizeBatchIDs(ids []int64, limit int, tooManyMessage string) ([]int64, error) {
 	if len(ids) == 0 {
 		return nil, newError(ErrInvalidInput, "ids 不能为空", nil)
@@ -102,10 +94,8 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 		if field.value == nil {
 			continue
 		}
-		// major defaults to '' in V001 and is the one bounded column an administrator
-		// may legitimately blank out; the rest identify the account. That is exactly the
-		// Required/Optional split, so the two helpers carry it rather than a field-name
-		// comparison inside a shared branch.
+		// major is the one column an administrator may legitimately blank; the rest
+		// identify the account. That is exactly the Required/Optional split.
 		var (
 			trimmed string
 			refused *validate.FieldError
@@ -144,11 +134,9 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 		if !validState(state) {
 			return validatedUpdate{}, newError(ErrInvalidInput, "state 取值非法", nil)
 		}
-		// Closing and reopening an account is DELETE's and restore's job. Those paths
-		// revoke every token in the transaction that flips the flag; this one does not,
-		// so accepting is_deleted here would leave a closed account holding live refresh
-		// tokens. Refusing it keeps "a deleted account has no sessions" true by
-		// construction rather than by remembering to duplicate the revocation.
+		// is_deleted is DELETE's and restore's job, which revoke tokens in the same
+		// transaction; accepting it here would leave a closed account holding live
+		// refresh tokens.
 		if state == model.UserStateDeleted {
 			return validatedUpdate{}, newError(ErrStateConflict,
 				"注销用户请使用 DELETE /admin/users/:id", nil)
@@ -205,16 +193,10 @@ func validateLoginEmail(raw *string) (*string, error) {
 	return &email, nil
 }
 
-// validateEmailType checks a submitted email_type against the domain that will be
-// in effect after the write.
-//
-// The V001 trigger only recomputes email_type when login_email appears in the
-// UPDATE column list, so a request carrying email_type alone can store a value
-// that contradicts the address. The contract exposes the field, so it is accepted
-// — but only when it agrees with the domain, which keeps the column's meaning
-// intact. When login_email is absent there is nothing to compare against, so the
-// field is refused rather than trusted; changing the address is how the type
-// changes.
+// validateEmailType checks a submitted email_type against the domain in effect
+// after the write. The trigger only recomputes it when login_email is in the UPDATE
+// list, so email_type is accepted only alongside a matching login_email — changing
+// the address is how the type changes.
 func validateEmailType(raw *string, loginEmail *string) (*model.EmailType, error) {
 	if raw == nil {
 		return nil, nil
@@ -279,12 +261,10 @@ func fieldTooLongMessage(field string) string  { return field + " 长度超出�
 func fieldInvalidMessage(field string) string  { return field + " 含非法字符" }
 
 // fieldError maps a validate.FieldError onto this service's invalid-input error.
-//
 // The rule lives in internal/validate because the alumni account-request flow
 // applies the same one, but the wording stays here: that flow is anonymous and
-// must not answer with copy written for the console. An unrecognized reason
-// falls through to the invalid-character message rather than being dropped,
-// since returning nil would let a refused value continue as if it had passed.
+// must not answer with console copy. An unrecognized reason falls through to the
+// invalid-character message rather than nil.
 func fieldError(refused *validate.FieldError) error {
 	switch refused.Reason {
 	case validate.ReasonRequired:
@@ -312,9 +292,8 @@ type validatedCreate struct {
 }
 
 // validateCreate checks a full account provision. name, phone_number, qq_number,
-// student_id and login_email are required; major may stay empty. role defaults
-// to member and state to retired_sast, the usual case for graduated members
-// whose school or SAST email is no longer reachable.
+// student_id and login_email are required; major may stay empty. role defaults to
+// member and state to retired_sast.
 func validateCreate(input CreateUserInput) (validatedCreate, error) {
 	var result validatedCreate
 
@@ -340,8 +319,7 @@ func validateCreate(input CreateUserInput) (validatedCreate, error) {
 	major := ""
 	if input.Major != nil {
 		// major is the one provisioning field the console may leave empty, so it goes
-		// through OptionalField. The alumni ticket flow requires it instead, because a
-		// blank major is what V010's generated column flags as incomplete.
+		// through OptionalField.
 		validated, refused := validate.OptionalField("major", *input.Major, validate.MaxMajorLength)
 		if refused != nil {
 			return validatedCreate{}, fieldError(refused)
@@ -361,8 +339,8 @@ func validateCreate(input CreateUserInput) (validatedCreate, error) {
 
 	loginEmail, err := validateLoginEmail(&input.LoginEmail)
 	if err != nil {
-		// validateLoginEmail answers nil for a nil input; the required strings have
-		// no such presence, so re-state the empty case with the field's own message.
+		// A nil login_email cannot occur here, so any error already carries the
+		// field's own message.
 		return validatedCreate{}, err
 	}
 	result.loginEmail = *loginEmail
@@ -379,8 +357,8 @@ func validateCreate(input CreateUserInput) (validatedCreate, error) {
 			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 格式非法", nil)
 		}
 		if email == result.loginEmail {
-			// Reject before the identity insert so the caller gets a clear input error
-			// rather than a DB constraint. Both emails are lowercased, so compare exactly.
+			// Rejected before the identity insert so the caller gets a clear input error
+			// rather than a DB constraint.
 			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 不能与 login_email 相同", nil)
 		}
 		result.personalEmail = &email
@@ -401,8 +379,8 @@ func validateCreate(input CreateUserInput) (validatedCreate, error) {
 		if !validState(state) {
 			return validatedCreate{}, newError(ErrInvalidInput, "state 取值非法", nil)
 		}
-		// A closed account has no sessions by construction; creating one already
-		// closed would skip every revocation path those transitions carry.
+		// is_deleted is refused: creating an account already closed would skip every
+		// revocation path those transitions carry.
 		if state == model.UserStateDeleted {
 			return validatedCreate{}, newError(ErrStateConflict,
 				"新建账号不能直接处于已注销状态", nil)

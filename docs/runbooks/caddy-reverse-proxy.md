@@ -44,6 +44,13 @@ link.sast.fun {
 }
 ```
 
+### 生产部署：宿主 Caddy
+
+生产机上 Caddy 是宿主的 systemd 进程，不在容器网络内，上游地址必须写成宿主可达的 `127.0.0.1:8080` / `127.0.0.1:3000`，而不是 compose 网络名 `api:8080` / `frontend:3000`。
+
+- 后端限流与登录失败计数按 IP 分桶，反代不传真实客户端 IP 时全站共用一个桶：Caddy 侧转发 `X-Forwarded-For`，服务侧把代理网段配入 `TRUSTED_PROXIES`（见 `.env.example`）。
+- `/v2/debug/*`（pprof）在反代层额外钉一道 `respond 404`：`PPROF_ENABLED` 是进程内开关，一次误配即公网暴露，路径级拒绝是与开关取值无关的第二道防线；需要用时走 SSH 本地转发，不经过公网路径。
+
 ### 为什么这个顺序是可靠的
 
 Caddy 的 `handle` 块是**互斥**的——只有第一个匹配的块会被执行。但「第一个」不是按文件里的书写顺序，而是按 Caddy 自己的 directive 排序算法：同名 directive 先按 matcher 排，带单个路径 matcher 的优先级最高，并且**按路径长度从最具体到最不具体**排序。

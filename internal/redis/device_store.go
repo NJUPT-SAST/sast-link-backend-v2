@@ -30,27 +30,20 @@ func (k Keys) Device(deviceID string) string {
 }
 
 // deviceHashKeyPrefix is the shared prefix of every device Hash key, passed
-// into Lua scripts that must delete or read a Hash by member ID. It is a key
-// pattern, not a key itself: scripts use it to derive member keys at runtime
-// (KEYS[3] .. member). Like every multi-key script in this codebase it assumes
-// a single Redis instance — under Redis Cluster the derived keys carry no hash
-// tag and would cross slots. The deployment runs one Redis; do not enable
-// cluster mode without adding hash tags to the device key scheme.
+// into Lua scripts that derive member keys from it at runtime.
 func (k Keys) deviceHashKeyPrefix() string {
 	return k.join("device") + ":"
 }
 
 // RegisterDevice records a login as a device: ZADD to the user's device sorted
-// set, HSET the device Hash, and evict the oldest device when the set exceeds
-// limit — all atomically, so concurrent logins cannot both observe a safe count
-// and push the set past the cap. The evicted device's Hash is deleted by the
-// caller (one extra round trip on the rare eviction path).
+// set, HSET the device Hash, evicting the oldest device when the set exceeds
+// limit — all atomically, so concurrent logins cannot push the set past the
+// cap. The evicted device's Hash is deleted by the caller.
 //
-// The returned device ID is the member evicted to make room ("" when the set
-// stayed within the cap). The caller must revoke that device's token family:
-// eviction is the "最多 5 台同时登录" enforcement (PRD §6.1), and a family
-// whose record vanished while its tokens stayed live would become an invisible,
-// unmanageable ghost session.
+// The returned device ID is the evicted member ("" within the cap). The caller
+// must revoke that device's token family: eviction is the "最多 5 台同时登录"
+// enforcement (PRD §6.1), and a family whose record vanished while its tokens
+// stayed live would become an unmanageable ghost session.
 //
 // Both keys get ttl; TouchDevice deliberately does not refresh it, so a device
 // that stops refreshing falls out of the set on its own.
@@ -90,16 +83,11 @@ func (s Store) RegisterDevice(
 }
 
 // registerDeviceScript adds the device, refreshes both TTLs, and evicts the
-// oldest member once the set exceeds the per-user cap. Returns the evicted
-// device ID ("" when nothing was evicted).
-//
-// Before the cap check it sweeps phantom members — set members whose Hash is
-// gone (eviction-policy drop, external delete, expiry skew) — out of the set
-// without revoking their families: the record is lost, not the session, and
-// the device re-registers on its next refresh. Without the sweep a phantom
-// member keeps occupying a cap slot and forces the eviction of a real device
-// while the phantom stays behind. The sweep is whole-set (at most the cap's
-// worth of members), so no phantom position in the set escapes it.
+// oldest member once the set exceeds the per-user cap. Before the cap check it
+// sweeps phantom members (set members whose Hash is gone) out of the set
+// without revoking their families, so a phantom cannot occupy a cap slot and
+// force the eviction of a real device. Returns the evicted device ID ("" when
+// nothing was evicted).
 const registerDeviceScript = `
 redis.call("ZADD", KEYS[1], ARGV[1], ARGV[2])
 redis.call("EXPIRE", KEYS[1], tonumber(ARGV[3]))
@@ -122,17 +110,11 @@ return ""
 
 // TouchDevice updates a device's last_seen on token refresh without extending
 // the live record's TTL, so an active device cannot stay in the set forever by
-// refreshing. A refresh that arrives after the record already expired (30d of
-// inactivity) instead resurrects it with a fresh TTL: the device is clearly
-// still in use, and dropping the refresh silently would leave a session that
-// works but is invisible in the device list and cannot be logged out — the
-// same ghost-session trap eviction now avoids by revoking the family.
-//
-// Resurrecting re-enters the per-user cap: like RegisterDevice, the script
-// evicts the oldest member once the set exceeds limit, and the caller revokes
-// the evicted family. Without that check a user at the 5-device cap with one
-// expired-but-still-refreshing device would end up with 6 live sessions,
-// silently violating the "最多 5 台同时登录" constraint.
+// refreshing. A refresh after the record expired instead resurrects it with a
+// fresh TTL and re-enters the per-user cap (evicting the oldest member past
+// limit, like RegisterDevice): silently dropping the refresh would leave an
+// invisible, unloggable ghost session, and skipping the cap check would allow
+// more live sessions than the "最多 5 台同时登录" limit.
 func (s Store) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time, ttl time.Duration, limit int) (string, error) {
 	if s.Client == nil || userID <= 0 || deviceID == "" || ttl <= 0 || limit <= 0 {
 		return "", fmt.Errorf("touch device: %w", ErrInvalidArgument)
@@ -170,22 +152,11 @@ func (s Store) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip s
 // {status, evicted device ID}: status 1 = live record touched (no eviction),
 // status 0 = resurrected (evicted is "" unless the cap was exceeded).
 //
-// The live branch re-applies a TTL only when one is missing (TTL < 0): a
-// record whose Hash lost its TTL — expiry-skew between the two keys, an
-// eviction-policy drop, an external delete — must not be rebuilt as a
-// never-expiring Hash by the HSET that follows, while an intact record's TTL
-// is still never extended by refreshes (PRD §6.1). The same guard covers the
-// sorted set, so a member cannot outlive its record as a zombie.
-//
-// When the live branch rebuilds a Hash whose key was lost, login_time is
-// restored from the ZSET score (the original login timestamp) rather than the
-// current time: the score is what ListDevices sorts by, so a rebuilt record
-// whose displayed login_time jumped to "now" while its sort position stayed at
-// the old login would present an ordering that contradicts its own timestamps.
-//
-// The resurrect branch sweeps phantom members (set members whose Hash is gone)
-// before the cap check, like RegisterDevice: they must not occupy cap slots
-// and push a real device out.
+// The live branch re-applies a TTL only when missing, so a rebuilt Hash never
+// becomes never-expiring and a member cannot outlive its record as a zombie;
+// a rebuilt Hash restores login_time from the ZSET score so the displayed time
+// stays consistent with its sort position. The resurrect branch sweeps phantom
+// members before the cap check so they cannot occupy cap slots.
 const touchDeviceScript = `
 local score = redis.call("ZSCORE", KEYS[1], ARGV[1])
 -- unix_ms_to_rfc3339 renders a Unix-millis score back into the RFC3339
@@ -246,14 +217,11 @@ return {0, ""}
 `
 
 // RemoveDevice removes one device: ZREM from the user's set and DEL its Hash.
-// Used by logout, which revokes the token family first — the device record is
-// the tail of that operation and its absence never blocks the logout itself.
+// Used by logout, which revokes the token family first (the device record is
+// the tail of that operation and its absence never blocks the logout).
 //
 // INVARIANT: the caller must already have proven that deviceID belongs to
-// userID. The Hash key holds no user dimension, so this primitive cannot tell
-// users apart; every current call site (LogoutDevice's ownership gate, the
-// eviction path whose displaced member came from this user's set, the refresh
-// paths whose family came from a DB row) satisfies that before calling.
+// userID — the Hash key holds no user dimension and cannot tell users apart.
 func (s Store) RemoveDevice(ctx context.Context, userID int64, deviceID string) error {
 	if s.Client == nil || userID <= 0 || deviceID == "" {
 		return fmt.Errorf("remove device: %w", ErrInvalidArgument)
@@ -342,11 +310,9 @@ func (s Store) ListDevices(ctx context.Context, userID int64) ([]DeviceInfo, err
 
 // listDevicesScript returns a flat array of {device_id, score, ua, ip,
 // login_time, last_seen} per device, newest first (ZREVRANGE). Hash fields are
-// read individually so a missing or partial Hash degrades to empty strings
-// rather than failing the whole list. Members whose Hash is entirely gone
-// (phantom members — eviction drop, external delete, expiry skew) are skipped:
-// a record with no data is not a device, and listing it would show a ghost
-// row the user cannot act on.
+// read individually so a missing or partial Hash degrades to empty strings;
+// members whose Hash is entirely gone are skipped, since a record with no data
+// would render as an unactionable ghost row.
 const listDevicesScript = `
 local members = redis.call("ZREVRANGE", KEYS[1], 0, -1, "WITHSCORES")
 local result = {}
@@ -369,10 +335,8 @@ return result
 `
 
 // DeviceOwnedBy reports whether deviceID is a member of the user's device set.
-// This is the ownership gate for "logout a specific device": the family-revoke
-// step below it trusts the caller, so a false positive here would let one user
-// kill another's sessions. Failing closed (an unreadable set is not ownership)
-// is the safe direction.
+// This is the ownership gate for "logout a specific device": a false positive
+// would let one user kill another's sessions, so an unreadable set fails closed.
 func (s Store) DeviceOwnedBy(ctx context.Context, userID int64, deviceID string) (bool, error) {
 	if s.Client == nil || userID <= 0 || deviceID == "" {
 		return false, fmt.Errorf("device ownership: %w", ErrInvalidArgument)

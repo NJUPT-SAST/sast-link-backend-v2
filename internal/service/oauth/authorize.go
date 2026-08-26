@@ -24,30 +24,27 @@ const (
 	pkceMethodS256             = "S256"
 
 	// maxAuthorizeParameterLength bounds the free-form authorize parameters that are
-	// persisted with the code. It matches the VARCHAR(255) width of
-	// oauth_authorizations.code_challenge and .nonce (V001): validating here turns an
-	// oversized value into a redirectable invalid_request on the first leg, instead of
-	// an opaque 500 at consent time — after the single-use stash has already been
-	// spent and the user has to restart.
+	// persisted with the code, matching oauth_authorizations.code_challenge and .nonce
+	// (V001). Refusing an oversized value here keeps it from failing later at consent,
+	// after the single-use stash has been spent.
 	maxAuthorizeParameterLength = 255
-	// maxStateLength bounds the state echoed back to the client. state is not stored
-	// in a column but is held in the Redis stash and reflected into a Location
-	// header, so it needs a cap of its own.
+	// maxStateLength bounds the state echoed back to the client; it is held in the
+	// Redis stash rather than a column, so it is capped here.
 	maxStateLength = 512
 )
 
 // Authorize validates an authorization request and stashes it for the consent page.
 //
-// Nothing is issued here and the caller is not authenticated: this leg only
-// proves the request is well formed and comes from a registered client with a
-// registered redirect_uri. The user's identity arrives on the second leg
-// (Consent), which is the only place a code can be minted.
+// Nothing is issued here and the caller is not authenticated: this leg only proves
+// the request is well formed and comes from a registered client with a registered
+// redirect_uri. The user's identity arrives on the second leg (Consent), the only
+// place a code can be minted.
 //
 // Error redirectability is decided in a strict order. client_id and redirect_uri
-// are validated first and every failure up to that point is non-redirectable —
-// RFC 6749 §4.1.2.1 forbids bouncing the browser to an unverified URI, which
-// would make this endpoint an open redirector. Once both check out, later
-// failures carry Redirectable so the client learns why its request was refused.
+// are validated first and every failure up to that point is non-redirectable — RFC
+// 6749 §4.1.2.1 forbids bouncing the browser to an unverified URI, which would make
+// this endpoint an open redirector. Once both check out, later failures carry
+// Redirectable so the client learns why its request was refused.
 func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*AuthorizeResult, error) {
 	if err := s.checkAuthorizeLimit(ctx, input.ClientIP); err != nil {
 		return nil, err
@@ -71,9 +68,8 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	if redirectURI == "" {
 		return nil, newError(ErrInvalidRequest, "redirect_uri 不能为空", nil)
 	}
-	// Exact string match against the registered set, per PRD §4.10. No prefix or
-	// host comparison: a prefix rule lets an attacker append a path the client
-	// never registered and receive the code there.
+	// Exact string match against the registered set (PRD §4.10); a prefix rule would
+	// let an attacker append a path the client never registered and receive the code.
 	if !slices.Contains([]string(client.RedirectURIs), redirectURI) {
 		return nil, newError(ErrInvalidRequest, "redirect_uri 与客户端注册值不匹配", nil)
 	}
@@ -86,11 +82,9 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	if strings.TrimSpace(input.ResponseType) != responseTypeCode {
 		return nil, redirectableError(ErrUnsupportedResponse, "response_type 必须为 code", nil)
 	}
-	// Presence is checked on the trimmed value so whitespace alone is not a state,
-	// but the original is what gets stashed and echoed back. RFC 6749 §4.1.2 requires
-	// state to be returned exactly as received: it is the client's CSRF token and the
-	// client compares it byte for byte, so trimming it would break that comparison
-	// for any client whose state carries surrounding whitespace.
+	// Presence is checked on the trimmed value but the original is stashed and echoed
+	// back: RFC 6749 §4.1.2 requires state to be returned exactly as received, since
+	// the client compares it byte for byte as its CSRF token.
 	if strings.TrimSpace(input.State) == "" {
 		return nil, redirectableError(ErrInvalidRequest, "state 不能为空", nil)
 	}
@@ -105,10 +99,8 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	if challenge == "" {
 		return nil, redirectableError(ErrInvalidRequest, "code_challenge 不能为空", nil)
 	}
-	// An S256 challenge is a fixed-width base64url digest, so anything else is
-	// malformed. Checked here rather than only at redemption: the code is minted from
-	// this value, and a challenge no verifier could ever match yields a code that is
-	// guaranteed to fail — better to refuse the request the client can still fix.
+	// An S256 challenge is a fixed-width base64url digest; any other shape is refused
+	// here so no code is minted from a value no verifier could ever match.
 	if !auth.IsValidPKCEChallenge(challenge) {
 		return nil, redirectableError(ErrInvalidRequest, "code_challenge 必须为 43 位 base64url S256 摘要", nil)
 	}
@@ -158,9 +150,9 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 //
 // The stash is consumed atomically before anything is issued, so one authorize
 // request yields at most one code even if the consent page is submitted twice.
-// Every code parameter comes from the stash rather than the request body: the
-// body is authenticated but its echoed parameters are not trusted, or a caller
-// could approve one request and mint a code for a different client or scope.
+// Every code parameter comes from the stash rather than the request body, so a
+// caller cannot approve one request and mint a code for a different client or
+// scope.
 func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResult, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
@@ -170,10 +162,9 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 		return nil, newError(ErrInvalidRequest, "request_id 不能为空", nil)
 	}
 
-	// Only the approving path mints an authorization code, so only it is budgeted:
-	// a deny mints nothing and must not consume the budget, and a rate-limited
-	// approve is refused before the stash is spent, so the user can retry once the
-	// window resets without re-starting the authorization.
+	// Only the approving path mints a code, so only it is rate-limited; a deny
+	// consumes no budget, and a refused approve happens before the stash is spent
+	// so the user can retry without re-starting the authorization.
 	if input.Approve {
 		if err := s.checkConsentLimit(ctx, input.UserID); err != nil {
 			return nil, err
@@ -189,11 +180,9 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	}
 
 	if !input.Approve {
-		// RFC 6749 §4.1.2.1: a refusal is reported to the client as access_denied,
-		// not hidden. The redirect_uri was validated on the first leg — but like
-		// the approval branch below, the refusal re-checks it against the
-		// registration as it stands now: an operator who removed a compromised
-		// callback expects nothing to be delivered there, access_denied included.
+		// RFC 6749 §4.1.2.1 reports a refusal to the client as access_denied. Like the
+		// approval branch below the redirect_uri is re-checked against the live
+		// registration, so nothing is delivered to a callback an operator removed.
 		client, lookupErr := s.Clients.FindActiveByClientID(ctx, payload.ClientID)
 		if errors.Is(lookupErr, repository.ErrNotFound) || errors.Is(lookupErr, repository.ErrInvalidArgument) {
 			s.auditAuthorize(ctx, input, payload, nil, false, errcode.CodeUnauthenticated, "denied_client_gone")
@@ -222,30 +211,16 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	if err != nil {
 		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
 	}
-	// The redirect_uri is re-matched against the registration as it stands now, not
-	// only as it stood on the first leg. An administrator who removes a compromised
-	// callback expects codes to stop going there immediately; without this the stash
-	// keeps delivering to the removed URI for the rest of its TTL. Same reasoning as
-	// the disabled-client check above — the registration can change between legs.
+	// The redirect_uri is re-matched against the live registration so a removed
+	// callback stops receiving codes immediately rather than for the stash's TTL.
 	if !slices.Contains([]string(client.RedirectURIs), payload.RedirectURI) {
 		return nil, newError(ErrInvalidRequest, "redirect_uri 已不在客户端注册值中，请重新发起授权", nil)
 	}
-	// The scopes are re-checked against the registration as it stands now, for the
-	// same reason as the redirect_uri above: the stash was validated on the first leg
-	// and the registration can change before consent is submitted. Without this, an
-	// administrator who revokes a client's admin scope keeps minting administrative
-	// codes from stashes written before the revocation, for the rest of their TTL.
-	//
-	// Deliberately not redirectable. The first leg's error goes to the client's
-	// redirect_uri because the client is the one that asked for a bad scope; here the
-	// request was valid when made and it is the operator's change that invalidated
-	// it, so the user gets told to restart rather than the client being handed an
-	// error it cannot act on.
+	// Scopes are re-checked against the live registration so revoking a client's
+	// admin scope stops old stashes from minting administrative codes. Not
+	// redirectable: the request was valid when made, so the user is told to restart
+	// rather than the client receiving an error it cannot act on.
 	if scopeErr := checkScopeForClient(client, payload.Scopes); scopeErr != nil {
-		// Recorded like every other refusal outcome on this path: an operator's
-		// mid-flight revocation that kills an in-flight consent is exactly the event
-		// an incident review wants to find. The stash is already spent, so the
-		// decision is final either way.
 		s.auditAuthorize(ctx, input, payload, nil, false, errcode.CodeForbidden, "scope_revoked")
 		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
@@ -266,9 +241,8 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 		return nil, newError(ErrInternal, "生成授权码失败", err)
 	}
 	now := s.now()
-	// The family starts here, at consent, and is carried by the code into whatever
-	// token pair redeems it. That is what lets a replayed code revoke the tokens
-	// already minted from it (PRD §4.10).
+	// The family starts here and is carried by the code into whatever token pair
+	// redeems it, so a replayed code revokes the tokens already minted (PRD §4.10).
 	familyID := uuid.NewString()
 	nonce := payload.Nonce
 	var noncePtr *string
@@ -301,9 +275,9 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 
 // ConsentInfo returns the verified client metadata for a pending authorization
 // request. It peeks the stash rather than consuming it, so merely viewing the
-// consent page does not spend the request. The client name/scopes come from the
-// stash (written by Authorize from the verified client record), never from the
-// consent URL — a crafted link cannot spoof which application is asking.
+// consent page does not spend the request. The client name and scopes come from
+// the stash written by Authorize, never from the consent URL, so a crafted link
+// cannot spoof which application is asking.
 func (s Service) ConsentInfo(ctx context.Context, input ConsentInfoInput) (*ConsentInfoResult, error) {
 	if err := s.checkConsentInfoLimit(ctx, input.UserID); err != nil {
 		return nil, err
@@ -319,13 +293,10 @@ func (s Service) ConsentInfo(ctx context.Context, input ConsentInfoInput) (*Cons
 	if !found {
 		return nil, newError(ErrInvalidRequest, "授权请求无效或已过期，请重新发起授权", nil)
 	}
-	// The stash was validated on the first leg, and the registration can change
-	// before the page loads. Re-read the client and re-check the scope set against
-	// the live registration, exactly as Consent does on submission, so the page
-	// cannot render scopes the registration no longer grants — an operator's
-	// mid-flight revocation would otherwise keep showing the revoked admin scope
-	// until the stash expired. The stash is peeked, not consumed, so a page that
-	// re-renders after the revocation simply gets the fresh answer.
+	// The registration can change after the first leg, so the client is re-read and
+	// the scope set re-checked against it, exactly as Consent does on submission;
+	// otherwise a mid-flight revocation keeps the revoked scope on screen until the
+	// stash expires.
 	client, err := s.Clients.FindActiveByClientID(ctx, payload.ClientID)
 	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
 		return nil, newError(ErrInvalidClient, "客户端已停用，请重新发起授权", nil)
@@ -345,12 +316,10 @@ func (s Service) ConsentInfo(ctx context.Context, input ConsentInfoInput) (*Cons
 
 // parseRequestedScopes parses the space-delimited wire scope parameter.
 //
-// Validation goes through internal/scope rather than a local membership test, so
-// the authorize endpoint and the signed JWT claim agree on which scope sets exist
-// at all — including openid being mandatory for this service. What differs is only
-// the whitespace tolerance: this is scope.Normalize over strings.Fields, not
-// scope.ParseClaim, because the wire parameter follows HTTP convention and may
-// carry runs of spaces that ParseClaim rejects in a claim we signed ourselves.
+// Validation goes through internal/scope so the authorize endpoint and the signed
+// JWT claim agree on which scope sets exist. It uses scope.Normalize over
+// strings.Fields rather than scope.ParseClaim, since the wire parameter follows
+// HTTP whitespace convention and may carry runs of spaces.
 func parseRequestedScopes(raw string) ([]string, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -376,29 +345,16 @@ func authorizeScopeForClient(client *model.OAuthClient, requested []string) erro
 
 // checkScopeForClient is the predicate itself, returning a non-redirectable error.
 //
-// Split out from authorizeScopeForClient because the same rule has to be re-applied
-// on the two later legs — consent and code redemption — where the answer goes to the
-// caller directly rather than through a redirect. A registration's scopes can change
-// between legs, and this check is what makes a revoked grant take effect on the codes
-// already in flight instead of one TTL later.
+// Split out from authorizeScopeForClient because the rule is re-applied on the
+// consent and code-redemption legs, where the answer goes to the caller directly.
+// A registration's scopes can change between legs, so this check is what makes a
+// revoked grant take effect on codes already in flight.
 //
-// The admin scopes are refused for a public (first_party) client, regardless of
-// what the registration says. They gate the /admin surface — the whole directory —
-// and a public client authenticates its token request by PKCE alone at the token
-// endpoint (no client_secret), so an intercepted authorization code is one barrier
-// short of a credential that reaches it, where a confidential client has two
-// independent barriers (client_secret + PKCE). adminclient.checkCapabilityScopeGrant
-// enforces the same confinement at the grant door, so no public registration ever
-// holds one to begin with.
-//
-// The user scopes carry no type constraint: they gate the self-service /user
-// surface, whose every endpoint operates on the token subject's own record, so an
-// application holding them is never a look-up-anyone credential — the subject is
-// pinned by the token, whatever client it was issued to.
-//
-// Note this is no longer derived from the registration being unenforced for
-// first-party clients — ContainsAll below now pins every client type. Removing that
-// exemption does not make this check redundant.
+// Admin scopes are refused for a public (first_party) client however the
+// registration reads: a public client authenticates by PKCE alone, leaving an
+// intercepted code one barrier short of the /admin surface. The user scopes carry
+// no type constraint, since every /user endpoint operates on the token subject's
+// own record. Not redundant now that ContainsAll pins every client type.
 func checkScopeForClient(client *model.OAuthClient, requested []string) *Error {
 	if scope.ContainsAdmin(requested) && client.ClientType != model.ClientTypeThirdParty {
 		return newError(ErrInvalidScope, "admin scope 不可授予公开（first_party）客户端", nil)
@@ -415,9 +371,8 @@ func checkScopeForClient(client *model.OAuthClient, requested []string) *Error {
 
 // successRedirectURI appends code and state to the client's redirect_uri.
 //
-// Query parameters are merged into any the client already registered rather than
-// replacing them, and state is echoed verbatim: the client compares it against
-// what it sent to detect CSRF, so any normalization here would break that check.
+// Query parameters are merged into any already registered rather than replaced,
+// and state is echoed verbatim so the client's byte-for-byte CSRF check holds.
 func successRedirectURI(redirectURI, state, code string) string {
 	return appendQuery(redirectURI, map[string]string{"code": code, "state": state})
 }
@@ -434,9 +389,8 @@ func errorRedirectURI(redirectURI, state, code, description string) string {
 func appendQuery(rawURI string, parameters map[string]string) string {
 	parsed, err := url.Parse(rawURI)
 	if err != nil {
-		// Unreachable for a registered URI, which was parsed when the client was
-		// created. Returning the input unchanged keeps this total rather than
-		// panicking on a value the caller cannot influence.
+		// Unreachable for a registered URI, which was parsed at registration; return
+		// the input unchanged to keep this total.
 		return rawURI
 	}
 	query := parsed.Query()

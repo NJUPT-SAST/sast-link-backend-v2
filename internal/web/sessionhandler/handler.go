@@ -61,10 +61,9 @@ type verifyRegisterCodeRequest struct {
 	Code       string `json:"code" binding:"required"`
 }
 
-// Password length is deliberately not enforced by a binding tag here: the
-// documented contract returns 42201 (密码长度不足) for a short password, and a
-// binding failure would collapse that into a generic 40000. The session service
-// owns the rule for every password entry point.
+// Password length is deliberately not enforced by a binding tag here — the
+// session service owns the rule, so a short password yields the documented
+// 42201 rather than a generic 40000.
 type registerRequest struct {
 	RegisterTicket    string `json:"register_ticket" binding:"required"`
 	Password          string `json:"password" binding:"required"`
@@ -110,9 +109,9 @@ type refreshRequest struct {
 }
 
 type logoutRequest struct {
-	// Accepted for contract compatibility (the frontend sends an empty object
-	// now); the service revokes the authenticated access token's own family, so
-	// the refresh token is no longer consulted.
+	// Accepted for contract compatibility (the frontend sends an empty object);
+	// the service revokes the authenticated access token's own family, so the
+	// body refresh token is never consulted.
 	RefreshToken string `json:"refresh_token"`
 }
 
@@ -239,29 +238,22 @@ type Gates struct {
 	RequireReadScope  gin.HandlerFunc
 	RequireWriteScope gin.HandlerFunc
 	// RequireLogoutAuth authenticates /auth/logout. It is the /user scoped
-	// gate with one deliberate difference: an expired access token is still
-	// admitted, because logout is family-wide revocation and a stale tab whose
-	// token ran out (1h TTL) must be able to end its session without
-	// re-authenticating.
+	// gate except that an expired access token is still admitted, so a stale tab
+	// can end its session.
 	RequireLogoutAuth gin.HandlerFunc
 }
 
-// ReadScopes and WriteScopes are the scoped access each class of
-// /user route accepts, exported for the same reason adminhandler exports its
-// counterparts: the set of scopes that may read or write a user's own record is
-// a contract decision, not a wiring detail.
-//
-// user:write appears in ReadScopes because write implies read, mirroring the
-// admin routes: a delegate trusted to modify a user's own record is not
-// meaningfully restrained by being refused a read of it.
+// ReadScopes and WriteScopes are the scoped access each class of /user route
+// accepts. user:write is in ReadScopes because write implies read, mirroring
+// the admin routes.
 var (
 	ReadScopes  = []string{scope.UserRead, scope.UserWrite}
 	WriteScopes = []string{scope.UserWrite}
 )
 
 func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
-	// Fail at boot rather than serve an ungated /user route. gin would happily
-	// mount a nil handler and panic on the first request instead.
+	// Panic at boot rather than serve an ungated /user route: gin would mount a
+	// nil handler and panic on the first request instead.
 	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil || g.RequireLogoutAuth == nil {
 		panic("sessionhandler: every gate in Gates must be set")
 	}
@@ -273,24 +265,18 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	r.POST("/auth/register", h.Register)
 	r.POST("/auth/forgot-password/send-code", h.ForgotPasswordSendCode)
 	r.POST("/auth/reset-password", h.ResetPassword)
-	// The card endpoint is temporarily disabled pending a privacy redesign. Its
-	// sequential-ID public URL lets anyone enumerate the full member roster, which
-	// is no longer acceptable; it will be reworked (owner-only + non-enumerable
-	// identifier), not re-enabled as-is. The handler/service/repository code stays
-	// in place pending that redesign, and the OIDC profile claim has been removed
-	// so no client can read the card projection through it either.
+	// The card endpoint is suspended pending a privacy redesign: a public URL
+	// keyed by sequential IDs would let anyone enumerate the full member roster.
+	// The handler/service/repository code stays in place pending that redesign,
+	// and no OIDC profile claim points at a card URL.
 	// r.GET("/card/:id", h.Card)
 
-	// Every protected route names a scope gate explicitly. A new route that names
+	// Every protected route names a scope gate explicitly, so a new route that names
 	// none has no scoped-client permission rather than inheriting one. The
-	// internal console token is exempt from every scope gate (its ceiling is
-	// being an authenticated session), so the console keeps its current access to
-	// all of these endpoints.
-	// Logout sits outside the RequireUserAuth group: it runs behind
-	// RequireLogoutAuth, the scoped gate that admits an expired access token so
-	// a stale tab can end its session. The scope gate is kept — a scoped
-	// third-party token may still end its own session — and the internal
-	// console token is exempt from it as everywhere on this surface.
+	// internal console token is exempt from every scope gate.
+	// Logout sits outside the RequireUserAuth group behind RequireLogoutAuth (which
+	// admits an expired access token) but keeps the write scope gate, so a scoped
+	// third-party token may still end its own session.
 	r.POST("/auth/logout", g.RequireLogoutAuth, g.RequireWriteScope, h.Logout)
 
 	protected := r.Group("")
@@ -360,27 +346,20 @@ func (h Handler) Refresh(c *gin.Context) {
 	})
 	if err != nil {
 		mapped := mapServiceError(err)
-		// Clear a stale cookie only when the dead token actually came from it,
-		// and only for a definitively dead family — whitelisted codes. A benign
-		// concurrent refresh (another tab rotated the same cookie within the grace
-		// window) must keep the cookie, it now holds the winner's token; a body
-		// token that failed must not delete a healthy newer cookie (this also
-		// makes a cross-site POST, which carries no cookie, a no-op instead of a
-		// cookie-clearing CSRF); transient failures (429/500) never clear. The
-		// whitelist is forward-safe: a future 401 code that does not mean "the
-		// family is gone" defaults to keeping the cookie rather than wiping a
-		// possibly-healthy session.
+		// Clear a stale cookie only when the dead token came from it and the code
+		// means a definitively dead family: a benign concurrent refresh (grace
+		// window) must keep the cookie, a failed body token must not delete a
+		// healthy newer cookie (a cross-site POST, which carries no cookie, stays
+		// a no-op rather than a cookie-clearing CSRF), and transient failures
+		// never clear.
 		if be, ok := mapped.(*response.BusinessError); ok && fromCookie {
 			switch be.Code {
 			case errcode.CodeAccessTokenInvalid, errcode.CodeAccountDeleted:
 				h.clearSessionCookie(c)
 			}
-			// A cookie-sourced refresh hitting a dead account answers 401, not the
-			// 403 a live-account state error gets: the front end clears its session
-			// and bounces to login only when a refresh ends in 401, and an account
-			// that no longer exists must not leave the tab stranded in a dead-session
-			// shell. A body token keeps the 403 — that caller authenticated in-band
-			// and deserves the accurate account state.
+			// A cookie-sourced refresh hitting a dead account answers 401 (the front
+			// end clears its session only on a 401 refresh) instead of the 403 a body
+			// token keeps.
 			if be.Code == errcode.CodeAccountDeleted {
 				be.HTTPStatus = http.StatusUnauthorized
 			}
@@ -388,9 +367,8 @@ func (h Handler) Refresh(c *gin.Context) {
 		response.Error(c, mapped)
 		return
 	}
-	// Refresh always rotates the refresh token, so the cookie must follow the
-	// new value — otherwise the next bootstrap reads a dead token and replay
-	// detection cuts the whole family.
+	// Refresh rotates the refresh token, so the cookie must carry the new value
+	// or the next bootstrap reads a dead token.
 	h.setSessionCookie(c, result.RefreshToken, result.RefreshExpiresAt)
 	response.Ok(c, tokenResponse{
 		AccessToken:  result.AccessToken,
@@ -422,13 +400,10 @@ func (h Handler) Logout(c *gin.Context) {
 		UserAgent:       c.Request.UserAgent(),
 	}); err != nil {
 		mapped := mapServiceError(err)
-		// A dead access token (revoked/expired under the service's clock, within
-		// the TOCTOU window between the middleware's DB check and here) means the
-		// session is already gone. Logout stays idempotent — clear the dead
-		// cookie and report success, so a session that died mid-request never
-		// leaves the user stuck. The whitelist is by code, not HTTP status, so a
-		// future 401 semantics that does not mean "the session is dead" defaults
-		// to surfacing the error with the cookie intact.
+		// A dead access token (within the TOCTOU window between the middleware's
+		// check and here) means the session is already gone; logout stays
+		// idempotent, clearing the cookie and reporting success. The whitelist is
+		// by code, so future non-dead 401 semantics defaults to keeping the cookie.
 		if be, ok := mapped.(*response.BusinessError); ok && be.Code == errcode.CodeAccessTokenInvalid {
 			h.clearSessionCookie(c)
 			response.Ok(c, logoutResponse{Message: "已登出"})
@@ -437,8 +412,8 @@ func (h Handler) Logout(c *gin.Context) {
 		response.Error(c, mapped)
 		return
 	}
-	// The session cookie is part of the same session family — drop it so the
-	// browser cannot bootstrap a dead session from a fresh tab.
+	// The session cookie is part of the same session family — drop it so a
+	// fresh tab cannot bootstrap a dead session.
 	h.clearSessionCookie(c)
 	response.Ok(c, logoutResponse{Message: "已登出"})
 }
@@ -657,8 +632,8 @@ func (h Handler) now() time.Time {
 }
 
 func expiresIn(now, expiry time.Time) int64 {
-	// Ceil so a token expiring in 3599.9s reports 3600, matching the OAuth token
-	// endpoint; truncation would under-report the same TTL by one second.
+	// Ceil so a near-expiry token reports the same TTL as the OAuth token
+	// endpoint rather than under-reporting by a second.
 	seconds := int64(math.Ceil(expiry.Sub(now).Seconds()))
 	if seconds < 0 {
 		return 0

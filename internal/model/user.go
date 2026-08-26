@@ -20,14 +20,11 @@ type User struct {
 	Major        string
 	TokenVersion int
 	// ProfileNeedsCompletion is V010's generated column: TRUE while a required
-	// field is blank or name still duplicates student_id, which is how accounts
-	// imported from the previous database arrived. It is a display hint that lets
-	// the frontend route those users to a completion page, never an authorization
-	// input.
+	// field is blank or name still duplicates student_id. It is a display hint
+	// for the frontend completion page, never an authorization input.
 	//
-	// The `->` tag makes it read-only. PostgreSQL rejects any INSERT or UPDATE
-	// naming a generated column, so without it every Create and Save on this
-	// struct would fail once GORM included the field in its column list.
+	// The `->` tag makes it read-only: PostgreSQL rejects any write naming a
+	// generated column.
 	ProfileNeedsCompletion bool       `gorm:"->"`
 	Profile                *Profile   `gorm:"foreignKey:UserID"`
 	Identities             []Identity `gorm:"foreignKey:UserID"`

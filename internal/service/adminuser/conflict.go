@@ -16,26 +16,21 @@ const (
 	userStudentIDConstraint  = "user_student_id_key"
 	// V005 raises both triggers as SQLSTATE unique_violation.
 	// ck_user_login_email_not_identity fires when a login email would take an
-	// address already bound as other_mail. ck_identities_provider_id_not_login_email
-	// is the mirror: an identity insert claims an address already used as a login
-	// email. This is the race an admin provisioning can hit when its personal email
-	// pre-check loses to a concurrent registration.
+	// address already bound as other_mail; the mirror forbids an identity insert
+	// claiming an address already used as a login email. This is the race an admin
+	// provisioning can hit when its personal-email pre-check loses to a concurrent
+	// registration.
 	userLoginEmailIsIdentityConstraint        = "ck_user_login_email_not_identity"
 	identityProviderIDNotLoginEmailConstraint = "ck_identities_provider_id_not_login_email"
-	// identities' own uniqueness guard. The console pre-checks the personal email
-	// with ExistsAsEmailAnywhere before creating, so this only lands after a race;
-	// it still needs a name, not a logged "unmapped" 500.
+	// identities' own uniqueness guard. The console pre-checks with
+	// ExistsAsEmailAnywhere, so this only lands after a race; it still needs a name,
+	// not a logged "unmapped" 500.
 	identityProviderProviderIDConstraint = "uq_identities_provider_provider_id"
 )
 
 // mapUniqueViolation names the colliding column, falling back to internalMessage
-// for anything that is not a duplicate.
-//
-// login_email and student_id are unique across all accounts, so an administrative
-// edit can lose a race against a registration or another edit. An unmapped
-// constraint is logged rather than guessed at: reporting the wrong field is worse
-// than reporting a generic conflict, and the log is what makes a new constraint
-// visible.
+// for anything that is not a duplicate. An unmapped constraint is logged rather
+// than guessed at: reporting the wrong field is worse than a generic conflict.
 func (s Service) mapUniqueViolation(ctx context.Context, err error, internalMessage string) error {
 	switch constraint := duplicateConstraint(err); constraint {
 	case userLoginEmailConstraint, userLoginEmailIsIdentityConstraint,
@@ -53,10 +48,9 @@ func (s Service) mapUniqueViolation(ctx context.Context, err error, internalMess
 }
 
 // duplicateConstraint returns the violated unique constraint's name, or "" when
-// err is not a unique violation. Thin wrapper over the repository helper so the
-// classification exists once; the mapping from a name onto this service's error
-// type stays local, because the same collision reads differently to an
-// administrator than it does to a user binding their own account.
+// err is not a unique violation. Thin wrapper over the repository helper; the
+// mapping onto this service's error type stays local, because the same collision
+// reads differently to an administrator than to a user binding their own account.
 func duplicateConstraint(err error) string {
 	return repository.DuplicateConstraint(err)
 }

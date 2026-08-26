@@ -32,9 +32,9 @@ type UserRepository interface {
 	// preloads, for edit paths that only act on the account row itself.
 	FindAuthUserByID(ctx context.Context, userID int64) (*model.User, error)
 	// UpdateAdminUser decides for itself whether the edit demotes an administrator,
-	// from the row locked inside its transaction. It takes no flag for that: a caller's
-	// comparison is against a read from before the transaction, and acting on it let a
-	// demotion commit unguarded and unrevoked.
+	// from the row locked inside its transaction. It takes no flag for that: a
+	// caller's comparison reads from before the transaction and could let a demotion
+	// commit unguarded and unrevoked.
 	UpdateAdminUser(
 		ctx context.Context,
 		userID int64,
@@ -264,9 +264,8 @@ type AuditLogItem struct {
 	CreatedAt     time.Time
 }
 
-// UserDetail is a full user record for the console. Written out field by field
-// rather than returning model.User, which carries the password hash: a type with
-// no such field cannot leak it however the model changes later.
+// UserDetail is a full user record for the console, written out field by field
+// rather than returning model.User, so the password hash cannot leak.
 type UserDetail struct {
 	ID          int64
 	Name        string
@@ -301,12 +300,9 @@ type ProfileDetail struct {
 	UpdatedAt  time.Time
 }
 
-// IdentityDetail is one third-party binding. The stored provider access and refresh
-// tokens are absent: the console displays bindings, it does not hand out the
-// credentials behind them.
-//
-// identity_data is absent for the same reason — it is the provider's whole user
-// object, carrying mobile and email addresses, and these endpoints are readable by
+// IdentityDetail is one third-party binding. The stored provider tokens and
+// identity_data are absent: the console displays bindings, it does not hand out the
+// credentials or personal data behind them, since these endpoints are readable by
 // lecturers as well as administrators.
 type IdentityDetail struct {
 	ID             int64

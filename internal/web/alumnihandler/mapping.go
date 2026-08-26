@@ -16,11 +16,9 @@ import (
 // composition root cannot silently mount them behind a different one.
 const AdminRole = model.UserRoleAdmin
 
-// ReaderRoles are the roles permitted to read the queue.
-//
-// The same set that may read the user directory: a pending ticket is a prospective
-// directory entry, and a lecturer who may look up members has no less business
-// seeing who has applied. Acting on a ticket is admin-only.
+// ReaderRoles are the roles permitted to read the queue. Same set that may
+// read the user directory, since a pending ticket is a prospective directory
+// entry; acting on a ticket is admin-only.
 var ReaderRoles = []model.UserRole{model.UserRoleAdmin, model.UserRoleLecturer}
 
 // ReadScopes and WriteScopes are the delegated scopes each class of route
@@ -30,11 +28,9 @@ var (
 	WriteScopes = []string{scope.AdminWrite}
 )
 
-// requestDTO is a ticket as the console sees it.
-//
-// There is no client_ip field. The submitter's address is kept in the table for
-// abuse tracing and rate-limit forensics, and reviewing a ticket has no use for
-// it — copying it onto a read surface would widen who can see a network
+// requestDTO is a ticket as the console sees it. No client_ip field: the
+// submitter's address is kept for abuse tracing, and reviewing a ticket has no
+// use for it — copying it onto a read surface would widen who can see a network
 // identifier tied to a named individual.
 type requestDTO struct {
 	ID             int64      `json:"id"`
@@ -107,12 +103,9 @@ func mapRequests(views []alumnirequest.RequestView) []requestDTO {
 }
 
 // mapServiceError converts a typed alumnirequest error into the HTTP envelope.
-//
-// The captcha and unavailable kinds are the two this mapping exists for. They must
-// not collapse into one status: 400 tells the submitter to solve the challenge
-// again, 503 tells the client that verification is not running at all and the
-// entry point should be hidden. Reporting an outage as a failed challenge sends
-// people to re-solve a widget that is working correctly.
+// The captcha and unavailable kinds must not collapse into one status: 400 tells
+// the submitter to solve the challenge again, 503 tells the client verification
+// is not running at all and the entry point should be hidden.
 func mapServiceError(err error) error {
 	var serviceErr *alumnirequest.Error
 	if !errors.As(err, &serviceErr) {
@@ -124,8 +117,7 @@ func mapServiceError(err error) error {
 	case alumnirequest.KindInvalidInput:
 		status = http.StatusBadRequest
 		// The service's messages are literals naming which rule was broken, never
-		// echoes of submitted values, so they are safe to return verbatim on an
-		// anonymous endpoint and are what makes a refused submission actionable.
+		// echoes of submitted values, so they are safe to return verbatim.
 		message = serviceErr.Message
 	case alumnirequest.KindNotFound:
 		status = http.StatusNotFound
@@ -134,8 +126,8 @@ func mapServiceError(err error) error {
 		status = http.StatusConflict
 		message = serviceErr.Message
 	case alumnirequest.KindStateConflict:
-		// 422 rather than 409: the request is well formed and the ticket exists, it is
-		// the transition its current status does not allow.
+		// 422 rather than 409: the request is well formed and the ticket exists; the
+		// transition is what its current status does not allow.
 		status = http.StatusUnprocessableEntity
 		message = serviceErr.Message
 	case alumnirequest.KindCaptchaFailed:

@@ -74,25 +74,17 @@ type Gates struct {
 // RequireAuth must precede every other gate: they all read the Principal that
 // authentication puts in the context.
 //
-// Two role gates rather than one, because PRD §4.12 splits the console: a lecturer
-// may read the user list and detail, everything else is admin-only. The group
-// carries authentication alone and each route names the gates it needs, so a new
-// route with no gate fails to gain a permission by omission — it simply has none,
-// which is why every route below states both a scope and a role gate explicitly.
+// Two role gates rather than one, because PRD §4.12 splits the console: a
+// lecturer may read the user list and detail, everything else is admin-only.
+// Each route names both a scope and a role gate explicitly, so a new route with
+// no gate gains no permission by omission.
 //
-// Two independent dimensions guard these routes, and both are required. The role
-// gate answers "is this user allowed to do this", reading the role from the
-// database row so a demotion lands on the next request. The scope gate answers
-// "was this credential granted the right to act", which only constrains a
-// admin-scoped token — any client holding an admin scope may reach these
-// routes on an administrator's behalf, but only within the scopes it registered
-// (that scope set is itself what marks it as a delegate). Neither
-// gate implies the other: an administrator's token issued to a read-only delegate
-// must not perform writes, and a write-scoped token belonging to a demoted user
-// must not do anything.
+// The two independent guards are both required. The role gate answers "is this
+// user allowed" from the database row, so a demotion lands on the next request;
+// the scope gate answers "was this credential granted the right to act" and only
+// constrains an admin-scoped token.
 func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
-	// Fail at boot rather than serve an ungated admin route. gin would happily mount
-	// a nil handler and panic on the first request instead.
+	// Panic at boot rather than serve an ungated admin route.
 	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil ||
 		g.RequireAdmin == nil || g.RequireReader == nil {
 		panic("adminhandler: every gate in Gates must be set")
@@ -107,8 +99,7 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 
 	admin.GET("/users", g.RequireReadScope, g.RequireReader, h.ListUsers)
 	// The static /users/batch segment wins over the :id parameter for the exact
-	// path, so a lookup of the id "batch" is served here rather than 404'd by
-	// GetUser — which is what the 404-on-non-numeric rule intends anyway.
+	// path, so a lookup of the id "batch" is served here rather than 404'd by GetUser.
 	admin.GET("/users/batch", g.RequireReadScope, g.RequireReader, h.GetUsersByIDs)
 	admin.GET("/users/:id", g.RequireReadScope, g.RequireReader, h.GetUser)
 	// POST /admin/users creates an account; it needs write scope and admin role.
@@ -120,7 +111,7 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 
 	admin.GET("/audit-logs", g.RequireReadScope, g.RequireAdmin, h.ListAuditLogs)
 
-	// Read-only aggregate, so the read scope: a delegate trusted to list the
+	// Read-only aggregate, so the read scope; a delegate trusted to list the
 	// directory is not further restrained by being refused its counts.
 	admin.GET("/stats", g.RequireReadScope, g.RequireAdmin, h.Stats)
 }
@@ -135,11 +126,7 @@ const AdminRole = model.UserRoleAdmin
 var ReaderRoles = []model.UserRole{model.UserRoleAdmin, model.UserRoleLecturer}
 
 // ReadScopes and WriteScopes are the delegated scopes each class of admin route
-// accepts, exported for the same reason as the roles above.
-//
-// admin:write appears in ReadScopes because write implies read: a delegate trusted
-// to modify the directory is not meaningfully restrained by being refused a read
-// of it, and requiring both scopes would just make every caller request both.
+// accepts. admin:write appears in ReadScopes because write implies read.
 var (
 	ReadScopes  = []string{scope.AdminRead, scope.AdminWrite}
 	WriteScopes = []string{scope.AdminWrite}

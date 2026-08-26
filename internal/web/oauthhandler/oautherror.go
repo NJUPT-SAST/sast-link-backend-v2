@@ -43,14 +43,12 @@ func writeError(c *gin.Context, err error) {
 	if oauthErr.RetryAfter > 0 {
 		c.Header("Retry-After", retryAfterSeconds(oauthErr.RetryAfter))
 	}
-	// No WWW-Authenticate on a 401 here. RFC 6749 §5.2 requires the header only "if
+	// No WWW-Authenticate on a 401 here. RFC 6749 §5.2 requires the header only if
 	// the client attempted to authenticate via the Authorization request header
-	// field", and this server never reads that header on the token or revocation
-	// endpoints: credentials arrive as form parameters, and the discovery document
-	// advertises exactly none and client_secret_post. Emitting a Basic challenge told
-	// a conforming client to retry with an auth method that does not exist here — it
-	// would resend the secret over Basic, omit the form client_id, and then fail with
-	// "client_id 不能为空" on every attempt.
+	// field, and this server never reads that header on the token or revocation
+	// endpoints: credentials arrive as form parameters. Emitting a Basic challenge
+	// would make a conforming client retry with an auth method that does not exist
+	// here.
 	c.JSON(status, errorResponse{
 		Error:            oauthErr.Code,
 		ErrorDescription: oauthErr.Description,
@@ -87,24 +85,21 @@ func writeBearerError(c *gin.Context, err error) {
 
 // bearerChallenge builds an RFC 6750 §3 challenge.
 //
-// Both quoted values are sanitized rather than merely assumed safe. Today every
-// code and description is a service-authored constant, but this string becomes a
-// response header: a stray quote would let a value escape its parameter and forge
-// another, and a CR or LF would split the header. Enforcing it here means a future
-// caller that passes request-derived text cannot turn it into header injection.
+// Both quoted values are sanitized rather than merely assumed safe: a stray
+// quote could forge another parameter and a CR or LF would split the header, so
+// a future caller passing request-derived text cannot turn it into header
+// injection.
 //
 // error_description is dropped entirely when sanitizing leaves nothing usable,
 // which is what happens to this service's Chinese messages: RFC 6750 §3 restricts
-// a quoted challenge value to %x20-21 / %x23-5B / %x5D-7E, so a client validating
-// against that grammar may discard the whole header — including the error code it
-// needs to decide whether to refresh. The full message still travels in the JSON
-// body, where UTF-8 is fine.
+// a quoted challenge value to printable US-ASCII, so a client validating against
+// that grammar may discard the whole header. The full message still travels in
+// the JSON body.
 func bearerChallenge(err *oauth.Error) string {
 	challenge := `Bearer realm="sast-link", error="` + quotedHeaderValue(err.Code) + `"`
-	// Included only when the description was already conforming, rather than in
-	// sanitized form. Stripping the non-ASCII bytes out of "Access Token 无效或已过期"
-	// would emit "Access Token " — a truncated fragment that reads like a different
-	// message. An absent optional parameter is honest; a mangled one is not.
+	// Included only when the description was already conforming. Stripping the
+	// non-ASCII bytes would emit a truncated fragment that reads like a different
+	// message; an absent optional parameter is honest, a mangled one is not.
 	if description := quotedHeaderValue(err.Description); description == err.Description && description != "" {
 		challenge += `, error_description="` + description + `"`
 	}
@@ -128,11 +123,9 @@ func quotedHeaderValue(value string) string {
 	}, value)
 }
 
-// statusForKind maps a service failure to its HTTP status.
-//
-// invalid_client on 401 rather than 400 is required by RFC 6749 §5.2; every other
-// token-endpoint error is a 400. Rate limiting and dependency outages are not
-// RFC 6749 conditions, so they keep the HTTP semantics the rest of the API uses.
+// statusForKind maps a service failure to its HTTP status. invalid_client is 401
+// (RFC 6749 §5.2) and every other token-endpoint error is 400; rate limiting and
+// dependency outages keep the HTTP semantics the rest of the API uses.
 func statusForKind(kind oauth.Kind) int {
 	switch kind {
 	case oauth.KindInvalidClient, oauth.KindInvalidToken:

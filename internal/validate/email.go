@@ -1,12 +1,6 @@
 // Package validate holds the input rules that more than one service must apply
-// identically.
-//
-// Nothing here is about any one use case: these are facts about the V001 schema and
-// about what an email address may contain. They live in one place because two copies
-// of the same rule drift, and the drift is invisible until it locks someone out —
-// an administrator writing a login_email that the login flow's stricter checker
-// rejects produces an account whose owner can never authenticate, and the console
-// renders the address as perfectly ordinary the whole time.
+// identically. They live in one place because two copies of the same rule drift,
+// and the drift is invisible until it locks someone out.
 package validate
 
 import (
@@ -30,19 +24,15 @@ const (
 var loginEmailDomains = []string{"@njupt.edu.cn", "@sast.fun"}
 
 // EmailFormat is the input-layer guard against SMTP header injection and key/audit
-// corruption. It rejects control characters (notably CR/LF, which the go-playground
-// "email" validator lets through), address separators, display-name brackets, and
-// any invisible codepoint, and it requires exactly one @ with a dotted domain. This
-// is defense in depth ahead of the mailer's own mail.ParseAddress check; it also
-// keeps Redis keys and audit detail free of unprintable bytes.
+// corruption: it rejects control characters (notably CR/LF), address separators,
+// display-name brackets, and any invisible codepoint, and requires exactly one @
+// with a dotted domain. This is defense in depth ahead of the mailer's own
+// mail.ParseAddress check and keeps Redis keys and audit detail free of
+// unprintable bytes.
 //
-// Whitespace is rejected everywhere, not just at the ends. An address is used as a
-// Redis key segment and a rate-limit subject before the mailer ever sees it, so
-// letting whitespace through means "a b@x" and "ab@x" occupy different buckets while
-// naming the same mailbox. A bare `r < 0x20` test misses this: U+0020 sits just
-// outside it, and NBSP, U+3000, U+200B and U+2028 are far above it. Those four also
-// survive mail.ParseAddress, so the request would travel all the way to SMTP before
-// failing — surfacing a delivery error for what is really malformed input.
+// Whitespace is rejected everywhere, not just at the ends: the address becomes a
+// Redis key segment and a rate-limit subject before the mailer sees it, and
+// whitespace variants survive mail.ParseAddress.
 func EmailFormat(email string) bool {
 	if email == "" || strings.Count(email, "@") != 1 {
 		return false
@@ -84,17 +74,10 @@ func IsLoginEmailDomain(email string) bool {
 	return false
 }
 
-// HasControlCharacter reports whether value contains a C0 or C1 control character.
-//
-// PostgreSQL rejects U+0000 in text at the protocol level (SQLSTATE 22021), which is
-// not a unique violation and so surfaces as a 500 naming no field. The other control
-// characters do store, but they travel into audit logs and onto the public card,
-// where a stray CR or LF splits a log line or a rendered value. C1 (0x80-0x9f)
-// matters as much as C0: U+0085 NEL terminates a line for some consumers. Display
-// text has no legitimate use for any of them.
-//
-// Interior spaces are deliberately allowed: names, intros and majors contain them,
-// and callers already trim the edges.
+// HasControlCharacter reports whether value contains a C0 or C1 control character
+// (0x00-0x1f, 0x7f, 0x80-0x9f): C1 matters because U+0085 NEL terminates a line
+// for some consumers. Interior spaces are deliberately allowed — names, intros and
+// majors contain them, and callers already trim the edges.
 func HasControlCharacter(value string) bool {
 	for _, symbol := range value {
 		if symbol < 0x20 || symbol == 0x7f {
