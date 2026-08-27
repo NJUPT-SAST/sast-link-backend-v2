@@ -791,6 +791,7 @@ paths:
                 college:
                   allOf:
                     - $ref: "#/components/schemas/College"
+                  type: string
                   nullable: true
                   description: 学院。NOT NULL 字段，传空字符串或空白返回 40000；传 null 表示不修改
                 major:
@@ -3777,6 +3778,7 @@ components:
         department:
           allOf:
             - $ref: "#/components/schemas/Department"
+          type: string
           nullable: true
         intro:
           type: string
@@ -3879,6 +3881,7 @@ components:
         department:
           allOf:
             - $ref: "#/components/schemas/Department"
+          type: string
           nullable: true
           description: 部门，用户尚无 profile 行时为 null
         profile_needs_completion:
@@ -4347,6 +4350,7 @@ components:
         profile:
           allOf:
             - $ref: "#/components/schemas/Profile"
+          type: object
           nullable: true
           description: 用户尚无 profile 行时为 null
         identities:
@@ -5177,6 +5181,7 @@ components:
                 type: string
                 description: 错误描述
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5213,6 +5218,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5261,6 +5267,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5303,6 +5310,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5333,6 +5341,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5369,6 +5378,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5403,6 +5413,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5427,6 +5438,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5461,6 +5473,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5479,5 +5492,6 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: JWT Bearer Token。Access Token 有效期 1 小时。
-servers: []
+servers:
+  - url: https://link.sast.fun/v2
 security: []
