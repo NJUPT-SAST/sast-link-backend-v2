@@ -886,6 +886,7 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	// must confirm the current password, so a stolen access token alone cannot
 	// attach an attacker-controlled address and then reset the password.
 	if err := s.requirePassword(ctx, input.UserID, input.Password); err != nil {
+		s.auditBindStepUpFailure(ctx, input.UserID, input.ActorClientID, input.ClientIP, input.UserAgent, err)
 		return nil, err
 	}
 	if _, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, email); findErr == nil {
@@ -939,6 +940,7 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 	// Same step-up as BindEmailSendCode, checked before the ticket so a wrong
 	// password does not cost the Bind-Ticket.
 	if err := s.requirePassword(ctx, input.UserID, input.Password); err != nil {
+		s.auditBindStepUpFailure(ctx, input.UserID, input.ActorClientID, input.ClientIP, input.UserAgent, err)
 		return nil, err
 	}
 	ticket := strings.TrimSpace(input.BindTicket)

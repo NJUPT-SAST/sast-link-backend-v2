@@ -2681,6 +2681,26 @@ func TestBindEmailVerifyKeepsTicketOnOwnerMismatch(t *testing.T) {
 	}
 }
 
+// A wrong password against the bind step-up is refused and audited as a failed
+// oauth_bind, matching UnbindIdentity's failure signal — a stolen token must not
+// be able to guess a password without leaving a trace.
+func TestBindEmailSendCodeAuditsWrongPassword(t *testing.T) {
+	service := newRegisterService(t)
+	audit := service.Audit.(*fakeAudit)
+
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com", Password: "wrong-password"})
+	if err == nil {
+		t.Fatal("BindEmailSendCode() error = nil, want a wrong-password refusal")
+	}
+	if len(audit.entries) == 0 {
+		t.Fatal("no audit entries recorded for a wrong-password bind")
+	}
+	entry := audit.entries[len(audit.entries)-1]
+	if entry.Action != "oauth_bind" || entry.Success == nil || *entry.Success || entry.ErrCode == nil || *entry.ErrCode != errcode.CodePasswordInvalid {
+		t.Fatalf("audit entry = %+v, want failed oauth_bind with 40105", entry)
+	}
+}
+
 // Register consumed the ticket before the uniqueness checks, so a taken student
 // ID burned it too.
 func TestRegisterKeepsTicketWhenStudentIDOccupied(t *testing.T) {
