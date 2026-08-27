@@ -103,6 +103,8 @@ const (
 // (audit finding #12). A handler may still override a code's message for a
 // specific surface — it then owns a comment saying why.
 //
+// #nosec G101 -- Localized business copy keyed by code, not credentials.
+//
 //nolint:gosec // Localized error copy, not credentials; G101 flags the map shape.
 var Messages = map[int]string{
 	CodeBadRequest:              "请求参数错误",
