@@ -10,9 +10,6 @@ linters:
     - sqlclosecheck
     - unconvert
   settings:
-    gosec:
-      excludes:
-
     govet:
       disable:
         - fieldalignment
