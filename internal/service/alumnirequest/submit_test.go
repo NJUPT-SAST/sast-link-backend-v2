@@ -566,7 +566,8 @@ func TestSubmitRecoveryIntent(t *testing.T) {
 		requests := &fakeRequests{}
 		users := &fakeUsers{}
 		users.seedAccount("B20040101", "b20040101@njupt.edu.cn")
-		service := newService(requests, users, &fakeAudit{}, &fakeCaptcha{})
+		audit := &fakeAudit{}
+		service := newService(requests, users, audit, &fakeCaptcha{})
 
 		result, err := service.Submit(context.Background(), recoverInput())
 		if err != nil {
@@ -577,6 +578,12 @@ func TestSubmitRecoveryIntent(t *testing.T) {
 		}
 		if requests.created.Intent != model.AlumniRequestIntentRecover {
 			t.Fatalf("stored intent = %q, want recover", requests.created.Intent)
+		}
+		// The submission audit names the intent, so a recovery application is
+		// distinguishable from a provision one in the trail.
+		entry := audit.find(actionSubmit)
+		if entry == nil || !strings.Contains(string(entry.Detail), "\"intent\":\"recover\"") {
+			t.Fatalf("submit audit = %+v, want the intent recorded", entry)
 		}
 	})
 }

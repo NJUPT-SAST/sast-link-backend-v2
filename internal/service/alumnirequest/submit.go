@@ -77,6 +77,7 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 		"student_id":     request.StudentID,
 		"login_email":    request.LoginEmail,
 		"personal_email": request.PersonalEmail,
+		"intent":         string(request.Intent),
 		// Recorded so a later dispute can establish that the submission did pass
 		// verification.
 		"captcha": "passed",
