@@ -402,7 +402,6 @@ Payload: {
   "sub": "1",                           // user.id 字符串
   "aud": "<client_id>",
   "exp": 1717400000, "iat": 1717396400,
-  "auth_time": 1717396400,              // 用户授权确认时间
   "nonce": "n-0S6_WzA2Mj",             // 与授权请求 nonce 一致
   // profile scope:
   "name": "张三",
@@ -430,7 +429,7 @@ Payload: {
 - `preferred_username` 取 `profile.nickname`，未设置或为空白时回退到 `user.name`
 - `role` 是本服务自有 claim 而非 OIDC 标准，取自签发那一刻的数据库行，而非请求方 token 的 `role` claim（后者是签发时快照，降权后仍带原角色，本服务自身鉴权也不读它，见 §4.1）。它随所在 token 一同过期，relying party 应视其为展示提示，不得据以做授权判断。命名不加 URI 命名空间：OIDC 未保留 `role` 这一名称，本服务的 claim 集合是封闭且受校验的，加前缀只会让每个 relying party 多解析一段字符串
 - `profile` URL claim 已移除（连同 `OAUTH_CARD_BASE_URL` 配置）。它指向的公开名片端点 `GET /card/:id` 因顺序 ID 可枚举全站成员名单而下线（见 §4.14），claim 若保留即等于给任何第三方客户端一条读取该投影的旁路。`profile` scope 现在只产出 `name` / `picture` / `preferred_username` / `updated_at`
-- `auth_time` 取授权码行的 `created_at`——两段式流程中授权码正是在用户点「同意」那一刻创建的，无需额外建列。注意这是 consent 时刻而非真实认证时刻：闲置多日后再次授权会高报认证新鲜度，因此该 claim 会签发但不通告在 `claims_supported` 中（见 API 文档 §8.4）。refresh 轮换不是重新认证，因此保持该 family 首个 refresh token 的创建时刻
+- `auth_time` 已移除（历史：曾取授权码行的 `created_at` 顶替，但那是 consent 时刻而非认证时刻，闲置多日后再次授权会高报认证新鲜度）。服务端未持久化真实认证时刻，ID Token 不再签发该 claim，`claims_supported` 亦不含；`max_age` / `prompt` 未实现。待登录时持久化认证时刻后再加回
 - ID Token 的 `aud` 是 `client_id`，与 access token（`aud` 为本服务）分属两条独立签名路径。若共用一条，要么破坏中间件的 audience 校验，要么签发出能被本服务当作自身 bearer 凭证接受的 ID Token
 
 #### ID Token 与 Access Token 的关系
@@ -707,7 +706,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | --------- | --------- | ------ |
 | `oauth_authorizations` 已过期（无论是否使用） | +1h | V006 增设全量 `expires_at` 索引，因 V001 的索引是 `WHERE is_used = FALSE` 的部分索引，而已兑换才是常态。本表曾是「已授权应用」列表的数据源，因此该列表在 consent 后约 65 分钟必然清空；V009 迁到长效的 `oauth_grants` 修正 |
 | `oauth_access_tokens` 已过期元数据 | +24h | 中间件对「JTI 不存在」与「已撤销」返回同一个 401，窗口过短会把仅仅过期的 token 呈现为已撤销，客户端读成被强制登出而不去刷新。校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的值 |
-| `oauth_refresh_tokens` 已撤销、已过期且 `sequence > 0` | +24h | 每个 family 的 sequence-0 行永久保留：它是 ID Token `auth_time` 的来源，且从首次轮换起即带 `revoked_at`；删掉会让活跃 family 的刷新返回 500 |
+| `oauth_refresh_tokens` 已撤销、已过期且 `sequence > 0` | +24h | 每个 family 的 sequence-0 行永久保留：它是 capability 封顶（`JWT_REFRESH_CAPABILITY_MAX_LIFETIME`）的起始基准，且从首次轮换起即带 `revoked_at`；删掉会让活跃 family 的刷新返回 500 |
 | `audit_logs` 超过保留期 | 90d | 审计日志属运维用途而非合规强制，故 90 天是**默认值**而非硬下限：可调大，也可收紧到 720h（30 天）的下限；低于下限启动时拒绝 |
 
 `token_blacklist_outbox` 由 `sessionworker.TokenBlacklist` 自行清理，不重复接管。

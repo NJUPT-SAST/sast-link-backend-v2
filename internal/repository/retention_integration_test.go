@@ -271,11 +271,12 @@ func TestRetentionTryLockIsExclusive(t *testing.T) {
 }
 
 // A family that keeps rotating outlives the origin row's own expires_at, and the
-// refresh flow reads that row on every rotation. Deleting it while any member of
-// the family is still live would make oauth.Service.refresh revoke the whole
-// family and answer 500 — a forced logout for an active user. This pins the
-// "live family keeps its origin" half of DeleteRevokedRefreshTokens.
-func TestRetentionKeepsAuthTimeReadableAcrossRotations(t *testing.T) {
+// refresh flow reads that row on every rotation (it dates the family for the
+// capability cap). Deleting it while any member of the family is still live would
+// make oauth.Service.refresh revoke the whole family and answer 500 — a forced
+// logout for an active user. This pins the "live family keeps its origin" half
+// of DeleteRevokedRefreshTokens.
+func TestRetentionKeepsFamilyOriginReadableAcrossRotations(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)
 	tokens := repository.NewToken(database)

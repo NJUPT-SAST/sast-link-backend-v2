@@ -72,7 +72,7 @@ func TestSignIDTokenGatesRoleByProfileScope(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			token, err := manager.SignIDToken(IDTokenInput{
 				Subject: "1", ClientID: "app", Scopes: test.scopes,
-				AuthTime: clock.value, TTL: time.Hour, Claims: subject,
+				TTL: time.Hour, Claims: subject,
 			})
 			if err != nil {
 				t.Fatalf("SignIDToken returned error: %v", err)
@@ -96,7 +96,6 @@ func TestSignIDTokenAudienceIsClientAndNotAnAccessToken(t *testing.T) {
 		Subject:  "1",
 		ClientID: "third-party-app",
 		Scopes:   []string{"openid"},
-		AuthTime: clock.value,
 		TTL:      time.Hour,
 	})
 	if err != nil {
@@ -109,9 +108,6 @@ func TestSignIDTokenAudienceIsClientAndNotAnAccessToken(t *testing.T) {
 	}
 	if claims.Issuer != "https://link.sast.fun/v2" || claims.Subject != "1" {
 		t.Fatalf("iss/sub = %q/%q, want the service issuer and user ID", claims.Issuer, claims.Subject)
-	}
-	if claims.AuthTime != clock.value.Unix() {
-		t.Fatalf("auth_time = %d, want %d", claims.AuthTime, clock.value.Unix())
 	}
 	if _, err := manager.VerifyAccessToken(token); err == nil {
 		t.Fatal("VerifyAccessToken accepted an ID token; its audience check is not holding")
@@ -162,7 +158,6 @@ func TestSignIDTokenEmitsOnlyGrantedScopeClaims(t *testing.T) {
 				Subject:  "1",
 				ClientID: "app",
 				Scopes:   test.scopes,
-				AuthTime: clock.value,
 				TTL:      time.Hour,
 				Claims:   subject,
 			})
@@ -207,7 +202,6 @@ func TestSignIDTokenEchoesNonce(t *testing.T) {
 		ClientID: "app",
 		Scopes:   []string{"openid"},
 		Nonce:    "n-0S6_WzA2Mj",
-		AuthTime: clock.value,
 		TTL:      time.Hour,
 	})
 	if err != nil {
@@ -221,7 +215,6 @@ func TestSignIDTokenEchoesNonce(t *testing.T) {
 		Subject:  "1",
 		ClientID: "app",
 		Scopes:   []string{"openid"},
-		AuthTime: clock.value,
 		TTL:      time.Hour,
 	})
 	if err != nil {
@@ -239,7 +232,6 @@ func TestSignIDTokenRejectsInvalidInput(t *testing.T) {
 		Subject:  "1",
 		ClientID: "app",
 		Scopes:   []string{"openid"},
-		AuthTime: clock.value,
 		TTL:      time.Hour,
 	}
 
@@ -250,7 +242,6 @@ func TestSignIDTokenRejectsInvalidInput(t *testing.T) {
 		{name: "empty subject", mutate: func(i *IDTokenInput) { i.Subject = "" }},
 		{name: "blank client", mutate: func(i *IDTokenInput) { i.ClientID = "   " }},
 		{name: "no TTL", mutate: func(i *IDTokenInput) { i.TTL = 0 }},
-		{name: "zero auth_time", mutate: func(i *IDTokenInput) { i.AuthTime = time.Time{} }},
 		// openid is mandatory for every token this service issues, so a scope set
 		// without it is not a valid ID token request.
 		{name: "scopes without openid", mutate: func(i *IDTokenInput) { i.Scopes = []string{"profile"} }},

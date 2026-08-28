@@ -5014,10 +5014,9 @@ components:
           items:
             type: string
           description: |
-            支持的 claims。注意 `auth_time` **会在 ID Token 中签发但不在此列表中**：
-            当前可得的值是授权确认时刻而非真实认证时刻，会高报认证新鲜度，
-            通告它等于邀请 RP 依赖一个本服务尚无法正确产出的值。
-            待持久化真实认证时刻后再加回。
+            支持的 claims。`auth_time` 不在此列表中，ID Token 也不签发它：服务端
+            未持久化真实认证时刻，唯一可得的值是授权确认时刻而非认证时刻，会
+            高报认证新鲜度，因此不发这个值，也不通告。
           example:
             - sub
             - iss
@@ -5184,14 +5183,6 @@ components:
         iat:
           type: integer
           description: 签发时间（Unix timestamp）
-          example: 1717396400
-        auth_time:
-          type: integer
-          description: |
-            **授权确认时间，不是 OIDC 定义的认证时间**（Unix timestamp）。服务端尚未持久化
-            真实认证时刻，因此闲置多日后再授权会把该值报成今天，高报认证新鲜度。
-            该 claim 因此不在 `claims_supported` 中通告，`max_age` / `prompt` 也未实现，
-            请勿依赖它判断认证新鲜度。
           example: 1717396400
         nonce:
           type: string

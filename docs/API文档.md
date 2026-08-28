@@ -1456,7 +1456,6 @@ grant_type=refresh_token&refresh_token=rt_abc123...&client_id=9f3a1c7d2e5b40a8c6
 - 轮换式：旧 refresh token 立即撤销，`sequence + 1`
 - 重放已轮换的 refresh token 触发整条 family 级联撤销。轮换后 30s 内（`refreshGracePeriod`）的并发刷新视为良性，不触发级联撤销；超出窗口的重放才撤销整条 family
 - **不支持 scope 收窄**。RFC 6749 §6 允许 refresh 时请求更小的 scope，但当前仓储层要求轮换后的 token pair 携带与当前完全一致的 scope，因此轮换后 scope 原样继承。客户端如需更小的 scope，须重新走一次授权流程。这是已知偏差
-- 轮换不是重新认证，因此 ID Token 的 `auth_time` 保持该 family 首个 refresh token 的创建时刻
 - **能力 family 生命周期封顶**：携带 `admin:*` / `user:*` 能力 scope 的 refresh family 受 `JWT_REFRESH_CAPABILITY_MAX_LIFETIME`（默认 `168h`，`0` 关闭）约束——从 family 首次授权起算，首个 refresh token 与每次轮换都按 `origin+cap` 夹紧到期时间，family 到点即撤销并返回 `invalid_grant`（审计 `refresh_family_expired`），客户端必须重新走授权。普通 OIDC family 与内部会话 family 不受此约束
 
 ---
@@ -2728,7 +2727,6 @@ Content-Type: application/json
   "aud": "9f3a1c7d2e5b40a8c6d1f4b7a2e9c3d5",
   "exp": 1717400000,
   "iat": 1717396400,
-  "auth_time": 1717396400,
   "nonce": "n-0S6_WzA2Mj",
   "name": "张三",
   "picture": "https://cos.example.com/avatar/1.jpg",
@@ -2749,7 +2747,6 @@ Content-Type: application/json
 | `aud` | — | 客户端 `client_id` |
 | `exp` | — | 过期时间（Unix timestamp） |
 | `iat` | — | 签发时间（Unix timestamp） |
-| `auth_time` | — | **授权确认时间，不是真正的认证时间**；会签发但**不在 `claims_supported` 中通告**，见下方说明 |
 | `nonce` | — | 防重放值，与授权请求参数一致（可选） |
 | `name` | `profile` | 真实姓名 |
 | `picture` | `profile` | 头像 URL |
@@ -2759,15 +2756,7 @@ Content-Type: application/json
 | `email_verified` | `email` | 邮箱已验证，固定 `true` |
 | `updated_at` | `profile` | 用户信息最后修改时间 |
 
-> **`auth_time` 语义偏差（已知限制）**
->
-> OIDC Core 定义 `auth_time` 为**终端用户完成认证**的时刻。本服务目前能拿到的最接近值是**用户在授权页点击同意**的时刻（授权码流取授权码创建时间，refresh 轮换取该 family 首个 refresh token 的创建时间）。因为服务端尚未在任何地方持久化真实的认证时刻。
->
-> 后果：用户三天前登录、会话仍有效，今天走第三方授权，`auth_time` 会被报成今天——**高报**了认证的新鲜度，而这恰是该 claim 存在的意义。
->
-> 因此该 claim **会签发但不在 `claims_supported` 中通告**：不通告就不构成承诺，省略可选 claim 是正确的行为，通告一个错值才是误导。同时 `max_age` 与 `prompt` 均未实现，RP 无法据此要求重新认证。
->
-> 真正修复需要：登录时持久化认证时刻 → 经授权确认写入授权码行 → 传递到 token family。涉及数据库迁移，留待后续实现，届时再把 `auth_time` 加回 `claims_supported`。
+> **`auth_time` 已移除**：服务端未持久化真实认证时刻，之前的近似值（授权确认时刻）会高报认证新鲜度，误导按 OIDC 语义消费该 claim 的 RP。因此 ID Token **不再签发** `auth_time`，也未列入 `claims_supported`；`max_age` / `prompt` 未实现。待将来持久化真实认证时刻后再加回。
 
 **OIDC 授权码流完整交互**：
 
