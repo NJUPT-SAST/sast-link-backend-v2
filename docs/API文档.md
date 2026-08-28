@@ -993,6 +993,8 @@ GET /user/identities
 
 > 本节与 §4.3（绑定 GitHub）只接受登录态调用，`code` 走 query 参数。绑定路径**不接受** `registration_state`：该值只证明有人走完了一次第三方回调，不证明是哪个 SAST 账号在操作，因此追加绑定一律由 Bearer token 认定调用者。每个用户每种 provider 最多一条绑定（V001 partial unique index）：该第三方账号已属他人返回 `40903`，调用者自己已绑同类型返回 `40904`。
 >
+> **step-up 复核**：绑定把一个新登录方式挂到账号名下，请求体必须携带当前账号密码（`password`，JSON）做二次确认——光有被窃取的 Bearer token 不能单独完成绑定。密码错返回 `40105`（401）并记录 `oauth_bind` 失败审计；限流按调用者，60s 内最多 `RATE_LIMIT_PASSWORD_STEPUP_RPM`（默认 10）次且先于密码校验生效。
+>
 > **`code` 从哪里来**：绑定与登录走**不同的回调地址**，因此需要在 provider 后台各注册一条。
 >
 > 登录用的回调（`OAUTH_*_REDIRECT_URI`）指向**本后端**的 `/oauth/{lark,github}/callback`，由后端消费 code 后 302 到前端。绑定用的回调是**前端页面**（例如 `/oauth/bind/lark`）：已登录用户在前端发起 provider 授权，provider 把 code 交给该前端页面，前端再带着 `code` 与自己那个回调地址调用本接口。
@@ -1015,6 +1017,14 @@ POST /user/identities/lark
 |------|------|------|
 | `code` | 是 | 飞书 OAuth 授权码 |
 | `redirect_uri` | 否 | 签发该 `code` 时使用的回调地址，即前端的绑定回调页。RFC 6749 §4.1.3 要求 token 交换重复这个值，飞书注册了多条回调时不一致会返回 `invalid_grant`。省略时回退到 `OAUTH_FEISHU_REDIRECT_URI`（登录回调），仅在绑定与登录共用同一回调地址时才适用 |
+
+**Request Body**:
+
+```json
+{
+  "password": "当前账号密码"
+}
+```
 
 **Response** `200`:
 
@@ -1052,6 +1062,14 @@ POST /user/identities/github
 | `code` | 是 | GitHub OAuth 授权码 |
 | `redirect_uri` | 否 | 签发该 `code` 时使用的回调地址，即前端的绑定回调页。省略时回退到 `OAUTH_GITHUB_REDIRECT_URI`（登录回调）。GitHub 在 token 交换阶段用它校验与签发 code 时是否一致，见 §4.2 的回调说明 |
 
+**Request Body**:
+
+```json
+{
+  "password": "当前账号密码"
+}
+```
+
 **Response** `200`:
 
 ```json
@@ -1085,7 +1103,8 @@ POST /user/identities/email
 
 ```json
 {
-  "email": "myemail@qq.com"
+  "email": "myemail@qq.com",
+  "password": "当前账号密码"
 }
 ```
 
@@ -1098,7 +1117,7 @@ POST /user/identities/email
 }
 ```
 
-**说明**: Bind-Ticket 存储在 Redis，有效期 5 分钟，一次性使用，内部携带待绑定邮箱地址。
+**说明**: Bind-Ticket 存储在 Redis，有效期 5 分钟，一次性使用，内部携带待绑定邮箱地址。发送与确认都要携带当前密码做 step-up 复核（见 §4.2），密码错返回 `40105`。
 
 ---
 
@@ -1115,7 +1134,8 @@ POST /user/identities/email/verify
 ```json
 {
   "bind_ticket": "be_abc123def456...",
-  "code": "123456"
+  "code": "123456",
+  "password": "当前账号密码"
 }
 ```
 

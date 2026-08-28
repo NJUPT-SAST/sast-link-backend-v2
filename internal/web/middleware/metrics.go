@@ -45,10 +45,12 @@ func init() {
 }
 
 // Metrics returns a Gin middleware that records request counts and latency on
-// the default Prometheus registry. It must be registered before the route table
-// (or at least before the request is handled), because the route label is read
-// from c.FullPath() only after c.Next() returns — a route pattern is resolved
-// while the handler chain runs, not when the middleware starts.
+// the default Prometheus registry. It must sit outside gin.Recovery so a
+// recovered panic still counts: the status code is read after the chain returns,
+// and it is the recovery middleware that has already written the 500. The route
+// label is read from c.FullPath() after c.Next() returns — the pattern is
+// resolved while the handler chain runs, not when the middleware starts.
+// web.NewRouter registers it outermost.
 //
 // /metrics is an anonymous scrape surface like /health: it intentionally sits
 // outside every auth gate.
