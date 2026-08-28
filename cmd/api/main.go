@@ -103,7 +103,10 @@ func run() error {
 		RequireLogoutAuth: runtime.Auth.RequireUserLogoutAuth(),
 	})
 	oauthhandler.RegisterRoutes(router, runtime.OAuth, runtime.Auth.RequireAuth())
-	oauthloginhandler.RegisterRoutes(router, runtime.OAuthLogin, runtime.Auth.RequireAuth())
+	oauthloginhandler.RegisterRoutes(router, runtime.OAuthLogin, oauthloginhandler.Gates{
+		RequireAuth:       runtime.Auth.RequireAuth(),
+		RequireWriteScope: runtime.Auth.RequireDelegatedScope(oauthloginhandler.WriteScopes...),
+	})
 	// The admin group authenticates through RequireAdminAuth, the only surface an
 	// admin-scoped token may reach within the scopes it holds.
 	adminhandler.RegisterRoutes(router, runtime.Admin, adminhandler.Gates{

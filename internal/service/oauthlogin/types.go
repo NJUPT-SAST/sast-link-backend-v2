@@ -23,6 +23,12 @@ type EndpointLimiter interface {
 	Allow(ctx context.Context, endpoint, subject string) (LimitResult, error)
 }
 
+// PasswordVerifier confirms the caller's current password during step-up
+// re-authentication; the session service's hasher satisfies it.
+type PasswordVerifier interface {
+	VerifyPassword(ctx context.Context, password, encodedHash string) error
+}
+
 // ProviderClient is one third-party provider; the interface lives here so
 // tests can fake a provider without a live endpoint.
 type ProviderClient interface {
@@ -249,8 +255,11 @@ type BindInput struct {
 	Provider    model.LoginMethod
 	Code        string
 	RedirectURI string
-	ClientIP    string
-	UserAgent   string
+	// Password is the caller's current password, confirmed before the binding is
+	// written so a stolen access token alone cannot attach a new login method.
+	Password  string
+	ClientIP  string
+	UserAgent string
 }
 
 type BindResult struct {

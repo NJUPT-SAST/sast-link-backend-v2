@@ -103,7 +103,11 @@ var (
 	// provider. V001 caps github and lark at one row per user.
 	ErrIdentityAlreadyBound = &Error{Kind: KindConflict, Code: errcode.CodeIdentityAlreadyBound}
 	ErrUserNotFound         = &Error{Kind: KindNotFound, Code: errcode.CodeUserNotFound}
-	ErrInternal             = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	// ErrPasswordInvalid reports a wrong current password during step-up
+	// re-authentication. KindInvalidToken surfaces it as 401, like every other
+	// failed credential check; the code is what audit and tests match on.
+	ErrPasswordInvalid = &Error{Kind: KindInvalidToken, Code: errcode.CodePasswordInvalid}
+	ErrInternal        = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 	// ErrProviderUnavailable reports that GitHub or Lark could not be reached or
 	// answered in a shape this service does not understand.
 	ErrProviderUnavailable = &Error{Kind: KindProviderUnavailable, Code: errcode.CodeDependencyUnavailable}

@@ -17,6 +17,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauthlogin"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
@@ -83,17 +84,35 @@ func (h Handler) readStateCookie(c *gin.Context) string {
 // redeeming a login_code is how a session is obtained, so requiring one would be
 // circular. The binding endpoints sit behind the JWT middleware because they
 // attach a provider account to a known caller.
-func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
+// Gates are the middleware the protected binding routes are mounted behind.
+type Gates struct {
+	// RequireAuth authenticates the group (the JWT middleware).
+	RequireAuth gin.HandlerFunc
+	// RequireWriteScope bounds what a scoped token may do on the binding routes;
+	// it is a no-op for an internal console token.
+	RequireWriteScope gin.HandlerFunc
+}
+
+// WriteScopes is the scope a delegated token must hold to attach a third-party
+// login method to the subject's account, matching the email-bind routes.
+var WriteScopes = []string{scope.UserWrite}
+
+func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
+	if g.RequireAuth == nil || g.RequireWriteScope == nil {
+		panic("oauthloginhandler: every gate in Gates must be set")
+	}
 	r.GET("/oauth/github", h.authorize(model.LoginMethodGitHub))
 	r.GET("/oauth/github/callback", h.callback(model.LoginMethodGitHub))
 	r.GET("/oauth/lark", h.authorize(model.LoginMethodLark))
 	r.GET("/oauth/lark/callback", h.callback(model.LoginMethodLark))
 	r.POST("/oauth/exchange-code", h.ExchangeCode)
 
+	// The binding routes name a write scope gate explicitly: a stolen token
+	// carrying only a read scope (or none) cannot attach a new login method.
 	protected := r.Group("")
-	protected.Use(authMiddleware)
-	protected.POST("/user/identities/github", h.bind(model.LoginMethodGitHub))
-	protected.POST("/user/identities/lark", h.bind(model.LoginMethodLark))
+	protected.Use(g.RequireAuth)
+	protected.POST("/user/identities/github", g.RequireWriteScope, h.bind(model.LoginMethodGitHub))
+	protected.POST("/user/identities/lark", g.RequireWriteScope, h.bind(model.LoginMethodLark))
 }
 
 // authorize returns the handler that starts a login for one provider.
@@ -266,6 +285,13 @@ func (h Handler) ExchangeCode(c *gin.Context) {
 // provider that supports multiple callbacks (Lark), redirect_uri must be echoed
 // back when exchanging the code, so the caller passes the exact callback the
 // code was issued against.
+// bindPasswordRequest carries the step-up password. The code and redirect_uri
+// arrive as query parameters (mirroring the documented contract), while the body
+// holds only the re-authentication credential.
+type bindPasswordRequest struct {
+	Password string `json:"password" binding:"required"`
+}
+
 func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		principal, ok := middleware.PrincipalFrom(c)
@@ -277,11 +303,17 @@ func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 			})
 			return
 		}
+		var body bindPasswordRequest
+		if err := decodeStrictJSON(c, &body); err != nil {
+			response.Error(c, webutil.BadRequest())
+			return
+		}
 		result, err := h.Service.Bind(c.Request.Context(), oauthlogin.BindInput{
 			UserID:      principal.UserID,
 			Provider:    name,
 			Code:        c.Query("code"),
 			RedirectURI: c.Query("redirect_uri"),
+			Password:    body.Password,
 			ClientIP:    c.ClientIP(),
 			UserAgent:   c.Request.UserAgent(),
 		})

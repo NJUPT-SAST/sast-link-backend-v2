@@ -129,7 +129,7 @@ func (s Service) requirePassword(ctx context.Context, userID int64, password str
 	// only after success does nothing against guessing. The shared limiter keeps
 	// every password step-up on one per-user budget; the endpoint name scopes
 	// the Redis key independently of unbind.
-	if err := s.checkEndpointLimit(ctx, s.UnbindLimiter, "password_step_up", "user:"+strconv.FormatInt(userID, 10)); err != nil {
+	if err := s.checkEndpointLimit(ctx, s.StepUpLimiter, "password_step_up", "user:"+strconv.FormatInt(userID, 10)); err != nil {
 		return err
 	}
 	user, err := s.Users.FindAuthUserByID(ctx, userID)

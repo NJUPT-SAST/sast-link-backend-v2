@@ -161,6 +161,7 @@ services:
       RATE_LIMIT_SEND_EMAIL_WINDOW: ${RATE_LIMIT_SEND_EMAIL_WINDOW:-60s}
       RATE_LIMIT_UNBIND_RPM: ${RATE_LIMIT_UNBIND_RPM:-3}
       RATE_LIMIT_UNBIND_WINDOW: ${RATE_LIMIT_UNBIND_WINDOW:-60s}
+      RATE_LIMIT_PASSWORD_STEPUP_RPM: ${RATE_LIMIT_PASSWORD_STEPUP_RPM:-10}
       # Device management: DELETE /user/devices/:id revokes a whole token family,
       # so the throttle is per authenticated user.
       RATE_LIMIT_DEVICE_RPM: ${RATE_LIMIT_DEVICE_RPM:-3}

@@ -121,6 +121,10 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	oauthRegistrations := oauthloginredis.RegistrationStateStore{Store: store}
 	oauthLoginCodes := oauthloginredis.LoginCodeStore{Store: store}
 	unbindLimiter := newSessionLimiter(cfg.RateLimitUnbindRPM, cfg.RateLimitUnbindWindow)
+	// Password step-up shares the unbind window on its own wider per-user budget
+	// (RATE_LIMIT_PASSWORD_STEPUP_RPM), so a multi-request operation like an email
+	// bind does not trip the stricter unbind cap.
+	passwordStepUpLimiter := newSessionLimiter(cfg.RateLimitPasswordStepUpRPM, cfg.RateLimitUnbindWindow)
 	registerLimiter := newSessionLimiter(cfg.RateLimitRegisterAttempts, cfg.RateLimitRegisterWindow)
 	refreshLimiter := newSessionLimiter(cfg.RateLimitRefreshRPM, cfg.RateLimitRefreshWindow)
 	avatarLimiter := newSessionLimiter(cfg.RateLimitUploadAvatarRPM, cfg.RateLimitUploadAvatarWindow)
@@ -183,6 +187,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		// Reads the key oauthloginredis.RegistrationStateStore writes, redeemable by POST /auth/register.
 		OAuthRegistration: sessionredis.OAuthRegistrationStore{Store: store},
 		UnbindLimiter:     unbindLimiter,
+		StepUpLimiter:     passwordStepUpLimiter,
 		RegisterLimiter:   registerLimiter,
 		AvatarLimiter:     avatarLimiter,
 		RefreshLimiter:    refreshLimiter,
@@ -263,10 +268,13 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	}
 	oauthLoginAuthorizeLimiter := newOAuthLoginLimiter(cfg.RateLimitOAuthLoginRPM, cfg.RateLimitOAuthLoginWindow)
 	oauthLoginExchangeLimiter := newOAuthLoginLimiter(cfg.RateLimitExchangeCodeRPM, cfg.RateLimitExchangeCodeWindow)
+	oauthLoginStepUpLimiter := newOAuthLoginLimiter(cfg.RateLimitPasswordStepUpRPM, cfg.RateLimitUnbindWindow)
 	oauthLoginService := oauthlogin.Service{
 		Providers:         loginProviders,
 		AuthorizeLimiter:  oauthLoginAuthorizeLimiter,
 		ExchangeLimiter:   oauthLoginExchangeLimiter,
+		StepUpLimiter:     oauthLoginStepUpLimiter,
+		Passwords:         passwordHasher,
 		Users:             users,
 		Identities:        identities,
 		Clients:           clients,

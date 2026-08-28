@@ -34,6 +34,8 @@ func mapServiceError(err error) error {
 		message = errcode.Messages[errcode.CodeUserNotFound]
 	case errcode.CodeAccountDeleted:
 		message = errcode.Messages[errcode.CodeAccountDeleted]
+	case errcode.CodePasswordInvalid:
+		message = errcode.Messages[errcode.CodePasswordInvalid]
 	}
 
 	var status int

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -46,6 +47,26 @@ type fakeProvider struct {
 	identity     *provider.Identity
 	err          error
 	calls        int
+}
+
+// fakePasswordVerifier stands in for the argon2id hasher during step-up
+// re-authentication. The default accepts exactly "secret".
+type fakePasswordVerifier struct {
+	want  string
+	calls int
+	// err, when set, simulates a verifier outage (a dead argon2 pool).
+	err error
+}
+
+func (v *fakePasswordVerifier) VerifyPassword(_ context.Context, password, _ string) error {
+	v.calls++
+	if v.err != nil {
+		return v.err
+	}
+	if password != v.want {
+		return errors.New("password mismatch")
+	}
+	return nil
 }
 
 func (p *fakeProvider) AuthorizeURL(state string) string {
@@ -346,6 +367,24 @@ func (r *fakeAuditRepository) actions() []string {
 	return actions
 }
 
+// failedActions returns "action:error_code" for every failed entry, so tests
+// can assert exactly what was audited as a failure.
+func (r *fakeAuditRepository) failedActions() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.entries))
+	for _, entry := range r.entries {
+		if entry.Success != nil && !*entry.Success {
+			code := 0
+			if entry.ErrCode != nil {
+				code = *entry.ErrCode
+			}
+			out = append(out, fmt.Sprintf("%s:%d", entry.Action, code))
+		}
+	}
+	return out
+}
+
 // fixedClock is a deterministic auth.Clock.
 type fixedClock struct {
 	instant time.Time
@@ -393,8 +432,9 @@ func newTestService(t *testing.T) (Service, *testDoubles) {
 		Clients: &fakeClientRepository{client: &model.OAuthClient{
 			ID: 1, ClientID: "sast-link-web", IsActive: boolPtr(true),
 		}},
-		Tokens: &fakeTokenRepository{},
-		Audits: &fakeAuditRepository{},
+		Tokens:    &fakeTokenRepository{},
+		Audits:    &fakeAuditRepository{},
+		Passwords: &fakePasswordVerifier{want: "secret"},
 	}
 
 	service := Service{
@@ -406,6 +446,7 @@ func newTestService(t *testing.T) (Service, *testDoubles) {
 		Clients:           doubles.Clients,
 		Tokens:            doubles.Tokens,
 		Audits:            doubles.Audits,
+		Passwords:         doubles.Passwords,
 		States:            doubles.States,
 		RegistrationState: doubles.Registration,
 		LoginCodes:        doubles.LoginCodes,
@@ -434,6 +475,7 @@ type testDoubles struct {
 	Clients      *fakeClientRepository
 	Tokens       *fakeTokenRepository
 	Audits       *fakeAuditRepository
+	Passwords    *fakePasswordVerifier
 	Devices      *fakeDeviceStore
 	Blacklist    *fakeBlacklist
 }

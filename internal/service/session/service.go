@@ -53,6 +53,10 @@ type Service struct {
 	OAuthRegistration OAuthRegistrationStore
 	// UnbindLimiter throttles unbind per user, kept separate from Limiter.
 	UnbindLimiter EndpointLimiter
+	// StepUpLimiter throttles password step-up per user, on its own budget so a
+	// normal email binding (two checks: send-code plus verify) does not trip the
+	// stricter unbind cap.
+	StepUpLimiter EndpointLimiter
 	// RegisterLimiter throttles POST /auth/register, keyed on the
 	// Register-Ticket; every accepted call runs an argon2id derivation.
 	RegisterLimiter EndpointLimiter
