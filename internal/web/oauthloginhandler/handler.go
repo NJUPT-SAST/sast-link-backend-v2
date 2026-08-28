@@ -24,10 +24,6 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
-// decodeStrictJSON is the shared strict body decoder, kept here under its
-// historical lowercase name so the call sites in this package did not change.
-var decodeStrictJSON = webutil.DecodeStrictJSON
-
 // Service is the use-case surface this handler drives.
 type Service interface {
 	Authorize(ctx context.Context, input oauthlogin.AuthorizeInput) (*oauthlogin.AuthorizeResult, error)
@@ -254,7 +250,7 @@ type exchangeCodeRequest struct {
 // ExchangeCode swaps a one-time login_code for a session.
 func (h Handler) ExchangeCode(c *gin.Context) {
 	var request exchangeCodeRequest
-	if err := decodeStrictJSON(c, &request); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &request); err != nil {
 		response.Error(c, webutil.BadRequest())
 		return
 	}
@@ -304,7 +300,7 @@ func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 			return
 		}
 		var body bindPasswordRequest
-		if err := decodeStrictJSON(c, &body); err != nil {
+		if err := webutil.DecodeStrictJSON(c, &body); err != nil {
 			response.Error(c, webutil.BadRequest())
 			return
 		}

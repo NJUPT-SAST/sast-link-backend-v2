@@ -105,5 +105,8 @@ func StripSubaddress(email string) string {
 	if plus := strings.IndexByte(local, '+'); plus >= 0 {
 		local = local[:plus]
 	}
-	return local + email[at:]
+	// Fold the local part's case so the strip is one consistent decision: a
+	// caller that skips normalization still keys on a single value. The domain is
+	// left untouched — normalizeIdentifier folds it at the call site.
+	return strings.ToLower(local) + email[at:]
 }

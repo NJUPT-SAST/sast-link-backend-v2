@@ -174,7 +174,10 @@ func loginLimitSubject(input LoginInput, identifier string) string {
 
 func loginFailureKey(user *model.User, identifier string) string {
 	if user == nil {
-		return "identifier:" + normalizeIdentifier(identifier)
+		// Fold alias addresses onto the same bucket a canonical one uses, so a
+		// +tag or case variant cannot spend a separate lockout budget (matches the
+		// code/key normalization of audit-fix #8).
+		return "identifier:" + normalizeIdentifier(validate.StripSubaddress(identifier))
 	}
 	return "user:" + strconv.FormatInt(user.ID, 10)
 }

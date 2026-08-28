@@ -57,10 +57,19 @@ func RequireJSONContentType(c *gin.Context) error {
 // empty body, ErrInvalidJSONContentType, or a binding error); callers map it
 // onto BadRequest.
 func DecodeStrictJSON(c *gin.Context, destination any) error {
+	return DecodeStrictJSONWithLimit(c, destination, MaxJSONRequestBodyBytes)
+}
+
+// DecodeStrictJSONWithLimit is DecodeStrictJSON with an explicit body cap, for a
+// handler surface whose largest legitimate body sits well below the shared cap
+// and that must not absorb the extra headroom: the bounded-work contract extends
+// to authenticated endpoints, so an OAuth request does not wantonly grow from its
+// historical 8 KiB to 64 KiB.
+func DecodeStrictJSONWithLimit(c *gin.Context, destination any, limit int64) error {
 	if err := RequireJSONContentType(c); err != nil {
 		return err
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxJSONRequestBodyBytes)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
 	return decodeJSON(json.NewDecoder(c.Request.Body), destination)
 }
 

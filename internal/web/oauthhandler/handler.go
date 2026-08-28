@@ -13,7 +13,13 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
+
+// maxOAuthBodyBytes caps the already-authenticated consent/grants request
+// bodies at their historical 8 KiB: the shared 64 KiB default is generous, and
+// a bounded-work surface must not absorb the extra headroom for nothing.
+const maxOAuthBodyBytes int64 = 8 << 10
 
 // Service is the OAuth use-case surface this handler drives.
 type Service interface {
@@ -119,7 +125,7 @@ func (h Handler) Consent(c *gin.Context) {
 		return
 	}
 	var req consentRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSONWithLimit(c, &req, maxOAuthBodyBytes); err != nil {
 		response.Error(c, badRequest())
 		return
 	}

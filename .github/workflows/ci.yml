@@ -66,6 +66,12 @@ jobs:
             base="${{ github.event.pull_request.base.sha }}"
           elif [[ "${{ github.event_name }}" == "push" ]]; then
             base="${{ github.event.before }}"
+            # A new branch's first push carries an all-zero before; diffing
+            # against it is fatal, so fall back to the parent commit (or, at the
+            # root commit, to HEAD itself — an empty diff, conservatively skipped).
+            if [[ "$base" == "0000000000000000000000000000000000000000" ]]; then
+              base="$(git rev-parse HEAD^ 2>/dev/null || echo "${{ github.sha }}")"
+            fi
           else
             base="HEAD~1"
           fi
@@ -80,7 +86,7 @@ jobs:
 
       - name: Lint OpenAPI contract
         if: steps.changed.outputs.changed == 'true'
-        run: npx --yes @redocly/cli@1 lint docs/openapi.yaml
+        run: npx --yes @redocly/cli@1.34.19 lint docs/openapi.yaml
 
   # The test suite is split in two parallel jobs: packages whose tests start
   # Testcontainers (internal/testutil importers) and packages that run without
@@ -140,8 +146,9 @@ jobs:
         # optimization (it only shapes the production binary).
         #
         # -timeout 25m raises go test's per-package default of 10 minutes.
-        # internal/repository provisions a PostgreSQL container per test through
-        # Testcontainers and is already past that default on a developer machine;
+        # internal/repository shares one PostgreSQL container with a dedicated
+        # schema per test (internal/testutil/postgres.go) and is already past
+        # that default on a developer machine;
         # the integration suites in internal/migration and the handler packages
         # are the same shape. A default-timeout failure is especially misleading
         # here: the panic reports "test timed out" with no `--- FAIL` line, so it

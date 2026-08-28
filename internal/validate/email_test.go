@@ -152,7 +152,7 @@ func TestStripSubaddress(t *testing.T) {
 		{"foo+tag@gmail.com", "foo@gmail.com"},
 		{"foo+bar+baz@gmail.com", "foo@gmail.com"},
 		{"a.b+tag@qq.com", "a.b@qq.com"},
-		{"FOO+Tag@GMAIL.COM", "FOO@GMAIL.COM"},
+		{"FOO+Tag@GMAIL.COM", "foo@GMAIL.COM"},
 		{"no-at-sign", "no-at-sign"},
 	}
 	for _, testCase := range cases {

@@ -571,7 +571,10 @@ func waitForExpiry(t *testing.T, client Cmdable, key string) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		ttl, err := client.PTTL(context.Background(), key).Result()
-		if err == nil && ttl < 0 {
+		// Expired means the key is gone (-2). Bare -1 (no TTL) must not count as
+		// expired: a key that lost its TTL is a different bug, and reporting it
+		// gone would pass the assertion against the wrong state.
+		if err == nil && ttl == -2 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

@@ -44,10 +44,6 @@ type tokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
-// decodeStrictJSON is the shared strict body decoder, kept here under its
-// historical lowercase name so the call sites in this package did not change.
-var decodeStrictJSON = webutil.DecodeStrictJSON
-
 // invalidRequest builds a non-redirectable invalid_request error.
 func invalidRequest(description string) error {
 	return &oauth.Error{

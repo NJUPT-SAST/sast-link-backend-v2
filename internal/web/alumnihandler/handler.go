@@ -22,10 +22,6 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
-// decodeStrictJSON is the shared strict body decoder, kept here under its
-// historical lowercase name so the call sites in this package did not change.
-var decodeStrictJSON = webutil.DecodeStrictJSON
-
 // RequestService is the account-request use cases this handler exposes.
 type RequestService interface {
 	Submit(ctx context.Context, input alumnirequest.SubmitInput) (*alumnirequest.SubmitResult, error)
@@ -111,7 +107,7 @@ type submittedDTO struct {
 // Submit records an account-request ticket.
 func (h Handler) Submit(c *gin.Context) {
 	var req submitRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -237,7 +233,7 @@ func (h Handler) Reject(c *gin.Context) {
 		return
 	}
 	var req rejectRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}

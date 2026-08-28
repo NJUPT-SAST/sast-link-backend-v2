@@ -225,7 +225,10 @@ func TestTokenRepositoryRotateRefreshTokenRejectsTokenExpiredWhileWaitingForFami
 		var waiters int
 		if err := database.Raw(`
 			SELECT COUNT(*) FROM pg_stat_activity
-			WHERE wait_event_type = 'Lock' AND state = 'active'
+			WHERE datname = current_database()
+			  AND pid <> pg_backend_pid()
+			  AND wait_event_type = 'Lock'
+			  AND state = 'active'
 		`).Scan(&waiters).Error; err != nil {
 			t.Fatalf("count lock waiters: %v", err)
 		}
@@ -405,7 +408,10 @@ func TestTokenRepositoryBulkRevokeWaitsForFamilyLockAndRevokesRotatedToken(t *te
 		var waiters int
 		if err := database.Raw(`
 			SELECT COUNT(*) FROM pg_stat_activity
-			WHERE wait_event_type = 'Lock' AND state = 'active'
+			WHERE datname = current_database()
+			  AND pid <> pg_backend_pid()
+			  AND wait_event_type = 'Lock'
+			  AND state = 'active'
 		`).Scan(&waiters).Error; err != nil {
 			t.Fatalf("count lock waiters: %v", err)
 		}

@@ -121,9 +121,5 @@ func badRequest() error {
 }
 
 func notFound() error {
-	return webutil.NotFound(errcode.CodeClientNotFound, "OAuth 客户端不存在")
+	return webutil.NotFound(errcode.CodeClientNotFound, errcode.Messages[errcode.CodeClientNotFound])
 }
-
-// decodeStrictJSON is the shared strict body decoder, kept here under its
-// historical lowercase name so the call sites in this package did not change.
-var decodeStrictJSON = webutil.DecodeStrictJSON

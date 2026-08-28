@@ -17,10 +17,6 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
-// decodeStrictJSON is the shared strict body decoder, kept here under its
-// historical lowercase name so the call sites in this package did not change.
-var decodeStrictJSON = webutil.DecodeStrictJSON
-
 type Service interface {
 	Login(ctx context.Context, input session.LoginInput) (*session.LoginResult, error)
 	Refresh(ctx context.Context, input session.RefreshInput) (*session.RefreshResult, error)
@@ -296,7 +292,7 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 
 func (h Handler) Login(c *gin.Context) {
 	var req loginRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -324,7 +320,7 @@ func (h Handler) Login(c *gin.Context) {
 
 func (h Handler) Refresh(c *gin.Context) {
 	var req refreshRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -386,7 +382,7 @@ func (h Handler) Logout(c *gin.Context) {
 		return
 	}
 	var req logoutRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -435,7 +431,7 @@ func (h Handler) Profile(c *gin.Context) {
 
 func (h Handler) SendRegisterCode(c *gin.Context) {
 	var req sendRegisterCodeRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -453,7 +449,7 @@ func (h Handler) SendRegisterCode(c *gin.Context) {
 
 func (h Handler) VerifyRegisterCode(c *gin.Context) {
 	var req verifyRegisterCodeRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -472,7 +468,7 @@ func (h Handler) VerifyRegisterCode(c *gin.Context) {
 
 func (h Handler) Register(c *gin.Context) {
 	var req registerRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -508,7 +504,7 @@ func (h Handler) Register(c *gin.Context) {
 
 func (h Handler) ForgotPasswordSendCode(c *gin.Context) {
 	var req forgotPasswordRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -526,7 +522,7 @@ func (h Handler) ForgotPasswordSendCode(c *gin.Context) {
 
 func (h Handler) ResetPassword(c *gin.Context) {
 	var req resetPasswordRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -553,7 +549,7 @@ func (h Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 	var req changePasswordRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -581,7 +577,7 @@ func (h Handler) BindEmailSendCode(c *gin.Context) {
 		return
 	}
 	var req bindEmailRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -607,7 +603,7 @@ func (h Handler) BindEmailVerify(c *gin.Context) {
 		return
 	}
 	var req bindEmailVerifyRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
