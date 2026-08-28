@@ -68,7 +68,7 @@ func mapServiceError(err error) error {
 		status = http.StatusBadRequest
 	case session.KindRateLimited, session.KindLocked:
 		status = http.StatusTooManyRequests
-	case session.KindUnknownIdentifier, session.KindPasswordInvalid, session.KindInvalidToken:
+	case session.KindUnknownIdentifier, session.KindPasswordInvalid, session.KindLoginFailed, session.KindInvalidToken:
 		status = http.StatusUnauthorized
 	case session.KindUserDeleted:
 		status = http.StatusForbidden
@@ -112,6 +112,8 @@ func defaultCode(kind session.Kind) int {
 		return errcode.CodeUnknownIdentifier
 	case session.KindPasswordInvalid:
 		return errcode.CodePasswordInvalid
+	case session.KindLoginFailed:
+		return errcode.CodePasswordInvalid
 	case session.KindInvalidToken:
 		return errcode.CodeAccessTokenInvalid
 	case session.KindUserDeleted:
@@ -145,6 +147,8 @@ func defaultMessage(kind session.Kind) string {
 		return "登录邮箱不存在"
 	case session.KindPasswordInvalid:
 		return "密码错误"
+	case session.KindLoginFailed:
+		return "邮箱或密码错误"
 	case session.KindUserDeleted:
 		return "账号已注销"
 	case session.KindInvalidToken:

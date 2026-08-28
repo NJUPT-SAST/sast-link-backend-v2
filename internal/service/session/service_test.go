@@ -993,19 +993,19 @@ func TestLoginDoesNotRehashWhenParametersMatch(t *testing.T) {
 func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 	service, _, _, _, audit, failures := newTestService(t)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	assertKind(t, err, KindUnknownIdentifier, errcode.CodeUnknownIdentifier)
+	// An unknown identifier answers exactly like a wrong password (audit-fix #7):
+	// distinguishing them on the wire hands anyone a registered-email oracle.
+	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 	if len(failures.failures) != 1 || failures.failures[0] != "identifier:missing@sast.fun" {
 		t.Fatalf("failures = %#v, want unknown bucket counted", failures.failures)
 	}
-	if got := lastErrCode(audit); got != errcode.CodeUnknownIdentifier {
-		t.Fatalf("audit err code = %d, want %d", got, errcode.CodeUnknownIdentifier)
-	}
 
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
-	assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
+	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 	if len(failures.failures) != 2 || failures.failures[1] != "user:42" {
 		t.Fatalf("failures = %#v, want known user bucket", failures.failures)
 	}
+	// One audit code for both legs; the reason field keeps the distinction.
 	if got := lastErrCode(audit); got != errcode.CodePasswordInvalid {
 		t.Fatalf("audit err code = %d, want %d", got, errcode.CodePasswordInvalid)
 	}
@@ -1014,14 +1014,17 @@ func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 func TestServiceErrorsMatchSentinels(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
 
+	// An unknown identifier now answers with the login-failed sentinel (audit-fix
+	// #7): the wire must not distinguish the two, or a login attempt becomes a
+	// registered-email oracle.
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	if !errors.Is(err, ErrUnknownIdentifier) {
-		t.Fatalf("unknown identifier: errors.Is(err, ErrUnknownIdentifier) = false, err=%v", err)
+	if !errors.Is(err, ErrLoginFailed) {
+		t.Fatalf("unknown identifier: errors.Is(err, ErrLoginFailed) = false, err=%v", err)
 	}
 
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
-	if !errors.Is(err, ErrPasswordInvalid) {
-		t.Fatalf("password invalid: errors.Is(err, ErrPasswordInvalid) = false, err=%v", err)
+	if !errors.Is(err, ErrLoginFailed) {
+		t.Fatalf("password invalid: errors.Is(err, ErrLoginFailed) = false, err=%v", err)
 	}
 
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: ""})
@@ -1097,7 +1100,7 @@ func TestLoginReportsCredentialErrorWhenFailureCounterUnavailable(t *testing.T) 
 	service, _, _, _, _, failures := newTestService(t)
 	failures.err = errors.New("redis unavailable")
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
-	assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
+	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 }
 
 func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
@@ -1348,7 +1351,7 @@ func TestLoginLockoutBoundaryAndAliasReset(t *testing.T) {
 
 	for attempt := 1; attempt <= 9; attempt++ {
 		_, err := service.Login(context.Background(), LoginInput{Identifier: "alias@sast.fun", Password: "wrong"})
-		assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
+		assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 	}
 	if failures.counts["user:42"] != 9 {
 		t.Fatalf("failure count = %d, want 9", failures.counts["user:42"])

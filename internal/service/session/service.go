@@ -105,7 +105,11 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		if lockErr := s.checkLoginLock(ctx, failureKey); lockErr != nil {
 			return nil, lockErr
 		}
-		return nil, s.failLogin(ctx, nil, input, failureKey, ErrUnknownIdentifier, "登录标识不存在", nil)
+		// A missing identifier answers 40105 with the same body as a wrong
+		// password: distinguishing them on the wire would hand anyone a
+		// registered-email oracle (audit-fix #7). The audit trail keeps the
+		// difference via reason.
+		return nil, s.failLogin(ctx, nil, input, failureKey, ErrLoginFailed, "邮箱或密码错误", "identifier_unknown", nil)
 	}
 	if err != nil {
 		return nil, newError(ErrInternal, "查询登录用户失败", err)
@@ -127,7 +131,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, newError(ErrDependencyUnavailable, "密码校验被中断", passwordErr)
 		}
-		return nil, s.failLogin(ctx, user, input, failureKey, ErrPasswordInvalid, "密码错误", passwordErr)
+		return nil, s.failLogin(ctx, user, input, failureKey, ErrLoginFailed, "邮箱或密码错误", "password_invalid", passwordErr)
 	}
 	// Rehash a stale hash in place once the password is proven, so a KDF parameter
 	// change (scheme, work factor) reaches existing accounts on their next login.
@@ -1137,7 +1141,10 @@ func (s Service) checkLoginLock(ctx context.Context, key string) error {
 	return nil
 }
 
-func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInput, failureKey string, sentinel *Error, message string, cause error) error {
+// failLogin records one failed login attempt and returns the rejection. reason
+// keeps the not-found vs wrong-password distinction in the audit trail now that
+// the wire answers both with one code (audit-fix #7).
+func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInput, failureKey string, sentinel *Error, message, reason string, cause error) error {
 	locked := false
 	lockTTL := time.Duration(0)
 	if s.Failures != nil {
@@ -1151,7 +1158,7 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 			lockTTL = result.TTL
 		}
 	}
-	if err := s.audit(ctx, loginUserID(user), "login", "session", nil, nil, false, sentinel.Code, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, input.Identifier)}); err != nil {
+	if err := s.audit(ctx, loginUserID(user), "login", "session", nil, nil, false, sentinel.Code, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, input.Identifier), "reason": reason}); err != nil {
 		slog.Error("audit login failure", "error", err)
 	}
 	if locked {

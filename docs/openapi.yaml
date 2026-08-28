@@ -5302,7 +5302,7 @@ components:
               summary: wrong_password
               value:
                 code: 40105
-                message: 密码错误
+                message: 邮箱或密码错误
                 data: null
             email_not_found:
               summary: email_not_found
