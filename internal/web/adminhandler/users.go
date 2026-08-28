@@ -10,6 +10,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 // ListUsers returns a filtered page of accounts.
@@ -89,7 +90,7 @@ func (h Handler) CreateUser(c *gin.Context) {
 		return
 	}
 	var req createUserRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -169,7 +170,7 @@ func (h Handler) UpdateUser(c *gin.Context) {
 		return
 	}
 	var req updateUserRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -262,7 +263,7 @@ func (h Handler) UpdateUsersRole(c *gin.Context) {
 		return
 	}
 	var req batchRoleUpdateRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
