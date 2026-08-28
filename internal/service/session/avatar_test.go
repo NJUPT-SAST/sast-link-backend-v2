@@ -186,6 +186,69 @@ func TestUploadAvatarStripsPolyglotTrailer(t *testing.T) {
 	}
 }
 
+// A phone photo carries an EXIF orientation tag the stdlib JPEG decoder ignores;
+// the re-encode must bake the correction in, or the stored PNG comes out sideways
+// (audit-fix follow-up).
+func TestUploadAvatarAppliesEXIFOrientation(t *testing.T) {
+	service, _, store, _, _ := avatarService(t)
+	// A 4-wide by 8-tall JPEG claiming orientation 6 (rotate 90° to correct):
+	// the stored PNG must have the correction applied (8 wide, 4 tall), not the
+	// raw sideways pixels stdlib image/jpeg would hand over.
+	imageData := testJPEGWithOrientation(t, 4, 8, 6)
+
+	if _, err := service.UploadAvatar(context.Background(), UploadAvatarInput{
+		UserID: 42, Content: bytes.NewReader(imageData), Size: int64(len(imageData)),
+	}); err != nil {
+		t.Fatalf("UploadAvatar: %v", err)
+	}
+	var stored []byte
+	for _, data := range store.uploads {
+		stored = data
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(stored))
+	if err != nil {
+		t.Fatalf("stored PNG does not decode: %v", err)
+	}
+	// Orientation 6 is a 90° transform, so width and height swap.
+	if bounds := decoded.Bounds(); bounds.Dx() != 8 || bounds.Dy() != 4 {
+		t.Fatalf("stored PNG bounds = %dx%d, want 8x4 (orientation applied)", bounds.Dx(), bounds.Dy())
+	}
+}
+
+// testJPEGWithOrientation builds a WxH JPEG whose EXIF orientation tag claims
+// the given value, so the re-encode path's AutoOrientation step is exercised.
+func testJPEGWithOrientation(t *testing.T, w, h, orientation int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	var raw bytes.Buffer
+	if err := jpeg.Encode(&raw, img, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatalf("encode base jpeg: %v", err)
+	}
+	base := raw.Bytes()
+	app1 := append([]byte("Exif\x00\x00"), buildOrientationTIFF(orientation)...)
+	out := make([]byte, 0, len(base)+len(app1)+4)
+	out = append(out, base[:2]...)                                     // SOI
+	out = append(out, 0xFF, 0xE1, byte(len(app1)>>8), byte(len(app1))) // #nosec G115 — segment length is 32, far below 256
+	out = append(out, app1...)
+	out = append(out, base[2:]...)
+	return out
+}
+
+// buildOrientationTIFF returns the minimal TIFF block an EXIF APP1 segment needs
+// to carry an orientation tag (IFD0 entry 0x0112, SHORT, value 1-8).
+func buildOrientationTIFF(orientation int) []byte {
+	tiff := []byte{'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00} // little-endian, IFD0 at offset 8
+	tiff = append(tiff, 0x01, 0x00)                              // one IFD entry
+	tiff = append(tiff,
+		0x12, 0x01, // tag 0x0112 (orientation)
+		0x03, 0x00, // type 3 (SHORT)
+		0x01, 0x00, 0x00, 0x00, // count 1
+		byte(orientation), 0x00, 0x00, 0x00, // #nosec G115 — orientation is 1-8
+	)
+	tiff = append(tiff, 0x00, 0x00, 0x00, 0x00) // no more IFDs
+	return tiff
+}
+
 func TestUploadAvatarRejectsUnsupportedFormat(t *testing.T) {
 	service, _, store, _, _ := avatarService(t)
 	content := []byte("GIF89a this is not an accepted format at all")

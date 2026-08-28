@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	github.com/caarlos0/env/v11 v11.4.1
+	github.com/disintegration/imaging v1.6.2
 	github.com/gabriel-vasile/mimetype v1.4.15
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
