@@ -174,7 +174,10 @@ func loginLimitSubject(input LoginInput, identifier string) string {
 
 func loginFailureKey(user *model.User, identifier string) string {
 	if user == nil {
-		return "identifier:" + normalizeIdentifier(identifier)
+		// Fold alias addresses onto the same bucket a canonical one uses, so a
+		// +tag or case variant cannot spend a separate lockout budget (matches the
+		// code/key normalization of audit-fix #8).
+		return "identifier:" + normalizeIdentifier(validate.StripSubaddress(identifier))
 	}
 	return "user:" + strconv.FormatInt(user.ID, 10)
 }
@@ -331,21 +334,4 @@ func (s Service) buildAuditEntry(
 	detail map[string]any,
 ) (*model.AuditLog, error) {
 	return buildAuditLog(s.now(), userID, action, resource, resourceID, actorClientID, success, errCode, clientIP, userAgent, detail)
-}
-
-// actorClientID resolves the acting client on the /user surface: the token's
-// azp when present, otherwise the console, so a legacy azp-less console token
-// names the built-in client rather than NULL.
-func (s Service) actorClientID(tokenClientID string) string {
-	if strings.TrimSpace(tokenClientID) != "" {
-		return strings.TrimSpace(tokenClientID)
-	}
-	return strings.TrimSpace(s.InternalClientID)
-}
-
-func nullableString(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
 }

@@ -95,6 +95,18 @@ func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 		*field.target = value
 	}
 
+	// Structural checks for fields that are numeric by convention, so free text
+	// cannot land in join_year/phone/qq and then surface in the directory.
+	if !digitsOnly(result.joinYear) {
+		return validatedSubmit{}, newError(ErrInvalidInput, fieldInvalidMessage("join_year"), nil)
+	}
+	if !digitsOnly(result.qqNumber) {
+		return validatedSubmit{}, newError(ErrInvalidInput, fieldInvalidMessage("qq_number"), nil)
+	}
+	if !phoneNumberDigits(result.phoneNumber) {
+		return validatedSubmit{}, newError(ErrInvalidInput, fieldInvalidMessage("phone_number"), nil)
+	}
+
 	optional := []struct {
 		field  string
 		value  string
@@ -219,4 +231,36 @@ func parseStatus(raw *string) (*model.AlumniRequestStatus, error) {
 		return nil, newError(ErrInvalidInput, "status 取值非法", nil)
 	}
 	return &status, nil
+}
+
+// digitsOnly reports whether s is a non-empty string of ASCII digits.
+func digitsOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// phoneNumberDigits permits digits with the occasional separator a mailbox might
+// record (space, +, -); at least one digit must be present so "abc" is refused.
+func phoneNumberDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	digits := 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == ' ' || r == '+' || r == '-':
+		default:
+			return false
+		}
+	}
+	return digits > 0
 }

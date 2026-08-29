@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // nullableClientID keeps an absent azp NULL in the audit row, which V007 reads as
@@ -49,7 +50,7 @@ func (s Service) RevokeGrant(ctx context.Context, userID, clientID int64, actorC
 	if err != nil {
 		return err
 	}
-	s.deliverBlacklist(ctx, entries, now)
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
 	// Drop the consent history too, so the application leaves the authorized list.
 	if s.Authorizations != nil {
 		if err := s.Authorizations.DeleteByUserClient(ctx, userID, clientID); err != nil {

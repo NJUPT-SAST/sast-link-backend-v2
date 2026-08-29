@@ -126,6 +126,37 @@ func TestSubmitRejectsBadEmails(t *testing.T) {
 	}
 }
 
+// Structured numeric fields must refuse free text: a join_year of "abc" would
+// otherwise surface in the directory as-is (audit finding #20).
+func TestSubmitRejectsNonNumericStructuredFields(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		mutate   func(*SubmitInput)
+		contains string
+	}{
+		{name: "join_year free text", mutate: func(in *SubmitInput) { in.JoinYear = "abc" }, contains: "join_year"},
+		{name: "phone_number free text", mutate: func(in *SubmitInput) { in.PhoneNumber = "not-a-phone" }, contains: "phone_number"},
+		{name: "qq_number free text", mutate: func(in *SubmitInput) { in.QQNumber = "abc" }, contains: "qq_number"},
+		{name: "phone_number separators only", mutate: func(in *SubmitInput) { in.PhoneNumber = "+- " }, contains: "phone_number"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			input := validSubmit()
+			testCase.mutate(&input)
+			service := newService(&fakeRequests{}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+			_, err := service.Submit(context.Background(), input)
+			if err == nil {
+				t.Fatal("Submit() error = nil, want a refusal")
+			}
+			assertInvalidInput(t, err, testCase.contains)
+		})
+	}
+}
+
 // Field validation runs before the captcha because a Turnstile token is
 // single-use: verifying first would burn it on a submission that then fails a
 // length check, and the applicant would have to solve the challenge again to fix a

@@ -120,8 +120,8 @@ type TokenRepository interface {
 	// between consume and write cannot be outlived by the pair.
 	CreatePairWithUserAndClientLock(ctx context.Context, userID int64, clientID int64, expectedTokenVersion int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
 	// RotateRefreshToken rotates currentRefreshTokenHash inside familyID and
-	// returns the family origin's created_at, so rotation does not advance the ID
-	// Token's auth_time: it is read off the sequence-0 row.
+	// returns the family origin's created_at, the earliest instant the family
+	// authenticates to.
 	RotateRefreshToken(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken) (time.Time, error)
 	// RotateRefreshTokenWithAudit is RotateRefreshToken with the token-issuance
 	// audit row written in the same transaction, so rotation and audit commit

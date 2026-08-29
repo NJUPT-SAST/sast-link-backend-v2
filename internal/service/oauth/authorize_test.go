@@ -338,7 +338,7 @@ func TestConsentIssuesCodeAndRedirect(t *testing.T) {
 		t.Fatalf("code expiry = %v, want 5 minutes from now", stored.ExpiresAt)
 	}
 	if !stored.CreatedAt.Equal(h.clock.value) {
-		t.Fatalf("code created_at = %v, want now; it backs the ID Token auth_time", stored.CreatedAt)
+		t.Fatalf("code created_at = %v, want now", stored.CreatedAt)
 	}
 	if actions := h.audit.actions(); len(actions) != 1 || actions[0] != "oauth_authorize" {
 		t.Fatalf("audit actions = %v, want one oauth_authorize", actions)

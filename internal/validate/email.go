@@ -89,3 +89,24 @@ func HasControlCharacter(value string) bool {
 	}
 	return false
 }
+
+// StripSubaddress returns the delivery mailbox of an email, dropping the "+tag"
+// subaddressing suffix (foo+bar@example.com -> foo@example.com). Verification-code
+// and rate-limit keys are keyed by this mailbox, so alias variants of one inbox
+// cannot mint unbounded distinct Redis keys. Dots are deliberately left alone:
+// whether dots conflate addresses varies by provider, so collapsing them would
+// collide distinct mailboxes.
+func StripSubaddress(email string) string {
+	at := strings.IndexByte(email, '@')
+	if at < 0 {
+		return email
+	}
+	local := email[:at]
+	if plus := strings.IndexByte(local, '+'); plus >= 0 {
+		local = local[:plus]
+	}
+	// Fold the local part's case so the strip is one consistent decision: a
+	// caller that skips normalization still keys on a single value. The domain is
+	// left untouched — normalizeIdentifier folds it at the call site.
+	return strings.ToLower(local) + email[at:]
+}

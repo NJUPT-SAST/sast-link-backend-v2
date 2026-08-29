@@ -21,17 +21,19 @@ func mapServiceError(err error) error {
 	message := defaultMessage(serviceErr.Kind)
 	switch serviceErr.Code {
 	case errcode.CodeLoginCodeInvalid:
-		message = "login_code 无效或已过期"
+		message = errcode.Messages[errcode.CodeLoginCodeInvalid]
 	case errcode.CodeLarkTenantRequired:
+		// Tenant gate names the rule; distinct from errcode's generic wording.
 		message = "仅限 SAST 成员登录"
 	case errcode.CodeIdentityOccupied:
-		message = "该第三方账号已被其他用户绑定"
+		message = errcode.Messages[errcode.CodeIdentityOccupied]
 	case errcode.CodeIdentityAlreadyBound:
+		// Bound-once surface spells out the constraint the canonical message leaves.
 		message = "该类型账号已绑定，不可重复绑定"
 	case errcode.CodeUserNotFound:
-		message = "用户不存在"
+		message = errcode.Messages[errcode.CodeUserNotFound]
 	case errcode.CodeAccountDeleted:
-		message = "账号已注销"
+		message = errcode.Messages[errcode.CodeAccountDeleted]
 	}
 
 	var status int
@@ -39,7 +41,7 @@ func mapServiceError(err error) error {
 	case oauthlogin.KindInvalidInput, oauthlogin.KindInvalidState:
 		status = http.StatusBadRequest
 	case oauthlogin.KindRateLimited:
-		message = "请求过于频繁"
+		message = errcode.Messages[errcode.CodeRateLimited]
 		status = http.StatusTooManyRequests
 	case oauthlogin.KindInvalidToken:
 		status = http.StatusUnauthorized
@@ -56,13 +58,13 @@ func mapServiceError(err error) error {
 		message = "第三方服务暂时不可用"
 		status = http.StatusBadGateway
 	case oauthlogin.KindDependencyUnavailable:
-		message = "依赖服务暂不可用"
+		message = errcode.Messages[errcode.CodeDependencyUnavailable]
 		status = http.StatusServiceUnavailable
 	case oauthlogin.KindInternal:
-		message = "服务器内部错误"
+		message = errcode.Messages[errcode.CodeInternal]
 		status = http.StatusInternalServerError
 	default:
-		message = "服务器内部错误"
+		message = errcode.Messages[errcode.CodeInternal]
 		status = http.StatusInternalServerError
 	}
 

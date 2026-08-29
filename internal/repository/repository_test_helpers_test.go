@@ -18,16 +18,25 @@ import (
 
 func setupDatabase(t *testing.T) *gorm.DB {
 	t.Helper()
-	databaseURL := testutil.StartPostgres(t)
+	databaseURL := testutil.SharedPostgresURL(t)
 	instance, err := migration.New(databaseURL)
 	if err != nil {
 		t.Fatalf("create migration: %v", err)
 	}
 	t.Cleanup(func() { _, _ = instance.Close() })
-	if err := instance.Up(); err != nil {
-		t.Fatalf("apply migrations: %v", err)
+	if upErr := instance.Up(); upErr != nil {
+		t.Fatalf("apply migrations: %v", upErr)
 	}
-	return testutil.OpenGORM(t, databaseURL)
+	database := testutil.OpenGORM(t, databaseURL)
+	// The shared container no longer disappears between tests, so the GORM
+	// connection pool must be closed explicitly; otherwise its idle connections
+	// accumulate across tests and exhaust the container's max_connections.
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatalf("unwrap GORM connection pool: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	return database
 }
 
 func testUser(loginEmail string) *model.User {

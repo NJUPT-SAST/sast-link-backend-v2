@@ -242,8 +242,7 @@ func createTokenPairInTransaction(
 }
 
 // RotateRefreshToken atomically rotates currentRefreshTokenHash to a new
-// access/refresh pair, returning the family's origin created_at so the caller
-// can set an ID Token's auth_time without a second lookup.
+// access/refresh pair, returning the family's origin created_at.
 func (r *TokenRepository) RotateRefreshToken(
 	ctx context.Context,
 	familyID string,

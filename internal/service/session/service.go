@@ -14,6 +14,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/objectstore"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
@@ -55,9 +56,6 @@ type Service struct {
 	// RegisterLimiter throttles POST /auth/register, keyed on the
 	// Register-Ticket; every accepted call runs an argon2id derivation.
 	RegisterLimiter EndpointLimiter
-	// CardLimiter throttles the unauthenticated GET /card/:id per caller IP; the
-	// sequential user ID makes an uncapped endpoint a scrape of every public card.
-	CardLimiter EndpointLimiter
 	// RefreshLimiter throttles POST /auth/refresh per caller IP, bounding DB
 	// amplification from an unauthenticated endpoint.
 	RefreshLimiter   EndpointLimiter
@@ -103,7 +101,11 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		if lockErr := s.checkLoginLock(ctx, failureKey); lockErr != nil {
 			return nil, lockErr
 		}
-		return nil, s.failLogin(ctx, nil, input, failureKey, ErrUnknownIdentifier, "登录标识不存在", nil)
+		// A missing identifier answers 40105 with the same body as a wrong
+		// password: distinguishing them on the wire would hand anyone a
+		// registered-email oracle (audit-fix #7). The audit trail keeps the
+		// difference via reason.
+		return nil, s.failLogin(ctx, nil, input, failureKey, ErrLoginFailed, "邮箱或密码错误", "identifier_unknown", nil)
 	}
 	if err != nil {
 		return nil, newError(ErrInternal, "查询登录用户失败", err)
@@ -113,10 +115,14 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		return nil, lockErr
 	}
 	if user.State == model.UserStateDeleted {
-		if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, nil, false, errcode.CodeAccountDeleted, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)}); auditErr != nil {
+		// A deleted account answers exactly like any other failed login (40105,
+		// same body), so probing cannot tell "never registered" from "closed".
+		// The audit keeps the reason, but the attempt is not counted: an account
+		// that can never be used again needs no lockout budget.
+		if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, nil, false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier), "reason": "user_deleted"}); auditErr != nil {
 			slog.Error("audit deleted login failure", "user_id", user.ID, "error", auditErr)
 		}
-		return nil, newError(ErrUserDeleted, "用户已注销", nil)
+		return nil, newError(ErrLoginFailed, "邮箱或密码错误", nil)
 	}
 	if passwordErr := s.Passwords.VerifyPassword(ctx, input.Password, user.PasswordHash); passwordErr != nil {
 		// A cancelled or timed-out caller proved nothing about the password, so it
@@ -125,7 +131,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, newError(ErrDependencyUnavailable, "密码校验被中断", passwordErr)
 		}
-		return nil, s.failLogin(ctx, user, input, failureKey, ErrPasswordInvalid, "密码错误", passwordErr)
+		return nil, s.failLogin(ctx, user, input, failureKey, ErrLoginFailed, "邮箱或密码错误", "password_invalid", passwordErr)
 	}
 	// Rehash a stale hash in place once the password is proven, so a KDF parameter
 	// change (scheme, work factor) reaches existing accounts on their next login.
@@ -229,7 +235,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			if revokeErr != nil {
 				return nil, newError(ErrInternal, "撤销被重放的 Refresh Token 家族失败", revokeErr)
 			}
-			s.deliverBlacklist(ctx, entries, s.now())
+			shared.DeliverBlacklist(ctx, s.Blacklist, entries, s.now())
 			// Replay kills the whole family, and the family is the device record;
 			// without the cleanup the device list would keep showing a session that
 			// can no longer authenticate. Fail-open — the revoke already committed.
@@ -394,7 +400,7 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 	if revokeErr != nil {
 		return nil, newError(ErrInternal, "撤销 Token 家族失败", revokeErr)
 	}
-	s.deliverBlacklist(ctx, entries, now)
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
 	// The family is revoked; drop its device record so the device list reflects
 	// what can actually authenticate. Fail-open: the session is already dead and
 	// a leftover record expires on its own.
@@ -403,7 +409,7 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 			slog.WarnContext(ctx, "remove device on logout failed", "user_id", input.PrincipalUserID, "device_id", familyID, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &input.PrincipalUserID, "logout", "session", &familyID, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
+	if auditErr := s.audit(ctx, &input.PrincipalUserID, "logout", "session", &familyID, shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{}); auditErr != nil {
 		slog.Error("audit logout", "family_id", familyID, "error", auditErr)
 	}
 	return &LogoutResult{BlacklistedJTI: principalJTI, FamilyID: familyID}, nil
@@ -444,7 +450,7 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 	if err != nil {
 		return nil, newError(ErrInternal, "生成验证码失败", err)
 	}
-	if err := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeRegister), email, code, verificationTTL); err != nil {
+	if err := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeRegister), validate.StripSubaddress(email), code, verificationTTL); err != nil {
 		return nil, newError(ErrDependencyUnavailable, "保存验证码失败", err)
 	}
 	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeRegister); err != nil {
@@ -569,7 +575,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if !college.Valid() {
 		return nil, newError(ErrInvalidInput, "学院不在枚举范围内", nil)
 	}
-	if len(password) < 8 {
+	if len(password) < validate.MinPasswordLength {
 		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
 	}
 
@@ -757,7 +763,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	}
 	// Validate everything possible before consuming the one-time code, so a
 	// rejected request does not force a fresh code.
-	if len(input.Password) < 8 {
+	if len(input.Password) < validate.MinPasswordLength {
 		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
 	}
 	if err := s.verifyCode(ctx, string(mailer.VerificationPurposeResetPassword), email, input.Code); err != nil {
@@ -796,7 +802,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	if err != nil {
 		return nil, newError(ErrInternal, "重置密码并撤销会话失败", err)
 	}
-	s.deliverBlacklist(ctx, entries, now)
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
 	s.clearLoginFailures(ctx, user, email)
 	// Same device cleanup as ChangePassword: reset revokes every session, so the
 	// device set must not survive.
@@ -818,7 +824,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	if input.OldPassword == "" || input.NewPassword == "" {
 		return nil, newError(ErrInvalidInput, "old_password 与 new_password 不能为空", nil)
 	}
-	if len(input.NewPassword) < 8 {
+	if len(input.NewPassword) < validate.MinPasswordLength {
 		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
 	}
 	if input.NewPassword == input.OldPassword {
@@ -840,7 +846,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 		if ctx.Err() != nil {
 			return nil, newError(ErrDependencyUnavailable, "密码校验被中断", verifyErr)
 		}
-		if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, nullableString(s.actorClientID(input.ActorClientID)), false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, nil); auditErr != nil {
+		if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, nil); auditErr != nil {
 			slog.Error("audit change password failure", "user_id", user.ID, "error", auditErr)
 		}
 		return nil, newError(ErrPasswordInvalid, "旧密码错误", verifyErr)
@@ -854,7 +860,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	if err != nil {
 		return nil, newError(ErrInternal, "修改密码并撤销会话失败", err)
 	}
-	s.deliverBlacklist(ctx, entries, now)
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
 	s.clearLoginFailures(ctx, user, user.LoginEmail)
 	// Every session of the user was just revoked, so the device set must die with
 	// it. Fail-open: the revocation is durable in PostgreSQL and a leftover device
@@ -864,7 +870,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 			slog.WarnContext(ctx, "remove all devices on password change failed", "user_id", user.ID, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, nil); auditErr != nil {
+	if auditErr := s.audit(ctx, &user.ID, "change_password", "session", nil, shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), true, 0, input.ClientIP, input.UserAgent, nil); auditErr != nil {
 		slog.Error("audit change password", "user_id", user.ID, "error", auditErr)
 	}
 	return &ChangePasswordResult{UserID: user.ID}, nil
@@ -908,7 +914,7 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	if err != nil {
 		return nil, newError(ErrInternal, "生成验证码失败", err)
 	}
-	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeBindEmail), email, code, verificationTTL); saveErr != nil {
+	if saveErr := s.VerificationCode.SaveVerificationCode(ctx, string(mailer.VerificationPurposeBindEmail), validate.StripSubaddress(email), code, verificationTTL); saveErr != nil {
 		return nil, newError(ErrDependencyUnavailable, "保存验证码失败", saveErr)
 	}
 	ticket, err := generateBindTicket()
@@ -922,7 +928,7 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 		slog.Error("send bind email verification", "email", email, "error", err)
 		return nil, newError(ErrEmailFailed, "邮件发送失败，请稍后重试", err)
 	}
-	if auditErr := s.audit(ctx, &input.UserID, "bind_email_send_code", "verification_code", nil, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{"email": email}); auditErr != nil {
+	if auditErr := s.audit(ctx, &input.UserID, "bind_email_send_code", "verification_code", nil, shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{"email": email}); auditErr != nil {
 		slog.Error("audit bind email send code", "email", email, "error", auditErr)
 	}
 	return &BindEmailSendCodeResult{BindTicket: ticket, ExpiresIn: int(verificationTTL.Seconds())}, nil
@@ -992,7 +998,7 @@ func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput
 		}
 		return nil, newError(ErrInternal, "创建第三方绑定记录失败", err)
 	}
-	if auditErr := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{"provider": string(model.LoginMethodOtherMail), "provider_id": payload.Email}); auditErr != nil {
+	if auditErr := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{"provider": string(model.LoginMethodOtherMail), "provider_id": payload.Email}); auditErr != nil {
 		slog.Error("audit bind email", "user_id", input.UserID, "error", auditErr)
 	}
 	return &BindEmailVerifyResult{
@@ -1031,7 +1037,7 @@ func (s Service) checkEndpointLimit(ctx context.Context, limiter EndpointLimiter
 // down.
 func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) error {
 	if s.EmailLimiter != nil {
-		result, err := s.EmailLimiter.Allow(ctx, "send_email", "email:"+email)
+		result, err := s.EmailLimiter.Allow(ctx, "send_email", "email:"+validate.StripSubaddress(email))
 		switch {
 		case err != nil:
 			slog.WarnContext(ctx, "email limiter unavailable, allowing request", "error", err)
@@ -1051,35 +1057,12 @@ func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) er
 	return nil
 }
 
-func (s Service) deliverBlacklist(ctx context.Context, entries []model.BlacklistEntry, now time.Time) {
-	if s.Blacklist == nil {
-		return
-	}
-	jtis := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		// The auth-state cache entry must be deleted so the middleware cannot
-		// serve a stale non-revoked state for a token the DB now says revoked.
-		if entry.ExpiresAt.Sub(now) <= 0 || strings.TrimSpace(entry.TokenID) == "" {
-			continue
-		}
-		jtis = append(jtis, entry.TokenID)
-	}
-	if len(jtis) == 0 {
-		return
-	}
-	if err := s.Blacklist.DeleteAuthStates(ctx, jtis); err != nil {
-		// The same-transaction outbox row guarantees a worker retry, so a failed
-		// synchronous delivery is expected degradation, not an error.
-		slog.WarnContext(ctx, "deliver auth-state invalidation, outbox worker will retry", "count", len(jtis), "error", err)
-	}
-}
-
 // verifyCode checks a submitted email code. The store keeps the code alive
 // through a bounded number of wrong guesses — a mistyped digit must not burn it,
 // because deleting on a wrong guess would let anyone who knows an address
 // invalidate its code at will. Once the budget is spent the store drops the code.
 func (s Service) verifyCode(ctx context.Context, purpose, email, code string) error {
-	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, email, code)
+	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, validate.StripSubaddress(email), code)
 	if err != nil {
 		return newError(ErrDependencyUnavailable, "校验验证码失败", err)
 	}
@@ -1105,7 +1088,7 @@ func (s Service) hashError(ctx context.Context, err error) error {
 // discardCode drops an already-matched code when a later step of the same flow
 // fails, so the spent code cannot be replayed by a retry.
 func (s Service) discardCode(ctx context.Context, purpose, email string) {
-	if err := s.VerificationCode.DiscardVerificationCode(ctx, purpose, email); err != nil {
+	if err := s.VerificationCode.DiscardVerificationCode(ctx, purpose, validate.StripSubaddress(email)); err != nil {
 		slog.WarnContext(ctx, "discard consumed verification code", "purpose", purpose, "error", err)
 	}
 }
@@ -1145,7 +1128,10 @@ func (s Service) checkLoginLock(ctx context.Context, key string) error {
 	return nil
 }
 
-func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInput, failureKey string, sentinel *Error, message string, cause error) error {
+// failLogin records one failed login attempt and returns the rejection. reason
+// keeps the not-found vs wrong-password distinction in the audit trail now that
+// the wire answers both with one code (audit-fix #7).
+func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInput, failureKey string, sentinel *Error, message, reason string, cause error) error {
 	locked := false
 	lockTTL := time.Duration(0)
 	if s.Failures != nil {
@@ -1159,7 +1145,7 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 			lockTTL = result.TTL
 		}
 	}
-	if err := s.audit(ctx, loginUserID(user), "login", "session", nil, nil, false, sentinel.Code, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, input.Identifier)}); err != nil {
+	if err := s.audit(ctx, loginUserID(user), "login", "session", nil, nil, false, sentinel.Code, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, input.Identifier), "reason": reason}); err != nil {
 		slog.Error("audit login failure", "error", err)
 	}
 	if locked {

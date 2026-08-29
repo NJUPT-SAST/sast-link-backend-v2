@@ -14,6 +14,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 type Service interface {
@@ -35,7 +36,6 @@ type Service interface {
 	UnbindIdentity(ctx context.Context, input session.UnbindIdentityInput) (*session.UnbindIdentityResult, error)
 	ListDevices(ctx context.Context, input session.ListDevicesInput) (*session.ListDevicesResult, error)
 	LogoutDevice(ctx context.Context, input session.LogoutDeviceInput) (*session.LogoutDeviceResult, error)
-	Card(ctx context.Context, input session.CardInput) (*session.CardResult, error)
 }
 
 type Handler struct {
@@ -265,11 +265,6 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	r.POST("/auth/register", h.Register)
 	r.POST("/auth/forgot-password/send-code", h.ForgotPasswordSendCode)
 	r.POST("/auth/reset-password", h.ResetPassword)
-	// The card endpoint is suspended pending a privacy redesign: a public URL
-	// keyed by sequential IDs would let anyone enumerate the full member roster.
-	// The handler/service/repository code stays in place pending that redesign,
-	// and no OIDC profile claim points at a card URL.
-	// r.GET("/card/:id", h.Card)
 
 	// Every protected route names a scope gate explicitly, so a new route that names
 	// none has no scoped-client permission rather than inheriting one. The
@@ -295,7 +290,7 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 
 func (h Handler) Login(c *gin.Context) {
 	var req loginRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -323,7 +318,7 @@ func (h Handler) Login(c *gin.Context) {
 
 func (h Handler) Refresh(c *gin.Context) {
 	var req refreshRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -385,7 +380,7 @@ func (h Handler) Logout(c *gin.Context) {
 		return
 	}
 	var req logoutRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -434,7 +429,7 @@ func (h Handler) Profile(c *gin.Context) {
 
 func (h Handler) SendRegisterCode(c *gin.Context) {
 	var req sendRegisterCodeRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -452,7 +447,7 @@ func (h Handler) SendRegisterCode(c *gin.Context) {
 
 func (h Handler) VerifyRegisterCode(c *gin.Context) {
 	var req verifyRegisterCodeRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -471,7 +466,7 @@ func (h Handler) VerifyRegisterCode(c *gin.Context) {
 
 func (h Handler) Register(c *gin.Context) {
 	var req registerRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -507,7 +502,7 @@ func (h Handler) Register(c *gin.Context) {
 
 func (h Handler) ForgotPasswordSendCode(c *gin.Context) {
 	var req forgotPasswordRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -525,7 +520,7 @@ func (h Handler) ForgotPasswordSendCode(c *gin.Context) {
 
 func (h Handler) ResetPassword(c *gin.Context) {
 	var req resetPasswordRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -552,7 +547,7 @@ func (h Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 	var req changePasswordRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -580,7 +575,7 @@ func (h Handler) BindEmailSendCode(c *gin.Context) {
 		return
 	}
 	var req bindEmailRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -605,7 +600,7 @@ func (h Handler) BindEmailVerify(c *gin.Context) {
 		return
 	}
 	var req bindEmailVerifyRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -642,7 +637,7 @@ func expiresIn(now, expiry time.Time) int64 {
 }
 
 func badRequest() error {
-	return &response.BusinessError{HTTPStatus: http.StatusBadRequest, Code: errcode.CodeBadRequest, Message: "请求参数错误"}
+	return webutil.BadRequest()
 }
 
 func unauthorized() error {
@@ -650,7 +645,14 @@ func unauthorized() error {
 }
 
 func internalError() error {
-	return &response.BusinessError{HTTPStatus: http.StatusInternalServerError, Code: errcode.CodeInternal, Message: "服务器内部错误"}
+	return webutil.InternalError()
+}
+
+// notFound builds a 404 for the paths that reject an ID before reaching the
+// service. The code is a parameter so the caller chooses between the generic
+// 40400 and a path-specific code.
+func notFound(code int, message string) error {
+	return webutil.NotFound(code, message)
 }
 
 // setSessionCookie writes the httpOnly session cookie for a freshly issued

@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // The /user self-service surface was opened to user:* third-party tokens in
@@ -27,20 +29,19 @@ func TestActorClientIDResolution(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := Service{InternalClientID: tc.internalID}
-			if got := s.actorClientID(tc.tokenID); got != tc.want {
-				t.Fatalf("actorClientID(%q) = %q, want %q", tc.tokenID, got, tc.want)
+			if got := shared.ActorClientID(tc.tokenID, tc.internalID); got != tc.want {
+				t.Fatalf("ActorClientID(%q, %q) = %q, want %q", tc.tokenID, tc.internalID, got, tc.want)
 			}
 		})
 	}
 }
 
 func TestNullableString(t *testing.T) {
-	if got := nullableString("x"); got == nil || *got != "x" {
-		t.Fatalf("nullableString(\"x\") = %v, want pointer to \"x\"", got)
+	if got := shared.NullableString("x"); got == nil || *got != "x" {
+		t.Fatalf(`shared.NullableString("x") = %v, want pointer to "x"`, got)
 	}
-	if got := nullableString(""); got != nil {
-		t.Fatalf("nullableString(\"\") = %v, want nil", got)
+	if got := shared.NullableString(""); got != nil {
+		t.Fatalf(`shared.NullableString("") = %v, want nil`, got)
 	}
 }
 

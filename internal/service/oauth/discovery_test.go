@@ -88,19 +88,16 @@ func TestDiscoveryClaimsMatchIssuedClaims(t *testing.T) {
 	}
 	emitted := map[string]bool{
 		"sub": true, "iss": true, "aud": true, "exp": true, "iat": true,
-		"auth_time": true, "nonce": true, "name": true, "picture": true,
+		"nonce": true, "name": true, "picture": true,
 		"preferred_username": true, "email": true,
 		"email_verified": true, "updated_at": true,
 		// role is this provider's own claim, under the profile scope.
 		"role": true,
 	}
-	// auth_time is issued but not advertised: the value available today is the consent
-	// instant rather than the authentication instant, which overstates how recently the
-	// user authenticated. Advertising it would invite a relying party to depend on a
-	// value this service cannot yet produce correctly.
-	// TODO(auth_time): remove the exception once a real authentication timestamp
-	// exists — see signIDToken.
-	withheld := map[string]bool{"auth_time": true}
+	// auth_time is neither issued nor advertised: no code path records a truthful
+	// authentication instant, so the token carries no such claim and the discovery
+	// list must not invite a relying party to depend on one.
+	withheld := map[string]bool{}
 
 	for _, claim := range claims {
 		if !emitted[claim] {

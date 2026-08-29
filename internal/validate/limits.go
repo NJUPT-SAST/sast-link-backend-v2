@@ -18,6 +18,10 @@ const (
 	MaxIntroLength       = 255
 	MaxDisplayEmailLen   = 255
 	MaxURLLength         = 512
+	// MinPasswordLength is the minimum accepted new-password length, shared by
+	// register, change-password, reset-password and admin provisioning. The
+	// bare literal used to be repeated at every call site.
+	MinPasswordLength = 8
 )
 
 // WithinLength reports whether value fits in a varchar(limit). PostgreSQL counts

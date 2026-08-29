@@ -11,6 +11,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/turnstile"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
@@ -49,15 +50,6 @@ func (s Service) now() time.Time {
 	return clock.Now().UTC()
 }
 
-// actorClientID resolves what to record as the acting client: the token's azp
-// when present, otherwise the console.
-func (s Service) actorClientID(tokenClientID string) string {
-	if tokenClientID != "" {
-		return tokenClientID
-	}
-	return s.ConsoleClientID
-}
-
 // auditParams describes one audit row.
 type auditParams struct {
 	// UserID is the reviewer. Nil for a submission, which is unauthenticated and has
@@ -86,8 +78,8 @@ func (s Service) audit(ctx context.Context, params auditParams) {
 		Action:    params.Action,
 		Resource:  params.Resource,
 		Success:   &success,
-		ClientIP:  nullableString(params.ClientIP),
-		UserAgent: nullableString(params.UserAgent),
+		ClientIP:  shared.NullableString(params.ClientIP),
+		UserAgent: shared.NullableString(params.UserAgent),
 		CreatedAt: s.now(),
 	}
 	if params.ResourceID != "" {
@@ -98,7 +90,7 @@ func (s Service) audit(ctx context.Context, params auditParams) {
 	// for it — attributing it to the console client would claim a credential
 	// authorized something no credential touched.
 	if params.UserID != nil {
-		entry.ActorClientID = nullableString(s.actorClientID(params.ActorClientID))
+		entry.ActorClientID = shared.NullableString(shared.ActorClientID(params.ActorClientID, s.ConsoleClientID))
 	}
 	if params.ErrCode != 0 {
 		errCode := params.ErrCode
@@ -192,13 +184,6 @@ func resolvePaging(page, pageSize int) (int, int) {
 		pageSize = validate.MaxPageSize
 	}
 	return page, pageSize
-}
-
-func nullableString(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
 }
 
 func formatID(id int64) string {

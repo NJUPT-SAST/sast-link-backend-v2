@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,14 +13,21 @@ import (
 
 func TestDeviceKeys(t *testing.T) {
 	keys := NewKeys("sast-link:test")
-	if got, want := keys.Devices(42), "sast-link:test:devices:42"; got != want {
+	if got, want := keys.Devices(42), "sast-link:test:{dev}:devices:42"; got != want {
 		t.Fatalf("Devices key = %q, want %q", got, want)
 	}
-	if got, want := keys.Device("family-1"), "sast-link:test:device:family-1"; got != want {
+	if got, want := keys.Device("family-1"), "sast-link:test:{dev}:device:family-1"; got != want {
 		t.Fatalf("Device key = %q, want %q", got, want)
 	}
 	if devices, device := keys.Devices(1), keys.Device("1"); devices == device {
 		t.Fatalf("Devices and Device keys collided: %q", devices)
+	}
+	// All three device keys must share one {dev} hash tag so the Lua scripts
+	// that touch several keys per call stay on a single Redis Cluster slot.
+	for _, key := range []string{keys.Devices(42), keys.Device("family-1")} {
+		if !strings.Contains(key, "{dev}") {
+			t.Fatalf("device key %q lacks the {dev} hash tag", key)
+		}
 	}
 }
 
@@ -258,7 +266,7 @@ func TestTouchDeviceResurrectsExpiredRecord(t *testing.T) {
 	if _, err := store.RegisterDevice(ctx, 42, "family-1", "old-ua", "10.0.0.1", now, time.Second, 5); err != nil {
 		t.Fatalf("RegisterDevice returned error: %v", err)
 	}
-	time.Sleep(1100 * time.Millisecond) // let the record expire
+	waitForExpiry(t, client, store.Keys.Device("family-1"))
 
 	daysLater := now.Add(48 * time.Hour)
 	if _, err := store.TouchDevice(ctx, 42, "family-1", "new-ua", "10.0.0.2", daysLater, time.Hour, 5); err != nil {
@@ -309,7 +317,7 @@ func TestTouchDeviceResurrectEvictsOldestWhenAtCap(t *testing.T) {
 	if _, err := store.RegisterDevice(ctx, 42, "family-C", "ua-c", "ip-c", now.Add(2*time.Minute), time.Hour, 2); err != nil {
 		t.Fatalf("RegisterDevice(C) returned error: %v", err)
 	}
-	time.Sleep(1100 * time.Millisecond) // let A expire
+	waitForExpiry(t, client, store.Keys.Device("family-A"))
 
 	// A refreshes: resurrected, and B (oldest) is evicted to hold the cap.
 	resurrected := now.Add(48 * time.Hour)
@@ -390,7 +398,7 @@ func TestTouchDeviceResurrectSweepsPhantomMembers(t *testing.T) {
 	if err := client.Del(ctx, store.Keys.Device("family-B")).Err(); err != nil {
 		t.Fatalf("Del hash: %v", err)
 	}
-	time.Sleep(1100 * time.Millisecond) // let A expire
+	waitForExpiry(t, client, store.Keys.Device("family-A"))
 
 	// A resurrects: the phantom B is swept, so no real device is evicted.
 	evicted, err := store.TouchDevice(ctx, 42, "family-A", "ua", "ip", now.Add(48*time.Hour), time.Hour, 2)
@@ -553,4 +561,23 @@ func TestListDevicesOnMissingSetIsEmpty(t *testing.T) {
 	if len(devices) != 0 {
 		t.Fatalf("devices = %#v, want empty list for a user without devices", devices)
 	}
+}
+
+// waitForExpiry polls until a Redis key reports absent (-2 TTL), so tests that
+// depend on a record expiring do not sleep a fixed interval that races under
+// load or -race (audit finding #18).
+func waitForExpiry(t *testing.T, client Cmdable, key string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ttl, err := client.PTTL(context.Background(), key).Result()
+		// Expired means the key is gone (-2). Bare -1 (no TTL) must not count as
+		// expired: a key that lost its TTL is a different bug, and reporting it
+		// gone would pass the assertion against the wrong state.
+		if err == nil && ttl == -2 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("key %q did not expire within 3s", key)
 }

@@ -126,7 +126,6 @@ func TestVerifyExpiredAccessTokenRejectsIDToken(t *testing.T) {
 		Subject:  "user-1",
 		ClientID: "some-client",
 		Scopes:   []string{"openid"},
-		AuthTime: time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC),
 		TTL:      time.Hour,
 	})
 	if err != nil {

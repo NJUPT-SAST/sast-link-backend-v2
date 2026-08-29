@@ -3,12 +3,13 @@ package session
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"image"
 	"image/jpeg"
 	"image/png"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -97,26 +98,17 @@ func testImageBytes(t *testing.T, format string) []byte {
 			t.Fatalf("encode test png: %v", err)
 		}
 	case "webp":
-		// Minimal but valid VP8L file: RIFF/WEBP container, 1x1 lossless image.
-		// DecodeConfig only reads the 5-byte VP8L header, so no pixel data is
-		// needed for the config-only path this service exercises.
-		payload := []byte{0x2F, 0x00, 0x00, 0x00, 0x00}
-		chunk := append([]byte("VP8L"), u32le(uint32(len(payload)))...) //nolint:gosec // payload is a 5-byte constant
-		chunk = append(chunk, payload...)
-		file := append([]byte("RIFF"), u32le(uint32(len(chunk)+4))...) //nolint:gosec // chunk is a 13-byte constant
-		file = append(file, []byte("WEBP")...)
-		file = append(file, chunk...)
-		return file
+		// A real, decodable WebP from golang.org/x/image's own testdata; the
+		// re-encode path decodes full pixels, so a header-only fixture would fail.
+		raw, err := os.ReadFile(filepath.Join("testdata", "webp_fixture.webp"))
+		if err != nil {
+			t.Fatalf("read webp fixture: %v", err)
+		}
+		return raw
 	default:
 		t.Fatalf("unknown test format %q", format)
 	}
 	return buf.Bytes()
-}
-
-func u32le(value uint32) []byte {
-	out := make([]byte, 4)
-	binary.LittleEndian.PutUint32(out, value)
-	return out
 }
 
 func TestUploadAvatarStoresObjectAndUpdatesProfile(t *testing.T) {
@@ -165,6 +157,96 @@ func TestUploadAvatarAcceptsAllDocumentedFormats(t *testing.T) {
 			t.Fatalf("format %s: uploads = %d, want 1", format, len(store.uploads))
 		}
 	}
+}
+
+// An image with a polyglot trailer (magic-valid image prefix + HTML/JS tail)
+// must be re-encoded to clean pixels before storage, so the tail never reaches
+// the bucket (audit finding #9).
+func TestUploadAvatarStripsPolyglotTrailer(t *testing.T) {
+	service, _, store, _, _ := avatarService(t)
+	imageData := append(testImageBytes(t, "png"), []byte("<script>alert(1)</script>")...)
+
+	if _, err := service.UploadAvatar(context.Background(), UploadAvatarInput{
+		UserID: 42, Content: bytes.NewReader(imageData), Size: int64(len(imageData)),
+	}); err != nil {
+		t.Fatalf("UploadAvatar returned error: %v", err)
+	}
+	if len(store.uploads) != 1 {
+		t.Fatalf("uploads = %d, want 1", len(store.uploads))
+	}
+	var stored []byte
+	for _, data := range store.uploads {
+		stored = data
+	}
+	if bytes.Contains(stored, []byte("<script>")) {
+		t.Fatal("stored avatar still contains the polyglot trailer")
+	}
+	if _, _, err := image.Decode(bytes.NewReader(stored)); err != nil {
+		t.Fatalf("re-encoded avatar does not decode: %v", err)
+	}
+}
+
+// A phone photo carries an EXIF orientation tag the stdlib JPEG decoder ignores;
+// the re-encode must bake the correction in, or the stored PNG comes out sideways
+// (audit-fix follow-up).
+func TestUploadAvatarAppliesEXIFOrientation(t *testing.T) {
+	service, _, store, _, _ := avatarService(t)
+	// A 4-wide by 8-tall JPEG claiming orientation 6 (rotate 90° to correct):
+	// the stored PNG must have the correction applied (8 wide, 4 tall), not the
+	// raw sideways pixels stdlib image/jpeg would hand over.
+	imageData := testJPEGWithOrientation(t, 4, 8, 6)
+
+	if _, err := service.UploadAvatar(context.Background(), UploadAvatarInput{
+		UserID: 42, Content: bytes.NewReader(imageData), Size: int64(len(imageData)),
+	}); err != nil {
+		t.Fatalf("UploadAvatar: %v", err)
+	}
+	var stored []byte
+	for _, data := range store.uploads {
+		stored = data
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(stored))
+	if err != nil {
+		t.Fatalf("stored PNG does not decode: %v", err)
+	}
+	// Orientation 6 is a 90° transform, so width and height swap.
+	if bounds := decoded.Bounds(); bounds.Dx() != 8 || bounds.Dy() != 4 {
+		t.Fatalf("stored PNG bounds = %dx%d, want 8x4 (orientation applied)", bounds.Dx(), bounds.Dy())
+	}
+}
+
+// testJPEGWithOrientation builds a WxH JPEG whose EXIF orientation tag claims
+// the given value, so the re-encode path's AutoOrientation step is exercised.
+func testJPEGWithOrientation(t *testing.T, w, h, orientation int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	var raw bytes.Buffer
+	if err := jpeg.Encode(&raw, img, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatalf("encode base jpeg: %v", err)
+	}
+	base := raw.Bytes()
+	app1 := append([]byte("Exif\x00\x00"), buildOrientationTIFF(orientation)...)
+	out := make([]byte, 0, len(base)+len(app1)+4)
+	out = append(out, base[:2]...)                                     // SOI
+	out = append(out, 0xFF, 0xE1, byte(len(app1)>>8), byte(len(app1))) // #nosec G115 — segment length is 32, far below 256
+	out = append(out, app1...)
+	out = append(out, base[2:]...)
+	return out
+}
+
+// buildOrientationTIFF returns the minimal TIFF block an EXIF APP1 segment needs
+// to carry an orientation tag (IFD0 entry 0x0112, SHORT, value 1-8).
+func buildOrientationTIFF(orientation int) []byte {
+	tiff := []byte{'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00} // little-endian, IFD0 at offset 8
+	tiff = append(tiff, 0x01, 0x00)                              // one IFD entry
+	tiff = append(tiff,
+		0x12, 0x01, // tag 0x0112 (orientation)
+		0x03, 0x00, // type 3 (SHORT)
+		0x01, 0x00, 0x00, 0x00, // count 1
+		byte(orientation), 0x00, 0x00, 0x00, // #nosec G115 — orientation is 1-8
+	)
+	tiff = append(tiff, 0x00, 0x00, 0x00, 0x00) // no more IFDs
+	return tiff
 }
 
 func TestUploadAvatarRejectsUnsupportedFormat(t *testing.T) {

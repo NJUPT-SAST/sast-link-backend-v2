@@ -7,7 +7,6 @@ import (
 	"math"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
@@ -203,9 +202,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if authorization.Nonce != nil {
 		nonce = *authorization.Nonce
 	}
-	// auth_time is the code's creation instant, which in this flow is exactly when
-	// the user confirmed the authorization: Consent creates the row on approval.
-	idToken, err := s.signIDToken(ctx, user, client, scopes, nonce, authorization.CreatedAt)
+	idToken, err := s.signIDToken(ctx, user, client, scopes, nonce)
 	if err != nil {
 		// The pair is already persisted, so a signing failure must not leave a live
 		// session the client never learned about.
@@ -307,9 +304,6 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	if err != nil {
 		return nil, newError(ErrInternal, "签发 Token Pair 失败", err)
 	}
-	// A rotation is not a fresh authentication, so auth_time stays the family
-	// origin: the sequence-0 row's creation time, read inside the rotation
-	// transaction. Reading current.CreatedAt would advance it with every rotation.
 	// The success audit rides the rotation transaction; a build failure logs and
 	// drops the row.
 	var refreshAudit *model.AuditLog
@@ -326,7 +320,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 			refreshAudit = nil
 		}
 	}
-	authTime, rotateErr := s.Tokens.RotateRefreshTokenWithAuditCapped(
+	_, rotateErr := s.Tokens.RotateRefreshTokenWithAuditCapped(
 		ctx, current.FamilyID, tokenHash, pair.Access, pair.Refresh, refreshAudit,
 		s.capabilityRefreshLifetime(scopes),
 	)
@@ -355,7 +349,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		}
 		return nil, newError(ErrInternal, "轮换 refresh_token 失败", rotateErr)
 	}
-	idToken, err := s.signIDToken(ctx, user, client, scopes, "", authTime)
+	idToken, err := s.signIDToken(ctx, user, client, scopes, "")
 	if err != nil {
 		s.revokeFamily(ctx, pair.FamilyID)
 		return nil, err
@@ -425,19 +419,15 @@ func matchRedirectURI(authorized *string, presented string) error {
 	return nil
 }
 
-// signIDToken builds the ID Token for a granted scope set.
-//
-// authTime is the moment the user approved the authorization, which is NOT what
-// OIDC means by auth_time (when the end user authenticated): nothing records an
-// authentication instant yet, so the value overstates recency. The claim is kept
-// out of claims_supported for that reason — see Discovery.
+// signIDToken builds the ID Token for a granted scope set. auth_time is
+// deliberately not part of it: no code path records a real authentication
+// instant yet, so any value would overstate recency (see discovery.go).
 func (s Service) signIDToken(
 	ctx context.Context,
 	user *model.User,
 	client *model.OAuthClient,
 	scopes []string,
 	nonce string,
-	authTime time.Time,
 ) (string, error) {
 	claims, err := s.idTokenClaims(ctx, user, scopes)
 	if err != nil {
@@ -448,7 +438,6 @@ func (s Service) signIDToken(
 		ClientID: client.ClientID,
 		Scopes:   scopes,
 		Nonce:    nonce,
-		AuthTime: authTime,
 		TTL:      s.accessTTL(),
 		Claims:   claims,
 	})

@@ -42,6 +42,52 @@ jobs:
         with:
           version: v2.12.2
 
+  # OpenAPI contract lint against the redocly recommended ruleset. Runs only on
+  # PRs (and main pushes) that touch docs/openapi.yaml: the current contract does
+  # not yet pass every recommended rule (no `servers:` declared, out-of-order
+  # schema properties), so an unconditional gate would fail PRs that never edit
+  # the contract until those are cleared. Gating on the file itself keeps
+  # unrelated PRs green while every contract edit is validated.
+  openapi:
+    name: openapi lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The change probe below diffs against the change's base commit.
+          fetch-depth: 0
+
+      - name: Detect docs/openapi.yaml changes
+        id: changed
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            base="${{ github.event.before }}"
+            # A new branch's first push carries an all-zero before; diffing
+            # against it is fatal, so fall back to the parent commit (or, at the
+            # root commit, to HEAD itself — an empty diff, conservatively skipped).
+            if [[ "$base" == "0000000000000000000000000000000000000000" ]]; then
+              base="$(git rev-parse HEAD^ 2>/dev/null || echo "${{ github.sha }}")"
+            fi
+          else
+            base="HEAD~1"
+          fi
+          if git diff --name-only "$base" HEAD | grep -qx 'docs/openapi.yaml'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v7
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          node-version: 22
+
+      - name: Lint OpenAPI contract
+        if: steps.changed.outputs.changed == 'true'
+        run: npx --yes @redocly/cli@1.34.19 lint docs/openapi.yaml
+
   # The test suite is split in two parallel jobs: packages whose tests start
   # Testcontainers (internal/testutil importers) and packages that run without
   # external services. The integration batch provisions a PostgreSQL 16 and a
@@ -72,6 +118,13 @@ jobs:
           # shellcheck disable=SC2046
           go test -race -shuffle=on -pgo=off -coverprofile=coverage-unit.out -covermode=atomic $(bash scripts/split-test-packages.sh unit)
 
+      - name: Upload unit coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-unit
+          path: coverage-unit.out
+          if-no-files-found: error
+
   test-integration:
     name: test (integration)
     runs-on: ubuntu-latest
@@ -93,8 +146,9 @@ jobs:
         # optimization (it only shapes the production binary).
         #
         # -timeout 25m raises go test's per-package default of 10 minutes.
-        # internal/repository provisions a PostgreSQL container per test through
-        # Testcontainers and is already past that default on a developer machine;
+        # internal/repository shares one PostgreSQL container with a dedicated
+        # schema per test (internal/testutil/postgres.go) and is already past
+        # that default on a developer machine;
         # the integration suites in internal/migration and the handler packages
         # are the same shape. A default-timeout failure is especially misleading
         # here: the panic reports "test timed out" with no `--- FAIL` line, so it
@@ -109,6 +163,13 @@ jobs:
           # shellcheck disable=SC2046
           go test -race -shuffle=on -pgo=off -timeout 25m -coverprofile=coverage-integration.out -covermode=atomic $(bash scripts/split-test-packages.sh integration)
 
+      - name: Upload integration coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-integration
+          path: coverage-integration.out
+          if-no-files-found: error
+
   # Aggregation gate. The check name stays `test`, so branch protection keeps
   # working unchanged; deploy.yml gates on the whole run's conclusion, which
   # this job participates in, so nothing there moves either.
@@ -119,6 +180,40 @@ jobs:
     needs: [test-unit, test-integration]
     steps:
       - run: echo "unit and integration tests passed"
+
+  # Coverage aggregation for human inspection (a PR's own coverage surface, not a
+  # gate). The two batches partition ./... exactly — asserted by test-split below —
+  # and each package's profile records only its own source files, so no file is
+  # covered twice and concatenating the two profiles (keeping the first file's
+  # `mode:` header) is a correct merge, not a lossy approximation.
+  coverage-merge:
+    name: merge coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [test-unit, test-integration]
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-unit
+          path: coverage-unit
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-integration
+          path: coverage-integration
+
+      - name: Merge coverage profiles
+        run: |
+          set -euo pipefail
+          head -1 coverage-unit/coverage-unit.out > coverage-merged.out
+          tail -n +2 coverage-unit/coverage-unit.out >> coverage-merged.out
+          tail -n +2 coverage-integration/coverage-integration.out >> coverage-merged.out
+
+      - name: Upload merged coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-merged
+          path: coverage-merged.out
+          if-no-files-found: error
 
   # Asserts the two batches partition ./... exactly: nothing missed (a package
   # would silently stop being tested) and nothing duplicated (a package's

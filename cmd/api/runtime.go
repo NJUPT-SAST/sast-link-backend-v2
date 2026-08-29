@@ -81,6 +81,29 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	identities := repository.NewIdentity(database)
 
 	keys := internalredis.NewKeys(cfg.RedisKeyPrefix)
+	// Every endpoint limiter below shares one skeleton — client, keys,
+	// limit and window — differing only in the quota. Builders keep the 16
+	// near-identical literals from drifting (audit finding #11).
+	newSessionLimiter := func(limit int, window time.Duration) sessionredis.EndpointLimiter {
+		return sessionredis.EndpointLimiter{
+			Limiter: internalredis.FixedWindowLimiter{Client: rdb, Keys: keys, Limit: limit, Window: window},
+		}
+	}
+	newOAuthLimiter := func(limit int, window time.Duration) oauthredis.EndpointLimiter {
+		return oauthredis.EndpointLimiter{
+			Limiter: internalredis.FixedWindowLimiter{Client: rdb, Keys: keys, Limit: limit, Window: window},
+		}
+	}
+	newOAuthLoginLimiter := func(limit int, window time.Duration) oauthloginredis.EndpointLimiter {
+		return oauthloginredis.EndpointLimiter{
+			Limiter: internalredis.FixedWindowLimiter{Client: rdb, Keys: keys, Limit: limit, Window: window},
+		}
+	}
+	newAlumniLimiter := func(limit int, window time.Duration) alumniredis.EndpointLimiter {
+		return alumniredis.EndpointLimiter{
+			Limiter: internalredis.FixedWindowLimiter{Client: rdb, Keys: keys, Limit: limit, Window: window},
+		}
+	}
 	// The tombstone TTL must outlive the longest in-flight request, so size it
 	// from WriteTimeout plus a margin.
 	store := internalredis.Store{
@@ -89,83 +112,19 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		AuthStateTombstoneTTL: ServerWriteTimeout + 5*time.Second,
 	}
 	blacklist := sessionredis.BlacklistStore{Store: store}
-	limiter := sessionredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitLoginRPM,
-			Window: cfg.RateLimitLoginWindow,
-		},
-	}
-	emailLimiter := sessionredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitSendEmailRPM,
-			Window: cfg.RateLimitSendEmailWindow,
-		},
-	}
-	emailIPLimiter := sessionredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitSendEmailIPRPM,
-			Window: cfg.RateLimitSendEmailWindow,
-		},
-	}
+	limiter := newSessionLimiter(cfg.RateLimitLoginRPM, cfg.RateLimitLoginWindow)
+	emailLimiter := newSessionLimiter(cfg.RateLimitSendEmailRPM, cfg.RateLimitSendEmailWindow)
+	emailIPLimiter := newSessionLimiter(cfg.RateLimitSendEmailIPRPM, cfg.RateLimitSendEmailWindow)
 	failures := sessionredis.LoginFailureStore{Store: store, Limit: cfg.LoginFailureLimit, Window: cfg.LoginFailureWindow}
 	bindTickets := sessionredis.BindTicketStore{Store: store}
 	oauthLoginStates := oauthloginredis.StateStore{Store: store}
 	oauthRegistrations := oauthloginredis.RegistrationStateStore{Store: store}
 	oauthLoginCodes := oauthloginredis.LoginCodeStore{Store: store}
-	unbindLimiter := sessionredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitUnbindRPM,
-			Window: cfg.RateLimitUnbindWindow,
-		},
-	}
-	registerLimiter := sessionredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitRegisterAttempts,
-			Window: cfg.RateLimitRegisterWindow,
-		},
-	}
-	cardLimiter := sessionredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitCardRPM,
-			Window: cfg.RateLimitCardWindow,
-		},
-	}
-	refreshLimiter := sessionredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitRefreshRPM,
-			Window: cfg.RateLimitRefreshWindow,
-		},
-	}
-	avatarLimiter := sessionredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitUploadAvatarRPM,
-			Window: cfg.RateLimitUploadAvatarWindow,
-		},
-	}
-	deviceLimiter := sessionredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitDeviceRPM,
-			Window: cfg.RateLimitDeviceWindow,
-		},
-	}
+	unbindLimiter := newSessionLimiter(cfg.RateLimitUnbindRPM, cfg.RateLimitUnbindWindow)
+	registerLimiter := newSessionLimiter(cfg.RateLimitRegisterAttempts, cfg.RateLimitRegisterWindow)
+	refreshLimiter := newSessionLimiter(cfg.RateLimitRefreshRPM, cfg.RateLimitRefreshWindow)
+	avatarLimiter := newSessionLimiter(cfg.RateLimitUploadAvatarRPM, cfg.RateLimitUploadAvatarWindow)
+	deviceLimiter := newSessionLimiter(cfg.RateLimitDeviceRPM, cfg.RateLimitDeviceWindow)
 	// Object storage is optional: unconfigured, PUT /user/avatar answers 50002;
 	// when configured the COS client also carries fail-closed image review.
 	var avatarStore objectstore.ObjectStore
@@ -225,7 +184,6 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		OAuthRegistration: sessionredis.OAuthRegistrationStore{Store: store},
 		UnbindLimiter:     unbindLimiter,
 		RegisterLimiter:   registerLimiter,
-		CardLimiter:       cardLimiter,
 		AvatarLimiter:     avatarLimiter,
 		RefreshLimiter:    refreshLimiter,
 		AvatarStore:       avatarStore,
@@ -252,45 +210,14 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		// /admin by carrying an admin scope.
 	}
 
-	authorizeLimiter := oauthredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitAuthorizeRPM,
-			Window: cfg.RateLimitAuthorizeWindow,
-		},
-	}
-	tokenLimiter := oauthredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitTokenRPM,
-			Window: cfg.RateLimitTokenWindow,
-		},
-	}
+	authorizeLimiter := newOAuthLimiter(cfg.RateLimitAuthorizeRPM, cfg.RateLimitAuthorizeWindow)
+	tokenLimiter := newOAuthLimiter(cfg.RateLimitTokenRPM, cfg.RateLimitTokenWindow)
 	// Keyed per user, not per IP: this surface is authenticated and the campus shares one NAT egress.
-	consentInfoLimiter := oauthredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitConsentInfoRPM,
-			Window: cfg.RateLimitConsentInfoWindow,
-		},
-	}
+	consentInfoLimiter := newOAuthLimiter(cfg.RateLimitConsentInfoRPM, cfg.RateLimitConsentInfoWindow)
 	// Consent submission mints codes, so it gets its own per-user budget; userinfo
 	// is deliberately unbudgeted — it requires a valid token and campus NAT is shared.
-	consentLimiter := oauthredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb, Keys: keys,
-			Limit: cfg.RateLimitConsentRPM, Window: cfg.RateLimitConsentWindow,
-		},
-	}
-	grantsLimiter := oauthredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb, Keys: keys,
-			Limit: cfg.RateLimitGrantsRPM, Window: cfg.RateLimitGrantsWindow,
-		},
-	}
+	consentLimiter := newOAuthLimiter(cfg.RateLimitConsentRPM, cfg.RateLimitConsentWindow)
+	grantsLimiter := newOAuthLimiter(cfg.RateLimitGrantsRPM, cfg.RateLimitGrantsWindow)
 	oauthService := oauth.Service{
 		Users:                        users,
 		Clients:                      clients,
@@ -334,22 +261,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			TenantKey: cfg.OAuthLarkTenantKey,
 		}, nil, nil)
 	}
-	oauthLoginAuthorizeLimiter := oauthloginredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitOAuthLoginRPM,
-			Window: cfg.RateLimitOAuthLoginWindow,
-		},
-	}
-	oauthLoginExchangeLimiter := oauthloginredis.EndpointLimiter{
-		Limiter: internalredis.FixedWindowLimiter{
-			Client: rdb,
-			Keys:   keys,
-			Limit:  cfg.RateLimitExchangeCodeRPM,
-			Window: cfg.RateLimitExchangeCodeWindow,
-		},
-	}
+	oauthLoginAuthorizeLimiter := newOAuthLoginLimiter(cfg.RateLimitOAuthLoginRPM, cfg.RateLimitOAuthLoginWindow)
+	oauthLoginExchangeLimiter := newOAuthLoginLimiter(cfg.RateLimitExchangeCodeRPM, cfg.RateLimitExchangeCodeWindow)
 	oauthLoginService := oauthlogin.Service{
 		Providers:         loginProviders,
 		AuthorizeLimiter:  oauthLoginAuthorizeLimiter,
@@ -412,19 +325,12 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	alumniNotifier := alumnirequestworker.New(alumniRequests, emailer,
 		cfg.AlumniResetURL, cfg.AlumniSupportEmail)
 	alumniService := alumnirequest.Service{
-		Requests:  alumniRequests,
-		Users:     users,
-		Audit:     audit,
-		Passwords: passwordHasher,
-		Captcha:   captchaVerifier,
-		Limiter: alumniredis.EndpointLimiter{
-			Limiter: internalredis.FixedWindowLimiter{
-				Client: rdb,
-				Keys:   keys,
-				Limit:  cfg.RateLimitAlumniRequestRPM,
-				Window: cfg.RateLimitAlumniRequestWindow,
-			},
-		},
+		Requests:        alumniRequests,
+		Users:           users,
+		Audit:           audit,
+		Passwords:       passwordHasher,
+		Captcha:         captchaVerifier,
+		Limiter:         newAlumniLimiter(cfg.RateLimitAlumniRequestRPM, cfg.RateLimitAlumniRequestWindow),
 		SubmitRateLimit: cfg.RateLimitAlumniRequestRPM,
 		Notifier:        alumniNotifier,
 		ConsoleClientID: cfg.InternalOAuthClientID,

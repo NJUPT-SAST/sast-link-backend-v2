@@ -38,10 +38,9 @@ func (s Service) Discovery() map[string]any {
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
 		// role is this provider's own claim, not an OIDC one, advertised here because a
 		// relying party has no other way to discover it; it rides the profile scope.
-		// auth_time is deliberately absent even though the ID Token carries it: the
-		// value could only be the consent instant, not when the user authenticated.
-		// TODO(auth_time): persisting a real authentication timestamp at login would
-		// let this entry be advertised.
+		// auth_time is deliberately absent from both the ID Token and this list:
+		// no code path records a real authentication instant, so the only value
+		// available would be the consent instant — not when the user authenticated.
 		"claims_supported": []string{
 			"sub", "iss", "aud", "exp", "iat", "nonce",
 			"name", "picture", "preferred_username", "role",

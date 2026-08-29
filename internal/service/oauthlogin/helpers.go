@@ -17,6 +17,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/provider"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // providerIdentity aliases the provider package's normalized identity so this
@@ -141,6 +142,7 @@ func (s Service) audit(
 	resourceID *string,
 	success bool,
 	errCode int,
+	actorClientID string,
 	clientIP string,
 	userAgent string,
 	detail map[string]any,
@@ -183,7 +185,11 @@ func (s Service) audit(
 		UserAgent:  userAgentPtr,
 		Success:    &successValue,
 		ErrCode:    errCodePtr,
-		CreatedAt:  s.now(),
+		// The acting client, or the built-in console client for an internal
+		// session: an authenticated bind is not an unauthenticated action, so
+		// NULL here must stay unambiguous.
+		ActorClientID: shared.NullableString(shared.ActorClientID(actorClientID, s.InternalClientID)),
+		CreatedAt:     s.now(),
 	})
 }
 
@@ -217,7 +223,7 @@ func (s Service) auditLogin(
 		"provider":    string(input.Provider),
 		"provider_id": providerID,
 	}
-	if err := s.audit(ctx, userID, "oauth_login", "session", nil, success, errCode,
+	if err := s.audit(ctx, userID, "oauth_login", "session", nil, success, errCode, "",
 		input.ClientIP, input.UserAgent, detail); err != nil {
 		logAuditFailure(ctx, "oauth_login", err)
 	}

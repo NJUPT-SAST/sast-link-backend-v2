@@ -14,3 +14,12 @@ repos:
       - id: go-fmt
       - id: go-imports
       - id: go-vet
+
+  # Same linter the CI lint job runs (golangci/golangci-lint-action, also pinned
+  # to v2.12.2), so a commit and CI read the same .golangci.yml with the same
+  # version. The default hook lints only the change (--new-from-rev HEAD); swap
+  # the id for golangci-lint-full to run the whole module exactly like CI does.
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.12.2
+    hooks:
+      - id: golangci-lint

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 const (
@@ -66,7 +67,7 @@ func (w Retention) Run(ctx context.Context) error {
 	if err := w.validate(); err != nil {
 		return err
 	}
-	ticker := time.NewTicker(durationOrDefault(w.Interval, defaultRetentionInterval))
+	ticker := time.NewTicker(shared.DurationOrDefault(w.Interval, defaultRetentionInterval))
 	defer ticker.Stop()
 
 	w.sweep(ctx)
@@ -189,11 +190,4 @@ func (w Retention) now() time.Time {
 		clock = auth.SystemClock
 	}
 	return clock.Now().UTC()
-}
-
-func durationOrDefault(value, fallback time.Duration) time.Duration {
-	if value > 0 {
-		return value
-	}
-	return fallback
 }

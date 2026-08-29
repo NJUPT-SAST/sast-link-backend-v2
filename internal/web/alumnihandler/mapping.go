@@ -116,7 +116,7 @@ func mapServiceError(err error) error {
 		return internalError()
 	}
 	status := http.StatusInternalServerError
-	message := "服务器内部错误"
+	message := errcode.Messages[errcode.CodeInternal]
 	switch serviceErr.Kind {
 	case alumnirequest.KindInvalidInput:
 		status = http.StatusBadRequest
@@ -125,7 +125,7 @@ func mapServiceError(err error) error {
 		message = serviceErr.Message
 	case alumnirequest.KindNotFound:
 		status = http.StatusNotFound
-		message = "建号申请不存在"
+		message = errcode.Messages[errcode.CodeAlumniRequestNotFound]
 	case alumnirequest.KindConflict:
 		status = http.StatusConflict
 		message = serviceErr.Message

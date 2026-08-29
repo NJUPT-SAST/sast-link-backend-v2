@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 type ListDevicesInput struct {
@@ -52,7 +54,7 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 		slog.WarnContext(ctx, "revoke evicted device family failed", "user_id", userID, "device_id", evicted, "error", err)
 		return
 	}
-	s.deliverBlacklist(ctx, entries, now)
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
 	if s.Devices != nil {
 		if err := s.Devices.RemoveDevice(ctx, userID, evicted); err != nil {
 			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)
@@ -111,13 +113,13 @@ func (s Service) LogoutDevice(ctx context.Context, input LogoutDeviceInput) (*Lo
 	if err != nil {
 		return nil, newError(ErrInternal, "撤销设备会话失败", err)
 	}
-	s.deliverBlacklist(ctx, entries, now)
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
 	// The family is dead; the record cleanup is best-effort and must not fail
 	// the call the user sees as a successful logout.
 	if err := s.Devices.RemoveDevice(ctx, input.UserID, deviceID); err != nil {
 		slog.WarnContext(ctx, "remove device after logout failed", "user_id", input.UserID, "device_id", deviceID, "error", err)
 	}
-	if auditErr := s.audit(ctx, &input.UserID, "logout_device", "session", &deviceID, nullableString(s.actorClientID(input.ActorClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{"device_id": deviceID}); auditErr != nil {
+	if auditErr := s.audit(ctx, &input.UserID, "logout_device", "session", &deviceID, shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), true, 0, input.ClientIP, input.UserAgent, map[string]any{"device_id": deviceID}); auditErr != nil {
 		slog.Error("audit logout device", "user_id", input.UserID, "device_id", deviceID, "error", auditErr)
 	}
 	return &LogoutDeviceResult{DeviceID: deviceID}, nil

@@ -48,7 +48,6 @@ tags:
       （需 `admin:*` scope，仅 `third_party` 可持有，且用户须为管理员）。
   - name: Health
   - name: OIDC
-  - name: Card
 paths:
   /auth/register/send-code:
     post:
@@ -268,10 +267,9 @@ paths:
           description: 参数错误（400xx）
         "401":
           $ref: "#/components/responses/Unauthorized"
-          description: 未认证（401xx）
-        "403":
-          $ref: "#/components/responses/Forbidden"
-          description: 账号已注销（40301）
+          description: >-
+            未认证（401xx）。登录失败统一返回 40105（邮箱或密码错误）：邮箱不存在、
+            密码错误与账号已注销不区分（避免枚举已注册邮箱）。
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: 登录限流或失败锁定（42900）
@@ -791,6 +789,7 @@ paths:
                 college:
                   allOf:
                     - $ref: "#/components/schemas/College"
+                  type: string
                   nullable: true
                   description: 学院。NOT NULL 字段，传空字符串或空白返回 40000；传 null 表示不修改
                 major:
@@ -930,49 +929,6 @@ paths:
                 $ref: "#/components/schemas/StandardEnvelope"
       security:
         - bearerAuth: []
-  /card/{id}:
-    get:
-      summary: 获取个人卡片
-      deprecated: true
-      description: |
-        已下线（路由注释，暂不响应）。顺序 ID 的公开 URL 可枚举全站成员名单，隐私重设计中。
-        重开后为 owner-only + 不可枚举标识，不会原样启用。
-      operationId: cardGetCard
-      tags:
-        - Card
-      parameters:
-        - name: id
-          in: path
-          description: 用户 ID，正整数；非正整数或含非数字字符返回 404
-          required: true
-          example: 12
-          schema:
-            type: integer
-            format: int64
-            minimum: 1
-      responses:
-        "200":
-          description: 个人卡片数据
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CardResponse"
-          headers: {}
-        "404":
-          $ref: "#/components/responses/NotFound"
-          description: 用户不存在或已注销
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
-          description: >-
-            请求过于频繁（42900，带 Retry-After）。按调用方 IP 限流，默认 300 次/60s
-            （RATE_LIMIT_CARD_RPM）：本端点无认证且路径参数是连续用户 ID，
-            不限流即等于开放全站公开卡片的抓取。限流在 ID 校验之前生效，
-            因此无效 ID 同样消耗配额——它得到的 404 正是枚举者要读的信号。
-            配额按共享出口 IP 下的成员墙定档，只能减缓而非阻止抓取；
-            公开卡片的批量读取应交由反向代理缓存承担。
-        "500":
-          $ref: "#/components/responses/InternalError"
-      security: []
   /user/identities:
     get:
       summary: 获取绑定列表
@@ -1043,6 +999,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/IdentityBindResponse"
           headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
@@ -1095,6 +1054,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/IdentityBindResponse"
           headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
@@ -1133,6 +1095,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/BindTicketResponse"
           headers: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 未认证（401xx）
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
@@ -2109,6 +2074,7 @@ paths:
           required: false
           schema:
             type: string
+            maxLength: 255
         - name: needs_completion
           in: query
           description: |
@@ -2280,7 +2246,7 @@ paths:
           in: path
           description: 用户 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       responses:
@@ -2314,7 +2280,7 @@ paths:
           in: path
           description: 用户 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       requestBody:
@@ -2436,7 +2402,7 @@ paths:
           in: path
           description: 用户 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       responses:
@@ -2477,7 +2443,7 @@ paths:
           in: path
           description: 用户 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       responses:
@@ -2661,7 +2627,7 @@ paths:
           in: path
           description: 客户端内部 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       requestBody:
@@ -2771,7 +2737,7 @@ paths:
           in: path
           description: 客户端内部 ID
           required: true
-          example: 0
+          example: 1
           schema:
             type: integer
       responses:
@@ -3479,6 +3445,26 @@ paths:
                 $ref: "#/components/schemas/HealthResponse"
           headers: {}
       security: []
+  /metrics:
+    get:
+      summary: Prometheus 指标
+      deprecated: false
+      description: >
+        请求计数与延迟、Go runtime 与进程指标的 Prometheus 文本抓取端点。与
+        /health 一样是匿名抓取面，刻意不设认证；部署层应在内网或网关白名单
+        后暴露它。
+      operationId: metricsScrape
+      tags:
+        - Operations
+      parameters: []
+      responses:
+        "200":
+          description: Prometheus 文本格式指标
+          content:
+            text/plain:
+              schema:
+                type: string
+      security: []
 components:
   schemas:
     UserRole:
@@ -3851,6 +3837,7 @@ components:
         department:
           allOf:
             - $ref: "#/components/schemas/Department"
+          type: string
           nullable: true
         intro:
           type: string
@@ -3953,6 +3940,7 @@ components:
         department:
           allOf:
             - $ref: "#/components/schemas/Department"
+          type: string
           nullable: true
           description: 部门，用户尚无 profile 行时为 null
         profile_needs_completion:
@@ -4230,7 +4218,6 @@ components:
     #   - /oauth/authorize/consent → SAST Link 自有端点而非 RFC 定义端点，沿用标准信封
     #   - /userinfo → 成功为 OIDC UserInfo claims；错误为 RFC 6750 Bearer Token 格式
     #   - /health → 直接 {status, db, redis}
-    #   - /card/{id} → 已下线（隐私重设计中），暂不响应
     #   - /.well-known/openid-configuration → OIDC Discovery JSON
     #   - /.well-known/jwks.json → JWKS JSON
     StandardEnvelope:
@@ -4422,6 +4409,7 @@ components:
         profile:
           allOf:
             - $ref: "#/components/schemas/Profile"
+          type: object
           nullable: true
           description: 用户尚无 profile 行时为 null
         identities:
@@ -4934,46 +4922,6 @@ components:
             - ok
             - degraded
           example: ok
-    CardResponse:
-      type: object
-      description: 个人卡片响应（公开端点，不使用标准信封）
-      properties:
-        id:
-          type: integer
-          description: 用户 ID
-          example: 1
-        nickname:
-          type: string
-          nullable: true
-          description: 昵称
-          example: 张三
-        department:
-          allOf:
-            - $ref: "#/components/schemas/Department"
-          nullable: true
-        intro:
-          type: string
-          nullable: true
-          description: 自我介绍
-          example: 自我介绍
-        avatar:
-          type: string
-          nullable: true
-          format: uri
-          description: 头像 URL
-          example: https://cos.example.com/avatar/1.jpg
-        blog_url:
-          type: string
-          nullable: true
-          format: uri
-          description: 个人博客链接
-          example: https://blog.example.com
-        github_url:
-          type: string
-          nullable: true
-          format: uri
-          description: GitHub 主页链接
-          example: https://github.com/example
     OpenIDConfiguration:
       type: object
       description: |
@@ -5058,10 +5006,9 @@ components:
           items:
             type: string
           description: |
-            支持的 claims。注意 `auth_time` **会在 ID Token 中签发但不在此列表中**：
-            当前可得的值是授权确认时刻而非真实认证时刻，会高报认证新鲜度，
-            通告它等于邀请 RP 依赖一个本服务尚无法正确产出的值。
-            待持久化真实认证时刻后再加回。
+            支持的 claims。`auth_time` 不在此列表中，ID Token 也不签发它：服务端
+            未持久化真实认证时刻，唯一可得的值是授权确认时刻而非认证时刻，会
+            高报认证新鲜度，因此不发这个值，也不通告。
           example:
             - sub
             - iss
@@ -5229,14 +5176,6 @@ components:
           type: integer
           description: 签发时间（Unix timestamp）
           example: 1717396400
-        auth_time:
-          type: integer
-          description: |
-            **授权确认时间，不是 OIDC 定义的认证时间**（Unix timestamp）。服务端尚未持久化
-            真实认证时刻，因此闲置多日后再授权会把该值报成今天，高报认证新鲜度。
-            该 claim 因此不在 `claims_supported` 中通告，`max_age` / `prompt` 也未实现，
-            请勿依赖它判断认证新鲜度。
-          example: 1717396400
         nonce:
           type: string
           description: 防重放值，与授权请求中的 nonce 一致
@@ -5292,6 +5231,7 @@ components:
                 type: string
                 description: 错误描述
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5328,6 +5268,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5344,13 +5285,7 @@ components:
               summary: wrong_password
               value:
                 code: 40105
-                message: 密码错误
-                data: null
-            email_not_found:
-              summary: email_not_found
-              value:
-                code: 40106
-                message: 登录邮箱不存在
+                message: 邮箱或密码错误
                 data: null
             token_expired:
               summary: token_expired
@@ -5376,6 +5311,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5418,6 +5354,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5448,6 +5385,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5484,6 +5422,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5518,6 +5457,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5542,6 +5482,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5576,6 +5517,7 @@ components:
               message:
                 type: string
               data:
+                type: object
                 nullable: true
             required:
               - code
@@ -5594,5 +5536,6 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: JWT Bearer Token。Access Token 有效期 1 小时。
-servers: []
+servers:
+  - url: https://link.sast.fun/v2
 security: []

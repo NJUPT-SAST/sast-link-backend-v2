@@ -126,9 +126,6 @@ type UserRepository interface {
 	// UpdateProfile applies a partial self-service field update across "user" and
 	// profile in one transaction and returns the reloaded aggregate.
 	UpdateProfile(ctx context.Context, userID int64, update repository.ProfileUpdate) (*model.User, error)
-	// FindPublicCardByUserID returns the public display card of a non-deleted
-	// user, or repository.ErrNotFound.
-	FindPublicCardByUserID(ctx context.Context, userID int64) (*repository.PublicCard, error)
 }
 
 type ClientRepository interface {
@@ -491,29 +488,6 @@ type UnbindIdentityInput struct {
 type UnbindIdentityResult struct {
 	Provider   string
 	ProviderID string
-}
-
-type CardInput struct {
-	UserID int64
-	// ClientIP is the rate-limit subject. This endpoint is unauthenticated, so
-	// the caller IP is the only key available.
-	ClientIP string
-}
-
-type CardResult struct {
-	Card CardDTO
-}
-
-// CardDTO is the public display card; only the public fields appear here,
-// nothing from the user's identity or permission columns.
-type CardDTO struct {
-	ID         int64
-	Nickname   *string
-	Department *string
-	Intro      *string
-	Avatar     *string
-	BlogURL    *string
-	GitHubURL  *string
 }
 
 type UpdateProfileResult struct {
