@@ -1,26 +1,14 @@
 package adminhandler
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
-	"mime"
 	"net/http"
 	"time"
-
-	"github.com/gin-gonic/gin"
-	"github.com/gin-gonic/gin/binding"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminclient"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
-)
-
-const maxJSONRequestBodyBytes int64 = 64 << 10
-
-var (
-	errInvalidJSONContentType = errors.New("request Content-Type must be application/json")
-	errTrailingJSONValue      = errors.New("JSON request body contains multiple values")
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 // clientDTO is one registration on the wire. Written out field by field rather
@@ -104,9 +92,10 @@ func mapServiceError(err error) error {
 		message = serviceErr.Message
 	case adminclient.KindNotFound:
 		status = http.StatusNotFound
-		message = "OAuth 客户端不存在"
+		message = errcode.Messages[errcode.CodeClientNotFound]
 	case adminclient.KindConflict:
 		status = http.StatusConflict
+		// This surface names the exact duplicate, unlike the canonical 40900.
 		message = "OAuth 客户端已存在"
 	case adminclient.KindProtected:
 		// 403 rather than 400: the request is well formed and the administrator is
@@ -124,48 +113,13 @@ func mapServiceError(err error) error {
 }
 
 func internalError() error {
-	return &response.BusinessError{
-		HTTPStatus: http.StatusInternalServerError,
-		Code:       errcode.CodeInternal,
-		Message:    "服务器内部错误",
-	}
+	return webutil.InternalError()
 }
 
 func badRequest() error {
-	return &response.BusinessError{
-		HTTPStatus: http.StatusBadRequest,
-		Code:       errcode.CodeBadRequest,
-		Message:    "请求参数错误",
-	}
+	return webutil.BadRequest()
 }
 
 func notFound() error {
-	return &response.BusinessError{
-		HTTPStatus: http.StatusNotFound,
-		Code:       errcode.CodeClientNotFound,
-		Message:    "OAuth 客户端不存在",
-	}
-}
-
-// decodeStrictJSON applies the shared request-body policy: exact content type, a
-// size cap, no unknown fields, and no trailing values.
-func decodeStrictJSON(c *gin.Context, destination any) error {
-	mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		return errInvalidJSONContentType
-	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBodyBytes)
-	decoder := json.NewDecoder(c.Request.Body)
-	// Unknown fields are rejected, which is what makes the immutable properties
-	// safe: a request trying to change client_id / client_secret / client_type /
-	// id is refused outright instead of silently ignored.
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return errTrailingJSONValue
-	}
-	return binding.Validator.ValidateStruct(destination)
+	return webutil.NotFound(errcode.CodeClientNotFound, errcode.Messages[errcode.CodeClientNotFound])
 }

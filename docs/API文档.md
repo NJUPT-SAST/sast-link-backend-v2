@@ -7,7 +7,7 @@
 - **Content-Type**: 标准业务接口使用 `application/json`；OAuth Token/Revoke 使用 `application/x-www-form-urlencoded`
 - **OAuth 2.1**: 授权端点使用 PKCE-S256，第一方应用无需 client_secret
 - **OIDC**: 基于 OAuth 2.1 的 OpenID Connect Provider，scope 含 `openid` 时返回 ID Token
-- **响应格式**: 标准业务接口使用标准化响应信封；OAuth/OIDC/健康检查/公开卡片等协议或直出端点见下方例外列表
+- **响应格式**: 标准业务接口使用标准化响应信封；OAuth/OIDC/健康检查等协议或直出端点见下方例外列表
 
 ---
 
@@ -32,7 +32,7 @@
 ```json
 {
   "code": 40105,
-  "message": "密码错误",
+  "message": "邮箱或密码错误",
   "data": null
 }
 ```
@@ -57,7 +57,7 @@
 `/oauth/authorize/consent` 是 SAST Link 自有端点而非 RFC 定义端点，**使用标准信封**，不在上述例外之列。
 
 - `/health`：直出 `{ "status", "db", "redis" }`。
-- `/card/{id}`：**已下线**（见 §3.4），暂不响应。
+- `/metrics`：直出 Prometheus 文本格式指标，不鉴权（与 `/health` 同类），供监控拉取。
 
 **OAuth 2.1 错误响应示例**：
 
@@ -99,8 +99,8 @@
 | `40102` | Access Token 无效或已被撤销 |
 | `40103` | Register-Ticket 无效或已过期 |
 | `40104` | Bind-Ticket 无效或已过期 |
-| `40105` | 密码错误 |
-| `40106` | 登录邮箱不存在 |
+| `40105` | 邮箱或密码错误（登录统一返回，避免枚举已注册邮箱；旧密码校验的"密码错误"亦为此码） |
+| `40106` | 登录邮箱不存在（仅非登录流程如找回密码返回） |
 | `40107` | login_code 无效或已过期 |
 | `40108` | 刷新请求冲突（30s 宽限窗内被并发刷新，家族保留） |
 
@@ -794,7 +794,7 @@ PUT /user/profile
 - 传 `null` 等同于未传该键（保持不变），**不表示清空**；清空请用空字符串
 - `college` 必须是 `college_enum` 完整枚举值（见附录 A），简称如「计算机学院」会被拒绝
 - `department` 仅接受 `software` / `media` 或空字符串
-- `blog_url` / `github_url` 必须是 http/https 绝对 URL——这两个字段会在公开卡片上渲染为链接，故拒绝 `javascript:`、`data:` 等 scheme
+- `blog_url` / `github_url` 必须是 http/https 绝对 URL——这两个字段会渲染为链接，故拒绝 `javascript:`、`data:` 等 scheme
 - 所有文本字段拒绝控制字符（NUL、CR、LF、Tab 及其他 C0/C1），返回 `40000`；字段内部的空格保留，仅首尾被裁剪
 - 字段长度上限按数据库列宽校验（`name`/`nickname`/`intro`/`email` 255，`phone_number`/`qq_number` 20，`student_id`/`major` 50，两个 URL 512）
 - `email` 为展示邮箱（非登录邮箱），非空时校验格式，不合法返回 `40000`
@@ -842,11 +842,11 @@ PUT /user/avatar
 **Headers**: `Authorization: Bearer <access_token>`
 **Content-Type**: `multipart/form-data`
 
-**Request**: `file` 字段（图片，限制 1MB 且任一维 ≤4096，格式 jpg/png/webp；按魔数检测，不信任文件名与 Content-Type。压缩由前端完成，后端只做上限、格式与分辨率校验，不重新编码）
+**Request**: `file` 字段（图片，输入上限 1MB 且任一维 ≤4096，格式 jpg/png/webp；按魔数检测，不信任文件名与 Content-Type。后端会重编码为 PNG，输出另设 4MB 上限：密集输入的无损重编码会显著膨胀，超限返回 `40000`；建议前端提交 ≤512px 的头像，避免触到该安全阀）
 
-上传链路：后端接收图片 → 上传腾讯云 COS（公开读）→ COS 内容审核（`STORAGE_AUDIT_ENABLED` 开启时）→ 写入 `profile.avatar` → 返回公开 URL。审核 fail-closed：审核服务不可用时上传失败，未审核图片不放行。旧头像对象在写库成功后删除（失败仅记日志，不影响响应）。
+上传链路：后端接收图片 → 重新编码为 PNG（只保留真实像素以清除拼接尾缀；JPEG 输入的 EXIF 方向标签先被还原，手机竖拍不会横显）→ 上传腾讯云 COS（公开读）→ COS 内容审核（`STORAGE_AUDIT_ENABLED` 开启时）→ 写入 `profile.avatar` → 返回公开 URL。审核 fail-closed：审核服务不可用时上传失败，未审核图片不放行。旧头像对象在写库成功后删除（失败仅记日志，不影响响应）。
 
-**错误码**: `40000`（非 jpg/png/webp、超 1MB 或任一维超 4096、文件损坏或为空、缺少 `file` 字段）、`42203`（头像未通过内容审核）、`42900`（请求过于频繁，按用户限流）、`40102`（未认证）、`40301`（账号已注销）、`50002`（对象存储未配置/上传失败）、`50300`（内容审核服务不可用，fail-closed）、`50003`（数据库错误）
+**错误码**: `40000`（非 jpg/png/webp、超 1MB 或任一维超 4096、重编码后体积过大、文件损坏或为空、缺少 `file` 字段）、`42203`（头像未通过内容审核）、`42900`（请求过于频繁，按用户限流）、`40102`（未认证）、`40301`（账号已注销）、`50002`（对象存储未配置/上传失败）、`50300`（内容审核服务不可用，fail-closed）、`50003`（数据库错误）
 
 **Response** `200`:
 
@@ -858,43 +858,9 @@ PUT /user/avatar
 
 ---
 
-### 3.4 获取个人卡片
+### 3.4 获取个人卡片（已移除）
 
-**已下线**（路由注释，暂不响应）。顺序 ID 的公开 URL 可枚举全站成员名单，隐私重设计中。重开后为 owner-only + 不可枚举标识，不会原样启用。以下为下线前的契约，供重设计参考。
-
-```
-GET /card/:id
-```
-
-> **限流**：按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_CARD_RPM`）。本端点无认证且路径参数是连续的用户 ID，不限流即等于开放全站公开卡片的抓取。限流检查排在 ID 合法性校验**之前**——无效 ID 得到的 `404` 本身就是枚举者要读的信号。
->
-> 配额按「共享出口 IP 下的成员墙」定档：一页渲染数十张卡片，不能让一位访客耗尽整个 NAT 当分钟的额度。这一档只能减缓而非阻止抓取——公开卡片的批量读取应交由反向代理缓存承担，容量防线本就在那一层。限流器故障时 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
-
-**Path Parameters**:
-
-| 参数 | 说明 |
-|------|------|
-| `id` | 用户 ID |
-
-**Response** `200`:
-
-```json
-{
-  "id": 1,
-  "nickname": "张三",
-  "department": "software",
-  "intro": "自我介绍",
-  "avatar": "https://cos.example.com/avatar/1.jpg",
-  "blog_url": "https://blog.example.com",
-  "github_url": "https://github.com/example"
-}
-```
-
-**说明**: 返回 `profile` 表中公开字段，用于公开个人主页、homepage 友链展示。用户 ID 不存在或已注销（`state = is_deleted`）时返回 404（`40401`），两者不区分；ID 格式非法（非正整数、含非数字字符）同样返回 `40401`，避免探测哪些 ID 曾经存在。
-
-**错误码**: `40401`（用户不存在、已注销或 ID 格式非法）、`50000`（服务器内部错误）
-
-该端点**不使用**标准响应信封（见 §10.1），字段直接位于顶层。未填写的展示字段返回 `null`；用户无 `profile` 记录时除 `id` 外全部为 `null`。`id` 非正整数或含非数字字符时同样返回 404。
+端点与代码均已删除：顺序 ID 的公开 URL 可枚举全站成员名单，隐私重设计中不再提供 `GET /card/:id`。公开资料中的 `picture`（头像）与 `preferred_username`（昵称）能力由 OIDC 的 `profile` scope 承载，经 `GET /userinfo` 与 ID Token 签出（见 §8.3 / §8.4）。
 
 ---
 
@@ -1470,7 +1436,6 @@ grant_type=refresh_token&refresh_token=rt_abc123...&client_id=9f3a1c7d2e5b40a8c6
 - 轮换式：旧 refresh token 立即撤销，`sequence + 1`
 - 重放已轮换的 refresh token 触发整条 family 级联撤销。轮换后 30s 内（`refreshGracePeriod`）的并发刷新视为良性，不触发级联撤销；超出窗口的重放才撤销整条 family
 - **不支持 scope 收窄**。RFC 6749 §6 允许 refresh 时请求更小的 scope，但当前仓储层要求轮换后的 token pair 携带与当前完全一致的 scope，因此轮换后 scope 原样继承。客户端如需更小的 scope，须重新走一次授权流程。这是已知偏差
-- 轮换不是重新认证，因此 ID Token 的 `auth_time` 保持该 family 首个 refresh token 的创建时刻
 - **能力 family 生命周期封顶**：携带 `admin:*` / `user:*` 能力 scope 的 refresh family 受 `JWT_REFRESH_CAPABILITY_MAX_LIFETIME`（默认 `168h`，`0` 关闭）约束——从 family 首次授权起算，首个 refresh token 与每次轮换都按 `origin+cap` 夹紧到期时间，family 到点即撤销并返回 `invalid_grant`（审计 `refresh_family_expired`），客户端必须重新走授权。普通 OIDC family 与内部会话 family 不受此约束
 
 ---
@@ -2742,7 +2707,6 @@ Content-Type: application/json
   "aud": "9f3a1c7d2e5b40a8c6d1f4b7a2e9c3d5",
   "exp": 1717400000,
   "iat": 1717396400,
-  "auth_time": 1717396400,
   "nonce": "n-0S6_WzA2Mj",
   "name": "张三",
   "picture": "https://cos.example.com/avatar/1.jpg",
@@ -2763,7 +2727,6 @@ Content-Type: application/json
 | `aud` | — | 客户端 `client_id` |
 | `exp` | — | 过期时间（Unix timestamp） |
 | `iat` | — | 签发时间（Unix timestamp） |
-| `auth_time` | — | **授权确认时间，不是真正的认证时间**；会签发但**不在 `claims_supported` 中通告**，见下方说明 |
 | `nonce` | — | 防重放值，与授权请求参数一致（可选） |
 | `name` | `profile` | 真实姓名 |
 | `picture` | `profile` | 头像 URL |
@@ -2773,15 +2736,7 @@ Content-Type: application/json
 | `email_verified` | `email` | 邮箱已验证，固定 `true` |
 | `updated_at` | `profile` | 用户信息最后修改时间 |
 
-> **`auth_time` 语义偏差（已知限制）**
->
-> OIDC Core 定义 `auth_time` 为**终端用户完成认证**的时刻。本服务目前能拿到的最接近值是**用户在授权页点击同意**的时刻（授权码流取授权码创建时间，refresh 轮换取该 family 首个 refresh token 的创建时间）。因为服务端尚未在任何地方持久化真实的认证时刻。
->
-> 后果：用户三天前登录、会话仍有效，今天走第三方授权，`auth_time` 会被报成今天——**高报**了认证的新鲜度，而这恰是该 claim 存在的意义。
->
-> 因此该 claim **会签发但不在 `claims_supported` 中通告**：不通告就不构成承诺，省略可选 claim 是正确的行为，通告一个错值才是误导。同时 `max_age` 与 `prompt` 均未实现，RP 无法据此要求重新认证。
->
-> 真正修复需要：登录时持久化认证时刻 → 经授权确认写入授权码行 → 传递到 token family。涉及数据库迁移，留待后续实现，届时再把 `auth_time` 加回 `claims_supported`。
+> **`auth_time` 已移除**：服务端未持久化真实认证时刻，之前的近似值（授权确认时刻）会高报认证新鲜度，误导按 OIDC 语义消费该 claim 的 RP。因此 ID Token **不再签发** `auth_time`，也未列入 `claims_supported`；`max_age` / `prompt` 未实现。待将来持久化真实认证时刻后再加回。
 
 **OIDC 授权码流完整交互**：
 

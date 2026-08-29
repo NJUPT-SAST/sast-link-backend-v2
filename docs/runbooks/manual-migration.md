@@ -84,7 +84,16 @@ CLI 会根据这些变量拼接 PostgreSQL URL，并通过 `pgx/v5` driver 执�
 000006_index_expired_authorizations.up.sql / .down.sql
 000007_audit_logs_actor_client.up.sql / .down.sql
 000008_index_live_refresh_expiry.up.sql / .down.sql
+000009_oauth_grants.up.sql / .down.sql
+000010_profile_needs_completion.up.sql / .down.sql
+000011_alumni_requests.up.sql / .down.sql
 ```
+
+V009–V011 同为 additive migration，但各有需要注意的语义：
+
+- **V009 `oauth_grants`**：长期授权（consent）历史表，一个（用户, 客户端）一行，审批时与授权码在同一事务 upsert。与授权码不同，这些行**永不被 retention worker 清扫**——已授权应用列表（`GET /oauth/grants`）以它为唯一数据源。两个外键均 `ON DELETE CASCADE`，注销账号或删除客户端即随之清理。迁移内会把 `oauth_authorizations` 中仍存活的 consent 回填进去（幂等）。
+- **V010 `profile_needs_completion`**：给 `"user"` 表加**生成列**（`GENERATED ALWAYS AS ... STORED`），标识仍带旧库迁移残留的账号（必填字段为空，或 `name` 与 `student_id` 相同——旧库导入同时产生过 `B24040525` 与 `b24040525`）。纯软信号，任何鉴权/授权路径都不读它；空白判定用 `sl_profile_is_blank()`，其空白集合与 Go `strings.TrimSpace` 对齐。注意这是生成列而非 `CHECK ... NOT VALID`：后者仍会校验每次 UPDATE，会让这类账号无法改密码/被禁用/被撤销 token（见 SQL 内注释）。
+- **V011 `alumni_requests`**：校友建号申请表（毕业成员无法自助注册）。唯一索引**部分在 `status = 'pending'`** 上：一个学号至多一张未处理申请，被拒后可改资料重新提交。`ON DELETE SET NULL` 的 `created_user_id`/`reviewed_by` 保留历史；`notified_at`/`notify_attempts` 支撑通知积压视图（console 的 `notified=false` 过滤）。审批路径校验 `major` 非空且 `name ≠ student_id`（复用 `validate.IncompleteProfileFields`），保证获批账号不会被 V010 生成列标记为待补全。
 
 ## 执行前检查清单
 

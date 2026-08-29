@@ -17,9 +17,11 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauthlogin"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 // Service is the use-case surface this handler drives.
@@ -78,17 +80,35 @@ func (h Handler) readStateCookie(c *gin.Context) string {
 // redeeming a login_code is how a session is obtained, so requiring one would be
 // circular. The binding endpoints sit behind the JWT middleware because they
 // attach a provider account to a known caller.
-func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
+// Gates are the middleware the protected binding routes are mounted behind.
+type Gates struct {
+	// RequireAuth authenticates the group (the JWT middleware).
+	RequireAuth gin.HandlerFunc
+	// RequireWriteScope bounds what a scoped token may do on the binding routes;
+	// it is a no-op for an internal console token.
+	RequireWriteScope gin.HandlerFunc
+}
+
+// WriteScopes is the scope a delegated token must hold to attach a third-party
+// login method to the subject's account, matching the email-bind routes.
+var WriteScopes = []string{scope.UserWrite}
+
+func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
+	if g.RequireAuth == nil || g.RequireWriteScope == nil {
+		panic("oauthloginhandler: every gate in Gates must be set")
+	}
 	r.GET("/oauth/github", h.authorize(model.LoginMethodGitHub))
 	r.GET("/oauth/github/callback", h.callback(model.LoginMethodGitHub))
 	r.GET("/oauth/lark", h.authorize(model.LoginMethodLark))
 	r.GET("/oauth/lark/callback", h.callback(model.LoginMethodLark))
 	r.POST("/oauth/exchange-code", h.ExchangeCode)
 
+	// The binding routes name a write scope gate explicitly: a stolen token
+	// carrying only a read scope (or none) cannot attach a new login method.
 	protected := r.Group("")
-	protected.Use(authMiddleware)
-	protected.POST("/user/identities/github", h.bind(model.LoginMethodGitHub))
-	protected.POST("/user/identities/lark", h.bind(model.LoginMethodLark))
+	protected.Use(g.RequireAuth)
+	protected.POST("/user/identities/github", g.RequireWriteScope, h.bind(model.LoginMethodGitHub))
+	protected.POST("/user/identities/lark", g.RequireWriteScope, h.bind(model.LoginMethodLark))
 }
 
 // authorize returns the handler that starts a login for one provider.
@@ -230,12 +250,8 @@ type exchangeCodeRequest struct {
 // ExchangeCode swaps a one-time login_code for a session.
 func (h Handler) ExchangeCode(c *gin.Context) {
 	var request exchangeCodeRequest
-	if err := decodeStrictJSON(c, &request); err != nil {
-		response.Error(c, &response.BusinessError{
-			HTTPStatus: http.StatusBadRequest,
-			Code:       errcode.CodeBadRequest,
-			Message:    "请求参数错误",
-		})
+	if err := webutil.DecodeStrictJSON(c, &request); err != nil {
+		response.Error(c, webutil.BadRequest())
 		return
 	}
 	result, err := h.Service.ExchangeCode(c.Request.Context(), oauthlogin.ExchangeCodeInput{
@@ -277,12 +293,13 @@ func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 			return
 		}
 		result, err := h.Service.Bind(c.Request.Context(), oauthlogin.BindInput{
-			UserID:      principal.UserID,
-			Provider:    name,
-			Code:        c.Query("code"),
-			RedirectURI: c.Query("redirect_uri"),
-			ClientIP:    c.ClientIP(),
-			UserAgent:   c.Request.UserAgent(),
+			UserID:        principal.UserID,
+			Provider:      name,
+			Code:          c.Query("code"),
+			RedirectURI:   c.Query("redirect_uri"),
+			ActorClientID: principal.ClientID,
+			ClientIP:      c.ClientIP(),
+			UserAgent:     c.Request.UserAgent(),
 		})
 		if err != nil {
 			response.Error(c, mapServiceError(err))

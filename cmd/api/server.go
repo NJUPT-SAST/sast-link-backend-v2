@@ -136,5 +136,7 @@ func pingDB(database *gorm.DB) error {
 }
 
 func pingRedis(client *goredis.Client) error {
-	return client.Ping(context.Background()).Err()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return client.Ping(ctx).Err()
 }

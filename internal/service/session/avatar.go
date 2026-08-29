@@ -6,12 +6,13 @@ import (
 	"errors"
 	"image"
 	_ "image/jpeg"
-	_ "image/png"
+	"image/png"
 	"io"
 	"log/slog"
 	"strconv"
 	"strings"
 
+	"github.com/disintegration/imaging"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/google/uuid"
 	_ "golang.org/x/image/webp"
@@ -19,6 +20,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // maxAvatarSize is the PUT /user/avatar upload ceiling (1MB); the reader is
@@ -30,6 +32,13 @@ const maxAvatarSize = 1 << 20
 // image header (DecodeConfig) so a pathological image never reaches the content
 // review or client rendering.
 const maxAvatarDimension = 4096
+
+// maxAvatarOutputSize bounds the re-encoded PNG independently of the upload cap:
+// the 1MB input limit bounds the raw bytes, while the polyglot-cleaning re-encode
+// is what actually lands in storage, and a dense input can normalize into a far
+// larger object. It is a storage/egress safety valve, not a size a normal avatar
+// approaches.
+const maxAvatarOutputSize = 4 << 20
 
 // avatarMIME maps the three accepted image formats to their canonical content
 // type, used both for the acceptance check and the COS upload header.
@@ -113,7 +122,7 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 			return nil, cleanup(newError(ErrDependencyUnavailable, "头像审核服务暂不可用，请稍后重试", auditErr))
 		}
 		if verdict.Sensitive {
-			if err := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), nullableString(s.actorClientID(input.ActorClientID)), false, errcode.CodeAvatarRejected,
+			if err := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), false, errcode.CodeAvatarRejected,
 				input.ClientIP, input.UserAgent, map[string]any{"label": verdict.Label}); err != nil {
 				slog.Error("audit avatar rejection", "user_id", input.UserID, "error", err)
 			}
@@ -146,7 +155,7 @@ func (s Service) UploadAvatar(ctx context.Context, input UploadAvatarInput) (*Up
 		}
 	}
 
-	if auditErr := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), nullableString(s.actorClientID(input.ActorClientID)), true, 0,
+	if auditErr := s.audit(ctx, &input.UserID, "upload_avatar", "user", resourceID(input.UserID), shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), true, 0,
 		input.ClientIP, input.UserAgent, map[string]any{"avatar_url": avatarURL}); auditErr != nil {
 		slog.Error("audit avatar upload", "user_id", input.UserID, "error", auditErr)
 	}
@@ -194,7 +203,39 @@ func readAvatar(content io.Reader, declaredSize int64) ([]byte, string, error) {
 	if cfg.Width > maxAvatarDimension || cfg.Height > maxAvatarDimension {
 		return nil, "", newError(ErrInvalidInput, "头像分辨率不能超过 4096×4096", nil)
 	}
-	return data, detected.String(), nil
+	// Re-encode from the decoded pixels so only the real image content survives:
+	// a polyglot trailer (a magic-valid image followed by HTML/JS) is dropped
+	// before the bytes reach storage. The dimension cap bounds the expanded
+	// pixel buffer this costs (4096²×4 = 64MB worst case). Every accepted input
+	// is normalized to PNG, so the stored bytes are independent of the claimed
+	// source format.
+	var img image.Image
+	if isJPEGBytes(data) {
+		// The stdlib JPEG decoder ignores the EXIF orientation tag, so a phone
+		// photo stored sideways would re-encode sideways (PNG has no orientation
+		// metadata of its own to save it). imaging reads the tag from the raw
+		// bytes and bakes the correction into the pixels before the encode.
+		img, err = imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+	} else {
+		img, _, err = image.Decode(bytes.NewReader(data))
+	}
+	if err != nil {
+		return nil, "", newError(ErrInvalidInput, "头像文件已损坏或不是有效图片", nil)
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, "", newError(ErrInternal, "头像重新编码失败", err)
+	}
+	if buf.Len() > maxAvatarOutputSize {
+		return nil, "", newError(ErrInvalidInput, "头像重编码后体积过大", nil)
+	}
+	return buf.Bytes(), "image/png", nil
+}
+
+// isJPEGBytes reports whether data is a JPEG stream (SOI marker FFD8), so the
+// EXIF-aware re-decode path runs only where orientation metadata can exist.
+func isJPEGBytes(data []byte) bool {
+	return len(data) >= 2 && data[0] == 0xFF && data[1] == 0xD8
 }
 
 // avatarKeyFromURL extracts the object key of a previously stored avatar URL:

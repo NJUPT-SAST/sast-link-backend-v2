@@ -6,6 +6,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 // updateProfileRequest mirrors the PUT /user/profile body. Every field is a
@@ -42,7 +43,7 @@ func (h Handler) UpdateProfile(c *gin.Context) {
 		return
 	}
 	var req updateProfileRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}

@@ -78,8 +78,17 @@ func newTestRouter(h Handler, userID int64) *gin.Engine {
 		}
 		c.Next()
 	}
-	RegisterRoutes(router, h, authMiddleware)
+	RegisterRoutes(router, h, Gates{
+		RequireAuth:       authMiddleware,
+		RequireWriteScope: func(c *gin.Context) { c.Next() },
+	})
 	return router
+}
+
+// bindRequest builds a POST to a binding endpoint; the code and redirect_uri
+// ride the query string per the documented contract.
+func bindRequest(target string) *http.Request {
+	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, target, nil)
 }
 
 func decodeEnvelope(t *testing.T, body string) (int, string, map[string]any) {
@@ -511,8 +520,7 @@ func TestBindPassesPrincipalAndProvider(t *testing.T) {
 	router := newTestRouter(Handler{Service: service}, 42)
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodPost,
-		"/user/identities/github?code=provider-code&redirect_uri=https%3A%2F%2Flink.sast.fun%2Foauth%2Fbind%2Fgithub", nil))
+	router.ServeHTTP(recorder, bindRequest("/user/identities/github?code=provider-code&redirect_uri=https%3A%2F%2Flink.sast.fun%2Foauth%2Fbind%2Fgithub"))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", recorder.Code, recorder.Body.String())
@@ -555,8 +563,7 @@ func TestBindLarkUsesLarkMessage(t *testing.T) {
 	router := newTestRouter(Handler{Service: service}, 42)
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodPost,
-		"/user/identities/lark?code=provider-code", nil))
+	router.ServeHTTP(recorder, bindRequest("/user/identities/lark?code=provider-code"))
 
 	_, _, data := decodeEnvelope(t, recorder.Body.String())
 	if data["message"] != "飞书账号绑定成功" {
@@ -569,8 +576,7 @@ func TestBindWithoutPrincipalIs401(t *testing.T) {
 	router := newTestRouter(Handler{Service: &fakeService{}}, 0)
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodPost,
-		"/user/identities/github?code=c", nil))
+	router.ServeHTTP(recorder, bindRequest("/user/identities/github?code=c"))
 
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", recorder.Code)
@@ -595,8 +601,7 @@ func TestBindMapsConflictCodes(t *testing.T) {
 			router := newTestRouter(Handler{Service: service}, 42)
 
 			recorder := httptest.NewRecorder()
-			router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodPost,
-				"/user/identities/github?code=c", nil))
+			router.ServeHTTP(recorder, bindRequest("/user/identities/github?code=c"))
 
 			if recorder.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d", recorder.Code, test.wantStatus)
@@ -617,8 +622,7 @@ func TestProviderOutageMapsTo502(t *testing.T) {
 	router := newTestRouter(Handler{Service: service}, 42)
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodPost,
-		"/user/identities/github?code=c", nil))
+	router.ServeHTTP(recorder, bindRequest("/user/identities/github?code=c"))
 
 	// 502, not 503: this service is healthy; GitHub answered badly.
 	if recorder.Code != http.StatusBadGateway {

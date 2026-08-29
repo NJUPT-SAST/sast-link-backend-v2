@@ -55,9 +55,9 @@ func TestOAuthAuthorizationRepositoryCreateAndConsume(t *testing.T) {
 	if consumed.CodeChallenge != authorization.CodeChallenge || consumed.Nonce == nil || *consumed.Nonce != "nonce-code-consume" {
 		t.Fatalf("consumed authorization = %+v, want the stored PKCE and nonce values", consumed)
 	}
-	// created_at backs the ID Token's auth_time claim, so it must come back set.
+	// created_at must survive round-trip: it dates the family and the grant.
 	if consumed.CreatedAt.IsZero() {
-		t.Fatal("consumed authorization has a zero created_at; auth_time would be unset")
+		t.Fatal("consumed authorization has a zero created_at")
 	}
 	assertAuthorizationUsed(t, database, "code-consume", true)
 }

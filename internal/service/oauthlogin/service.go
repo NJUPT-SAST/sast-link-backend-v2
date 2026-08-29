@@ -331,7 +331,7 @@ func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 	if err != nil {
 		// The user is unknown on most failure legs (the code may name no one), so the
 		// subject stays nil; the action and outcome are what matter.
-		if auditErr := s.audit(ctx, nil, "oauth_login_exchange", "session", nil, false, auditErrorCode(err),
+		if auditErr := s.audit(ctx, nil, "oauth_login_exchange", "session", nil, false, auditErrorCode(err), "",
 			input.ClientIP, input.UserAgent, nil); auditErr != nil {
 			logAuditFailure(ctx, "oauth_login_exchange", auditErr)
 		}
@@ -390,7 +390,7 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 		return nil, newError(ErrInternal, "保存 Token 失败", err)
 	}
 
-	if auditErr := s.audit(ctx, &user.ID, "oauth_login_exchange", "session", nil, true, 0,
+	if auditErr := s.audit(ctx, &user.ID, "oauth_login_exchange", "session", nil, true, 0, "",
 		input.ClientIP, input.UserAgent, map[string]any{"user_id": user.ID}); auditErr != nil {
 		slog.ErrorContext(ctx, "audit oauth login exchange", "user_id", user.ID, "error", auditErr)
 	}
@@ -456,7 +456,7 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, true, 0, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
+	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, true, 0, "", clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
 		slog.ErrorContext(ctx, "audit evict device", "user_id", userID, "device_id", evicted, "error", auditErr)
 	}
 }

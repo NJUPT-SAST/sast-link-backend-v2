@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	_ "go.uber.org/automaxprocs" // calibrate GOMAXPROCS to the container's cgroup CPU quota
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
@@ -77,6 +78,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create router: %w", err)
 	}
+	// Application metrics: the middleware is registered in web.NewRouter as the
+	// outermost middleware (outside gin.Recovery, so a recovered panic still
+	// counts), and the scrape endpoint below exposes the default Prometheus
+	// registry. Like /health it is an anonymous scrape surface, deliberately
+	// outside every auth gate.
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	// pprof is fail-closed: only an explicit development environment or PPROF_ENABLED enables it.
 	if cfg.AppEnv == "development" || cfg.EnablePprof {
 		registerProfiling(router)
@@ -95,7 +102,10 @@ func run() error {
 		RequireLogoutAuth: runtime.Auth.RequireUserLogoutAuth(),
 	})
 	oauthhandler.RegisterRoutes(router, runtime.OAuth, runtime.Auth.RequireAuth())
-	oauthloginhandler.RegisterRoutes(router, runtime.OAuthLogin, runtime.Auth.RequireAuth())
+	oauthloginhandler.RegisterRoutes(router, runtime.OAuthLogin, oauthloginhandler.Gates{
+		RequireAuth:       runtime.Auth.RequireAuth(),
+		RequireWriteScope: runtime.Auth.RequireDelegatedScope(oauthloginhandler.WriteScopes...),
+	})
 	// The admin group authenticates through RequireAdminAuth, the only surface an
 	// admin-scoped token may reach within the scopes it holds.
 	adminhandler.RegisterRoutes(router, runtime.Admin, adminhandler.Gates{

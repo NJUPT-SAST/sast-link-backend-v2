@@ -15,9 +15,6 @@ import (
 // Every scope-gated claim is a pointer or omitempty, so a claim absent from the
 // granted scopes is absent from the token rather than present-and-empty.
 type IDTokenClaims struct {
-	// AuthTime is the moment the user confirmed the authorization, in seconds
-	// since the epoch. OIDC names it auth_time and requires seconds, not RFC 3339.
-	AuthTime int64 `json:"auth_time"`
 	// Nonce echoes the authorization request's nonce verbatim so the relying party
 	// can bind this token to its own request. Absent when the request had none.
 	Nonce string `json:"nonce,omitempty"`
@@ -65,9 +62,7 @@ type IDTokenInput struct {
 	// Scopes must already be normalized-able; openid is required.
 	Scopes []string
 	Nonce  string
-	// AuthTime is when the user confirmed the authorization.
-	AuthTime time.Time
-	TTL      time.Duration
+	TTL    time.Duration
 	// Claims holds every user attribute an ID Token could carry; the signer emits
 	// only those the granted scopes allow.
 	Claims IDTokenSubjectClaims
@@ -91,15 +86,9 @@ func (m JWTManager) SignIDToken(input IDTokenInput) (string, error) {
 		m.Active.KID == "" || m.Active.Private == nil {
 		return "", ErrInvalidInput
 	}
-	authTime := input.AuthTime.UTC()
-	if authTime.IsZero() {
-		return "", ErrInvalidInput
-	}
-
 	issuedAt := now(m.Clock).UTC()
 	claims := IDTokenClaims{
-		AuthTime: authTime.Unix(),
-		Nonce:    input.Nonce,
+		Nonce: input.Nonce,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    m.Issuer,
 			Subject:   input.Subject,

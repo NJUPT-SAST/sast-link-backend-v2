@@ -574,10 +574,10 @@ type PublicCard struct {
 	GitHubURL  *string           `gorm:"column:github_url"`
 }
 
-// FindPublicCardByUserID returns the public card of a non-deleted user.
-// Soft-deleted accounts are filtered in SQL because /card/:id is
-// unauthenticated; a missed check would publish an account the owner asked to
-// have removed. A deleted user reports ErrNotFound, matching the 404 contract.
+// FindPublicCardByUserID returns the public profile card of a non-deleted user.
+// It backs the OIDC /userinfo picture and preferred_username claims. Soft-deleted
+// accounts are filtered in SQL; a missed check would publish an account the owner
+// asked to have removed. A deleted user reports ErrNotFound, matching the contract.
 func (r *UserRepository) FindPublicCardByUserID(ctx context.Context, userID int64) (*PublicCard, error) {
 	if userID <= 0 {
 		return nil, ErrNotFound

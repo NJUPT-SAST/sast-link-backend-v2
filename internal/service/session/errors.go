@@ -18,13 +18,18 @@ const (
 	KindLocked            Kind = "locked"
 	KindUnknownIdentifier Kind = "unknown_identifier"
 	KindPasswordInvalid   Kind = "password_invalid"
-	KindUserDeleted       Kind = "user_deleted"
-	KindInvalidToken      Kind = "invalid_token"
-	KindEmailFailed       Kind = "email_failed"
-	KindConflict          Kind = "conflict"
-	KindValidationFailed  Kind = "validation_failed"
-	KindNotFound          Kind = "not_found"
-	KindInternal          Kind = "internal"
+	// KindLoginFailed is what a failed sign-in answers with, unknown identifier
+	// and wrong password alike (audit-fix #7): the wire must not distinguish the
+	// two, or a login attempt becomes a registered-email oracle. The audit trail
+	// keeps the distinction via the failure reason.
+	KindLoginFailed      Kind = "login_failed"
+	KindUserDeleted      Kind = "user_deleted"
+	KindInvalidToken     Kind = "invalid_token"
+	KindEmailFailed      Kind = "email_failed"
+	KindConflict         Kind = "conflict"
+	KindValidationFailed Kind = "validation_failed"
+	KindNotFound         Kind = "not_found"
+	KindInternal         Kind = "internal"
 	// KindObjectUploadFailed reports that an object-storage upload or review
 	// failed (errcode 50002), distinct from KindInternal.
 	KindObjectUploadFailed Kind = "object_upload_failed"
@@ -77,8 +82,12 @@ var (
 	ErrLocked            = &Error{Kind: KindLocked, Code: errcode.CodeRateLimited}
 	ErrUnknownIdentifier = &Error{Kind: KindUnknownIdentifier, Code: errcode.CodeUnknownIdentifier}
 	ErrPasswordInvalid   = &Error{Kind: KindPasswordInvalid, Code: errcode.CodePasswordInvalid}
-	ErrUserDeleted       = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
-	ErrInvalidToken      = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}
+	// ErrLoginFailed is the single code a failed sign-in returns whether the
+	// identifier is unknown or the password wrong, so neither leg leaks whether
+	// the address is registered (audit-fix #7).
+	ErrLoginFailed  = &Error{Kind: KindLoginFailed, Code: errcode.CodePasswordInvalid}
+	ErrUserDeleted  = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
+	ErrInvalidToken = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}
 	// ErrConcurrentRefresh reports a benign concurrent refresh within the 30s
 	// grace window: a sibling rotation already cut this token but preserved the
 	// family. It stays an invalid-token outcome for the client, but distinct so

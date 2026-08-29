@@ -11,6 +11,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 const (
@@ -90,7 +91,7 @@ func (w *ForgotPassword) process(ctx context.Context, job session.ForgotPassword
 		return
 	}
 	purpose := string(mailer.VerificationPurposeResetPassword)
-	if err := w.Codes.SaveVerificationCode(ctx, purpose, job.Email, code, forgotPasswordCodeTTL); err != nil {
+	if err := w.Codes.SaveVerificationCode(ctx, purpose, validate.StripSubaddress(job.Email), code, forgotPasswordCodeTTL); err != nil {
 		logForgotPasswordFailure(ctx, "save_code", err)
 		return
 	}

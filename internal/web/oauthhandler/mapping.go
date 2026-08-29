@@ -1,25 +1,13 @@
 package oauthhandler
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
-	"mime"
 	"net/http"
-
-	"github.com/gin-gonic/gin"
-	"github.com/gin-gonic/gin/binding"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
-)
-
-const maxJSONRequestBodyBytes int64 = 8 << 10
-
-var (
-	errInvalidJSONContentType = errors.New("request Content-Type must be application/json")
-	errTrailingJSONValue      = errors.New("JSON request body contains multiple values")
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 // consentRequest is the consent page's submission.
@@ -54,26 +42,6 @@ type tokenResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 	IDToken      string `json:"id_token,omitempty"`
 	Scope        string `json:"scope"`
-}
-
-// decodeStrictJSON applies the same body policy as the session handlers: exact
-// media type, bounded size, no unknown fields, exactly one JSON value.
-func decodeStrictJSON(c *gin.Context, destination any) error {
-	mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		return errInvalidJSONContentType
-	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBodyBytes)
-	decoder := json.NewDecoder(c.Request.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return errTrailingJSONValue
-	}
-	return binding.Validator.ValidateStruct(destination)
 }
 
 // invalidRequest builds a non-redirectable invalid_request error.
@@ -137,7 +105,7 @@ func mapEnvelopeError(err error, invalidClientStatus int) error {
 	code := businessCodeForKind(oauthErr.Kind)
 	message := oauthErr.Description
 	if oauthErr.Kind == oauth.KindInternal || message == "" {
-		message = "服务器内部错误"
+		message = errcode.Messages[errcode.CodeInternal]
 	}
 	return &response.BusinessError{
 		HTTPStatus: status,
@@ -172,17 +140,9 @@ func businessCodeForKind(kind oauth.Kind) int {
 }
 
 func badRequest() error {
-	return &response.BusinessError{
-		HTTPStatus: http.StatusBadRequest,
-		Code:       errcode.CodeBadRequest,
-		Message:    "请求参数错误",
-	}
+	return webutil.BadRequest()
 }
 
 func internalError() error {
-	return &response.BusinessError{
-		HTTPStatus: http.StatusInternalServerError,
-		Code:       errcode.CodeInternal,
-		Message:    "服务器内部错误",
-	}
+	return webutil.InternalError()
 }

@@ -41,7 +41,13 @@ type Keys struct {
 
 // NewKeys returns a key builder with a normalized prefix.
 func NewKeys(prefix string) Keys {
-	return Keys{Prefix: strings.Trim(prefix, ":")}
+	trimmed := strings.Trim(prefix, ":")
+	if strings.ContainsAny(trimmed, "{}") {
+		// A brace in the prefix would re-scope the {dev} hash tag every device key
+		// depends on, scattering one family across cluster slots.
+		panic("redis: key prefix must not contain '{' or '}': it breaks the {dev} hash tag")
+	}
+	return Keys{Prefix: trimmed}
 }
 
 func (k Keys) join(parts ...string) string {

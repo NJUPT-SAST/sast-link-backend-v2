@@ -20,19 +20,24 @@ type DeviceInfo struct {
 // Devices returns the sorted set holding a user's device IDs, scored by login
 // timestamp. The member is the device ID, which the session service binds to
 // the token family ID so device lifecycle and session lifecycle stay one.
+//
+// The {dev} hash tag keeps all three device keys on one Redis Cluster slot so
+// the Lua scripts that touch several of them at once never cross slots. This
+// changes the key shape, so pre-existing device records age out naturally under
+// their TTL instead of being migrated.
 func (k Keys) Devices(userID int64) string {
-	return k.join("devices", strconv.FormatInt(userID, 10))
+	return k.join("{dev}", "devices", strconv.FormatInt(userID, 10))
 }
 
 // Device returns the Hash holding one device's details.
 func (k Keys) Device(deviceID string) string {
-	return k.join("device", deviceID)
+	return k.join("{dev}", "device", deviceID)
 }
 
 // deviceHashKeyPrefix is the shared prefix of every device Hash key, passed
 // into Lua scripts that derive member keys from it at runtime.
 func (k Keys) deviceHashKeyPrefix() string {
-	return k.join("device") + ":"
+	return k.join("{dev}", "device") + ":"
 }
 
 // RegisterDevice records a login as a device: ZADD to the user's device sorted

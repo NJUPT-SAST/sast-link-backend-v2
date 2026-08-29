@@ -10,6 +10,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 const (
@@ -53,8 +54,8 @@ func (w TokenBlacklist) Run(ctx context.Context) error {
 	if err := w.validate(); err != nil {
 		return err
 	}
-	interval := durationOrDefault(w.Interval, defaultTokenBlacklistInterval)
-	cleanupInterval := durationOrDefault(w.CleanupInterval, defaultTokenBlacklistCleanupRate)
+	interval := shared.DurationOrDefault(w.Interval, defaultTokenBlacklistInterval)
+	cleanupInterval := shared.DurationOrDefault(w.CleanupInterval, defaultTokenBlacklistCleanupRate)
 	// A timer lets an empty outbox sleep at maxBackoff.
 	dueTimer := time.NewTimer(interval)
 	defer dueTimer.Stop()
@@ -84,8 +85,8 @@ func (w TokenBlacklist) Run(ctx context.Context) error {
 // residual stale window, while the authoritative DB revoked_at check covers the
 // same tokens from the moment the revoking transaction commits.
 func (w TokenBlacklist) processDue(ctx context.Context) time.Duration {
-	base := durationOrDefault(w.Interval, defaultTokenBlacklistInterval)
-	maxBackoff := durationOrDefault(w.MaxBackoff, defaultTokenBlacklistMaxBackoff)
+	base := shared.DurationOrDefault(w.Interval, defaultTokenBlacklistInterval)
+	maxBackoff := shared.DurationOrDefault(w.MaxBackoff, defaultTokenBlacklistMaxBackoff)
 	now := w.now()
 	entries, err := w.Outbox.ClaimDue(ctx, now, w.lease(), w.batchSize())
 	if err != nil {
@@ -175,7 +176,7 @@ func (w TokenBlacklist) retryBackoff(attemptCount int) time.Duration {
 		attemptCount = 30
 	}
 	backoff := time.Second * time.Duration(1<<attemptCount)
-	maxBackoff := durationOrDefault(w.MaxBackoff, defaultTokenBlacklistMaxBackoff)
+	maxBackoff := shared.DurationOrDefault(w.MaxBackoff, defaultTokenBlacklistMaxBackoff)
 	if backoff > maxBackoff {
 		return maxBackoff
 	}
@@ -201,7 +202,7 @@ func (w TokenBlacklist) now() time.Time {
 }
 
 func (w TokenBlacklist) lease() time.Duration {
-	return durationOrDefault(w.Lease, defaultTokenBlacklistLease)
+	return shared.DurationOrDefault(w.Lease, defaultTokenBlacklistLease)
 }
 
 func (w TokenBlacklist) batchSize() int {
@@ -209,11 +210,4 @@ func (w TokenBlacklist) batchSize() int {
 		return w.BatchSize
 	}
 	return defaultTokenBlacklistBatchSize
-}
-
-func durationOrDefault(value, fallback time.Duration) time.Duration {
-	if value > 0 {
-		return value
-	}
-	return fallback
 }

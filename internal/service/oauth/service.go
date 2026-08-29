@@ -14,6 +14,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
 )
 
@@ -190,29 +191,6 @@ func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoi
 	return nil
 }
 
-// deliverBlacklist clears the auth-state cache for revoked access tokens. The
-// durable delivery is the outbox row written in the revoking transaction; this
-// synchronous call closes the stale window so a just-revoked token is rejected on
-// the next request rather than riding out the cache TTL.
-func (s Service) deliverBlacklist(ctx context.Context, entries []model.BlacklistEntry, now time.Time) {
-	if s.Blacklist == nil || len(entries) == 0 {
-		return
-	}
-	jtis := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.ExpiresAt.Sub(now) <= 0 || strings.TrimSpace(entry.TokenID) == "" {
-			continue
-		}
-		jtis = append(jtis, entry.TokenID)
-	}
-	if len(jtis) == 0 {
-		return
-	}
-	if err := s.Blacklist.DeleteAuthStates(ctx, jtis); err != nil {
-		slog.WarnContext(ctx, "invalidate oauth auth-state cache", "count", len(jtis), "error", err)
-	}
-}
-
 // revokeFamily revokes a token family, discarding the outcome, for callers whose
 // response cannot change either way (a replay defense already failing, or a
 // compensating cleanup already erroring). A failure is still logged as a
@@ -242,7 +220,7 @@ func (s Service) revokeFamilyErr(ctx context.Context, familyID string) error {
 	if err != nil {
 		return err
 	}
-	s.deliverBlacklist(revokeCtx, entries, now)
+	shared.DeliverBlacklist(revokeCtx, s.Blacklist, entries, now)
 	return nil
 }
 

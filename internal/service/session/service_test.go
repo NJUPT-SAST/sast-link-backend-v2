@@ -348,26 +348,6 @@ func (f *fakeUsers) UpdateProfile(_ context.Context, userID int64, update reposi
 	return user, nil
 }
 
-func (f *fakeUsers) FindPublicCardByUserID(_ context.Context, userID int64) (*repository.PublicCard, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	user, ok := f.byID[userID]
-	if !ok || user.State == model.UserStateDeleted {
-		return nil, repository.ErrNotFound
-	}
-	card := &repository.PublicCard{ID: user.ID}
-	if user.Profile != nil {
-		card.Nickname = user.Profile.Nickname
-		card.Department = user.Profile.Department
-		card.Intro = user.Profile.Intro
-		card.Avatar = user.Profile.Avatar
-		card.BlogURL = user.Profile.BlogURL
-		card.GitHubURL = user.Profile.GitHubURL
-	}
-	return card, nil
-}
-
 func applyString(target *string, value *string) {
 	if value != nil {
 		*target = *value
@@ -1013,19 +993,19 @@ func TestLoginDoesNotRehashWhenParametersMatch(t *testing.T) {
 func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 	service, _, _, _, audit, failures := newTestService(t)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	assertKind(t, err, KindUnknownIdentifier, errcode.CodeUnknownIdentifier)
+	// An unknown identifier answers exactly like a wrong password (audit-fix #7):
+	// distinguishing them on the wire hands anyone a registered-email oracle.
+	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 	if len(failures.failures) != 1 || failures.failures[0] != "identifier:missing@sast.fun" {
 		t.Fatalf("failures = %#v, want unknown bucket counted", failures.failures)
 	}
-	if got := lastErrCode(audit); got != errcode.CodeUnknownIdentifier {
-		t.Fatalf("audit err code = %d, want %d", got, errcode.CodeUnknownIdentifier)
-	}
 
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
-	assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
+	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 	if len(failures.failures) != 2 || failures.failures[1] != "user:42" {
 		t.Fatalf("failures = %#v, want known user bucket", failures.failures)
 	}
+	// One audit code for both legs; the reason field keeps the distinction.
 	if got := lastErrCode(audit); got != errcode.CodePasswordInvalid {
 		t.Fatalf("audit err code = %d, want %d", got, errcode.CodePasswordInvalid)
 	}
@@ -1034,14 +1014,17 @@ func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 func TestServiceErrorsMatchSentinels(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
 
+	// An unknown identifier now answers with the login-failed sentinel (audit-fix
+	// #7): the wire must not distinguish the two, or a login attempt becomes a
+	// registered-email oracle.
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	if !errors.Is(err, ErrUnknownIdentifier) {
-		t.Fatalf("unknown identifier: errors.Is(err, ErrUnknownIdentifier) = false, err=%v", err)
+	if !errors.Is(err, ErrLoginFailed) {
+		t.Fatalf("unknown identifier: errors.Is(err, ErrLoginFailed) = false, err=%v", err)
 	}
 
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
-	if !errors.Is(err, ErrPasswordInvalid) {
-		t.Fatalf("password invalid: errors.Is(err, ErrPasswordInvalid) = false, err=%v", err)
+	if !errors.Is(err, ErrLoginFailed) {
+		t.Fatalf("password invalid: errors.Is(err, ErrLoginFailed) = false, err=%v", err)
 	}
 
 	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: ""})
@@ -1117,14 +1100,16 @@ func TestLoginReportsCredentialErrorWhenFailureCounterUnavailable(t *testing.T) 
 	service, _, _, _, _, failures := newTestService(t)
 	failures.err = errors.New("redis unavailable")
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
-	assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
+	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 }
 
 func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
 	service, _, clients, _, _, failures := newTestService(t)
 	service.Users.(*fakeUsers).byLogin["deleted@sast.fun"] = testUser(t, 99, "deleted@sast.fun", model.UserStateDeleted)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "deleted@sast.fun", Password: "secret"})
-	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
+	// A deleted account answers like any other failed login, so probing cannot
+	// tell "never registered" from "closed" (audit-fix #7 follow-up).
+	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 	if len(failures.failures) != 0 {
 		t.Fatalf("deleted login failures = %#v, want no credential failure count", failures.failures)
 	}
@@ -1368,7 +1353,7 @@ func TestLoginLockoutBoundaryAndAliasReset(t *testing.T) {
 
 	for attempt := 1; attempt <= 9; attempt++ {
 		_, err := service.Login(context.Background(), LoginInput{Identifier: "alias@sast.fun", Password: "wrong"})
-		assertKind(t, err, KindPasswordInvalid, errcode.CodePasswordInvalid)
+		assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 	}
 	if failures.counts["user:42"] != 9 {
 		t.Fatalf("failure count = %d, want 9", failures.counts["user:42"])
@@ -2105,6 +2090,25 @@ func TestBindEmailSendCodeIssuesTicket(t *testing.T) {
 	}
 }
 
+// Subaddress aliases of one inbox must share the verification-code key, so
+// foo+1@example.com and foo+2@example.com cannot mint unlimited distinct keys
+// for the same mailbox (audit finding #8). The mail is still sent to the exact
+// address the caller submitted.
+func TestBindEmailSendCodeCollapsesSubaddressInCodeKey(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+
+	if _, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra+tag@gmail.com"}); err != nil {
+		t.Fatalf("BindEmailSendCode(extra+tag) error = %v", err)
+	}
+	if _, ok := codes.codes[codeKey(string(mailer.VerificationPurposeBindEmail), "extra@gmail.com")]; !ok {
+		t.Fatal("verification code not saved under the stripped mailbox key")
+	}
+	if _, ok := codes.codes[codeKey(string(mailer.VerificationPurposeBindEmail), "extra+tag@gmail.com")]; ok {
+		t.Fatal("verification code unexpectedly saved under the tagged alias")
+	}
+}
+
 func TestBindEmailSendCodeRejectsOccupiedEmail(t *testing.T) {
 	service := newRegisterService(t)
 	identities := service.Identities.(*fakeIdentities)
@@ -2668,6 +2672,12 @@ func TestBindEmailVerifyKeepsTicketOnOwnerMismatch(t *testing.T) {
 	if err := tickets.SaveBindTicket(context.Background(), "be_abc", BindTicketPayload{UserID: 42, Email: "bind@qq.com"}, time.Minute); err != nil {
 		t.Fatalf("SaveBindTicket() error = %v", err)
 	}
+
+	// A second valid account tries to redeem user 42's ticket; step-up passes
+	// (the caller knows their own password), then the ownership check refuses it.
+	_, hash := sharedTestCredentials(t)
+	users := service.Users.(*fakeUsers)
+	users.byID[99] = testUserWithHash(99, "other@njupt.edu.cn", model.UserStateOnSAST, hash)
 
 	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 99, BindTicket: "be_abc", Code: "123456"})
 	assertKind(t, err, KindInvalidToken, errcode.CodeBindTicketInvalid)

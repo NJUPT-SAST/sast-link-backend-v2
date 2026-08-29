@@ -180,9 +180,10 @@ func TestTokenRepositoryRotateRefreshTokenRejectsTokenExpiredWhileWaitingForFami
 	`).Error; err != nil {
 		t.Fatalf("drop refresh expiry constraint: %v", err)
 	}
+	tokenExpiresAt := time.Now().Add(200 * time.Millisecond)
 	if err := database.Model(&model.OAuthRefreshToken{}).
 		Where("token_hash = ?", "rotate-lock-expired-current-refresh").
-		Update("expires_at", time.Now().Add(200*time.Millisecond)).Error; err != nil {
+		Update("expires_at", tokenExpiresAt).Error; err != nil {
 		t.Fatalf("shorten current refresh token expiry: %v", err)
 	}
 
@@ -217,7 +218,34 @@ func TestTokenRepositoryRotateRefreshTokenRejectsTokenExpiredWhileWaitingForFami
 		)
 		result <- err
 	}()
-	time.Sleep(350 * time.Millisecond)
+	// Wait until the rotation is actually blocked on the held lock instead of a
+	// fixed sleep, so the release below cannot race the goroutine's arrival.
+	blocked := false
+	for i := 0; i < 50 && !blocked; i++ {
+		var waiters int
+		if err := database.Raw(`
+			SELECT COUNT(*) FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND pid <> pg_backend_pid()
+			  AND wait_event_type = 'Lock'
+			  AND state = 'active'
+		`).Scan(&waiters).Error; err != nil {
+			t.Fatalf("count lock waiters: %v", err)
+		}
+		blocked = waiters > 0
+		if !blocked {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if !blocked {
+		t.Fatal("RotateRefreshToken never blocked on the token-family lock")
+	}
+	// The rotation stays blocked on the lock while the token crosses its expiry,
+	// so the release below hands it an already-expired token — the ErrTokenExpired
+	// this test asserts. Polling the clock keeps it load-independent.
+	for time.Now().Before(tokenExpiresAt.Add(20 * time.Millisecond)) {
+		time.Sleep(20 * time.Millisecond)
+	}
 	if err := lockTransaction.Rollback().Error; err != nil {
 		t.Fatalf("release external token-family lock: %v", err)
 	}
@@ -380,7 +408,10 @@ func TestTokenRepositoryBulkRevokeWaitsForFamilyLockAndRevokesRotatedToken(t *te
 		var waiters int
 		if err := database.Raw(`
 			SELECT COUNT(*) FROM pg_stat_activity
-			WHERE wait_event_type = 'Lock' AND state = 'active'
+			WHERE datname = current_database()
+			  AND pid <> pg_backend_pid()
+			  AND wait_event_type = 'Lock'
+			  AND state = 'active'
 		`).Scan(&waiters).Error; err != nil {
 			t.Fatalf("count lock waiters: %v", err)
 		}

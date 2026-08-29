@@ -7,6 +7,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 // ListClients returns every registered OAuth client.
@@ -44,7 +45,7 @@ func (h Handler) CreateClient(c *gin.Context) {
 		return
 	}
 	var req createClientRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
@@ -101,7 +102,7 @@ func (h Handler) UpdateClient(c *gin.Context) {
 		return
 	}
 	var req updateClientRequest
-	if err := decodeStrictJSON(c, &req); err != nil {
+	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}

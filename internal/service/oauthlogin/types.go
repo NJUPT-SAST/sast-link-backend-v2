@@ -249,8 +249,12 @@ type BindInput struct {
 	Provider    model.LoginMethod
 	Code        string
 	RedirectURI string
-	ClientIP    string
-	UserAgent   string
+	// ActorClientID is the OAuth client that authorized this bind (the azp),
+	// recorded on the audit row so a delegated bind is not mistaken for an
+	// unauthenticated one.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 type BindResult struct {

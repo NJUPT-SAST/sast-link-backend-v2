@@ -8,6 +8,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
@@ -150,7 +151,7 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		s.auditUpdate(ctx, input, false, errorCode(mapped), nil)
 		return nil, mapped
 	}
-	s.deliverBlacklist(ctx, entries, s.now())
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, s.now())
 	// A role change that revoked sessions also clears the device set, so it stops
 	// showing logins that can no longer authenticate; fail-open, since the revoke is
 	// durable and a leftover record expires on its own. The gate is the repository's
@@ -281,7 +282,7 @@ func (s Service) DeleteUser(ctx context.Context, input TargetUserInput) error {
 		s.auditTarget(ctx, input, actionDeleteUser, false, errorCode(mapped))
 		return mapped
 	}
-	s.deliverBlacklist(ctx, entries, s.now())
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, s.now())
 	// Clear the device records so the closed account leaves no ghost logins behind;
 	// fail-open — the user is already gone.
 	if s.Devices != nil {

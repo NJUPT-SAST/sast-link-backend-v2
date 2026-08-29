@@ -1,10 +1,11 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -107,22 +108,24 @@ func TestTokenAuthorizationCodeIssuesPairAndIDToken(t *testing.T) {
 	}
 }
 
-// auth_time must be the moment the user consented, which is when the code row was
-// created — not the moment the client got around to redeeming it.
-func TestTokenIDTokenAuthTimeIsConsentInstant(t *testing.T) {
+// auth_time is deliberately absent from the ID Token: no code path records a
+// truthful authentication instant, so any value would overstate recency.
+func TestTokenIDTokenCarriesNoAuthTimeClaim(t *testing.T) {
 	h := newHarness(t)
 	code := issueCode(t, h, testPublicClientID, "openid")
-	consentedAt := h.authorizations.created[0].CreatedAt
 
 	result, err := h.service.Token(context.Background(), validCodeTokenInput(code))
 	if err != nil {
 		t.Fatalf("Token() error = %v", err)
 	}
 
-	claims := parseIDTokenClaims(t, h, result.IDToken)
-	if claims.AuthTime != consentedAt.Unix() {
-		t.Fatalf("auth_time = %d, want the consent instant %d", claims.AuthTime, consentedAt.Unix())
+	// Probe the raw payload for the JSON key too, so a reintroduced claim cannot
+	// hide behind an empty-but-present value.
+	if bytes.Contains(unpackJWT(t, result.IDToken), []byte(`"auth_time"`)) {
+		t.Fatal("ID token carries an auth_time claim, which nothing can produce truthfully")
 	}
+
+	claims := parseIDTokenClaims(t, h, result.IDToken)
 	if len(claims.Audience) != 1 || claims.Audience[0] != testPublicClientID {
 		t.Fatalf("id_token aud = %v, want the client_id", claims.Audience)
 	}
@@ -135,55 +138,25 @@ func TestTokenIDTokenAuthTimeIsConsentInstant(t *testing.T) {
 	}
 }
 
+// unpackJWT decodes a JWT's payload segment so a test can probe raw claim keys.
+func unpackJWT(t *testing.T, token string) []byte {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token = %q, want three JWT segments", token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode JWT payload: %v", err)
+	}
+	return payload
+}
+
 // movingClock advances between calls, so a test can observe what a value is read
 // from rather than only that it is plausible at one instant.
 type movingClock struct{ now *time.Time }
 
 func (c movingClock) Now() time.Time { return *c.now }
-
-// Rotation is not a re-authentication, so auth_time must stay the instant the user
-// authorized (PRD §4.10, API 文档 §5.3).
-//
-// Three rotations, not one: reading the *current* refresh row's created_at is
-// correct for the first rotation and only starts drifting on the second, so a
-// single-rotation test passes against the bug.
-func TestTokenIDTokenAuthTimeSurvivesRepeatedRotation(t *testing.T) {
-	h := newHarness(t)
-	base := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
-	current := base
-	h.service.Clock = movingClock{now: &current}
-
-	code := issueCode(t, h, testPublicClientID, "openid")
-	consentedAt := h.authorizations.created[0].CreatedAt
-
-	issued, err := h.service.Token(context.Background(), validCodeTokenInput(code))
-	if err != nil {
-		t.Fatalf("code grant error = %v", err)
-	}
-	tokens := map[string]string{"code grant": issued.IDToken}
-	refreshToken := issued.RefreshToken
-	for i, elapsed := range []time.Duration{2 * time.Hour, 10 * time.Hour, 30 * time.Hour} {
-		current = base.Add(elapsed)
-		rotated, rotateErr := h.service.Token(context.Background(), TokenInput{
-			GrantType:    grantTypeRefreshToken,
-			RefreshToken: refreshToken,
-			ClientID:     testPublicClientID,
-		})
-		if rotateErr != nil {
-			t.Fatalf("rotation %d error = %v", i+1, rotateErr)
-		}
-		tokens[fmt.Sprintf("rotation %d", i+1)] = rotated.IDToken
-		refreshToken = rotated.RefreshToken
-	}
-
-	for name, token := range tokens {
-		got := parseIDTokenClaims(t, h, token).AuthTime
-		if got != consentedAt.Unix() {
-			t.Errorf("%s auth_time = %v, want the authorization instant %v",
-				name, time.Unix(got, 0).UTC(), consentedAt.UTC())
-		}
-	}
-}
 
 // The family always has a sequence-0 row, so a lookup failure means inconsistent
 // metadata: refuse rather than sign an ID Token with a guessed auth_time.
