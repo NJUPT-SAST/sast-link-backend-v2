@@ -1605,13 +1605,16 @@ GET /admin/users
 | `keyword` | 搜索关键词（姓名/学号/邮箱模糊匹配，大小写不敏感；`%`、`_`、`\` 按字面量处理，不作通配符） |
 | `needs_completion` | 筛选资料待补全账号（§3.0）：`true` 只列出待补全的，`false` 只列出已完整的，不传则不筛选 |
 
-**说明**：不带 `state` 筛选时列表包含已注销用户（`state = is_deleted`），否则无法找到并恢复它们。
+**说明**：
+
+- 角色视图：`phone_number` 仅 **admin** 视角返回；lecturer 视角该字段**不存在**（既不 null 也不空串——"未披露"不能读成"未填写"）。`qq_number` 与其余字段所有角色一致。
+- 不带 `state` 筛选时列表包含已注销用户（`state = is_deleted`），否则无法找到并恢复它们。
 
 `needs_completion` 只接受 `true` / `false` 字面量，其他值返回 `40000` 而非按 `false` 处理——`needs_completion=ture` 若被静默当作 `false`，会列出与调用者意图完全相反的结果且看不出错。该筛选用于清理旧库迁移遗留数据，配合响应里的 `incomplete_fields` 可直接看出每个账号缺哪些字段。
 
 **错误码**：`40000`（分页参数非法 / `role`、`state`、`department`、`needs_completion` 取值非法）、`40100`、`40300`。
 
-**Response** `200`:
+**Response** `200`（admin 视角；lecturer 视角无 `phone_number`）:
 
 ```json
 {
@@ -1651,7 +1654,10 @@ GET /admin/users/:id
 
 **Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
-**说明**：`id` 非数字或非正整数一律返回 `404`（与用户不存在同一响应），不区分两者。`identities` 不含第三方 `access_token` / `refresh_token`，也不含 `identity_data`——该字段存的是第三方返回的完整用户对象（飞书含 `mobile`、`email`、`enterprise_email`、`employee_no`），本端点 lecturer 亦可读，列出绑定不等于交出绑定背后的联系方式。
+**说明**：`id` 非数字或非正整数一律返回 `404`（与用户不存在同一响应），不区分两者。
+
+- 完整档案（含联系方式与第三方绑定）；`phone_number` 仅 **admin** 视角返回，lecturer 视角该字段**不存在**（既不 null 也不空串）。其余字段（`qq_number` / 第三方绑定 / `profile.email` 等）所有角色可见。
+- `identities` 不含第三方 `access_token` / `refresh_token`，也不含 `identity_data`——该字段存的是第三方返回的完整用户对象（飞书含 `mobile`、`email`、`enterprise_email`、`employee_no`），列出绑定不等于交出绑定背后的联系方式。
 
 **错误码**：`40100`、`40300`、`40401`。
 

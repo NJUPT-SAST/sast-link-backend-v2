@@ -168,8 +168,9 @@ func TestSetPrincipalRoundTrips(t *testing.T) {
 // no unit test inside adminhandler can catch, since it stubs its own middleware.
 //
 // This asserts the composition root passes all five in order, and that each route
-// picks the gates its contract calls for: the two read-only user endpoints admit a
-// lecturer, everything else is admin-only; reads accept a read-or-write delegated
+// picks the gates its contract calls for: the user reads (list, detail, batch)
+// admit a lecturer — the phone field, not the endpoint, is what a non-admin role
+// loses — everything else is admin-only; reads accept a read-or-write delegated
 // scope, writes demand write.
 func TestAdminRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -199,9 +200,11 @@ func TestAdminRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 		{http.MethodGet, "/admin/oauth-clients", "read-scope", "admin"},
 		{http.MethodPost, "/admin/oauth-clients", "write-scope", "admin"},
 		{http.MethodPut, "/admin/oauth-clients/5", "write-scope", "admin"},
-		// PRD §4.12: reading the directory is open to lecturers, writing is not.
+		// PRD §4.12: the directory list and the detail records are open to lecturers,
+		// with the phone field dropped for them inside the mapping; writes are admin-only.
 		{http.MethodGet, "/admin/users", "read-scope", "reader"},
 		{http.MethodGet, "/admin/users/5", "read-scope", "reader"},
+		{http.MethodGet, "/admin/users/batch", "read-scope", "reader"},
 		{http.MethodPut, "/admin/users/5", "write-scope", "admin"},
 		{http.MethodDelete, "/admin/users/5", "write-scope", "admin"},
 		{http.MethodPut, "/admin/users/5/restore", "write-scope", "admin"},
@@ -279,8 +282,9 @@ func TestReaderRolesAreAdminAndLecturer(t *testing.T) {
 }
 
 // The console account-request routes carry the same two-dimensional gating as the
-// rest of /admin: reading the queue is open to the roles that may read the user
-// directory, acting on a ticket is admin-only.
+// rest of /admin. They differ from the user surface in one place: the whole queue
+// — reads included — is admin-only, because a ticket carries an applicant's
+// contact details and prospective identity.
 func TestAlumniConsoleRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

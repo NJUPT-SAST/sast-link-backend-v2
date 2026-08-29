@@ -75,9 +75,13 @@ type Gates struct {
 // authentication puts in the context.
 //
 // Two role gates rather than one, because PRD §4.12 splits the console: a
-// lecturer may read the user list and detail, everything else is admin-only.
-// Each route names both a scope and a role gate explicitly, so a new route with
-// no gate gains no permission by omission.
+// lecturer may read the user directory, everything else is admin-only. The read
+// gates admit lecturers to the list and the detail records alike — the phone
+// field is dropped for them inside the mapping, so the endpoint stays open
+// without handing out the number; the alumnus queue (alumnihandler) is fully
+// admin-only, since tickets carry applicants' contact details. Each route names
+// both a scope and a role gate explicitly, so a new route with no gate gains no
+// permission by omission.
 //
 // The two independent guards are both required. The role gate answers "is this
 // user allowed" from the database row, so a demotion lands on the next request;
@@ -100,6 +104,8 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	admin.GET("/users", g.RequireReadScope, g.RequireReader, h.ListUsers)
 	// The static /users/batch segment wins over the :id parameter for the exact
 	// path, so a lookup of the id "batch" is served here rather than 404'd by GetUser.
+	// Detail records (this and :id) are readable by the same roles as the list,
+	// with the phone field dropped for non-admin roles inside mapUserDetail.
 	admin.GET("/users/batch", g.RequireReadScope, g.RequireReader, h.GetUsersByIDs)
 	admin.GET("/users/:id", g.RequireReadScope, g.RequireReader, h.GetUser)
 	// POST /admin/users creates an account; it needs write scope and admin role.

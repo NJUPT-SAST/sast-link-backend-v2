@@ -2019,7 +2019,10 @@ paths:
     get:
       summary: 用户列表
       deprecated: false
-      description: 需 admin 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
+      description: |
+        需 admin 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
+        lecturer 视角下 `phone_number` 字段不存在；`qq_number` 与其余字段对所有
+        角色一致返回。
       operationId: adminListUsers
       tags:
         - Admin
@@ -2199,6 +2202,7 @@ paths:
       deprecated: false
       description: |
         需 admin 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
+        lecturer 视角下 `phone_number` 字段不存在（与 `GET /admin/users/{id}` 一致）。
         按请求顺序返回与 `GET /admin/users/{id}` 相同结构的完整记录；
         重复 id 只返回一次，不存在的 id 直接缺席（不报错，调用方自行 diff）。
         已注销用户照常返回（与单条详情一致）。
@@ -2237,7 +2241,10 @@ paths:
     get:
       summary: 用户详情
       deprecated: false
-      description: 需 admin 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
+      description: |
+        需 admin 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
+        完整档案（含联系方式与第三方绑定）；lecturer 视角无 `phone_number`
+        字段，其余字段（qq / 绑定 / 邮箱等）可见。
       operationId: adminGetUserDetail
       tags:
         - Admin
@@ -3874,6 +3881,9 @@ components:
           description: 更新时间
     AdminUserItem:
       type: object
+      description: >-
+        列表项。`phone_number` 仅 admin 视角返回；lecturer 视角该字段不存在
+        （既不 null 也不空串）。`qq_number` 对所有角色返回。
       properties:
         id:
           type: integer
@@ -3896,10 +3906,10 @@ components:
           $ref: "#/components/schemas/EmailType"
         phone_number:
           type: string
-          description: 手机号
+          description: 手机号。仅 admin 视角返回，lecturer 视角无此字段。
         qq_number:
           type: string
-          description: QQ 号
+          description: QQ 号。所有角色可见。
         college:
           $ref: "#/components/schemas/College"
         major:
@@ -4352,10 +4362,13 @@ components:
           $ref: "#/components/schemas/EmailType"
         phone_number:
           type: string
-          description: 手机号
+          description: >-
+            手机号。管理接口（GET /admin/users/{id}、/admin/users/batch）中仅 admin
+            视角返回，lecturer 视角该字段不存在；自服务接口（GET /user/profile、
+            PUT /user/profile）始终返回本人手机号。
         qq_number:
           type: string
-          description: QQ 号
+          description: QQ 号。所有角色可见。
         student_id:
           type: string
           description: 学号
