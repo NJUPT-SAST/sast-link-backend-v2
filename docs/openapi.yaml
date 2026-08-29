@@ -48,7 +48,6 @@ tags:
       （需 `admin:*` scope，仅 `third_party` 可持有，且用户须为管理员）。
   - name: Health
   - name: OIDC
-  - name: Card
 paths:
   /auth/register/send-code:
     post:
