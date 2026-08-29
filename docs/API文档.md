@@ -2350,7 +2350,9 @@ POST /alumni-requests
 GET /admin/alumni-requests?status=&notified=&keyword=&page=&page_size=
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（admin 或 lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（admin 角色），委派调用需 `admin:read` 或 `admin:write` scope
+
+**说明**：整个队列 admin-only——ticket 携带申请人联系方式（phone / qq / personal_email），lecturer 无此端点权限。
 
 | 参数 | 说明 |
 |------|------|

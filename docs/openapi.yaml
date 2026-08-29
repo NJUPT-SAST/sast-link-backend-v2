@@ -3062,7 +3062,8 @@ paths:
       summary: 建号申请列表
       deprecated: false
       description: |
-        审批队列。读取开放给 admin 与 lecturer，与用户列表一致；审批仅 admin。
+        审批队列，仅 admin。ticket 携带申请人的联系方式与预期身份，
+        lecturer 不可读。
 
         不返回提交者 IP：它留在库里用于滥用追溯与限流取证，审批用不到，把一个
         可关联到具体个人的网络标识复制到读接口上只是扩大暴露面。
