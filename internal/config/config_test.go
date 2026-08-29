@@ -863,9 +863,6 @@ func TestValidateAPIAuthRequiresTurnstileActionWithSecret(t *testing.T) {
 	}
 }
 
-// The reset URL an approval email points at has a production default (matching
-// docker-compose and .env.example), and an explicit blank is a boot failure
-// rather than silently undeliverable notices.
 // The reset URL an approval email points at is environment-specific and has no
 // default: a deployment that forgets it must fail at boot, not mail every
 // approved applicant a link that points at the wrong host.
