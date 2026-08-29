@@ -1107,7 +1107,9 @@ func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
 	service, _, clients, _, _, failures := newTestService(t)
 	service.Users.(*fakeUsers).byLogin["deleted@sast.fun"] = testUser(t, 99, "deleted@sast.fun", model.UserStateDeleted)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "deleted@sast.fun", Password: "secret"})
-	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
+	// A deleted account answers like any other failed login, so probing cannot
+	// tell "never registered" from "closed" (audit-fix #7 follow-up).
+	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
 	if len(failures.failures) != 0 {
 		t.Fatalf("deleted login failures = %#v, want no credential failure count", failures.failures)
 	}

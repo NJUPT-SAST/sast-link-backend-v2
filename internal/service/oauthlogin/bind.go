@@ -220,7 +220,7 @@ func (s Service) auditBind(
 		"provider":    string(input.Provider),
 		"provider_id": providerID,
 	}
-	if err := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, success, errCode,
+	if err := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, success, errCode, input.ActorClientID,
 		input.ClientIP, input.UserAgent, detail); err != nil {
 		logAuditFailure(ctx, "oauth_bind", err)
 	}

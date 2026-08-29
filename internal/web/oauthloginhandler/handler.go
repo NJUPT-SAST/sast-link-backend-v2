@@ -305,13 +305,14 @@ func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 			return
 		}
 		result, err := h.Service.Bind(c.Request.Context(), oauthlogin.BindInput{
-			UserID:      principal.UserID,
-			Provider:    name,
-			Code:        c.Query("code"),
-			RedirectURI: c.Query("redirect_uri"),
-			Password:    body.Password,
-			ClientIP:    c.ClientIP(),
-			UserAgent:   c.Request.UserAgent(),
+			UserID:        principal.UserID,
+			Provider:      name,
+			Code:          c.Query("code"),
+			RedirectURI:   c.Query("redirect_uri"),
+			Password:      body.Password,
+			ActorClientID: principal.ClientID,
+			ClientIP:      c.ClientIP(),
+			UserAgent:     c.Request.UserAgent(),
 		})
 		if err != nil {
 			response.Error(c, mapServiceError(err))

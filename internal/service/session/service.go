@@ -119,10 +119,14 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		return nil, lockErr
 	}
 	if user.State == model.UserStateDeleted {
-		if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, nil, false, errcode.CodeAccountDeleted, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier)}); auditErr != nil {
+		// A deleted account answers exactly like any other failed login (40105,
+		// same body), so probing cannot tell "never registered" from "closed".
+		// The audit keeps the reason, but the attempt is not counted: an account
+		// that can never be used again needs no lockout budget.
+		if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, nil, false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier), "reason": "user_deleted"}); auditErr != nil {
 			slog.Error("audit deleted login failure", "user_id", user.ID, "error", auditErr)
 		}
-		return nil, newError(ErrUserDeleted, "用户已注销", nil)
+		return nil, newError(ErrLoginFailed, "邮箱或密码错误", nil)
 	}
 	if passwordErr := s.Passwords.VerifyPassword(ctx, input.Password, user.PasswordHash); passwordErr != nil {
 		// A cancelled or timed-out caller proved nothing about the password, so it

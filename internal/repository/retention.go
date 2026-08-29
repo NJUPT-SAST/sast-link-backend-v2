@@ -123,10 +123,10 @@ func (r *RetentionRepository) DeleteExpiredAccessTokens(
 // that removes a sequence-0 origin row left by a login the user never returned
 // to.
 //
-// The origin row of a live family is preserved: the refresh flow reads it for an
-// ID Token's auth_time, and deleting it would make the refresh revoke the family
-// and return 500. "Live" means unrevoked and not yet expired, judged against
-// cutoff so the sweep never races a valid token.
+// The origin row of a live family is preserved: the refresh flow reads it to
+// date the family for the capability cap, and deleting it would make the refresh
+// revoke the family and return 500. "Live" means unrevoked and not yet expired,
+// judged against cutoff so the sweep never races a valid token.
 func (r *RetentionRepository) DeleteRevokedRefreshTokens(
 	ctx context.Context,
 	cutoff time.Time,

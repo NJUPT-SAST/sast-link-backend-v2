@@ -257,9 +257,13 @@ type BindInput struct {
 	RedirectURI string
 	// Password is the caller's current password, confirmed before the binding is
 	// written so a stolen access token alone cannot attach a new login method.
-	Password  string
-	ClientIP  string
-	UserAgent string
+	Password string
+	// ActorClientID is the OAuth client that authorized this bind (the azp),
+	// recorded on the audit row so a delegated bind is not mistaken for an
+	// unauthenticated one.
+	ActorClientID string
+	ClientIP      string
+	UserAgent     string
 }
 
 type BindResult struct {

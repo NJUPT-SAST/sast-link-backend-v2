@@ -842,7 +842,7 @@ PUT /user/avatar
 **Headers**: `Authorization: Bearer <access_token>`
 **Content-Type**: `multipart/form-data`
 
-**Request**: `file` 字段（图片，限制 1MB 且任一维 ≤4096，格式 jpg/png/webp；按魔数检测，不信任文件名与 Content-Type。压缩由前端完成，后端只做上限、格式与分辨率校验，不重新编码）
+**Request**: `file` 字段（图片，输入上限 1MB 且任一维 ≤4096，格式 jpg/png/webp；按魔数检测，不信任文件名与 Content-Type。后端会重编码为 PNG，输出另设 4MB 上限：密集输入的无损重编码会显著膨胀，超限返回 `40000`；建议前端提交 ≤512px 的头像，避免触到该安全阀）
 
 上传链路：后端接收图片 → 重新编码为 PNG（只保留真实像素以清除拼接尾缀；JPEG 输入的 EXIF 方向标签先被还原，手机竖拍不会横显）→ 上传腾讯云 COS（公开读）→ COS 内容审核（`STORAGE_AUDIT_ENABLED` 开启时）→ 写入 `profile.avatar` → 返回公开 URL。审核 fail-closed：审核服务不可用时上传失败，未审核图片不放行。旧头像对象在写库成功后删除（失败仅记日志，不影响响应）。
 
