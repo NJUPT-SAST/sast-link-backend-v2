@@ -553,3 +553,44 @@ func TestApproveDispatchesOnStoredIntent(t *testing.T) {
 		t.Fatal("a provision ticket took the recovery path")
 	}
 }
+
+// The approval-time failure branches added with recovery map onto the errcode
+// contract clients observe: the code drives how the console renders the verdict
+// failure, so each repository sentinel must land on the code the API文档 names.
+func TestApproveMapsRecoveryAndFoldedFailures(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		recover  bool
+		repoErr  error
+		wantCode int
+	}{
+		{"folded student id collision at approval", false,
+			repository.ErrStudentIDExists, errcode.CodeStudentIDOccupied},
+		{"recovery target no longer resolves", true,
+			repository.ErrRecoverTargetMissing, errcode.CodeConflict},
+		{"recovery target account closed", true,
+			repository.ErrAccountClosed, errcode.CodeValidationFailed},
+		{"recovery login email drifted", true,
+			repository.ErrLoginEmailMismatch, errcode.CodeValidationFailed},
+		{"recovery bind cap reached", true,
+			repository.ErrIdentityLimitExceeded, errcode.CodeIdentityLimitReached},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			ticket := pendingTicket()
+			if testCase.recover {
+				ticket.Intent = model.AlumniRequestIntentRecover
+			}
+			requests := &fakeRequests{getResult: ticket, approveErr: testCase.repoErr}
+			service := newService(requests, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+			_, err := service.Approve(context.Background(), reviewInput())
+			if errorCode(err) != testCase.wantCode {
+				t.Fatalf("code = %d, want %d (error %v)", errorCode(err), testCase.wantCode, err)
+			}
+		})
+	}
+}
