@@ -771,7 +771,7 @@ func TestAlumniRequestListUnnotifiedReviewed(t *testing.T) {
 		approved := makeTicket(t, "B20040212", model.AlumniRequestStatusApproved)
 		rejected := makeTicket(t, "B20040213", model.AlumniRequestStatusRejected)
 
-		rows, err := requests.ListUnnotifiedReviewed(ctx, 10)
+		rows, err := requests.ListUnnotifiedReviewed(ctx, 10, nil)
 		if err != nil {
 			t.Fatalf("ListUnnotifiedReviewed() error = %v", err)
 		}
@@ -799,7 +799,7 @@ func TestAlumniRequestListUnnotifiedReviewed(t *testing.T) {
 			t.Fatalf("MarkNotifyAttempt() error = %v", err)
 		}
 
-		rows, err := requests.ListUnnotifiedReviewed(ctx, 10)
+		rows, err := requests.ListUnnotifiedReviewed(ctx, 10, nil)
 		if err != nil {
 			t.Fatalf("ListUnnotifiedReviewed() error = %v", err)
 		}
@@ -810,8 +810,32 @@ func TestAlumniRequestListUnnotifiedReviewed(t *testing.T) {
 		}
 	})
 
+	t.Run("excluded ids are skipped", func(t *testing.T) {
+		first := makeTicket(t, "B20040215", model.AlumniRequestStatusApproved)
+		second := makeTicket(t, "B20040216", model.AlumniRequestStatusApproved)
+
+		rows, err := requests.ListUnnotifiedReviewed(ctx, 10, []int64{first.ID})
+		if err != nil {
+			t.Fatalf("ListUnnotifiedReviewed() error = %v", err)
+		}
+		for _, row := range rows {
+			if row.ID == first.ID {
+				t.Fatalf("excluded ticket %d listed, want it skipped", first.ID)
+			}
+		}
+		foundSecond := false
+		for _, row := range rows {
+			if row.ID == second.ID {
+				foundSecond = true
+			}
+		}
+		if !foundSecond {
+			t.Fatal("non-excluded ticket not listed beside an exclusion")
+		}
+	})
+
 	t.Run("the limit is respected", func(t *testing.T) {
-		rows, err := requests.ListUnnotifiedReviewed(ctx, 1)
+		rows, err := requests.ListUnnotifiedReviewed(ctx, 1, nil)
 		if err != nil {
 			t.Fatalf("ListUnnotifiedReviewed(1) error = %v", err)
 		}

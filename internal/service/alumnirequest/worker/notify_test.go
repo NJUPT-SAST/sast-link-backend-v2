@@ -42,13 +42,27 @@ func (f *fakeRequests) MarkNotified(_ context.Context, _ int64, _ time.Time) err
 	return nil
 }
 
-func (f *fakeRequests) ListUnnotifiedReviewed(_ context.Context, _ int) ([]model.AlumniRequest, error) {
+func (f *fakeRequests) ListUnnotifiedReviewed(_ context.Context, limit int, excludeIDs []int64) ([]model.AlumniRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.listRows, nil
+	excluded := make(map[int64]struct{}, len(excludeIDs))
+	for _, id := range excludeIDs {
+		excluded[id] = struct{}{}
+	}
+	rows := make([]model.AlumniRequest, 0, limit)
+	for _, row := range f.listRows {
+		if _, skip := excluded[row.ID]; skip {
+			continue
+		}
+		rows = append(rows, row)
+		if len(rows) == limit {
+			break
+		}
+	}
+	return rows, nil
 }
 
 func (f *fakeRequests) sequence() []string {
@@ -314,8 +328,9 @@ func waitFor(t *testing.T, condition func() bool) {
 // TestRunReconcilesTheQueueOnStartup pins the restart self-heal: a process that
 // died with reviewed-but-untouched tickets re-queues them on boot, so an
 // applicant whose result email was lost to a crash is served without an admin
-// noticing a backlog. Each row is claimed (attempt counted) before being queued,
-// which is what stops a second instance from double-sending the same row.
+// noticing a backlog. The attempt counter moves at send time, never here — a
+// reconciled row is not claimed, it is queued; asserting the counter still reads
+// the number of sends pins that the reconcile itself never double-counts.
 func TestRunReconcilesTheQueueOnStartup(t *testing.T) {
 	requests := &fakeRequests{listRows: []model.AlumniRequest{
 		{ID: 11, PersonalEmail: "alice@example.com", Name: "甲",
@@ -358,6 +373,41 @@ func TestRunReconcilesTheQueueOnStartup(t *testing.T) {
 	// restore-access copy, not the new-account one.
 	if got := mailer.resultAt(2); !got.Approved || !got.Recovered {
 		t.Fatalf("third result = %+v, want an approved recovery", got)
+	}
+}
+
+// TestRunReconcileSpansBatches pins that a backlog longer than one reconcile
+// batch is fully re-queued: the walk excludes already-queued ids, so the oldest
+// batch cannot shadow the rest until the worker catches up.
+func TestRunReconcileSpansBatches(t *testing.T) {
+	rows := make([]model.AlumniRequest, 0, 96)
+	for i := range 96 {
+		rows = append(rows, model.AlumniRequest{
+			ID: int64(100 + i), PersonalEmail: "row@example.com", Name: "批量",
+			Status: model.AlumniRequestStatusApproved,
+		})
+	}
+	requests := &fakeRequests{listRows: rows}
+	mailer := &fakeMailer{}
+	worker := alumnirequestworker.New(requests, mailer,
+		"https://link.sast.fun/reset", "link@sast.fun")
+
+	delivered := make(chan struct{}, len(rows))
+	mailer.onCalled = func() { delivered <- struct{}{} }
+	stop := runWorker(t, worker)
+
+	for range len(rows) {
+		select {
+		case <-delivered:
+		case <-time.After(3 * time.Second):
+			stop()
+			t.Fatalf("reconciled %d/%d notifications before timeout", mailer.count(), len(rows))
+		}
+	}
+	stop()
+
+	if mailer.count() != len(rows) {
+		t.Fatalf("sent %d, want all %d reconciled", mailer.count(), len(rows))
 	}
 }
 

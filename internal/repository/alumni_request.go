@@ -418,22 +418,27 @@ func lockPendingRequest(transaction *gorm.DB, requestID int64) (*model.AlumniReq
 }
 
 // ListUnnotifiedReviewed returns reviewed tickets whose result email was never
-// attempted, oldest review first, capped at limit. A restart loses whatever the
-// in-memory notification queue had not sent yet; notify_attempts = 0 identifies
-// exactly those untouched jobs, and the partial index on (status <> pending,
-// notified_at IS NULL) serves the query.
-func (r *AlumniRequestRepository) ListUnnotifiedReviewed(ctx context.Context, limit int) ([]model.AlumniRequest, error) {
+// attempted, oldest review first, capped at limit and skipping excludeIDs. A
+// restart loses whatever the in-memory notification queue had not sent yet;
+// notify_attempts = 0 identifies exactly those untouched jobs, and the partial
+// index on (status <> pending, notified_at IS NULL) serves the query. The
+// exclusion lets a re-queuing process walk a backlog longer than one batch
+// without re-listing rows it already queued but has not started sending yet
+// (the attempt counter only moves at send time).
+func (r *AlumniRequestRepository) ListUnnotifiedReviewed(ctx context.Context, limit int, excludeIDs []int64) ([]model.AlumniRequest, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("%w: limit must be positive", ErrInvalidArgument)
 	}
-	rows := make([]model.AlumniRequest, 0, limit)
-	err := r.database.WithContext(ctx).
+	query := r.database.WithContext(ctx).
 		Select("id", "personal_email", "name", "status", "intent", "reject_reason").
 		Where("status <> ? AND notified_at IS NULL AND notify_attempts = 0",
 			model.AlumniRequestStatusPending).
-		Order("reviewed_at ASC").
-		Limit(limit).
-		Find(&rows).Error
+		Order("reviewed_at ASC")
+	if len(excludeIDs) > 0 {
+		query = query.Where("id NOT IN ?", excludeIDs)
+	}
+	rows := make([]model.AlumniRequest, 0, limit)
+	err := query.Limit(limit).Find(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("list unnotified reviewed alumni requests: %w", err)
 	}
