@@ -1553,7 +1553,7 @@ DELETE /oauth/grants/:client_id
 
 > **实现状态**：本章全部端点已注册。
 >
-> 以下四处对 OpenAPI 契约做了收紧，实现按本文档为准：
+> 以下五处对 OpenAPI 契约做了收紧，实现按本文档为准：
 >
 > 1. **`PUT /admin/users/:id` 不接受 `state: is_deleted`**，返回 `422`。注销必须走 `DELETE`，恢复必须走 `PUT .../restore` —— 只有这两条路径会在同一事务内撤销该用户的全部 Token。若允许 PUT 直接置为 `is_deleted`，会留下「账号已注销但 Refresh Token 仍可换新 Access Token」的窗口。对已注销用户执行 PUT 同样返回 `422`，需先恢复。
 > 2. **`email_type` 只能与 `login_email` 一同提交，且必须与其域名一致**，否则返回 `400`。V001 触发器 `auto_set_email_type` 仅在 `login_email` 出现在 UPDATE 列中时才重算该字段，单独提交 `email_type` 会写入与邮箱域名矛盾的值。
@@ -1859,7 +1859,7 @@ GET /admin/users/batch?ids=1,2,3
 
 - 返回的 `users` 数组**按请求顺序**排列（People 的邮件批次目标 / 阅卷列表需要与输入对齐），重复 ID 只返回一次（按首次出现位置）。
 - **不存在的 ID 直接缺席**（不报错，调用方自行 diff 重试）；已注销用户照常返回（与 `GET /admin/users/:id` 一致）。
-- 每条记录字段与 `GET /admin/users/:id` 完全一致（含 `profile` / `identities`），People 可直接复用现有转换逻辑。
+- 每条记录字段与 `GET /admin/users/:id` 完全一致（含 `profile` / `identities`），People 可直接复用现有转换逻辑。`phone_number` 同样按视角返回：仅 **admin** 可见，lecturer 视角该字段**不存在**（既不 null 也不空串），与 `:id` 一致。
 - `ids` 缺失、含非数字/非正整数段（如 `1,abc,2`、`1,,2`）、超过 100 个，均返回 `400`——静默丢弃非法段会返回一个无法与输入对齐的列表。
 
 **错误码**：`40000`（ids 缺失 / 非法 / 超上限）、`40100`、`40300`。
