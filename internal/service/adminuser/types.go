@@ -92,6 +92,11 @@ type ListUsersInput struct {
 	Department string
 	StudentID  string
 	Keyword    string
+	// IncludePhoneColumn admits phone_number into the keyword predicate. The
+	// handler sets it only for an admin principal: the response mapping hides
+	// phone_number from every other role, and the search predicate must not
+	// leak it through existence probing.
+	IncludePhoneColumn bool
 	// NeedsCompletion filters on the migration-debris flag. Nil applies no
 	// filter, so the default list is unchanged; a pointer makes "show me the
 	// backlog" and "show me the healthy accounts" both expressible, which a bare

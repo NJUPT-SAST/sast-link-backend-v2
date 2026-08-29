@@ -38,14 +38,15 @@ func (h Handler) ListUsers(c *gin.Context) {
 		return
 	}
 	result, err := h.Users.ListUsers(c.Request.Context(), adminuser.ListUsersInput{
-		Page:            page,
-		PageSize:        pageSize,
-		Role:            c.Query("role"),
-		State:           c.Query("state"),
-		Department:      c.Query("department"),
-		StudentID:       c.Query("student_id"),
-		Keyword:         c.Query("keyword"),
-		NeedsCompletion: needsCompletion,
+		Page:               page,
+		PageSize:           pageSize,
+		Role:               c.Query("role"),
+		State:              c.Query("state"),
+		Department:         c.Query("department"),
+		StudentID:          c.Query("student_id"),
+		Keyword:            c.Query("keyword"),
+		IncludePhoneColumn: principalRole(c) == string(AdminRole),
+		NeedsCompletion:    needsCompletion,
 	})
 	if err != nil {
 		response.Error(c, mapUserServiceError(err))

@@ -223,6 +223,26 @@ func TestListUsersPassesQueryParameters(t *testing.T) {
 	}
 }
 
+// The keyword predicate admits phone_number only for an admin principal: a
+// lecturer must not be able to probe an account by phone, since the response
+// mapping hides the field from them ("admin or hidden" applies to the match the
+// same way it applies to the output).
+func TestListUsersScopesPhoneKeywordToAdmins(t *testing.T) {
+	users := &fakeUsers{}
+	router := newUserRouter(t, users, nil)
+	doRequest(t, router, http.MethodGet, "/admin/users?keyword=138", "", "")
+	if !users.listInput.IncludePhoneColumn {
+		t.Fatalf("admin principal: IncludePhoneColumn = false, want true")
+	}
+
+	lecturer := &fakeUsers{}
+	router = newUserRouterWithRole(t, lecturer, nil, "lecturer")
+	doRequest(t, router, http.MethodGet, "/admin/users?keyword=138", "", "")
+	if lecturer.listInput.IncludePhoneColumn {
+		t.Fatalf("lecturer principal: IncludePhoneColumn = true, want false")
+	}
+}
+
 // A caller that sent page=abc did not mean page 1. Falling back silently would
 // return a page they did not ask for and hide the mistake.
 //
