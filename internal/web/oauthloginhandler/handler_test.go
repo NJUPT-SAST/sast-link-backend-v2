@@ -85,12 +85,10 @@ func newTestRouter(h Handler, userID int64) *gin.Engine {
 	return router
 }
 
-// bindRequest builds a POST to a binding endpoint carrying the step-up password.
+// bindRequest builds a POST to a binding endpoint; the code and redirect_uri
+// ride the query string per the documented contract.
 func bindRequest(target string) *http.Request {
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, target,
-		strings.NewReader(`{"password":"secret"}`))
-	req.Header.Set("Content-Type", "application/json")
-	return req
+	return httptest.NewRequestWithContext(context.Background(), http.MethodPost, target, nil)
 }
 
 func decodeEnvelope(t *testing.T, body string) (int, string, map[string]any) {
@@ -536,9 +534,6 @@ func TestBindPassesPrincipalAndProvider(t *testing.T) {
 	}
 	if service.bindInput.Code != "provider-code" {
 		t.Fatalf("code = %q, want the query value", service.bindInput.Code)
-	}
-	if service.bindInput.Password != "secret" {
-		t.Fatalf("password = %q, want the body value", service.bindInput.Password)
 	}
 	// The frontend bind callback must be echoed back so the provider code can be
 	// exchanged against the exact callback it was issued for (RFC 6749 §4.1.3).

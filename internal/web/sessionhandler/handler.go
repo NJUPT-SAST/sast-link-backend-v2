@@ -93,14 +93,12 @@ type changePasswordRequest struct {
 }
 
 type bindEmailRequest struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required"`
+	Email string `json:"email" binding:"required,email"`
 }
 
 type bindEmailVerifyRequest struct {
 	BindTicket string `json:"bind_ticket" binding:"required"`
 	Code       string `json:"code" binding:"required"`
-	Password   string `json:"password" binding:"required"`
 }
 
 type refreshRequest struct {
@@ -584,7 +582,6 @@ func (h Handler) BindEmailSendCode(c *gin.Context) {
 	result, err := h.Service.BindEmailSendCode(c.Request.Context(), session.BindEmailSendCodeInput{
 		UserID:        principal.UserID,
 		Email:         req.Email,
-		Password:      req.Password,
 		ActorClientID: principal.ClientID,
 		ClientIP:      c.ClientIP(),
 		UserAgent:     c.Request.UserAgent(),
@@ -611,7 +608,6 @@ func (h Handler) BindEmailVerify(c *gin.Context) {
 		UserID:        principal.UserID,
 		BindTicket:    req.BindTicket,
 		Code:          req.Code,
-		Password:      req.Password,
 		ActorClientID: principal.ClientID,
 		ClientIP:      c.ClientIP(),
 		UserAgent:     c.Request.UserAgent(),

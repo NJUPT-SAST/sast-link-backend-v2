@@ -1581,7 +1581,7 @@ func TestSendRegisterCodeRejectsHeaderInjectionPayload(t *testing.T) {
 	_, err = service.ResetPassword(context.Background(), ResetPasswordInput{Email: injection, Code: "123456", Password: "longpassword"})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 
-	_, err = service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: injection, Password: "secret"})
+	_, err = service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: injection})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 
 	// No mail must have been sent for any of the rejected payloads.
@@ -1706,14 +1706,14 @@ func TestFailClosedStoresReturnDependencyUnavailable(t *testing.T) {
 	t.Run("bind send code", func(t *testing.T) {
 		service := newRegisterService(t)
 		service.VerificationCode = &fakeVerificationCodeStore{err: redisDown}
-		_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com", Password: "secret"})
+		_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
 		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
 	})
 
 	t.Run("peek bind ticket", func(t *testing.T) {
 		service := newRegisterService(t)
 		service.BindTicket = &fakeBindTicketStore{err: redisDown}
-		_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456", Password: "secret"})
+		_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
 		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
 	})
 
@@ -1728,7 +1728,7 @@ func TestFailClosedStoresReturnDependencyUnavailable(t *testing.T) {
 			t.Fatalf("save code: %v", err)
 		}
 		bindTickets.consumeErr = redisDown
-		_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456", Password: "secret"})
+		_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
 		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
 	})
 }
@@ -2078,7 +2078,7 @@ func TestRegisterRejectsShortPassword(t *testing.T) {
 func TestBindEmailSendCodeIssuesTicket(t *testing.T) {
 	service := newRegisterService(t)
 	codes := service.VerificationCode.(*fakeVerificationCodeStore)
-	result, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com", Password: "secret"})
+	result, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
 	if err != nil {
 		t.Fatalf("BindEmailSendCode returned error: %v", err)
 	}
@@ -2098,7 +2098,7 @@ func TestBindEmailSendCodeCollapsesSubaddressInCodeKey(t *testing.T) {
 	service := newRegisterService(t)
 	codes := service.VerificationCode.(*fakeVerificationCodeStore)
 
-	if _, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra+tag@gmail.com", Password: "secret"}); err != nil {
+	if _, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra+tag@gmail.com"}); err != nil {
 		t.Fatalf("BindEmailSendCode(extra+tag) error = %v", err)
 	}
 	if _, ok := codes.codes[codeKey(string(mailer.VerificationPurposeBindEmail), "extra@gmail.com")]; !ok {
@@ -2115,7 +2115,7 @@ func TestBindEmailSendCodeRejectsOccupiedEmail(t *testing.T) {
 	identities.byProviderID = map[string]*model.Identity{
 		"extra@gmail.com": {UserID: 99, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
 	}
-	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com", Password: "secret"})
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
 
@@ -2127,14 +2127,14 @@ func TestBindEmailSendCodeSameConflictForSelfAndOtherBinding(t *testing.T) {
 	selfBound.Identities = &fakeIdentities{byProviderID: map[string]*model.Identity{
 		"extra@gmail.com": {UserID: 42, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
 	}}
-	_, selfErr := selfBound.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com", Password: "secret"})
+	_, selfErr := selfBound.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
 	assertKind(t, selfErr, KindConflict, errcode.CodeIdentityOccupied)
 
 	otherBound := newRegisterService(t)
 	otherBound.Identities = &fakeIdentities{byProviderID: map[string]*model.Identity{
 		"extra@gmail.com": {UserID: 99, Provider: model.LoginMethodOtherMail, ProviderID: "extra@gmail.com"},
 	}}
-	_, otherErr := otherBound.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com", Password: "secret"})
+	_, otherErr := otherBound.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
 	assertKind(t, otherErr, KindConflict, errcode.CodeIdentityOccupied)
 
 	selfServiceErr, _ := selfErr.(*Error)
@@ -2146,7 +2146,7 @@ func TestBindEmailSendCodeSameConflictForSelfAndOtherBinding(t *testing.T) {
 
 func TestBindEmailSendCodeRejectsLoginEmail(t *testing.T) {
 	service := newRegisterService(t)
-	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "user@njupt.edu.cn", Password: "secret"})
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "user@njupt.edu.cn"})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
 
@@ -2160,7 +2160,7 @@ func TestBindEmailVerifyCreatesIdentity(t *testing.T) {
 	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "extra@gmail.com", "123456", time.Minute); err != nil {
 		t.Fatalf("save code: %v", err)
 	}
-	result, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456", Password: "secret"})
+	result, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
 	if err != nil {
 		t.Fatalf("BindEmailVerify returned error: %v", err)
 	}
@@ -2188,7 +2188,7 @@ func TestBindEmailVerifyEnforcesLimitAtomically(t *testing.T) {
 	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "c@gmail.com", "123456", time.Minute); err != nil {
 		t.Fatalf("save code: %v", err)
 	}
-	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456", Password: "secret"})
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityLimitReached)
 }
 
@@ -2202,7 +2202,7 @@ func TestBindEmailVerifyRejectsWrongCode(t *testing.T) {
 	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "extra@gmail.com", "123456", time.Minute); err != nil {
 		t.Fatalf("save code: %v", err)
 	}
-	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "000000", Password: "secret"})
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "000000"})
 	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
 }
 
@@ -2216,7 +2216,7 @@ func TestBindEmailVerifyRejectsLoginEmail(t *testing.T) {
 	if err := codes.SaveVerificationCode(context.Background(), string(mailer.VerificationPurposeBindEmail), "user@njupt.edu.cn", "123456", time.Minute); err != nil {
 		t.Fatalf("save code: %v", err)
 	}
-	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456", Password: "secret"})
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
 
@@ -2226,7 +2226,7 @@ func TestBindEmailVerifyRejectsForeignTicket(t *testing.T) {
 	if err := bindTickets.SaveBindTicket(context.Background(), "be_xxx", BindTicketPayload{Email: "extra@gmail.com", UserID: 99}, time.Minute); err != nil {
 		t.Fatalf("save bind ticket: %v", err)
 	}
-	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456", Password: "secret"})
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_xxx", Code: "123456"})
 	assertKind(t, err, KindInvalidToken, errcode.CodeBindTicketInvalid)
 }
 
@@ -2645,13 +2645,13 @@ func TestBindEmailVerifyKeepsTicketOnWrongCode(t *testing.T) {
 	}
 	codes.codes = map[string]string{codeKey(string(mailer.VerificationPurposeBindEmail), "bind@qq.com"): "123456"}
 
-	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_abc", Code: "000000", Password: "secret"})
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_abc", Code: "000000"})
 	assertKind(t, err, KindInvalidInput, errcode.CodeVerificationCodeWrong)
 	if _, ok := tickets.tickets["be_abc"]; !ok {
 		t.Fatal("Bind-Ticket was consumed by a wrong verification code")
 	}
 
-	result, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_abc", Code: "123456", Password: "secret"})
+	result, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 42, BindTicket: "be_abc", Code: "123456"})
 	if err != nil {
 		t.Fatalf("BindEmailVerify() after retry error = %v", err)
 	}
@@ -2679,30 +2679,10 @@ func TestBindEmailVerifyKeepsTicketOnOwnerMismatch(t *testing.T) {
 	users := service.Users.(*fakeUsers)
 	users.byID[99] = testUserWithHash(99, "other@njupt.edu.cn", model.UserStateOnSAST, hash)
 
-	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 99, BindTicket: "be_abc", Code: "123456", Password: "secret"})
+	_, err := service.BindEmailVerify(context.Background(), BindEmailVerifyInput{UserID: 99, BindTicket: "be_abc", Code: "123456"})
 	assertKind(t, err, KindInvalidToken, errcode.CodeBindTicketInvalid)
 	if _, ok := tickets.tickets["be_abc"]; !ok {
 		t.Fatal("Bind-Ticket was consumed by a request from the wrong user")
-	}
-}
-
-// A wrong password against the bind step-up is refused and audited as a failed
-// oauth_bind, matching UnbindIdentity's failure signal — a stolen token must not
-// be able to guess a password without leaving a trace.
-func TestBindEmailSendCodeAuditsWrongPassword(t *testing.T) {
-	service := newRegisterService(t)
-	audit := service.Audit.(*fakeAudit)
-
-	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com", Password: "wrong-password"})
-	if err == nil {
-		t.Fatal("BindEmailSendCode() error = nil, want a wrong-password refusal")
-	}
-	if len(audit.entries) == 0 {
-		t.Fatal("no audit entries recorded for a wrong-password bind")
-	}
-	entry := audit.entries[len(audit.entries)-1]
-	if entry.Action != "oauth_bind" || entry.Success == nil || *entry.Success || entry.ErrCode == nil || *entry.ErrCode != errcode.CodePasswordInvalid {
-		t.Fatalf("audit entry = %+v, want failed oauth_bind with 40105", entry)
 	}
 }
 

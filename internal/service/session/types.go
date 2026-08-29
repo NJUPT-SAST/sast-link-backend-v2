@@ -408,9 +408,8 @@ type ChangePasswordResult struct {
 }
 
 type BindEmailSendCodeInput struct {
-	UserID   int64
-	Email    string
-	Password string
+	UserID int64
+	Email  string
 	// ActorClientID is the azp of the token that authorized the bind; empty
 	// means a legacy console token, resolved to InternalClientID at audit time.
 	ActorClientID string
@@ -427,7 +426,6 @@ type BindEmailVerifyInput struct {
 	UserID     int64
 	BindTicket string
 	Code       string
-	Password   string
 	// ActorClientID is the azp of the token that authorized the bind; empty
 	// means a legacy console token, resolved to InternalClientID at audit time.
 	ActorClientID string

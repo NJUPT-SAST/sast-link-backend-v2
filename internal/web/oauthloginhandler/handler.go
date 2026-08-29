@@ -281,13 +281,6 @@ func (h Handler) ExchangeCode(c *gin.Context) {
 // provider that supports multiple callbacks (Lark), redirect_uri must be echoed
 // back when exchanging the code, so the caller passes the exact callback the
 // code was issued against.
-// bindPasswordRequest carries the step-up password. The code and redirect_uri
-// arrive as query parameters (mirroring the documented contract), while the body
-// holds only the re-authentication credential.
-type bindPasswordRequest struct {
-	Password string `json:"password" binding:"required"`
-}
-
 func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		principal, ok := middleware.PrincipalFrom(c)
@@ -299,17 +292,11 @@ func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 			})
 			return
 		}
-		var body bindPasswordRequest
-		if err := webutil.DecodeStrictJSON(c, &body); err != nil {
-			response.Error(c, webutil.BadRequest())
-			return
-		}
 		result, err := h.Service.Bind(c.Request.Context(), oauthlogin.BindInput{
 			UserID:        principal.UserID,
 			Provider:      name,
 			Code:          c.Query("code"),
 			RedirectURI:   c.Query("redirect_uri"),
-			Password:      body.Password,
 			ActorClientID: principal.ClientID,
 			ClientIP:      c.ClientIP(),
 			UserAgent:     c.Request.UserAgent(),

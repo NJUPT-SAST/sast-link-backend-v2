@@ -928,7 +928,7 @@ func TestBindEmailSendCodeReturnsTicketAndExpiry(t *testing.T) {
 	router := gin.New()
 	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)})))
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email", strings.NewReader(`{"email":"extra@qq.com","password":"secret"}`))
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email", strings.NewReader(`{"email":"extra@qq.com"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -958,7 +958,7 @@ func TestBindEmailVerifyReturnsIdentity(t *testing.T) {
 	router := gin.New()
 	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour)})))
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email/verify", strings.NewReader(`{"bind_ticket":"be_ticket","code":"123456","password":"secret"}`))
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/user/identities/email/verify", strings.NewReader(`{"bind_ticket":"be_ticket","code":"123456"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -1110,7 +1110,7 @@ func TestUserEndpointsThreadActorClientID(t *testing.T) {
 		{
 			name: "bind-email-send-code",
 			request: func() *http.Request {
-				return jsonRequest(http.MethodPost, "/user/identities/email", `{"email":"extra@qq.com","password":"secret"}`)
+				return jsonRequest(http.MethodPost, "/user/identities/email", `{"email":"extra@qq.com"}`)
 			},
 			service: &fakeService{bindEmailSendCodeResult: &session.BindEmailSendCodeResult{BindTicket: "be_t", ExpiresIn: 300}},
 			actor:   func(s *fakeService) string { return s.bindEmailSendCodeInput.ActorClientID },
@@ -1118,7 +1118,7 @@ func TestUserEndpointsThreadActorClientID(t *testing.T) {
 		{
 			name: "bind-email-verify",
 			request: func() *http.Request {
-				return jsonRequest(http.MethodPost, "/user/identities/email/verify", `{"bind_ticket":"be_t","code":"123456","password":"secret"}`)
+				return jsonRequest(http.MethodPost, "/user/identities/email/verify", `{"bind_ticket":"be_t","code":"123456"}`)
 			},
 			service: &fakeService{bindEmailVerifyResult: &session.BindEmailVerifyResult{Email: "extra@qq.com", Identity: session.IdentityDTO{}}},
 			actor:   func(s *fakeService) string { return s.bindEmailVerifyInput.ActorClientID },

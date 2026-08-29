@@ -53,10 +53,6 @@ type Service struct {
 	OAuthRegistration OAuthRegistrationStore
 	// UnbindLimiter throttles unbind per user, kept separate from Limiter.
 	UnbindLimiter EndpointLimiter
-	// StepUpLimiter throttles password step-up per user, on its own budget so a
-	// normal email binding (two checks: send-code plus verify) does not trip the
-	// stricter unbind cap.
-	StepUpLimiter EndpointLimiter
 	// RegisterLimiter throttles POST /auth/register, keyed on the
 	// Register-Ticket; every accepted call runs an argon2id derivation.
 	RegisterLimiter EndpointLimiter
@@ -894,13 +890,6 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
 	}
-	// Step-up before adding a login method: mirroring UnbindIdentity, the caller
-	// must confirm the current password, so a stolen access token alone cannot
-	// attach an attacker-controlled address and then reset the password.
-	if err := s.requirePassword(ctx, input.UserID, input.Password); err != nil {
-		s.auditBindStepUpFailure(ctx, input.UserID, input.ActorClientID, input.ClientIP, input.UserAgent, err)
-		return nil, err
-	}
 	if _, findErr := s.Identities.FindByProviderID(ctx, model.LoginMethodOtherMail, email); findErr == nil {
 		// The conflict response must not reveal who owns the address: a distinct
 		// "already bound to you" error would let any authenticated caller enumerate
@@ -948,12 +937,6 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 func (s Service) BindEmailVerify(ctx context.Context, input BindEmailVerifyInput) (*BindEmailVerifyResult, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
-	}
-	// Same step-up as BindEmailSendCode, checked before the ticket so a wrong
-	// password does not cost the Bind-Ticket.
-	if err := s.requirePassword(ctx, input.UserID, input.Password); err != nil {
-		s.auditBindStepUpFailure(ctx, input.UserID, input.ActorClientID, input.ClientIP, input.UserAgent, err)
-		return nil, err
 	}
 	ticket := strings.TrimSpace(input.BindTicket)
 	if ticket == "" || input.Code == "" {

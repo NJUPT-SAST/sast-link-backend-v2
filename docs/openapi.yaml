@@ -970,9 +970,6 @@ paths:
 
         本接口不接受 `registration_state`：该值只证明有人完成了一次第三方回调，
         不证明是哪个 SAST 账号在操作，因此调用者一律由 Bearer token 认定。
-
-        绑定把一个新登录方式挂到账号名下，因此在请求体传入当前账号密码做
-        step-up 复核（`password`）：光有被窃取的 Bearer token 不能单独完成绑定。
       operationId: userBindLark
       tags:
         - Identities
@@ -994,18 +991,6 @@ paths:
           schema:
             type: string
             format: uri
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - password
-              properties:
-                password:
-                  type: string
-                  description: 当前账号密码，用于 step-up 复核
-        required: true
       responses:
         "200":
           description: 绑定成功
@@ -1016,7 +1001,7 @@ paths:
           headers: {}
         "401":
           $ref: "#/components/responses/Unauthorized"
-          description: 未认证或密码复核失败（401xx）
+          description: 未认证（401xx）
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
@@ -1041,9 +1026,6 @@ paths:
         交换 code，另一个 App 签发的 code 会被拒绝。
 
         本接口不接受 `registration_state`，调用者一律由 Bearer token 认定。
-
-        绑定把一个新的登录方式挂到账号名下，因此在请求体传入当前账号密码做
-        step-up 复核（`password`）：光有被窃取的 Bearer token 不能单独完成绑定。
       operationId: userBindGithub
       tags:
         - Identities
@@ -1064,18 +1046,6 @@ paths:
           schema:
             type: string
             format: uri
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - password
-              properties:
-                password:
-                  type: string
-                  description: 当前账号密码，用于 step-up 复核
-        required: true
       responses:
         "200":
           description: 绑定成功
@@ -1086,7 +1056,7 @@ paths:
           headers: {}
         "401":
           $ref: "#/components/responses/Unauthorized"
-          description: 未认证或密码复核失败（401xx）
+          description: 未认证（401xx）
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
@@ -1110,16 +1080,12 @@ paths:
               type: object
               required:
                 - email
-                - password
               properties:
                 email:
                   type: string
                   format: email
                   description: 待绑定的第三方邮箱
                   example: myemail@qq.com
-                password:
-                  type: string
-                  description: 当前账号密码，用于 step-up 复核
         required: true
       responses:
         "200":
@@ -1131,7 +1097,7 @@ paths:
           headers: {}
         "401":
           $ref: "#/components/responses/Unauthorized"
-          description: 未认证或密码复核失败（401xx）
+          description: 未认证（401xx）
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
@@ -1154,7 +1120,6 @@ paths:
               required:
                 - bind_ticket
                 - code
-                - password
               properties:
                 bind_ticket:
                   type: string
@@ -1162,9 +1127,6 @@ paths:
                 code:
                   type: string
                   description: 邮箱验证码
-                password:
-                  type: string
-                  description: 当前账号密码，用于 step-up 复核
         required: true
       responses:
         "200":
@@ -1179,7 +1141,7 @@ paths:
           description: 参数错误（400xx）
         "401":
           $ref: "#/components/responses/Unauthorized"
-          description: 未认证或密码复核失败（401xx）
+          description: 未认证（401xx）
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）

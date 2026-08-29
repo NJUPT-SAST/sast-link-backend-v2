@@ -162,12 +162,6 @@ type Config struct {
 	// serialization point for concurrent deletes of one record.
 	RateLimitUnbindRPM    int           `env:"RATE_LIMIT_UNBIND_RPM" envDefault:"3"`
 	RateLimitUnbindWindow time.Duration `env:"RATE_LIMIT_UNBIND_WINDOW" envDefault:"60s"`
-	// Password step-up (confirming the current password before a sensitive
-	// self-service write such as binding a new login method) gets its own per-user
-	// budget, wider than unbind's 3/min: one email binding runs two password
-	// checks (send-code and verify), so a tight budget would 429 a normal round
-	// trip. Window is shared with unbind's.
-	RateLimitPasswordStepUpRPM int `env:"RATE_LIMIT_PASSWORD_STEPUP_RPM" envDefault:"10"`
 	// Throttles DELETE /user/devices/:id per user. The endpoint revokes a whole
 	// token family (and therefore kills a real session), so the cap is per
 	// authenticated user rather than per IP — a campus NAT must not share one
@@ -543,8 +537,6 @@ func (c *Config) validateRateLimits() error {
 		return fmt.Errorf("RATE_LIMIT_UNBIND_RPM must be positive")
 	case c.RateLimitUnbindWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_UNBIND_WINDOW must be at least 1s")
-	case c.RateLimitPasswordStepUpRPM <= 0:
-		return fmt.Errorf("RATE_LIMIT_PASSWORD_STEPUP_RPM must be positive")
 	case c.RateLimitDeviceRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_DEVICE_RPM must be positive")
 	case c.RateLimitDeviceWindow < time.Second:

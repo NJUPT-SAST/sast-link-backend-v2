@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strconv"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
@@ -43,16 +41,6 @@ func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error)
 	}
 	if user.State == model.UserStateDeleted {
 		return nil, newError(ErrUserDeleted, "账号已注销", nil)
-	}
-	// Step-up re-authentication, sharing the email-bind guard: a stolen access
-	// token alone must not be able to attach a new login method, or the bind +
-	// reset flow would become account takeover. The password is verified before
-	// the provider exchange, so a wrong password never spends the caller's code.
-	if stepUpErr := s.stepUpPassword(ctx, input.UserID, input.Password, user.PasswordHash); stepUpErr != nil {
-		if stepUpFailureAuditable(stepUpErr) {
-			s.auditBind(ctx, input, "", false, errcode.CodePasswordInvalid)
-		}
-		return nil, stepUpErr
 	}
 
 	identity, err := client.Exchange(ctx, input.Code, input.RedirectURI)
@@ -99,55 +87,6 @@ func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error)
 
 	s.auditBind(ctx, input, identity.ProviderID, true, 0)
 	return &BindResult{Identity: *row}, nil
-}
-
-// stepUpPassword re-authenticates a sensitive self-service write with the
-// caller's current password. Throttling runs before the password check so
-// repeated wrong-password attempts consume the budget, and a cooldown claimed
-// only after a successful verify does nothing against guessing.
-func (s Service) stepUpPassword(ctx context.Context, userID int64, password, encodedHash string) error {
-	if password == "" {
-		return newError(ErrInvalidInput, "password 不能为空", nil)
-	}
-	if s.Passwords == nil {
-		return newError(ErrInternal, "密码校验未配置", nil)
-	}
-	if err := s.checkStepUpLimit(ctx, userID); err != nil {
-		return err
-	}
-	if verifyErr := s.Passwords.VerifyPassword(ctx, password, encodedHash); verifyErr != nil {
-		if ctx.Err() != nil {
-			return newError(ErrDependencyUnavailable, "密码校验被中断", verifyErr)
-		}
-		return newError(ErrPasswordInvalid, "密码错误", verifyErr)
-	}
-	return nil
-}
-
-// checkStepUpLimit applies the per-user password step-up budget. Fail-open, like
-// every endpoint limiter: Redis is not the authority over a password check.
-func (s Service) checkStepUpLimit(ctx context.Context, userID int64) error {
-	if s.StepUpLimiter == nil {
-		return nil
-	}
-	result, err := s.StepUpLimiter.Allow(ctx, "password_step_up", "user:"+strconv.FormatInt(userID, 10))
-	if err != nil {
-		slog.WarnContext(ctx, "step-up limiter unavailable, allowing request",
-			"user_id", userID, "error", err)
-		return nil
-	}
-	if !result.Allowed {
-		return withRetryAfter(newError(ErrRateLimited, "请求过于频繁", nil), result.RetryAfter)
-	}
-	return nil
-}
-
-// stepUpFailureAuditable reports whether a step-up failure is a wrong password
-// (audit it, like an unbind) rather than a broken dependency or a limiter
-// refusal, which are their own signals.
-func stepUpFailureAuditable(err error) bool {
-	var serviceErr *Error
-	return errors.As(err, &serviceErr) && serviceErr.Code == errcode.CodePasswordInvalid
 }
 
 // bindWriteError maps an insert failure onto the right conflict code.

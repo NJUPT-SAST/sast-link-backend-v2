@@ -65,11 +65,6 @@ type Service struct {
 	// ExchangeLimiter throttles login_code redemption per IP; the endpoint cannot
 	// require a session, so the cap bounds probing of the code space.
 	ExchangeLimiter EndpointLimiter
-	// StepUpLimiter throttles password step-up re-authentication per user, on its
-	// own wider budget so a normal binding cannot trip the exchange cap.
-	StepUpLimiter EndpointLimiter
-	// Passwords verifies the caller's current password during step-up.
-	Passwords PasswordVerifier
 
 	Issuer tokenissue.Issuer
 	Clock  auth.Clock

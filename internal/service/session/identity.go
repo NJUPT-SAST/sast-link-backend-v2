@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strconv"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
@@ -113,54 +112,5 @@ func (s Service) auditUnbind(ctx context.Context, input UnbindIdentityInput, ide
 	if err := s.audit(ctx, &input.UserID, "oauth_unbind", "identity", &id, shared.NullableString(shared.ActorClientID(input.ActorClientID, s.InternalClientID)), success, errCode,
 		input.ClientIP, input.UserAgent, detail); err != nil {
 		slog.Error("audit oauth unbind", "user_id", input.UserID, "identity_id", identity.ID, "error", err)
-	}
-}
-
-// requirePassword steps up a sensitive operation with the current password,
-// sharing UnbindIdentity's guard: an access token on its own must not be able
-// to bind a new login method (BindEmail*), or a stolen token would turn the
-// bind + reset flow into account takeover.
-func (s Service) requirePassword(ctx context.Context, userID int64, password string) error {
-	if password == "" {
-		return newError(ErrInvalidInput, "password 不能为空", nil)
-	}
-	// Throttle before the password check, like UnbindIdentity: repeated
-	// wrong-password attempts must consume the budget, and a cooldown claimed
-	// only after success does nothing against guessing. The shared limiter keeps
-	// every password step-up on one per-user budget; the endpoint name scopes
-	// the Redis key independently of unbind.
-	if err := s.checkEndpointLimit(ctx, s.StepUpLimiter, "password_step_up", "user:"+strconv.FormatInt(userID, 10)); err != nil {
-		return err
-	}
-	user, err := s.Users.FindAuthUserByID(ctx, userID)
-	if errors.Is(err, repository.ErrNotFound) {
-		return newError(ErrInvalidToken, "身份主体无效", nil)
-	}
-	if err != nil {
-		return newError(ErrInternal, "查询待操作的用户失败", err)
-	}
-	if user.State == model.UserStateDeleted {
-		return newError(ErrUserDeleted, "用户已注销", nil)
-	}
-	if verifyErr := s.Passwords.VerifyPassword(ctx, password, user.PasswordHash); verifyErr != nil {
-		if ctx.Err() != nil {
-			return newError(ErrDependencyUnavailable, "密码校验被中断", verifyErr)
-		}
-		return newError(ErrPasswordInvalid, "密码错误", verifyErr)
-	}
-	return nil
-}
-
-// auditBindStepUpFailure records a wrong password against the bind flow, the
-// same failure signal UnbindIdentity emits on an oauth_unbind. Other step-up
-// failures (unknown user, deleted account) are their own errors and carry no
-// audit event here.
-func (s Service) auditBindStepUpFailure(ctx context.Context, userID int64, actorClientID, clientIP, userAgent string, stepErr error) {
-	var serviceErr *Error
-	if !errors.As(stepErr, &serviceErr) || serviceErr.Code != errcode.CodePasswordInvalid {
-		return
-	}
-	if auditErr := s.audit(ctx, &userID, "oauth_bind", "session", nil, shared.NullableString(shared.ActorClientID(actorClientID, s.InternalClientID)), false, errcode.CodePasswordInvalid, clientIP, userAgent, nil); auditErr != nil {
-		slog.Error("audit bind password failure", "user_id", userID, "error", auditErr)
 	}
 }

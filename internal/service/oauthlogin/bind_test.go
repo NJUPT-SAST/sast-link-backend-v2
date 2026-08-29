@@ -18,7 +18,6 @@ func TestBindCreatesIdentityForAuthenticatedCaller(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	if err != nil {
 		t.Fatalf("Bind: %v", err)
@@ -55,7 +54,6 @@ func TestBindRejectsAccountOwnedByAnotherUser(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
@@ -73,7 +71,6 @@ func TestBindRejectsSecondBindingOfSameProvider(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	// 40904, not 40903: the caller owns the existing binding.
 	assertKind(t, err, KindConflict, errcode.CodeIdentityAlreadyBound)
@@ -90,7 +87,6 @@ func TestBindReportsAlreadyBoundWhenSameAccountRepeats(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityAlreadyBound)
 	// Repeating the bind still refreshes the stored credentials, so a user whose
@@ -111,7 +107,6 @@ func TestBindMapsUniqueViolationRaceToOccupied(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
@@ -125,7 +120,6 @@ func TestBindMapsPerUserIndexRaceToAlreadyBound(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityAlreadyBound)
 }
@@ -139,7 +133,6 @@ func TestBindMapsLimitExceededToAlreadyBound(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityAlreadyBound)
 }
@@ -154,7 +147,6 @@ func TestBindRefusesDeletedAccount(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
 	// The provider must not even be contacted for a closed account.
@@ -168,7 +160,6 @@ func TestBindRejectsMissingPrincipal(t *testing.T) {
 	_, err := service.Bind(context.Background(), BindInput{
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 }
@@ -193,7 +184,6 @@ func TestBindPropagatesForeignTenant(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	})
 	assertKind(t, err, KindForbidden, errcode.CodeLarkTenantRequired)
 }
@@ -217,7 +207,6 @@ func TestBindDoesNotConsumeAnyOAuthState(t *testing.T) {
 		UserID:   42,
 		Provider: model.LoginMethodGitHub,
 		Code:     "provider-code",
-		Password: "secret",
 	}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
