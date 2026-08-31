@@ -2072,7 +2072,10 @@ paths:
         - name: keyword
           in: query
           description: |
-            搜索关键词，对姓名/学号/登录邮箱做大小写不敏感的模糊匹配。
+            搜索关键词，对姓名/学号/登录邮箱/QQ 号/昵称（profile）/博客链接/
+            GitHub 链接做大小写不敏感的模糊匹配。手机号仅 admin 角色参与匹配——
+            搜索谓词与响应裁剪同边界（"admin or hidden"），lecturer 的关键词
+            不会命中手机号。
             `%`、`_`、`\` 按字面量处理，不作为通配符。
           required: false
           schema:

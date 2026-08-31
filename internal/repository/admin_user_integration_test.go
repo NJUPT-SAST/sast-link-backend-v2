@@ -211,6 +211,78 @@ func TestListAdminUsersFiltersAndPages(t *testing.T) {
 	})
 }
 
+// Keyword now spans the profile display columns and the contact columns that
+// every admin-surface role may see, plus phone_number behind the
+// IncludePhoneColumn flag — the one field the tightening hides from non-admin
+// roles. The phone assertions run both ways so the predicate cannot leak it
+// through existence probing.
+func TestListAdminUsersKeywordExpandedColumns(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+
+	a := adminSeed(t, database, "alpha@njupt.edu.cn", "千刀", model.UserRoleMember, model.UserStateOnSAST, nil)
+	adminSeed(t, database, "beta@njupt.edu.cn", "半夏", model.UserRoleMember, model.UserStateOnSAST, nil)
+	// Default testUser rows all carry the same phone/qq, so stamp unique contact
+	// and display values onto the first account.
+	if err := database.Model(&model.User{}).Where("id = ?", a.ID).Updates(map[string]any{
+		"qq_number":    "777000111",
+		"phone_number": "13900002222",
+	}).Error; err != nil {
+		t.Fatalf("stamp user contact columns: %v", err)
+	}
+	if err := database.Model(&model.Profile{}).Where("user_id = ?", a.ID).Updates(map[string]any{
+		"nickname":   "小千",
+		"blog_url":   "https://blog.example.com/alpha",
+		"github_url": "https://github.com/alpha-user",
+	}).Error; err != nil {
+		t.Fatalf("stamp profile columns: %v", err)
+	}
+
+	for _, testCase := range []struct {
+		name    string
+		keyword string
+		flag    bool
+		want    int
+	}{
+		{"nickname", "小千", false, 1},
+		{"qq number", "777000111", false, 1},
+		{"blog url", "blog.example.com", false, 1},
+		{"github url", "alpha-user", false, 1},
+		{"phone hidden without the flag", "13900002222", false, 0},
+		{"phone matches with the flag", "13900002222", true, 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			rows, _, err := users.ListAdminUsers(context.Background(),
+				repository.AdminUserFilter{
+					Keyword:            testCase.keyword,
+					IncludePhoneColumn: testCase.flag,
+					Limit:              10,
+				})
+			if err != nil {
+				t.Fatalf("ListAdminUsers(%q): %v", testCase.keyword, err)
+			}
+			if len(rows) != testCase.want {
+				t.Fatalf("keyword %q (phone flag %v) matched %d rows, want %d",
+					testCase.keyword, testCase.flag, len(rows), testCase.want)
+			}
+		})
+	}
+
+	t.Run("user columns match without a profile row", func(t *testing.T) {
+		if err := database.Where("user_id = ?", a.ID).Delete(&model.Profile{}).Error; err != nil {
+			t.Fatalf("delete profile row: %v", err)
+		}
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: "alpha@njupt", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 1 || rows[0].ID != a.ID {
+			t.Fatalf("rows = %+v, want the profile-less user matched via login_email", rows)
+		}
+	})
+}
+
 // A keyword of "%" or "_" is a literal search term, not a wildcard. Without
 // escaping, "%" would match every account and the search would silently mean
 // something other than what was typed.
