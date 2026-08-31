@@ -24,7 +24,7 @@ func (s AlumniRequestStatus) Valid() bool {
 }
 
 // AlumniRequestIntent is what approval does with a ticket. TEXT in the schema
-// (V012) rather than an enum type: written once at submission, never mutated,
+// (V013) rather than an enum type: written once at submission, never mutated,
 // and the rules live here.
 type AlumniRequestIntent string
 

@@ -507,9 +507,9 @@ CREATE UNIQUE INDEX uq_alumni_requests_pending_student
     ON alumni_requests (lower(btrim(student_id))) WHERE status = 'pending';
 ```
 
-### intent 两种意图（V012）
+### intent 两种意图（V013）
 
-V012 加列 `intent TEXT NOT NULL DEFAULT 'provision'`，不用 enum 类型：提交时写一次、从不修改、规则在
+V013 加列 `intent TEXT NOT NULL DEFAULT 'provision'`，不用 enum 类型：提交时写一次、从不修改、规则在
 `internal/model` 的 `Valid()`。两种意图共用同一张表、同一个 partial unique index（一个学号不能同时挂一张
 provision 单和一张 recover 单）和同一条投递链路：
 

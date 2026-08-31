@@ -63,7 +63,7 @@ type validatedSubmit struct {
 func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 	var result validatedSubmit
 
-	// Blank means provision so every pre-V012 client keeps its exact behavior.
+	// Blank means provision so every pre-V013 client keeps its exact behavior.
 	intent := model.AlumniRequestIntent(strings.TrimSpace(input.Intent))
 	if intent == "" {
 		intent = model.AlumniRequestIntentProvision
