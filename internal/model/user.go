@@ -12,6 +12,10 @@ type User struct {
 	PasswordHash string    `gorm:"column:password;not null" json:"-"`
 	StudentID    string    `gorm:"not null"`
 	State        UserState `gorm:"type:state_enum;not null;default:(-)"`
+	// StateManual marks a state pinned by an administrator (PUT /admin/users/:id
+	// with state). Every derived-state path (write-side derivation, retention
+	// batch) skips the row while it is TRUE; PUT with state_auto=true clears it.
+	StateManual  bool
 	EmailType    EmailType `gorm:"type:email_enum;not null;default:(-)"`
 	LoginEmail   string
 	CreatedAt    time.Time
