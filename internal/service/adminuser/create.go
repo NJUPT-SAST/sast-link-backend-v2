@@ -12,7 +12,7 @@ import (
 // because the member is not present to enter one, and the plaintext is returned in
 // CreateUserResult but never persisted or audited.
 func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*CreateUserResult, error) {
-	validated, err := validateCreate(input)
+	validated, err := validateCreate(input, s.now())
 	if err != nil {
 		s.auditCreate(ctx, input, 0, false, errorCode(err), attemptedCreateDetail(input))
 		return nil, err
@@ -57,6 +57,7 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 		QQNumber:     validated.qqNumber,
 		StudentID:    validated.studentID,
 		State:        validated.state,
+		StateManual:  validated.stateManual,
 		LoginEmail:   validated.loginEmail,
 		College:      validated.college,
 		Major:        validated.major,

@@ -151,6 +151,7 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		LoginEmail:    validated.loginEmail,
 		Role:          validated.role,
 		State:         validated.state,
+		StateAuto:     validated.stateAuto,
 		EmailType:     validated.emailType,
 		PersonalEmail: validated.personalEmail,
 		// A role change invalidates sessions: a demoted account's live refresh tokens
@@ -306,7 +307,9 @@ func (s Service) DeleteUser(ctx context.Context, input TargetUserInput) error {
 	return nil
 }
 
-// RestoreUser reopens a closed account at the njupter state.
+// RestoreUser reopens a closed account with the derived state (internal/
+// validate), clearing any manual pin — the DELETE that closed the account
+// already overwrote the pinned value, so the restore cannot preserve it.
 func (s Service) RestoreUser(ctx context.Context, input TargetUserInput) error {
 	if s.Users == nil {
 		return newError(ErrInternal, "用户仓储未配置", nil)
@@ -314,7 +317,7 @@ func (s Service) RestoreUser(ctx context.Context, input TargetUserInput) error {
 	if input.UserID <= 0 {
 		return newError(ErrNotFound, "用户不存在", nil)
 	}
-	err := s.Users.RestoreUser(ctx, input.UserID)
+	err := s.Users.RestoreUser(ctx, input.UserID, s.now())
 	if err != nil {
 		var mapped error
 		switch {

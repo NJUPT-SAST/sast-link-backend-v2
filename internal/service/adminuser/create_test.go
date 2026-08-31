@@ -65,7 +65,10 @@ func TestCreateUserProvisionsWithBoundEmail(t *testing.T) {
 
 // role and state are optional at creation and default to the population this
 // endpoint exists for; college defaults to the V001 row default. A provision
-// without a personal email creates no identity.
+// without a personal email creates no identity. The state defaults to the
+// derived value (internal/validate): the probe's 2024-cohort member is still
+// in school at the harness clock (2026-07-30), so it derives to njupter rather
+// than the retired_sast the code used to hardcode.
 func TestCreateUserDefaultsRoleStateAndCollege(t *testing.T) {
 	h := newHarness(t)
 	input := createProbeInput()
@@ -78,8 +81,8 @@ func TestCreateUserDefaultsRoleStateAndCollege(t *testing.T) {
 		t.Fatal("no user id returned")
 	}
 	user := h.users.createdUser
-	if user.Role != model.UserRoleMember || user.State != model.UserStateRetiredSAST {
-		t.Fatalf("role/state = %s/%s, want member/retired_sast", user.Role, user.State)
+	if user.Role != model.UserRoleMember || user.State != model.UserStateNJUPTer {
+		t.Fatalf("role/state = %s/%s, want member/njupter", user.Role, user.State)
 	}
 	if user.College != model.CollegeOther || user.Major != "" {
 		t.Fatalf("college/major = %q/%q, want 其他/''", user.College, user.Major)

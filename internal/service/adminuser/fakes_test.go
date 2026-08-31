@@ -119,7 +119,7 @@ func (f *fakeUsers) SoftDeleteAndRevokeSessions(
 	return f.deleteEntries, nil
 }
 
-func (f *fakeUsers) RestoreUser(_ context.Context, userID int64) error {
+func (f *fakeUsers) RestoreUser(_ context.Context, userID int64, _ time.Time) error {
 	f.restoredUserID = userID
 	return f.restoreErr
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // List returns a page of tickets for the reviewer's queue.
@@ -173,12 +174,19 @@ func (s Service) buildAccount(
 			"生成密码哈希失败", err)
 	}
 
+	// Member role, never taken from the submission — a ticket must not be able to
+	// ask for a role. The state follows the derivation rule (internal/validate): a
+	// graduate's old student ID derives to retired_sast, which is exactly the
+	// console provisioning default this path used to hardcode.
+	state, stateErr := validate.DeriveState(model.UserRoleMember, request.StudentID, s.now())
+	if stateErr != nil {
+		return nil, nil, nil, internalError(ctx, "derive alumni state",
+			"学号无法解析入学年份，请驳回工单", stateErr)
+	}
+
 	user := &model.User{
-		// Member role and retired_sast state, both the console's provisioning defaults
-		// and never taken from the submission — a ticket must not be able to ask for
-		// a role.
 		Role:         model.UserRoleMember,
-		State:        model.UserStateRetiredSAST,
+		State:        state,
 		Name:         request.Name,
 		PhoneNumber:  request.PhoneNumber,
 		QQNumber:     request.QQNumber,

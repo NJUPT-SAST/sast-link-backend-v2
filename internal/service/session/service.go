@@ -633,9 +633,19 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		return nil, s.hashError(ctx, err)
 	}
 
+	// The state machine is derived from role + student ID + the current academic
+	// year (internal/validate); a freshman with a fresh student ID derives to
+	// njupter, so the registered account lands in the school-student state even as
+	// the derivation rule evolves. An unparseable student ID is a defensive branch
+	// and refuses the registration.
+	state, stateErr := validate.DeriveState(model.UserRoleFreshman, studentID, s.now())
+	if stateErr != nil {
+		return nil, newError(ErrInvalidInput, "学号无法解析入学年份", stateErr)
+	}
+
 	user := &model.User{
 		Role:         model.UserRoleFreshman,
-		State:        model.UserStateNJUPTer,
+		State:        state,
 		College:      college,
 		Name:         name,
 		PhoneNumber:  phone,

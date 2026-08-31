@@ -167,6 +167,7 @@ type updateUserRequest struct {
 	LoginEmail    *string `json:"login_email"`
 	Role          *string `json:"role"`
 	State         *string `json:"state"`
+	StateAuto     *bool   `json:"state_auto"`
 	EmailType     *string `json:"email_type"`
 	PersonalEmail *string `json:"personal_email"`
 }
@@ -199,6 +200,7 @@ func (h Handler) UpdateUser(c *gin.Context) {
 		LoginEmail:    req.LoginEmail,
 		Role:          req.Role,
 		State:         req.State,
+		StateAuto:     req.StateAuto,
 		EmailType:     req.EmailType,
 		PersonalEmail: req.PersonalEmail,
 		AdminUserID:   principal.UserID,

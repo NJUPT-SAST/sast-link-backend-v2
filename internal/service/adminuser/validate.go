@@ -2,6 +2,7 @@ package adminuser
 
 import (
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
@@ -51,7 +52,7 @@ func normalizeBatchIDs(ids []int64, limit int, tooManyMessage string) ([]int64, 
 // detail, so the log reads the same way regardless of map iteration.
 var userFieldOrder = []string{
 	"name", "phone_number", "qq_number", "student_id", "college", "major",
-	"login_email", "role", "state", "email_type", "personal_email",
+	"login_email", "role", "state", "state_auto", "email_type", "personal_email",
 }
 
 // validatedUpdate is the outcome of checking an UpdateUserInput.
@@ -65,6 +66,7 @@ type validatedUpdate struct {
 	loginEmail    *string
 	role          *model.UserRole
 	state         *model.UserState
+	stateAuto     bool
 	emailType     *model.EmailType
 	personalEmail *string
 	changed       []string
@@ -144,6 +146,16 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 		}
 		result.state = &state
 		present["state"] = true
+	}
+	// state_auto re-derives state and unpins it; it is the undo for a manual pin,
+	// so sending a pinned state alongside it is two contradictory instructions.
+	if input.StateAuto != nil && *input.StateAuto {
+		if input.State != nil {
+			return validatedUpdate{}, newError(ErrInvalidInput,
+				"state 与 state_auto 不能同时提交", nil)
+		}
+		result.stateAuto = true
+		present["state_auto"] = true
 	}
 
 	loginEmail, err := validateLoginEmail(input.LoginEmail)
@@ -315,22 +327,27 @@ func fieldError(refused *validate.FieldError) error {
 // validatedCreate holds the normalized CreateUserInput. Optional fields are
 // resolved to their defaults; there are no nil-or-unchanged semantics.
 type validatedCreate struct {
-	name          string
-	phoneNumber   string
-	qqNumber      string
-	studentID     string
-	major         string
-	college       model.College
-	loginEmail    string
-	role          model.UserRole
-	state         model.UserState
+	name        string
+	phoneNumber string
+	qqNumber    string
+	studentID   string
+	major       string
+	college     model.College
+	loginEmail  string
+	role        model.UserRole
+	state       model.UserState
+	// stateManual is true when the caller supplied an explicit state: an
+	// administrator-chosen value is a pin, like PUT's state, so the derived-state
+	// paths leave it alone.
+	stateManual   bool
 	personalEmail *string
 }
 
 // validateCreate checks a full account provision. name, phone_number, qq_number,
 // student_id and login_email are required; major may stay empty. role defaults to
-// member and state to retired_sast.
-func validateCreate(input CreateUserInput) (validatedCreate, error) {
+// member; the state defaults to the derived value (internal/validate) for the
+// resolved role and student ID, or the caller's explicit state, which pins it.
+func validateCreate(input CreateUserInput, now time.Time) (validatedCreate, error) {
 	var result validatedCreate
 
 	required := []struct {
@@ -409,7 +426,7 @@ func validateCreate(input CreateUserInput) (validatedCreate, error) {
 	}
 	result.role = role
 
-	state := model.UserStateRetiredSAST
+	var state model.UserState
 	if input.State != nil {
 		state = model.UserState(strings.TrimSpace(*input.State))
 		if !validState(state) {
@@ -421,6 +438,17 @@ func validateCreate(input CreateUserInput) (validatedCreate, error) {
 			return validatedCreate{}, newError(ErrStateConflict,
 				"新建账号不能直接处于已注销状态", nil)
 		}
+		result.stateManual = true
+	} else {
+		// No explicit state: derive it from the role and student ID (rule in
+		// internal/validate). A student ID that cannot be read is a defensive
+		// branch — the format is guaranteed — and refusing beats guessing.
+		derived, derErr := validate.DeriveState(result.role, result.studentID, now)
+		if derErr != nil {
+			return validatedCreate{}, newError(ErrInvalidInput,
+				"学号无法解析入学年份，请显式指定 state", nil)
+		}
+		state = derived
 	}
 	result.state = state
 
