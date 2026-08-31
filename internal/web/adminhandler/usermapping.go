@@ -16,6 +16,12 @@ var errInvalidQueryParameter = errors.New("query parameter is not valid")
 // adminUserDTO is one user row on the wire. Written out field by field rather
 // than serializing model.User, which carries the password hash: a response type
 // with no such field cannot leak it no matter how the model changes later.
+//
+// The phone field is a pointer with omitempty: only an admin sees it; any other
+// role reading the list (a lecturer) gets the directory view, where the field is
+// absent rather than empty — "not disclosed" must not read as "not filled in".
+// The rule is "admin or hidden", so a future role defaults to the restricted
+// view. qq_number carries no such restriction and stays a plain field.
 type adminUserDTO struct {
 	ID          int64   `json:"id"`
 	Name        string  `json:"name"`
@@ -24,7 +30,7 @@ type adminUserDTO struct {
 	Role        string  `json:"role"`
 	State       string  `json:"state"`
 	EmailType   string  `json:"email_type"`
-	PhoneNumber string  `json:"phone_number"`
+	PhoneNumber *string `json:"phone_number,omitempty"`
 	QQNumber    string  `json:"qq_number"`
 	College     string  `json:"college"`
 	Major       string  `json:"major"`
@@ -67,19 +73,20 @@ type batchRoleUpdateResponse struct {
 }
 
 // userDetailDTO is one full user record. Same reasoning as adminUserDTO, plus the
-// profile and identity halves.
+// profile and identity halves. The phone field follows the same role rule as the
+// list: present for an admin, absent for every other role.
 type userDetailDTO struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	LoginEmail  string `json:"login_email"`
-	Role        string `json:"role"`
-	State       string `json:"state"`
-	EmailType   string `json:"email_type"`
-	PhoneNumber string `json:"phone_number"`
-	QQNumber    string `json:"qq_number"`
-	StudentID   string `json:"student_id"`
-	College     string `json:"college"`
-	Major       string `json:"major"`
+	ID          int64   `json:"id"`
+	Name        string  `json:"name"`
+	LoginEmail  string  `json:"login_email"`
+	Role        string  `json:"role"`
+	State       string  `json:"state"`
+	EmailType   string  `json:"email_type"`
+	PhoneNumber *string `json:"phone_number,omitempty"`
+	QQNumber    string  `json:"qq_number"`
+	StudentID   string  `json:"student_id"`
+	College     string  `json:"college"`
+	Major       string  `json:"major"`
 	// See adminUserDTO.
 	ProfileNeedsCompletion bool              `json:"profile_needs_completion"`
 	IncompleteFields       []string          `json:"incomplete_fields"`
@@ -140,7 +147,16 @@ type auditLogListResponse struct {
 	PageSize int           `json:"page_size"`
 }
 
-func mapAdminUser(user adminuser.UserListItem) adminUserDTO {
+// mapAdminUser maps one list row. The phone field rides on the caller's role:
+// an admin sees the stored value (an empty string stays an empty string — it is
+// the true "not filled in" state), every other role gets nil, which drops the
+// field from the response entirely. qq_number is visible to every role.
+func mapAdminUser(user adminuser.UserListItem, role string) adminUserDTO {
+	isAdmin := role == string(model.UserRoleAdmin)
+	var phoneNumber *string
+	if isAdmin {
+		phoneNumber = &user.PhoneNumber
+	}
 	return adminUserDTO{
 		ID:          user.ID,
 		Name:        user.Name,
@@ -149,7 +165,7 @@ func mapAdminUser(user adminuser.UserListItem) adminUserDTO {
 		Role:        user.Role,
 		State:       user.State,
 		EmailType:   user.EmailType,
-		PhoneNumber: user.PhoneNumber,
+		PhoneNumber: phoneNumber,
 		QQNumber:    user.QQNumber,
 		College:     user.College,
 		Major:       user.Major,
@@ -163,7 +179,17 @@ func mapAdminUser(user adminuser.UserListItem) adminUserDTO {
 	}
 }
 
-func mapUserDetail(detail adminuser.UserDetail) userDetailDTO {
+// mapUserDetail maps one full record. Same phone rule as mapAdminUser: an admin
+// sees the stored value (an empty string stays an empty string), every other role
+// gets nil so the field is absent. qq_number, identities and the profile ride
+// along for every role — the same view the detail endpoint always offered before
+// the phone restriction.
+func mapUserDetail(detail adminuser.UserDetail, role string) userDetailDTO {
+	isAdmin := role == string(model.UserRoleAdmin)
+	var phoneNumber *string
+	if isAdmin {
+		phoneNumber = &detail.PhoneNumber
+	}
 	dto := userDetailDTO{
 		ID:          detail.ID,
 		Name:        detail.Name,
@@ -171,7 +197,7 @@ func mapUserDetail(detail adminuser.UserDetail) userDetailDTO {
 		Role:        detail.Role,
 		State:       detail.State,
 		EmailType:   detail.EmailType,
-		PhoneNumber: detail.PhoneNumber,
+		PhoneNumber: phoneNumber,
 		QQNumber:    detail.QQNumber,
 		StudentID:   detail.StudentID,
 		College:     detail.College,

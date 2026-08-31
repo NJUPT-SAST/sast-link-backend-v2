@@ -173,13 +173,19 @@ func (f *fakeAuditLogs) ListAuditLogs(
 const testHandlerAdminID int64 = 99
 
 // newUserRouter mounts the admin routes with a stub authentication step that
-// injects a principal, standing in for RequireAuth plus the role gates.
+// injects an admin principal, standing in for RequireAuth plus the role gates.
 func newUserRouter(t *testing.T, users UserService, auditLogs AuditLogService) *gin.Engine {
+	return newUserRouterWithRole(t, users, auditLogs, "admin")
+}
+
+// newUserRouterWithRole is newUserRouter with a configurable principal role, so a
+// test can exercise the view a specific role is entitled to.
+func newUserRouterWithRole(t *testing.T, users UserService, auditLogs AuditLogService, role string) *gin.Engine {
 	t.Helper()
 	r := gin.New()
 	injectPrincipal := func(c *gin.Context) {
 		middleware.SetPrincipal(c, middleware.Principal{
-			UserID: testHandlerAdminID, Role: "admin", JTI: "jti-99",
+			UserID: testHandlerAdminID, Role: role, JTI: "jti-99",
 		})
 		c.Next()
 	}
@@ -214,6 +220,26 @@ func TestListUsersPassesQueryParameters(t *testing.T) {
 	if input.StudentID != "B24040101" || input.Keyword != "张三" {
 		t.Fatalf("student_id/keyword = %q/%q, want them passed through",
 			input.StudentID, input.Keyword)
+	}
+}
+
+// The keyword predicate admits phone_number only for an admin principal: a
+// lecturer must not be able to probe an account by phone, since the response
+// mapping hides the field from them ("admin or hidden" applies to the match the
+// same way it applies to the output).
+func TestListUsersScopesPhoneKeywordToAdmins(t *testing.T) {
+	users := &fakeUsers{}
+	router := newUserRouter(t, users, nil)
+	doRequest(t, router, http.MethodGet, "/admin/users?keyword=138", "", "")
+	if !users.listInput.IncludePhoneColumn {
+		t.Fatalf("admin principal: IncludePhoneColumn = false, want true")
+	}
+
+	lecturer := &fakeUsers{}
+	router = newUserRouterWithRole(t, lecturer, nil, "lecturer")
+	doRequest(t, router, http.MethodGet, "/admin/users?keyword=138", "", "")
+	if lecturer.listInput.IncludePhoneColumn {
+		t.Fatalf("lecturer principal: IncludePhoneColumn = true, want false")
 	}
 }
 
@@ -274,6 +300,55 @@ func TestListUsersSerializesEmptyPageAsArray(t *testing.T) {
 	decodeData(t, recorder, &payload)
 	if string(payload.Users) != "[]" {
 		t.Fatalf("users = %s, want []", payload.Users)
+	}
+}
+
+// The read endpoints are readable by lecturers, but the phone field on them is
+// admin-only: an admin sees the stored value (an empty string stays an empty
+// string, the true "not filled in" state), any other role sees the field dropped
+// entirely — "not disclosed" must not read as "not filled in". qq_number is
+// visible to every role. The rule is "admin or hidden" for the phone only, so the
+// test asserts the restricted shape for a lecturer rather than pinning the
+// allowed set. It covers all three read surfaces: the list, the detail record and
+// the batch read, which share the same phone rule but map through different
+// functions.
+func TestListUsersHidesContactFieldsFromLecturer(t *testing.T) {
+	listResult := &adminuser.ListUsersResult{
+		Users: []adminuser.UserListItem{{
+			ID: 5, Name: "李四", LoginEmail: "b24040102@njupt.edu.cn",
+			Role: "member", State: "on_sast", PhoneNumber: "13800138000", QQNumber: "123456",
+		}},
+		Total: 1, Page: 1, PageSize: 20,
+	}
+	detail := &adminuser.UserDetail{
+		ID: 5, Name: "李四", LoginEmail: "b24040102@njupt.edu.cn",
+		Role: "member", State: "on_sast", PhoneNumber: "13800138000", QQNumber: "123456",
+	}
+
+	// The lecturer view: the phone field is absent, not null and not an empty
+	// string; qq_number rides along like any other field.
+	paths := []string{"/admin/users", "/admin/users/5", "/admin/users/batch?ids=5"}
+	lecturer := newUserRouterWithRole(t, &fakeUsers{listResult: listResult, getResult: detail, getByIDsResult: []adminuser.UserDetail{*detail}}, nil, "lecturer")
+	for _, path := range paths {
+		body := doRequest(t, lecturer, http.MethodGet, path, "", "").Body.String()
+		if strings.Contains(body, "phone_number") {
+			t.Fatalf("lecturer response for %s contains phone_number: %s", path, body)
+		}
+		if !strings.Contains(body, `"qq_number":"123456"`) {
+			t.Fatalf("lecturer response for %s missing qq_number: %s", path, body)
+		}
+	}
+
+	// The admin view: both values ride along, and an empty string stays an empty
+	// string — it is the real "not filled in" marker.
+	admin := newUserRouter(t, &fakeUsers{listResult: listResult, getResult: detail, getByIDsResult: []adminuser.UserDetail{*detail}}, nil)
+	for _, path := range paths {
+		body := doRequest(t, admin, http.MethodGet, path, "", "").Body.String()
+		for _, want := range []string{`"phone_number":"13800138000"`, `"qq_number":"123456"`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("admin response for %s missing %s: %s", path, want, body)
+			}
+		}
 	}
 }
 

@@ -123,7 +123,6 @@ func run() error {
 		RequireReadScope:  runtime.Auth.RequireDelegatedScope(alumnihandler.ReadScopes...),
 		RequireWriteScope: runtime.Auth.RequireDelegatedScope(alumnihandler.WriteScopes...),
 		RequireAdmin:      runtime.Auth.RequireRole(alumnihandler.AdminRole),
-		RequireReader:     runtime.Auth.RequireRole(alumnihandler.ReaderRoles...),
 	})
 
 	slog.Info("server starting", slog.String("port", cfg.AppPort))

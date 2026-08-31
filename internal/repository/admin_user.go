@@ -39,11 +39,20 @@ type AdminUserFilter struct {
 	State      *model.UserState
 	Department *model.Department
 	StudentID  string
-	// Keyword matches name, student_id or login_email case-insensitively.
+	// Keyword matches name, student_id, login_email, qq_number, nickname,
+	// blog_url or github_url case-insensitively. phone_number joins the match
+	// only when IncludePhoneColumn is set, below.
 	Keyword string
+	// IncludePhoneColumn admits phone_number into the keyword predicate.
+	// phone_number is the one field the admin-surface tightening hides from
+	// non-admin roles, and the search predicate must not leak it through
+	// existence probing: the caller (the handler) sets this only for an admin
+	// principal, mirroring the "admin or hidden" rule the response mapping
+	// applies.
+	IncludePhoneColumn bool
 	// NeedsCompletion filters on V010's generated flag: true lists only accounts
-	// still carrying migration debris, false only the healthy ones, nil applies no
-	// filter.
+	// still carrying migration debris, false only the healthy ones, nil applies
+	// no filter.
 	NeedsCompletion *bool
 	Limit           int
 	Offset          int
@@ -254,10 +263,17 @@ func (r *UserRepository) adminUserQuery(ctx context.Context, filter AdminUserFil
 	}
 	if filter.Keyword != "" {
 		pattern := "%" + escapeLikePattern(filter.Keyword) + "%"
-		query = query.Where(
-			`("user".name ILIKE ? ESCAPE '\' OR "user".student_id ILIKE ? ESCAPE '\'`+
-				` OR "user".login_email ILIKE ? ESCAPE '\')`,
-			pattern, pattern, pattern)
+		cols := `("user".name ILIKE ? ESCAPE '\' OR "user".student_id ILIKE ? ESCAPE '\'` +
+			` OR "user".login_email ILIKE ? ESCAPE '\' OR "user".qq_number ILIKE ? ESCAPE '\'` +
+			` OR profile.nickname ILIKE ? ESCAPE '\' OR profile.blog_url ILIKE ? ESCAPE '\'` +
+			` OR profile.github_url ILIKE ? ESCAPE '\'`
+		args := []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern}
+		if filter.IncludePhoneColumn {
+			cols += ` OR "user".phone_number ILIKE ? ESCAPE '\'`
+			args = append(args, pattern)
+		}
+		cols += `)`
+		query = query.Where(cols, args...)
 	}
 	return query
 }

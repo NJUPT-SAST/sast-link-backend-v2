@@ -50,7 +50,6 @@ type Gates struct {
 	RequireReadScope  gin.HandlerFunc
 	RequireWriteScope gin.HandlerFunc
 	RequireAdmin      gin.HandlerFunc
-	RequireReader     gin.HandlerFunc
 }
 
 // RegisterRoutes mounts the account-request endpoints.
@@ -59,21 +58,22 @@ type Gates struct {
 // who have no account by definition; its protection is the service's captcha
 // check and rate limiter.
 //
-// Every console route names both a scope gate and a role gate, so a new route
-// cannot gain a permission by omission. Reading the queue is open to the same
-// roles that may read the user directory; acting on one is admin-only.
+// Every console route names both a scope gate and the role gate, and the role
+// gate is admin for all of them: a ticket carries an applicant's contact
+// details and prospective identity, so the queue — reads included — is not a
+// directory view for lecturers.
 func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	// Panic at boot rather than serve an ungated console route.
 	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil ||
-		g.RequireAdmin == nil || g.RequireReader == nil {
+		g.RequireAdmin == nil {
 		panic("alumnihandler: every gate in Gates must be set")
 	}
 
 	r.POST("/alumni-requests", h.Submit)
 
 	admin := r.Group("/admin", g.RequireAuth)
-	admin.GET("/alumni-requests", g.RequireReadScope, g.RequireReader, h.List)
-	admin.GET("/alumni-requests/:id", g.RequireReadScope, g.RequireReader, h.Get)
+	admin.GET("/alumni-requests", g.RequireReadScope, g.RequireAdmin, h.List)
+	admin.GET("/alumni-requests/:id", g.RequireReadScope, g.RequireAdmin, h.Get)
 	admin.POST("/alumni-requests/:id/approve", g.RequireWriteScope, g.RequireAdmin, h.Approve)
 	admin.POST("/alumni-requests/:id/reject", g.RequireWriteScope, g.RequireAdmin, h.Reject)
 	admin.POST("/alumni-requests/:id/resend-notification",

@@ -96,6 +96,7 @@ const (
 	CollegeForeignLanguages                       College = "外国语学院"
 	CollegeEducationScienceAndTechnology          College = "教育科学与技术学院"
 	CollegePortland                               College = "波特兰学院"
+	CollegeEuropeCyprus                           College = "欧洲塞浦路斯学院"
 	CollegeOther                                  College = "其他"
 )
 
@@ -111,7 +112,7 @@ func (c College) Valid() bool {
 		CollegeModernPostAndIntelligentTransportation, CollegeDigitalMediaAndDesignArt,
 		CollegeManagement, CollegeEconomics, CollegeSociologyPopulationAndSocialWork,
 		CollegeForeignLanguages, CollegeEducationScienceAndTechnology,
-		CollegePortland, CollegeOther:
+		CollegePortland, CollegeEuropeCyprus, CollegeOther:
 		return true
 	default:
 		return false
