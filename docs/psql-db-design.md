@@ -89,6 +89,8 @@ CREATE TABLE "user" (
     password      VARCHAR(512)    NOT NULL,
     student_id    VARCHAR(50)     NOT NULL UNIQUE,
     state         state_enum      NOT NULL DEFAULT 'njupter',
+    -- V014 新增：管理员手写 state 的钉住标记。TRUE = 该行跳过自动推导与清算批次
+    state_manual   BOOLEAN         NOT NULL DEFAULT FALSE,
     email_type    email_enum      NOT NULL,
     login_email   VARCHAR(255)    NOT NULL UNIQUE,
     created_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
@@ -117,7 +119,9 @@ CREATE TABLE "user" (
 |password|密码，不可为空|
 |token_version|Token 版本号，改密/重置密码后递增，JWT 校验时比对，不匹配则拒绝|
 |student_id|学号|
-|state|enum {'is_deleted','on_sast','retired_sast','njupter'}|
+|state|enum {'is_deleted','on_sast','retired_sast','njupter'}。V014 起 `njupter`/`on_sast`/`retired_sast` 由自动状态机推导（规则单一事实源在 `internal/validate`，不复制进 SQL）：学号前两位数字=入学年份（格式保证），东八区 9/1 为学年切点，入学满 4 年→`retired_sast`；否则在校 `lecturer`/`admin`→`on_sast`，在校 `freshman`/`member`→`njupter`。`is_deleted` 保持手动独立通道。管理员传 `state` 即钉住（`state_manual=TRUE`），`state_auto=true` 重推并解除；清算批次每 tick 校准未钉住的活跃行，只改 state 不撤销会话|
+|state_manual|V014 钉住标记，见 `state` 行|
+
 |email_type|注册邮箱类型，见 `email_enum`|
 |login_email|注册邮箱|
 |created_at|创建时间|

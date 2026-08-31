@@ -441,11 +441,11 @@ Payload: {
 | 端点 | 方法 | 角色 | 委派 scope | 说明 |
 | ------ | ------ | ------ | ------ | ------ |
 | `/admin/users` | GET | admin / lecturer | admin:read | 分页列表，支持按 role / state / department / student_id / keyword 筛选 |
-| `/admin/users` | POST | admin | admin:write | 创建账号（管理员建号）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份，无需邮箱验证；绑定后可用于登录和密码重置（见 §4.13）；role / state 缺省 member / retired_sast；系统生成随机初始密码，仅在响应中返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
+| `/admin/users` | POST | admin | admin:write | 创建账号（管理员建号）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份，无需邮箱验证；绑定后可用于登录和密码重置（见 §4.13）；role 缺省 member，state 缺省由自动状态机推导（role + 学号入学年份 + 当前学年），显式传 state 则钉住；系统生成随机初始密码，仅在响应中返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
 | `/admin/users/:id` | GET | admin / lecturer | admin:read | 用户详情（含 profile + identities） |
 | `/admin/users/:id` | PUT | admin | admin:write | 更新用户信息（含 role / state / email_type） |
 | `/admin/users/:id` | DELETE | admin | admin:write | 软删除（state → is_deleted），级联撤销所有 token |
-| `/admin/users/:id/restore` | PUT | admin | admin:write | 恢复已注销用户（state: is_deleted → njupter） |
+| `/admin/users/:id/restore` | PUT | admin | admin:write | 恢复已注销用户：state 按自动状态机重新推导并解除钉住（注销时 is_deleted 覆盖了一切旧值，钉住无从保留；恢复即回到自动推导，需重新钉住者再提交一次 state） |
 | `/admin/users/batch` | GET | admin / lecturer | admin:read | 批量查询：`ids` 逗号分隔（≤100），按请求顺序返回详情（字段同 `/admin/users/:id`），缺失 id 缺席，重复 id 只返回一次 |
 | `/admin/users` | PUT | admin | admin:write | 批量改角色：`ids`（≤500，去重）+ `role`（同单条枚举），逐条独立执行并复用单条全部守卫（自查角色 / 最后一名管理员 / 已注销），响应逐条 `results`（success / reason），审计逐条 `admin_user_update` 且 detail 带 `batch: true` |
 | `/admin/oauth-clients` | GET | admin | admin:read | 客户端列表 |
@@ -580,12 +580,16 @@ Payload: {
 
 ### 用户状态机
 
+`njupter` / `on_sast` / `retired_sast` 由自动状态机推导（规则单一事实源在 `internal/validate`，曾硬编码在各写路径）：学号前两位数字为入学年份（格式保证），当前学年在东八区 9/1 切换，入学满 4 年一律 `retired_sast`（压过 role）；否则在校 `lecturer` / `admin` 为 `on_sast`，在校 `freshman` / `member` 为 `njupter`。
+
 ```
-njupter ──(加入SAST)──► on_sast
+njupter ──(加入SAST)──► on_sast    ← 手动通道（PUT state 钉住），不再由状态机自动迁移
 on_sast ──(离开SAST)──► retired_sast
 njupter/on_sast/retired_sast ──(注销)──► is_deleted
-is_deleted ──(恢复)──► njupter
+is_deleted ──(恢复)──► 按自动状态机重新推导
 ```
+
+手动通道：管理员 `PUT /admin/users/:id` 提交 `state` 即钉住（`state_manual`），自动推导与清算批次全部跳过；`state_auto=true` 在同一事务内重推并解除钉住（与 `state` 互斥）。清算批次挂在 retention worker 每小时跑，只改 state、不撤销会话。
 
 ---
 
