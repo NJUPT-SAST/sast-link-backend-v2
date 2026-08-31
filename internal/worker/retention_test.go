@@ -31,6 +31,11 @@ type fakeRetentionStore struct {
 	// through more than one batch.
 	remaining map[string]int64
 	failOn    string
+	// recomputeRowsLeft budgets the derived-state sweep; recomputeCalls counts
+	// how many passes ran; recomputeErr fails one pass.
+	recomputeRowsLeft int64
+	recomputeCalls    int
+	recomputeErr      error
 }
 
 func newFakeRetentionStore() *fakeRetentionStore {
@@ -128,6 +133,26 @@ func (s *fakeRetentionStore) DeleteExpiredAuditLogs(_ context.Context, cutoff ti
 
 func (s *fakeRetentionStore) DeleteExpiredAlumniRequests(_ context.Context, cutoff time.Time, batchSize int) (int64, error) {
 	return s.del("alumni_requests", cutoff, batchSize)
+}
+
+func (s *fakeRetentionStore) RecomputeDerivedState(_ context.Context, cursor int64, _ time.Time, batchSize int) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recomputeCalls++
+	if s.recomputeErr != nil {
+		return 0, s.recomputeErr
+	}
+	if s.recomputeRowsLeft <= 0 {
+		return 0, nil
+	}
+	// Hand out batches of batchSize rows until the fake's budget is spent; a
+	// short final batch is reported as "swept" via 0, like the real store.
+	next := cursor + int64(batchSize)
+	s.recomputeRowsLeft -= int64(batchSize)
+	if s.recomputeRowsLeft <= 0 {
+		return 0, nil
+	}
+	return next, nil
 }
 
 func testRetention(store RetentionStore, now time.Time) Retention {

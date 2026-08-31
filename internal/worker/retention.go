@@ -38,6 +38,12 @@ type RetentionStore interface {
 	// backend enforces, and deleting an unreviewed application would lose someone's
 	// request instead of expiring it.
 	DeleteExpiredAlumniRequests(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+	// RecomputeDerivedState recalibrates user.state against the derivation rule
+	// (internal/validate) for unpinned live accounts, in id order past cursor.
+	// The rule lives in Go, so this is the batch job that keeps stored states
+	// current as the academic year advances; it never revokes sessions.
+	// Returns the next cursor (0 = swept to the end).
+	RecomputeDerivedState(ctx context.Context, cursor int64, now time.Time, batchSize int) (int64, error)
 }
 
 // Retention deletes expired OAuth metadata and aged-out audit logs.
@@ -127,6 +133,31 @@ func (w Retention) sweep(ctx context.Context) {
 		}
 		w.drain(ctx, target.name, now.Add(-target.age), target.delete)
 	}
+	// Derived user state is recalibrated in the same sweep, under the same
+	// advisory lock, so two instances cannot interleave state writes. Unlike the
+	// deletes above, an unchanged row still matches the candidate predicate, so
+	// the cursor advances by id and a short batch ends the loop.
+	var cursor int64
+	for pass := 0; pass < maxRetentionPasses; pass++ {
+		if ctx.Err() != nil {
+			return
+		}
+		next, recErr := w.Store.RecomputeDerivedState(ctx, cursor, now, w.batchSize())
+		if recErr != nil {
+			if ctx.Err() == nil {
+				slog.Error("retention sweep derived state", "error", recErr)
+			}
+			return
+		}
+		if next == 0 {
+			return
+		}
+		cursor = next
+	}
+	// Hitting the pass cap means the table outgrew one tick's budget. Say so,
+	// rather than letting a permanent backlog look like a clean sweep.
+	slog.Warn("retention derived-state sweep truncated at pass cap",
+		"cursor", cursor, "passes", maxRetentionPasses)
 }
 
 // drain deletes in batches until a pass comes back short or the pass cap is hit.
