@@ -116,7 +116,6 @@ func newRouter(service *stubService) *gin.Engine {
 			RequireReadScope:  func(c *gin.Context) { c.Next() },
 			RequireWriteScope: func(c *gin.Context) { c.Next() },
 			RequireAdmin:      func(c *gin.Context) { c.Next() },
-			RequireReader:     func(c *gin.Context) { c.Next() },
 		})
 	return router
 }

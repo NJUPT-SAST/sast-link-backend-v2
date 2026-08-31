@@ -12,14 +12,11 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 )
 
-// AdminRole is the role permitted on the review endpoints, exported so the
-// composition root cannot silently mount them behind a different one.
+// AdminRole is the role permitted on the whole queue surface — reads and
+// reviews alike — exported so the composition root cannot silently mount it
+// behind a different one. A ticket carries an applicant's contact details, so
+// there is deliberately no reader role for it.
 const AdminRole = model.UserRoleAdmin
-
-// ReaderRoles are the roles permitted to read the queue. Same set that may
-// read the user directory, since a pending ticket is a prospective directory
-// entry; acting on a ticket is admin-only.
-var ReaderRoles = []model.UserRole{model.UserRoleAdmin, model.UserRoleLecturer}
 
 // ReadScopes and WriteScopes are the delegated scopes each class of route
 // accepts. admin:write appears in ReadScopes because write implies read.

@@ -13,6 +13,15 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
+// principalRole returns the caller's role for the role-scoped field views. Every
+// route that calls it sits behind RequireAuth, so a principal is always present;
+// a missing one is a wiring mistake and yields "" — the restrictive view —
+// rather than an unauthorized disclosure.
+func principalRole(c *gin.Context) string {
+	principal, _ := middleware.PrincipalFrom(c)
+	return principal.Role
+}
+
 // ListUsers returns a filtered page of accounts.
 func (h Handler) ListUsers(c *gin.Context) {
 	page, pageSize, err := web.ParsePaging(c)
@@ -43,8 +52,10 @@ func (h Handler) ListUsers(c *gin.Context) {
 		return
 	}
 	items := make([]adminUserDTO, 0, len(result.Users))
+	// The contact fields on the list ride on the caller's role (mapAdminUser): a
+	// lecturer may read the list but not the contact fields on it.
 	for _, user := range result.Users {
-		items = append(items, mapAdminUser(user))
+		items = append(items, mapAdminUser(user, principalRole(c)))
 	}
 	response.Ok(c, adminUserListResponse{
 		Users:    items,
@@ -135,7 +146,8 @@ func (h Handler) GetUser(c *gin.Context) {
 		response.Error(c, mapUserServiceError(err))
 		return
 	}
-	response.Ok(c, mapUserDetail(*detail))
+	// The phone field on the record rides on the caller's role (mapUserDetail).
+	response.Ok(c, mapUserDetail(*detail, principalRole(c)))
 }
 
 // updateUserRequest is a partial administrative edit. Pointers so an omitted
@@ -218,9 +230,10 @@ func (h Handler) GetUsersByIDs(c *gin.Context) {
 		response.Error(c, mapUserServiceError(err))
 		return
 	}
+	// The phone field on each record rides on the caller's role (mapUserDetail).
 	items := make([]userDetailDTO, 0, len(users))
 	for _, user := range users {
-		items = append(items, mapUserDetail(user))
+		items = append(items, mapUserDetail(user, principalRole(c)))
 	}
 	response.Ok(c, batchUsersResponse{Users: items})
 }

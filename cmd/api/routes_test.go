@@ -40,7 +40,7 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 	})
 	alumnihandler.RegisterRoutes(router, alumnihandler.Handler{}, alumnihandler.Gates{
 		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
-		RequireAdmin: passthrough, RequireReader: passthrough,
+		RequireAdmin: passthrough,
 	})
 
 	registered := make(map[string]bool)
@@ -168,8 +168,9 @@ func TestSetPrincipalRoundTrips(t *testing.T) {
 // no unit test inside adminhandler can catch, since it stubs its own middleware.
 //
 // This asserts the composition root passes all five in order, and that each route
-// picks the gates its contract calls for: the two read-only user endpoints admit a
-// lecturer, everything else is admin-only; reads accept a read-or-write delegated
+// picks the gates its contract calls for: the user reads (list, detail, batch)
+// admit a lecturer — the phone field, not the endpoint, is what a non-admin role
+// loses — everything else is admin-only; reads accept a read-or-write delegated
 // scope, writes demand write.
 func TestAdminRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -199,9 +200,11 @@ func TestAdminRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 		{http.MethodGet, "/admin/oauth-clients", "read-scope", "admin"},
 		{http.MethodPost, "/admin/oauth-clients", "write-scope", "admin"},
 		{http.MethodPut, "/admin/oauth-clients/5", "write-scope", "admin"},
-		// PRD §4.12: reading the directory is open to lecturers, writing is not.
+		// PRD §4.12: the directory list and the detail records are open to lecturers,
+		// with the phone field dropped for them inside the mapping; writes are admin-only.
 		{http.MethodGet, "/admin/users", "read-scope", "reader"},
 		{http.MethodGet, "/admin/users/5", "read-scope", "reader"},
+		{http.MethodGet, "/admin/users/batch", "read-scope", "reader"},
 		{http.MethodPut, "/admin/users/5", "write-scope", "admin"},
 		{http.MethodDelete, "/admin/users/5", "write-scope", "admin"},
 		{http.MethodPut, "/admin/users/5/restore", "write-scope", "admin"},
@@ -279,8 +282,9 @@ func TestReaderRolesAreAdminAndLecturer(t *testing.T) {
 }
 
 // The console account-request routes carry the same two-dimensional gating as the
-// rest of /admin: reading the queue is open to the roles that may read the user
-// directory, acting on a ticket is admin-only.
+// rest of /admin. They differ from the user surface in one place: the whole queue
+// — reads included — is admin-only, because a ticket carries an applicant's
+// contact details and prospective identity.
 func TestAlumniConsoleRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -299,14 +303,13 @@ func TestAlumniConsoleRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 		RequireReadScope:  step("read-scope"),
 		RequireWriteScope: step("write-scope"),
 		RequireAdmin:      rejectingStep("admin"),
-		RequireReader:     rejectingStep("reader"),
 	})
 
 	for _, route := range []struct {
 		method, path, scopeGate, roleGate string
 	}{
-		{http.MethodGet, "/admin/alumni-requests", "read-scope", "reader"},
-		{http.MethodGet, "/admin/alumni-requests/5", "read-scope", "reader"},
+		{http.MethodGet, "/admin/alumni-requests", "read-scope", "admin"},
+		{http.MethodGet, "/admin/alumni-requests/5", "read-scope", "admin"},
 		{http.MethodPost, "/admin/alumni-requests/5/approve", "write-scope", "admin"},
 		{http.MethodPost, "/admin/alumni-requests/5/reject", "write-scope", "admin"},
 		{http.MethodPost, "/admin/alumni-requests/5/resend-notification", "write-scope", "admin"},
@@ -341,7 +344,6 @@ func TestAlumniSubmitRouteIsPublic(t *testing.T) {
 		RequireReadScope:  rejecting,
 		RequireWriteScope: rejecting,
 		RequireAdmin:      rejecting,
-		RequireReader:     rejecting,
 	})
 
 	recorder := httptest.NewRecorder()
@@ -361,14 +363,13 @@ func TestRegisterAlumniRoutesRejectsIncompleteGates(t *testing.T) {
 	passthrough := func(c *gin.Context) { c.Next() }
 	full := alumnihandler.Gates{
 		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
-		RequireAdmin: passthrough, RequireReader: passthrough,
+		RequireAdmin: passthrough,
 	}
 	for name, mutate := range map[string]func(*alumnihandler.Gates){
 		"auth":        func(g *alumnihandler.Gates) { g.RequireAuth = nil },
 		"read scope":  func(g *alumnihandler.Gates) { g.RequireReadScope = nil },
 		"write scope": func(g *alumnihandler.Gates) { g.RequireWriteScope = nil },
 		"admin role":  func(g *alumnihandler.Gates) { g.RequireAdmin = nil },
-		"reader role": func(g *alumnihandler.Gates) { g.RequireReader = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			gates := full
@@ -383,15 +384,12 @@ func TestRegisterAlumniRoutesRejectsIncompleteGates(t *testing.T) {
 	}
 }
 
-// The write role must be admin, and the read roles exactly admin and lecturer. The
-// route test above only checks which gate ran, not which roles it admits, so a
-// drift that added member to ReaderRoles would open the queue invisibly.
-func TestAlumniHandlerRolesMatchTheAdminSurface(t *testing.T) {
+// The write role must be admin. The alumni surface has no reader roles at all: a
+// ticket carries an applicant's contact details, so the whole queue is
+// admin-only. The route test above only checks which gate ran, not which roles it
+// admits, so a drift that weakened AdminRole would open the queue invisibly.
+func TestAlumniAdminRoleIsAdmin(t *testing.T) {
 	if alumnihandler.AdminRole != model.UserRoleAdmin {
 		t.Fatalf("AdminRole = %q, want admin", alumnihandler.AdminRole)
-	}
-	want := []model.UserRole{model.UserRoleAdmin, model.UserRoleLecturer}
-	if !slices.Equal(alumnihandler.ReaderRoles, want) {
-		t.Fatalf("ReaderRoles = %v, want %v", alumnihandler.ReaderRoles, want)
 	}
 }
