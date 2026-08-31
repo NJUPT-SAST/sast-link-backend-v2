@@ -3768,6 +3768,7 @@ components:
         - 外国语学院
         - 教育科学与技术学院
         - 波特兰学院
+        - 欧洲塞浦路斯学院
         - 其他
       description: 学院枚举
     AuthUser:

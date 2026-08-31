@@ -14,6 +14,7 @@ func TestCollegeValid(t *testing.T) {
 		model.CollegeBellHonors,
 		model.CollegeComputerSoftwareCybersecurity,
 		model.CollegePortland,
+		model.CollegeEuropeCyprus,
 		model.CollegeOther,
 	}
 	for _, college := range valid {
