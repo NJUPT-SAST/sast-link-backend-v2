@@ -35,10 +35,19 @@ type fakeRequests struct {
 	rejectErr   error
 	rejected    *model.AlumniRequest
 	rejectedFor string
+	// pendingEmail is the fake's answer to EmailHasPendingTicket; the query's
+	// input is recorded in pendingEmailArg.
+	pendingEmail    bool
+	pendingEmailErr error
+	pendingEmailArg string
 	// provisioned captures what the approval callback built, which is how the tests
 	// check the role, state and identity the account was created with.
 	provisioned *model.User
 	identity    *model.Identity
+	// recoverApproved records that the recovery path ran, with the target user ID
+	// it wrote into created_user_id.
+	recoverApproved bool
+	recoverTargetID int64
 }
 
 func (f *fakeRequests) Create(_ context.Context, request *model.AlumniRequest) error {
@@ -59,6 +68,11 @@ func (f *fakeRequests) Get(_ context.Context, _ int64) (*model.AlumniRequest, er
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
+	if f.getResult == nil {
+		// Approval flows read the ticket before locking it; a test that did not
+		// configure one is still given an existing pending ticket to act on.
+		return pendingTicket(), nil
+	}
 	return f.getResult, nil
 }
 
@@ -71,6 +85,14 @@ func (f *fakeRequests) List(
 		return nil, 0, f.listErr
 	}
 	return f.listRows, f.listTotal, nil
+}
+
+func (f *fakeRequests) EmailHasPendingTicket(_ context.Context, email string) (bool, error) {
+	f.pendingEmailArg = email
+	if f.pendingEmailErr != nil {
+		return false, f.pendingEmailErr
+	}
+	return f.pendingEmail, nil
 }
 
 func (f *fakeRequests) ApproveAlumniRequest(
@@ -110,6 +132,34 @@ func (f *fakeRequests) ApproveAlumniRequest(
 	return &approved, nil
 }
 
+func (f *fakeRequests) ApproveAlumniRequestRecover(
+	_ context.Context,
+	requestID int64,
+	reviewerID int64,
+	now time.Time,
+) (*model.AlumniRequest, error) {
+	if f.approveErr != nil {
+		return nil, f.approveErr
+	}
+	ticket := f.getResult
+	if ticket == nil {
+		ticket = pendingTicket()
+	}
+	// Stand in for the existing account's key, distinct from every provisioned ID.
+	target := ticket.ID + 900
+	f.recoverApproved = true
+	f.recoverTargetID = target
+
+	approved := *ticket
+	approved.ID = requestID
+	approved.Status = model.AlumniRequestStatusApproved
+	approved.CreatedUserID = &target
+	approved.ReviewedBy = &reviewerID
+	approved.ReviewedAt = &now
+	f.approved = &approved
+	return &approved, nil
+}
+
 func (f *fakeRequests) RejectAlumniRequest(
 	_ context.Context,
 	requestID int64,
@@ -138,9 +188,11 @@ func (f *fakeRequests) RejectAlumniRequest(
 // fakeUsers answers the occupancy pre-checks.
 type fakeUsers struct {
 	occupiedEmails map[string]bool
-	occupiedIDs    map[string]bool
 	emailErr       error
 	studentErr     error
+	// loginEmailByStudentID feeds FindLoginEmailByStudentID; a test seeds the
+	// exact ID string it expects the service to look up.
+	loginEmailByStudentID map[string]string
 	// emailQueries records every address asked about, so a test can assert that both
 	// the personal and the login address were checked.
 	emailQueries []string
@@ -154,11 +206,21 @@ func (f *fakeUsers) ExistsAsEmailAnywhere(_ context.Context, email string) (bool
 	return f.occupiedEmails[email], nil
 }
 
-func (f *fakeUsers) ExistsByStudentID(_ context.Context, studentID string) (bool, error) {
+func (f *fakeUsers) FindLoginEmailByStudentID(_ context.Context, studentID string) (string, bool, error) {
 	if f.studentErr != nil {
-		return false, f.studentErr
+		return "", false, f.studentErr
 	}
-	return f.occupiedIDs[studentID], nil
+	loginEmail, ok := f.loginEmailByStudentID[studentID]
+	return loginEmail, ok, nil
+}
+
+// seedAccount registers an existing account under a student ID, as recovery
+// submissions see it through the folded lookup.
+func (f *fakeUsers) seedAccount(studentID, loginEmail string) {
+	if f.loginEmailByStudentID == nil {
+		f.loginEmailByStudentID = map[string]string{}
+	}
+	f.loginEmailByStudentID[studentID] = loginEmail
 }
 
 // fakeAudit collects audit rows.

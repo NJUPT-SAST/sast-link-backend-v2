@@ -303,8 +303,12 @@ func TestSubmitReportsOccupiedIdentifiers(t *testing.T) {
 			wantCode: errcode.CodeEmailAlreadyRegistered,
 		},
 		{
-			name:     "student id taken",
-			users:    &fakeUsers{occupiedIDs: map[string]bool{"B20040101": true}},
+			name: "student id taken",
+			users: func() *fakeUsers {
+				users := &fakeUsers{}
+				users.seedAccount("B20040101", "someone.else@njupt.edu.cn")
+				return users
+			}(),
 			wantCode: errcode.CodeStudentIDOccupied,
 		},
 	}
@@ -452,8 +456,9 @@ func TestSubmitAuditsFailures(t *testing.T) {
 	t.Parallel()
 
 	audit := &fakeAudit{}
-	service := newService(&fakeRequests{},
-		&fakeUsers{occupiedIDs: map[string]bool{"B20040101": true}}, audit, &fakeCaptcha{})
+	taken := &fakeUsers{}
+	taken.seedAccount("B20040101", "someone.else@njupt.edu.cn")
+	service := newService(&fakeRequests{}, taken, audit, &fakeCaptcha{})
 
 	if _, err := service.Submit(context.Background(), validSubmit()); err == nil {
 		t.Fatal("Submit() error = nil, want a conflict")
@@ -489,4 +494,127 @@ func assertInvalidInput(t *testing.T, err error, field string) {
 // classification path under test is the real one rather than a stub.
 func uniqueViolation(constraint string) error {
 	return repository.NewUniqueViolationForTest(constraint)
+}
+
+// A pending ticket is not an account, so the account-occupancy checks cannot see
+// it; without this guard the same personal email could accumulate several open
+// tickets under different student IDs, and the first approval would bind the
+// address, leaving every other one stuck.
+func TestSubmitRefusesAPersonalEmailWithATicketPending(t *testing.T) {
+	t.Parallel()
+
+	requests := &fakeRequests{pendingEmail: true}
+	users := &fakeUsers{}
+	audit := &fakeAudit{}
+	service := newService(requests, users, audit, &fakeCaptcha{})
+
+	_, err := service.Submit(context.Background(), validSubmit())
+	if err == nil {
+		t.Fatal("Submit() with a pending ticket on the email error = nil, want a refusal")
+	}
+	if !errors.Is(err, ErrEmailPending) {
+		t.Fatalf("error = %v, want ErrEmailPending", err)
+	}
+	if requests.created != nil {
+		t.Fatal("a refused submission must not create a ticket")
+	}
+	if requests.pendingEmailArg != "zhangsan@example.com" {
+		t.Fatalf("pending-email check ran on %q, want the lowercased personal email", requests.pendingEmailArg)
+	}
+
+	audit.mu.Lock()
+	defer audit.mu.Unlock()
+	if len(audit.entries) != 1 || audit.entries[0].ErrCode == nil ||
+		*audit.entries[0].ErrCode != errcode.CodeAlumniRequestPending {
+		t.Fatalf("audit entries = %+v, want one failed submission with the pending code", audit.entries)
+	}
+}
+
+// A recovery submission names an existing account. Its student ID must resolve
+// to one, its login email must match the registration on record, and both
+// checks run before the captcha-adjacent occupancy queries — the same
+// fail-fast-late ordering every other input error follows.
+func TestSubmitRecoveryIntent(t *testing.T) {
+	t.Parallel()
+
+	recoverInput := func() SubmitInput {
+		input := validSubmit()
+		input.Intent = string(model.AlumniRequestIntentRecover)
+		return input
+	}
+
+	t.Run("an unknown intent is refused", func(t *testing.T) {
+		t.Parallel()
+		input := validSubmit()
+		input.Intent = "hijack"
+		service := newService(&fakeRequests{}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+		_, err := service.Submit(context.Background(), input)
+		if err == nil {
+			t.Fatal("Submit() with an unknown intent error = nil")
+		}
+		assertInvalidInput(t, err, "intent")
+	})
+
+	t.Run("blank intent defaults to provision", func(t *testing.T) {
+		t.Parallel()
+		requests := &fakeRequests{}
+		users := &fakeUsers{}
+		service := newService(requests, users, &fakeAudit{}, &fakeCaptcha{})
+
+		if _, err := service.Submit(context.Background(), validSubmit()); err != nil {
+			t.Fatalf("Submit() error = %v", err)
+		}
+		if requests.created.Intent != model.AlumniRequestIntentProvision {
+			t.Fatalf("stored intent = %q, want provision", requests.created.Intent)
+		}
+	})
+
+	t.Run("a student id without an account redirects to provision", func(t *testing.T) {
+		t.Parallel()
+		service := newService(&fakeRequests{}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+		_, err := service.Submit(context.Background(), recoverInput())
+		if !errors.Is(err, ErrRecoverNoTarget) {
+			t.Fatalf("error = %v, want ErrRecoverNoTarget", err)
+		}
+	})
+
+	t.Run("a mismatched login email is refused", func(t *testing.T) {
+		t.Parallel()
+		users := &fakeUsers{}
+		users.seedAccount("B20040101", "someone.else@njupt.edu.cn")
+		service := newService(&fakeRequests{}, users, &fakeAudit{}, &fakeCaptcha{})
+
+		_, err := service.Submit(context.Background(), recoverInput())
+		if !errors.Is(err, ErrLoginEmailMismatch) {
+			t.Fatalf("error = %v, want ErrLoginEmailMismatch", err)
+		}
+	})
+
+	t.Run("a matching target stores a recover ticket", func(t *testing.T) {
+		t.Parallel()
+		requests := &fakeRequests{}
+		users := &fakeUsers{}
+		users.seedAccount("B20040101", "b20040101@njupt.edu.cn")
+		audit := &fakeAudit{}
+		service := newService(requests, users, audit, &fakeCaptcha{})
+
+		result, err := service.Submit(context.Background(), recoverInput())
+		if err != nil {
+			t.Fatalf("Submit() error = %v", err)
+		}
+		if result.RequestID == 0 || requests.created == nil {
+			t.Fatal("recovery submission did not create a ticket")
+		}
+		if requests.created.Intent != model.AlumniRequestIntentRecover {
+			t.Fatalf("stored intent = %q, want recover", requests.created.Intent)
+		}
+		// The submission audit names the intent, so a recovery application is
+		// distinguishable from a provision one in the trail.
+		entry := audit.find(actionSubmit)
+		if entry == nil || !strings.Contains(string(entry.Detail), "\"intent\":\"recover\"") {
+			t.Fatalf("submit audit = %+v, want the intent recorded", entry)
+		}
+	})
 }

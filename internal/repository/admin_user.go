@@ -25,6 +25,12 @@ import (
 // transaction, so it cannot deadlock against the email key.
 const adminLockKey int64 = 0x5A5701AD
 
+// maxOtherMailBindings mirrors the V001 check_other_mail_limit trigger: at most
+// two other_mail identities per account. The repository count must agree with
+// the trigger so a cap breach can be reported as a classified error instead of
+// the trigger's unnamed P0001.
+const maxOtherMailBindings = 2
+
 // AdminUserFilter narrows the administrative user list. Zero values mean "no
 // constraint" so an empty filter lists everyone, including soft-deleted accounts:
 // the console needs to find a deleted user in order to restore it.
@@ -293,6 +299,13 @@ type AdminUserUpdate struct {
 	Role        *model.UserRole
 	State       *model.UserState
 	EmailType   *model.EmailType
+	// PersonalEmail, when set, additionally binds the address as an other_mail
+	// identity on the account, in the same transaction. This is the fix of last
+	// resort for an alumnus whose school mailbox died before they bound anything:
+	// the reset flow reads an other_mail binding, so one bound address reopens the
+	// account from outside. Cross-account occupancy is enforced by the V005
+	// triggers and the unique indexes, so no pre-flight read is needed.
+	PersonalEmail *string
 }
 
 // columns returns the "user" table assignments, empty when untouched.
@@ -353,7 +366,7 @@ func (r *UserRepository) UpdateAdminUser(
 		return nil, false, fmt.Errorf("%w: account close must go through SoftDeleteAndRevokeSessions", ErrInvalidArgument)
 	}
 	columns := update.columns()
-	if len(columns) == 0 {
+	if len(columns) == 0 && update.PersonalEmail == nil {
 		return nil, false, fmt.Errorf("%w: update has no fields", ErrInvalidArgument)
 	}
 
@@ -389,14 +402,44 @@ func (r *UserRepository) UpdateAdminUser(
 		if roleChanged {
 			columns["token_version"] = gorm.Expr("token_version + 1")
 		}
-		result := transaction.Model(&model.User{}).
-			Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
-			Updates(columns)
-		if result.Error != nil {
-			return fmt.Errorf("update admin user fields: %w", result.Error)
+		if len(columns) > 0 {
+			result := transaction.Model(&model.User{}).
+				Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
+				Updates(columns)
+			if result.Error != nil {
+				return fmt.Errorf("update admin user fields: %w", result.Error)
+			}
+			if result.RowsAffected == 0 {
+				// Either the row is missing or it is already closed; the row was locked
+				// above, so this is not a lost race.
+				return classifyMissingUser(transaction, userID)
+			}
 		}
-		if result.RowsAffected == 0 {
-			return ErrNotFound
+		if update.PersonalEmail != nil {
+			// The V001 check_other_mail_limit trigger refuses a third binding with an
+			// unnamed P0001 that DuplicateConstraint cannot classify, so the cap is
+			// checked here, inside the same transaction that already holds the admin
+			// advisory lock — the count and the insert cannot race a concurrent bind.
+			var bound int64
+			if err := transaction.Model(&model.Identity{}).
+				Where("user_id = ? AND provider = ?", userID, model.LoginMethodOtherMail).
+				Count(&bound).Error; err != nil {
+				return fmt.Errorf("count bound other_mail identities: %w", err)
+			}
+			if bound >= maxOtherMailBindings {
+				return ErrIdentityLimitExceeded
+			}
+			// The V005 trigger refuses an address that is someone's login email and
+			// the unique index refuses one already bound as other_mail, so a collision
+			// surfaces as a unique violation the service classifies by constraint name.
+			identity := &model.Identity{
+				UserID:     userID,
+				Provider:   model.LoginMethodOtherMail,
+				ProviderID: *update.PersonalEmail,
+			}
+			if err := transaction.Create(identity).Error; err != nil {
+				return fmt.Errorf("bind admin user personal email: %w", err)
+			}
 		}
 		if !roleChanged {
 			return nil

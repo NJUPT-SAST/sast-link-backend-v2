@@ -158,16 +158,17 @@ func (h Handler) GetUser(c *gin.Context) {
 // user's own PUT /user/profile. The strict decoder turns an attempt to send one
 // into a 400.
 type updateUserRequest struct {
-	Name        *string `json:"name"`
-	PhoneNumber *string `json:"phone_number"`
-	QQNumber    *string `json:"qq_number"`
-	StudentID   *string `json:"student_id"`
-	College     *string `json:"college"`
-	Major       *string `json:"major"`
-	LoginEmail  *string `json:"login_email"`
-	Role        *string `json:"role"`
-	State       *string `json:"state"`
-	EmailType   *string `json:"email_type"`
+	Name          *string `json:"name"`
+	PhoneNumber   *string `json:"phone_number"`
+	QQNumber      *string `json:"qq_number"`
+	StudentID     *string `json:"student_id"`
+	College       *string `json:"college"`
+	Major         *string `json:"major"`
+	LoginEmail    *string `json:"login_email"`
+	Role          *string `json:"role"`
+	State         *string `json:"state"`
+	EmailType     *string `json:"email_type"`
+	PersonalEmail *string `json:"personal_email"`
 }
 
 // UpdateUser applies a partial administrative edit.
@@ -199,6 +200,7 @@ func (h Handler) UpdateUser(c *gin.Context) {
 		Role:          req.Role,
 		State:         req.State,
 		EmailType:     req.EmailType,
+		PersonalEmail: req.PersonalEmail,
 		AdminUserID:   principal.UserID,
 		ActorClientID: principal.ClientID,
 		ClientIP:      c.ClientIP(),

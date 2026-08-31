@@ -1,6 +1,7 @@
 package mailer
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -120,5 +121,16 @@ func TestAlumniResultNeverRendersACredential(t *testing.T) {
 				t.Errorf("text mentions %q", forbidden)
 			}
 		}
+	}
+}
+
+// Recovered is only meaningful on an approval: a rejection carrying it would
+// render the restore-access copy with an empty reset link.
+func TestSendAlumniRequestResultRefusesRecoveredRejection(t *testing.T) {
+	mailer := New(Config{Host: "smtp.test", Port: 587, From: "link@sast.fun"})
+	err := mailer.SendAlumniRequestResult(context.Background(), "alumni@example.com",
+		AlumniResult{Approved: false, Recovered: true, RejectReason: "请补充资料"})
+	if err == nil || !strings.Contains(err.Error(), "only valid for an approval") {
+		t.Fatalf("error = %v, want the recovered/rejected pairing refused", err)
 	}
 }

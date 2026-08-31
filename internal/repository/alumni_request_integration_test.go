@@ -627,3 +627,367 @@ func mustUserID(t *testing.T, database *gorm.DB) int64 {
 // timestamp: the concurrency subtest seeds from parallel goroutines, and a
 // second-resolution clock would hand two of them the same identifiers.
 var reviewerSeq atomic.Int64
+
+// TestAlumniRequestApprovalRefusesAFoldedStudentID pins the approval-time
+// folded occupancy check: an existing account holding b24040525 must make a
+// ticket for B24040525 unapprovable rather than provision a second account, and
+// the ticket must stay pending so the reviewer can act on it.
+func TestAlumniRequestApprovalRefusesAFoldedStudentID(t *testing.T) {
+	database := setupDatabase(t)
+	requests := repository.NewAlumniRequest(database)
+	ctx := context.Background()
+
+	existing := &model.User{
+		Name:         "Existing Lowercase",
+		PhoneNumber:  "13800138000",
+		QQNumber:     "10000",
+		PasswordHash: "password-hash",
+		LoginEmail:   "folded-b24040525@njupt.edu.cn",
+		StudentID:    "b24040525",
+		Role:         model.UserRoleMember,
+		State:        model.UserStateRetiredSAST,
+		College:      model.CollegeOther,
+	}
+	if err := database.Create(existing).Error; err != nil {
+		t.Fatalf("seed existing user: %v", err)
+	}
+
+	request := testAlumniRequest("B24040525")
+	// Keep the ticket's own addresses clear of the seeded account: only the
+	// student ID is under test.
+	request.LoginEmail = "alumni-B24040525@njupt.edu.cn"
+	request.PersonalEmail = "alumni-B24040525@example.com"
+	if err := requests.Create(ctx, request); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	_, err := requests.ApproveAlumniRequest(ctx, request.ID, mustUserID(t, database),
+		time.Now().UTC(), func(ticket *model.AlumniRequest) (*model.User, *model.Profile, *model.Identity, error) {
+			user, profile, identity := provisionFrom(ticket)
+			return user, profile, identity, nil
+		})
+	if !errors.Is(err, repository.ErrStudentIDExists) {
+		t.Fatalf("ApproveAlumniRequest() error = %v, want ErrStudentIDExists", err)
+	}
+
+	stored, err := requests.Get(ctx, request.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if stored.Status != model.AlumniRequestStatusPending {
+		t.Fatalf("status = %s, want still pending after a folded refusal", stored.Status)
+	}
+	if stored.CreatedUserID != nil {
+		t.Fatalf("created_user_id = %v, want NULL after a folded refusal", *stored.CreatedUserID)
+	}
+}
+
+// TestAlumniRequestEmailHasPendingTicket pins the cross-ticket email guard: an
+// address with a ticket awaiting review is refused at submit time, while a
+// reviewed ticket releases the address so a corrected applicant may resubmit —
+// the same release the partial student-ID index gives. The login_email column
+// counts too, since it is the address that becomes the account's login.
+func TestAlumniRequestEmailHasPendingTicket(t *testing.T) {
+	database := setupDatabase(t)
+	requests := repository.NewAlumniRequest(database)
+	ctx := context.Background()
+
+	request := testAlumniRequest("B20040211")
+	if err := requests.Create(ctx, request); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	for _, probe := range []string{request.PersonalEmail, request.LoginEmail} {
+		pending, err := requests.EmailHasPendingTicket(ctx, probe)
+		if err != nil {
+			t.Fatalf("EmailHasPendingTicket(%q) error = %v", probe, err)
+		}
+		if !pending {
+			t.Fatalf("EmailHasPendingTicket(%q) = false, want true", probe)
+		}
+	}
+
+	unrelated, err := requests.EmailHasPendingTicket(ctx, "nobody@example.com")
+	if err != nil {
+		t.Fatalf("EmailHasPendingTicket(nobody) error = %v", err)
+	}
+	if unrelated {
+		t.Fatal("EmailHasPendingTicket(nobody) = true, want false")
+	}
+
+	// A reviewed ticket releases the address. Rejection is the resubmit path: a
+	// fixed application carries the same personal email.
+	if _, rejectErr := requests.RejectAlumniRequest(ctx, request.ID, mustUserID(t, database),
+		"请补充毕业证明", time.Now().UTC()); rejectErr != nil {
+		t.Fatalf("RejectAlumniRequest() error = %v", rejectErr)
+	}
+	after, err := requests.EmailHasPendingTicket(ctx, request.PersonalEmail)
+	if err != nil {
+		t.Fatalf("EmailHasPendingTicket(after reject) error = %v", err)
+	}
+	if after {
+		t.Fatal("EmailHasPendingTicket(after reject) = true, want false: reviewed tickets release the address")
+	}
+}
+
+// TestAlumniRequestListUnnotifiedReviewed pins the restart self-heal input: a
+// crash loses whatever the in-memory queue held, and only reviewed tickets with
+// notify_attempts = 0 represent jobs the previous process never touched. An
+// attempted-but-unconfirmed delivery (attempts >= 1) must stay out — it sits in
+// the console backlog for the resend endpoint instead of risking a duplicate.
+func TestAlumniRequestListUnnotifiedReviewed(t *testing.T) {
+	database := setupDatabase(t)
+	requests := repository.NewAlumniRequest(database)
+	ctx := context.Background()
+
+	makeTicket := func(t *testing.T, studentID string, status model.AlumniRequestStatus) *model.AlumniRequest {
+		t.Helper()
+		request := testAlumniRequest(studentID)
+		if status == model.AlumniRequestStatusPending {
+			t.Fatalf("pending tickets are not reviewed; use approve/reject paths")
+		}
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		var verdict error
+		if status == model.AlumniRequestStatusApproved {
+			_, verdict = requests.ApproveAlumniRequest(ctx, request.ID, mustUserID(t, database),
+				time.Now().UTC(), func(ticket *model.AlumniRequest) (*model.User, *model.Profile, *model.Identity, error) {
+					user, profile, identity := provisionFrom(ticket)
+					return user, profile, identity, nil
+				})
+		} else {
+			_, verdict = requests.RejectAlumniRequest(ctx, request.ID, mustUserID(t, database),
+				"请补齐资料", time.Now().UTC())
+		}
+		if verdict != nil {
+			t.Fatalf("verdict on %s error = %v", studentID, verdict)
+		}
+		return request
+	}
+
+	t.Run("untouched reviewed tickets are listed", func(t *testing.T) {
+		// Two fresh tickets: approved and rejected, neither notified.
+		approved := makeTicket(t, "B20040212", model.AlumniRequestStatusApproved)
+		rejected := makeTicket(t, "B20040213", model.AlumniRequestStatusRejected)
+
+		rows, err := requests.ListUnnotifiedReviewed(ctx, 10, nil)
+		if err != nil {
+			t.Fatalf("ListUnnotifiedReviewed() error = %v", err)
+		}
+		if len(rows) != 2 {
+			t.Fatalf("listed %d rows, want 2", len(rows))
+		}
+		byID := map[int64]model.AlumniRequest{}
+		for _, row := range rows {
+			byID[row.ID] = row
+		}
+		if _, ok := byID[approved.ID]; !ok {
+			t.Fatal("approved ticket not listed")
+		}
+		if _, ok := byID[rejected.ID]; !ok {
+			t.Fatal("rejected ticket not listed")
+		}
+		if byID[rejected.ID].RejectReason != "请补齐资料" {
+			t.Fatalf("reject_reason = %q, want it carried for the email", byID[rejected.ID].RejectReason)
+		}
+	})
+
+	t.Run("attempted tickets are skipped", func(t *testing.T) {
+		ticket := makeTicket(t, "B20040214", model.AlumniRequestStatusApproved)
+		if err := requests.MarkNotifyAttempt(ctx, ticket.ID); err != nil {
+			t.Fatalf("MarkNotifyAttempt() error = %v", err)
+		}
+
+		rows, err := requests.ListUnnotifiedReviewed(ctx, 10, nil)
+		if err != nil {
+			t.Fatalf("ListUnnotifiedReviewed() error = %v", err)
+		}
+		for _, row := range rows {
+			if row.ID == ticket.ID {
+				t.Fatalf("attempted ticket %d listed, want it skipped", ticket.ID)
+			}
+		}
+	})
+
+	t.Run("excluded ids are skipped", func(t *testing.T) {
+		first := makeTicket(t, "B20040215", model.AlumniRequestStatusApproved)
+		second := makeTicket(t, "B20040216", model.AlumniRequestStatusApproved)
+
+		rows, err := requests.ListUnnotifiedReviewed(ctx, 10, []int64{first.ID})
+		if err != nil {
+			t.Fatalf("ListUnnotifiedReviewed() error = %v", err)
+		}
+		for _, row := range rows {
+			if row.ID == first.ID {
+				t.Fatalf("excluded ticket %d listed, want it skipped", first.ID)
+			}
+		}
+		foundSecond := false
+		for _, row := range rows {
+			if row.ID == second.ID {
+				foundSecond = true
+			}
+		}
+		if !foundSecond {
+			t.Fatal("non-excluded ticket not listed beside an exclusion")
+		}
+	})
+
+	t.Run("the limit is respected", func(t *testing.T) {
+		rows, err := requests.ListUnnotifiedReviewed(ctx, 1, nil)
+		if err != nil {
+			t.Fatalf("ListUnnotifiedReviewed(1) error = %v", err)
+		}
+		if len(rows) > 1 {
+			t.Fatalf("limit 1 returned %d rows", len(rows))
+		}
+	})
+}
+
+// TestAlumniRequestRecoveryApproval pins the recovery path end to end at the
+// repository level: approval binds the ticket's personal email to the account
+// its student ID already names, writes created_user_id, and never provisions.
+func TestAlumniRequestRecoveryApproval(t *testing.T) {
+	database := setupDatabase(t)
+	requests := repository.NewAlumniRequest(database)
+	ctx := context.Background()
+
+	t.Run("binds and records without provisioning", func(t *testing.T) {
+		existing := testUser("recovered-b20040215@njupt.edu.cn")
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed existing user: %v", err)
+		}
+
+		request := testAlumniRequest(existing.StudentID)
+		// The ticket's login email must name the seeded account, exactly as a real
+		// recovery submission must.
+		request.LoginEmail = existing.LoginEmail
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		approved, err := requests.ApproveAlumniRequestRecover(ctx, request.ID,
+			mustUserID(t, database), time.Now().UTC())
+		if err != nil {
+			t.Fatalf("ApproveAlumniRequestRecover() error = %v", err)
+		}
+		if approved.Status != model.AlumniRequestStatusApproved {
+			t.Fatalf("status = %s, want approved", approved.Status)
+		}
+		if approved.CreatedUserID == nil || *approved.CreatedUserID != existing.ID {
+			t.Fatalf("created_user_id = %v, want the recovered account %d",
+				approved.CreatedUserID, existing.ID)
+		}
+
+		var count int64
+		if err := database.Model(&model.Identity{}).
+			Where("user_id = ? AND provider = ? AND provider_id = ?",
+				existing.ID, model.LoginMethodOtherMail, request.PersonalEmail).
+			Count(&count).Error; err != nil {
+			t.Fatalf("count bound identity: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("bound identity count = %d, want 1", count)
+		}
+	})
+
+	t.Run("a case-differing student id still reaches the account", func(t *testing.T) {
+		// The folded lookup is what makes a resubmission with b24040525-style
+		// casing resolve instead of reporting a missing target.
+		existing := testUser("folded-recover@njupt.edu.cn")
+		existing.StudentID = "b24040525"
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed lowercase user: %v", err)
+		}
+
+		request := testAlumniRequest("B24040525")
+		request.LoginEmail = existing.LoginEmail
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		approved, err := requests.ApproveAlumniRequestRecover(ctx, request.ID,
+			mustUserID(t, database), time.Now().UTC())
+		if err != nil {
+			t.Fatalf("ApproveAlumniRequestRecover(folded) error = %v", err)
+		}
+		if approved.CreatedUserID == nil || *approved.CreatedUserID != existing.ID {
+			t.Fatalf("created_user_id = %v, want %d", approved.CreatedUserID, existing.ID)
+		}
+	})
+
+	t.Run("a mismatched login email refuses the approval", func(t *testing.T) {
+		existing := testUser("mismatch-b20040216@njupt.edu.cn")
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed user: %v", err)
+		}
+
+		request := testAlumniRequest(existing.StudentID)
+		request.LoginEmail = "not-the-record-b20040216@njupt.edu.cn"
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		_, err := requests.ApproveAlumniRequestRecover(ctx, request.ID,
+			mustUserID(t, database), time.Now().UTC())
+		if !errors.Is(err, repository.ErrLoginEmailMismatch) {
+			t.Fatalf("error = %v, want ErrLoginEmailMismatch", err)
+		}
+		stored, getErr := requests.Get(ctx, request.ID)
+		if getErr != nil || stored.Status != model.AlumniRequestStatusPending {
+			t.Fatalf("ticket state after refusal: status=%v err=%v, want still pending",
+				stored.Status, getErr)
+		}
+	})
+
+	t.Run("a closed account is refused", func(t *testing.T) {
+		users := repository.NewUser(database)
+		existing := testUser("closed-b20040217@njupt.edu.cn")
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed user: %v", err)
+		}
+		if _, err := users.SoftDeleteAndRevokeSessions(ctx, existing.ID, time.Now().UTC()); err != nil {
+			t.Fatalf("close account: %v", err)
+		}
+
+		request := testAlumniRequest(existing.StudentID)
+		request.LoginEmail = existing.LoginEmail
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		_, err := requests.ApproveAlumniRequestRecover(ctx, request.ID,
+			mustUserID(t, database), time.Now().UTC())
+		if !errors.Is(err, repository.ErrAccountClosed) {
+			t.Fatalf("error = %v, want ErrAccountClosed", err)
+		}
+	})
+
+	t.Run("a misdirected provision approval refuses a recover ticket", func(t *testing.T) {
+		// The service dispatches on intent; the repository guards keep a wrong
+		// call from provisioning beside a recovery target.
+		existing := testUser("guarded-b20040218@njupt.edu.cn")
+		if err := database.Create(existing).Error; err != nil {
+			t.Fatalf("seed user: %v", err)
+		}
+
+		request := testAlumniRequest(existing.StudentID)
+		request.Intent = model.AlumniRequestIntentRecover
+		if err := requests.Create(ctx, request); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		_, err := requests.ApproveAlumniRequest(ctx, request.ID, mustUserID(t, database),
+			time.Now().UTC(), func(ticket *model.AlumniRequest) (*model.User, *model.Profile, *model.Identity, error) {
+				user, profile, identity := provisionFrom(ticket)
+				return user, profile, identity, nil
+			})
+		if !errors.Is(err, repository.ErrInvalidArgument) {
+			t.Fatalf("error = %v, want ErrInvalidArgument for an intent mismatch", err)
+		}
+	})
+}

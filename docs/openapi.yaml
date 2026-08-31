@@ -2355,6 +2355,15 @@ paths:
                   description: |
                     登录邮箱。域名限 @njupt.edu.cn / @sast.fun，会被规范化为小写；
                     修改后触发器 auto_set_email_type 自动重算 email_type。
+                personal_email:
+                  type: string
+                  format: email
+                  maxLength: 255
+                  description: |
+                    提供时在同一事务内直绑为 other_mail 登录身份（管理员背书、免邮箱
+                    验证），绑定后可用于登录与密码重置——已有账号的救援通道。不可与
+                    login_email 相同（含本次修改后的值），不得已被其他账号占用，且每
+                    账号 other_mail 绑定总数不超过 2 个（40905）；不可对已注销用户绑定。
         required: true
       responses:
         "200":
@@ -2380,7 +2389,7 @@ paths:
           description: 资源不存在（404xx）
         "409":
           $ref: "#/components/responses/Conflict"
-          description: 学号或邮箱已被占用（40901 / 40902）
+          description: 学号或邮箱已被占用、绑定数量已达上限（40901 / 40902 / 40905）
         "422":
           $ref: "#/components/responses/Unprocessable"
           description: state 为 is_deleted，或目标用户已注销（42200）
@@ -3210,6 +3219,12 @@ paths:
 
         不返回初始密码：系统生成的密码在审批时哈希后即丢弃，校友通过 /reset 自
         助设置，填写邮箱时用其第三方邮箱。通知邮件里也不含密码。
+
+        intent=recover 的工单走恢复分支：不建号不生成密码，同一事务内按折叠学
+        号定位并锁定现有账号、核对 login_email 一致，把个人邮箱直绑为该账号的
+        other_mail 身份，created_user_id 记录现有账号。目标已注销或登录邮箱漂
+        移返回 42200，绑定数量达上限返回 40905。审计只记一行审批结果（detail
+        带 recovered/target_user_id/bound_email），不写开户行。
       operationId: approveAlumniRequest
       tags:
         - AlumniRequest
@@ -3600,6 +3615,17 @@ components:
           type: string
           maxLength: 1000
           description: 补充说明
+        intent:
+          type: string
+          enum:
+            - provision
+            - recover
+          default: provision
+          description: |
+            工单意图。provision（缺省）为新学号开新号；recover 给该学号现有账
+            号绑定 personal_email 恢复访问，不建新号。recover 要求 login_email
+            与现有账号登记的登录邮箱一致，审批时在同一事务内再次核对——它把能
+            收重置验证码的邮箱绑到现役账号上，控制台必须以高危操作呈现。
         captcha_token:
           type: string
           maxLength: 2048
@@ -3639,6 +3665,12 @@ components:
           type: string
         status:
           $ref: "#/components/schemas/AlumniRequestStatus"
+        intent:
+          type: string
+          enum:
+            - provision
+            - recover
+          description: 工单意图：provision 开新号；recover 给该学号现有账号绑定 personal_email 恢复访问
         reject_reason:
           type: string
           description: 驳回原因，会进入驳回通知邮件；非驳回状态为空字符串

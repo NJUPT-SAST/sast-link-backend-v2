@@ -727,3 +727,149 @@ func TestUserRepositoryCreateAdminUserRollsBackOnV005(t *testing.T) {
 			userCount, profileCount, identityCount)
 	}
 }
+
+// TestUserRepositoryExistsByStudentIDFoldsCase pins the folded occupancy guard:
+// user.student_id's unique constraint is case-sensitive, so an existing
+// b24040525 must still make a submission for B24040525 look occupied. Without
+// this, a case-differing variant sails past the pre-submission check and, on
+// the alumni channel, past the approval too (mistake the import once produced).
+func TestUserRepositoryExistsByStudentIDFoldsCase(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+
+	user := &model.User{
+		Name:         "Folded Case User",
+		PhoneNumber:  "13800138000",
+		QQNumber:     "10000",
+		PasswordHash: "password-hash",
+		LoginEmail:   "folded-b24040525@njupt.edu.cn",
+		StudentID:    "b24040525",
+		Role:         model.UserRoleFreshman,
+		State:        model.UserStateNJUPTer,
+		College:      model.CollegeOther,
+	}
+	if err := database.Create(user).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	for _, candidate := range []string{"b24040525", "B24040525", " b24040525"} {
+		got, err := userRepository.ExistsByStudentID(context.Background(), candidate)
+		if err != nil {
+			t.Fatalf("ExistsByStudentID(%q) error = %v", candidate, err)
+		}
+		if !got {
+			t.Fatalf("ExistsByStudentID(%q) = false, want true (occupied by b24040525)", candidate)
+		}
+	}
+}
+
+// TestAdminUserUpdateBindsPersonalEmail pins W2a: an administrative edit can
+// bind an other_mail identity on an existing account in the same transaction —
+// the rescue path for an alumnus whose school mailbox died before they bound
+// anything. The V005 trigger and the unique index keep a bound address from
+// colliding with a login email or a second binding, and the collision surfaces
+// as a unique violation the service classifies by constraint name.
+func TestAdminUserUpdateBindsPersonalEmail(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	ctx := context.Background()
+
+	user := testUser("rescue-b20040208@njupt.edu.cn")
+	if err := database.Create(user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	t.Run("binds and survives a field-only empty columns path", func(t *testing.T) {
+		email := "alumni.rescue@example.com"
+		_, sessionsRevoked, err := users.UpdateAdminUser(ctx, user.ID,
+			repository.AdminUserUpdate{PersonalEmail: &email}, time.Now().UTC())
+		if err != nil {
+			t.Fatalf("UpdateAdminUser(personal email only) error = %v", err)
+		}
+		if sessionsRevoked {
+			t.Fatal("sessionsRevoked = true, want false: binding an email is not a session cut")
+		}
+		var count int64
+		if err := database.Model(&model.Identity{}).
+			Where("user_id = ? AND provider = ? AND provider_id = ?",
+				user.ID, model.LoginMethodOtherMail, email).
+			Count(&count).Error; err != nil {
+			t.Fatalf("count bound identity: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("bound identity count = %d, want 1", count)
+		}
+	})
+
+	t.Run("team-dev with a field change also binds", func(t *testing.T) {
+		name := "Bound Name"
+		email := "alumni.rescue2@example.com"
+		_, _, err := users.UpdateAdminUser(ctx, user.ID, repository.AdminUserUpdate{
+			Name:          &name,
+			PersonalEmail: &email,
+		}, time.Now().UTC())
+		if err != nil {
+			t.Fatalf("UpdateAdminUser(name + personal email) error = %v", err)
+		}
+		var count int64
+		if err := database.Model(&model.Identity{}).
+			Where("user_id = ? AND provider = ? AND provider_id = ?",
+				user.ID, model.LoginMethodOtherMail, email).
+			Count(&count).Error; err != nil {
+			t.Fatalf("count second binding: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("second binding count = %d, want 1", count)
+		}
+	})
+
+	t.Run("a third bind reaches the per-account cap", func(t *testing.T) {
+		// Two binds already landed above; the count check inside the transaction
+		// must refuse a third with a classified error rather than the V001
+		// trigger's unnamed P0001.
+		third := "alumni.rescue3@example.com"
+		_, _, err := users.UpdateAdminUser(ctx, user.ID,
+			repository.AdminUserUpdate{PersonalEmail: &third}, time.Now().UTC())
+		if !errors.Is(err, repository.ErrIdentityLimitExceeded) {
+			t.Fatalf("third bind error = %v, want ErrIdentityLimitExceeded", err)
+		}
+	})
+
+	t.Run("a repeated address collides with the unique index", func(t *testing.T) {
+		// A fresh account with a single bind: the cap does not pre-empt, so the
+		// unique index is what refuses the duplicate address. provider_id is
+		// globally unique, so the address must not be in use anywhere yet.
+		fresh := testUser("rescue-b20040209@njupt.edu.cn")
+		if err := database.Create(fresh).Error; err != nil {
+			t.Fatalf("create fresh user: %v", err)
+		}
+		email := "alumni.rescue.fresh@example.com"
+		if _, _, err := users.UpdateAdminUser(ctx, fresh.ID,
+			repository.AdminUserUpdate{PersonalEmail: &email}, time.Now().UTC()); err != nil {
+			t.Fatalf("first bind on fresh user error = %v", err)
+		}
+		_, _, err := users.UpdateAdminUser(ctx, fresh.ID,
+			repository.AdminUserUpdate{PersonalEmail: &email}, time.Now().UTC())
+		if err == nil {
+			t.Fatal("second bind of the same address error = nil")
+		}
+		if got := repository.DuplicateConstraint(err); got != "uq_identities_provider_provider_id" {
+			t.Fatalf("error = %v; constraint = %q, want uq_identities_provider_provider_id", err, got)
+		}
+	})
+
+	t.Run("an address that is someone's login email is refused by the V005 trigger", func(t *testing.T) {
+		fresh := testUser("rescue-b20040210@njupt.edu.cn")
+		if err := database.Create(fresh).Error; err != nil {
+			t.Fatalf("create fresh user: %v", err)
+		}
+		_, _, err := users.UpdateAdminUser(ctx, fresh.ID,
+			repository.AdminUserUpdate{PersonalEmail: &fresh.LoginEmail}, time.Now().UTC())
+		if err == nil {
+			t.Fatal("binding a login email error = nil")
+		}
+		if got := repository.DuplicateConstraint(err); got != "ck_identities_provider_id_not_login_email" {
+			t.Fatalf("error = %v; constraint = %q, want ck_identities_provider_id_not_login_email", err, got)
+		}
+	})
+}

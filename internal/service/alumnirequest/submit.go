@@ -52,6 +52,7 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 	}
 
 	request := &model.AlumniRequest{
+		Intent:         validated.intent,
 		Name:           validated.name,
 		StudentID:      validated.studentID,
 		LoginEmail:     validated.loginEmail,
@@ -76,6 +77,7 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 		"student_id":     request.StudentID,
 		"login_email":    request.LoginEmail,
 		"personal_email": request.PersonalEmail,
+		"intent":         string(request.Intent),
 		// Recorded so a later dispute can establish that the submission did pass
 		// verification.
 		"captcha": "passed",
@@ -85,37 +87,71 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 	return &SubmitResult{RequestID: request.ID}, nil
 }
 
-// checkOccupancy refuses a submission whose identifiers already belong to an
-// account. Pre-checked at submit time — the applicant is gone by review, so a
-// collision found then leaves the reviewer a ticket they cannot act on.
-func (s Service) checkOccupancy(ctx context.Context, validated validatedSubmit) error {
-	occupied, err := s.Users.ExistsAsEmailAnywhere(ctx, validated.personalEmail)
+// checkOccupancy refuses a submission whose identifiers are in the wrong
+// relationship to the database. Both intents share the personal-email guards;
+// the student-ID direction is what they flip on:
+//
+//   - provision requires the ID to be free (the account would collide with it);
+//   - recover requires the ID to resolve to an existing account, and its login
+//     email to match the ticket's — that pairing is what makes approval touch
+//     one specific account instead of whichever row happens to be closest.
+func (s Service) checkOccupancy(ctx context.Context, v validatedSubmit) error {
+	if v.intent == model.AlumniRequestIntentRecover {
+		registeredLoginEmail, found, err := s.Users.FindLoginEmailByStudentID(ctx, v.studentID)
+		if err != nil {
+			return internalError(ctx, "resolve recovery target",
+				"查询学号对应账号失败", err)
+		}
+		if !found {
+			return newError(ErrRecoverNoTarget,
+				"该学号尚无账号，如需新开账号请使用普通申请", nil)
+		}
+		if registeredLoginEmail != v.loginEmail {
+			return newError(ErrLoginEmailMismatch,
+				"login_email 与该学号登记的登录邮箱不一致", nil)
+		}
+	} else {
+		occupied, err := s.Users.ExistsAsEmailAnywhere(ctx, v.loginEmail)
+		if err != nil {
+			return internalError(ctx, "check alumni request login email occupancy",
+				"查询邮箱占用情况失败", err)
+		}
+		if occupied {
+			return newError(ErrEmailOccupied, "邮箱已被占用", nil)
+		}
+		_, found, err := s.Users.FindLoginEmailByStudentID(ctx, v.studentID)
+		if err != nil {
+			return internalError(ctx, "check alumni request student id occupancy",
+				"查询学号占用情况失败", err)
+		}
+		if found {
+			// The applicant is likely the owner of that account: a graduated member
+			// whose school mailbox died does not need a second account, they need
+			// access restored to the first. Point them back at this same flow; the
+			// support address stays for when the form itself will not load.
+			return newError(ErrStudentIDOccupied,
+				"该学号已有账号。若这是您本人且无法登录（如毕业邮箱已停用），可在本页切换为「恢复已有账号访问」重新提交，或联系 link@sast.fun", nil)
+		}
+	}
+
+	// A pending ticket is not an account, so the checks above cannot see it; the
+	// first approval would bind the address and leave every later ticket stuck,
+	// so refuse the overlap up front. Shared by both intents.
+	pending, err := s.Requests.EmailHasPendingTicket(ctx, v.personalEmail)
+	if err != nil {
+		return internalError(ctx, "check alumni request pending email",
+			"查询待审申请失败", err)
+	}
+	if pending {
+		return newError(ErrEmailPending, "该邮箱已有待审申请，请等待处理", nil)
+	}
+	occupied, err := s.Users.ExistsAsEmailAnywhere(ctx, v.personalEmail)
 	if err != nil {
 		return internalError(ctx, "check alumni request email occupancy",
 			"查询邮箱占用情况失败", err)
 	}
 	if occupied {
 		return newError(ErrEmailOccupied, "邮箱已被占用", nil)
-	}
-
-	// The login email is checked the same way: it becomes the account's login
-	// identity.
-	occupied, err = s.Users.ExistsAsEmailAnywhere(ctx, validated.loginEmail)
-	if err != nil {
-		return internalError(ctx, "check alumni request login email occupancy",
-			"查询邮箱占用情况失败", err)
-	}
-	if occupied {
-		return newError(ErrEmailOccupied, "邮箱已被占用", nil)
-	}
-
-	exists, err := s.Users.ExistsByStudentID(ctx, validated.studentID)
-	if err != nil {
-		return internalError(ctx, "check alumni request student id occupancy",
-			"查询学号占用情况失败", err)
-	}
-	if exists {
-		return newError(ErrStudentIDOccupied, "学号已被占用", nil)
 	}
 	return nil
 }

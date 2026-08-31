@@ -95,7 +95,10 @@ type submitRequest struct {
 	JoinYear       string  `json:"join_year"`
 	DepartmentNote string  `json:"department_note"`
 	Note           string  `json:"note"`
-	CaptchaToken   string  `json:"captcha_token"`
+	// Intent selects between a fresh account and restoring access to an existing
+	// one; blank means provision, so pre-recovery clients need no change.
+	Intent       string `json:"intent"`
+	CaptchaToken string `json:"captcha_token"`
 }
 
 // submittedDTO is all an anonymous submitter learns: the ticket id. Nothing about
@@ -123,6 +126,7 @@ func (h Handler) Submit(c *gin.Context) {
 		JoinYear:       req.JoinYear,
 		DepartmentNote: req.DepartmentNote,
 		Note:           req.Note,
+		Intent:         req.Intent,
 		CaptchaToken:   req.CaptchaToken,
 		ClientIP:       c.ClientIP(),
 		UserAgent:      c.Request.UserAgent(),

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest"
 )
 
@@ -26,6 +27,13 @@ type Requests interface {
 	MarkNotifyAttempt(ctx context.Context, requestID int64) error
 	// MarkNotified records a confirmed delivery.
 	MarkNotified(ctx context.Context, requestID int64, now time.Time) error
+	// ListUnnotifiedReviewed returns reviewed tickets whose result email was
+	// never attempted (notify_attempts = 0), so a restarted process can re-queue
+	// what its in-memory queue lost. excludeIDs are tickets already re-queued by
+	// this process: the queue consumes asynchronously and the attempt is only
+	// counted at send time, so without the exclusion a backlog bigger than one
+	// batch would re-queue its oldest rows forever.
+	ListUnnotifiedReviewed(ctx context.Context, limit int, excludeIDs []int64) ([]model.AlumniRequest, error)
 }
 
 // Mailer delivers the result email.
@@ -73,17 +81,93 @@ func (w *Notifier) EnqueueAlumniNotification(job alumnirequest.NotificationJob) 
 	}
 }
 
-// Run consumes the queue until ctx is cancelled.
+// Run consumes the queue until ctx is cancelled. The consumer starts before
+// the startup reconcile so a backlog larger than the queue can drain while it
+// is being re-queued; a full queue then parks the reconcile loop, never the
+// send loop.
 func (w *Notifier) Run(ctx context.Context) error {
 	if w == nil || w.jobs == nil || w.Requests == nil || w.Mailer == nil {
 		return fmt.Errorf("alumni notification worker requires queue, requests and mailer")
 	}
+	go w.consume(ctx)
+	w.reconcileBacklog(ctx)
+	<-ctx.Done()
+	return nil
+}
+
+// consume delivers queued jobs until ctx is cancelled.
+func (w *Notifier) consume(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		case job := <-w.jobs:
 			w.process(ctx, job)
+		}
+	}
+}
+
+// enqueueWaiting queues a job, waiting for space when the queue is full. Only
+// the startup reconcile uses it, and its consumer is already running, so a
+// drained queue unblocks the wait; the sleep interval is a poll, not a
+// signal, to keep the queue itself single-channel.
+func (w *Notifier) enqueueWaiting(ctx context.Context, job alumnirequest.NotificationJob) bool {
+	for {
+		if w.EnqueueAlumniNotification(job) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// reconcileBacklog re-queues notifications the in-memory queue lost to a
+// restart. Only untouched jobs (notify_attempts = 0) are picked up: a job that
+// was attempted but unconfirmed sits in the console backlog for the resend
+// endpoint, since process death after a send must not become a duplicate email.
+// The attempt is counted by process, not here — notify_attempts stays "sends
+// attempted", and a claim-then-queue here would double-count every reconciled
+// job. Seen tickets are excluded from later batches, because the queue consumes
+// asynchronously and a row is only counted once its send starts, so a plain
+// cursor would re-list the oldest batch until the worker caught up. A full
+// queue parks the walk until the running consumer frees a slot, so a backlog
+// of any size is drained in this process rather than left for the next
+// restart. Two instances reconciling the same rows in the same instant can
+// both enqueue; the window is a cold-start millisecond with an un-consumed
+// job in one queue, and a duplicate email beats a permanent off-by-two
+// counter.
+func (w *Notifier) reconcileBacklog(ctx context.Context) {
+	const reconcileBatch = 32
+	seen := make(map[int64]struct{})
+	for {
+		exclude := make([]int64, 0, len(seen))
+		for id := range seen {
+			exclude = append(exclude, id)
+		}
+		rows, err := w.Requests.ListUnnotifiedReviewed(ctx, reconcileBatch, exclude)
+		if err != nil {
+			slog.ErrorContext(ctx, "alumni notification reconcile failed",
+				"operation", "alumni_request_notify", "stage", "reconcile", "error", err)
+			return
+		}
+		if len(rows) == 0 {
+			return
+		}
+		for _, row := range rows {
+			seen[row.ID] = struct{}{}
+			if !w.enqueueWaiting(ctx, alumnirequest.NotificationJob{
+				RequestID:    row.ID,
+				Recipient:    row.PersonalEmail,
+				Name:         row.Name,
+				Approved:     row.Status == model.AlumniRequestStatusApproved,
+				Recovered:    row.Intent == model.AlumniRequestIntentRecover,
+				RejectReason: row.RejectReason,
+			}) {
+				return
+			}
 		}
 	}
 }
@@ -108,6 +192,7 @@ func (w *Notifier) process(ctx context.Context, job alumnirequest.NotificationJo
 	err := w.Mailer.SendAlumniRequestResult(ctx, job.Recipient, mailer.AlumniResult{
 		Name:         job.Name,
 		Approved:     job.Approved,
+		Recovered:    job.Recovered,
 		RejectReason: job.RejectReason,
 		ResetURL:     w.ResetURL,
 		SupportEmail: w.SupportEmail,

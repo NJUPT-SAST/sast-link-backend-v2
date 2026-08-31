@@ -188,10 +188,12 @@ func TestApproveReportsAnAlreadyReviewedTicket(t *testing.T) {
 	}
 }
 
+// The intent dispatch reads the stored ticket first, so a missing one fails at
+// the lookup — the same not-found the reviewer would have seen from the queue.
 func TestApproveReportsAMissingTicket(t *testing.T) {
 	t.Parallel()
 
-	requests := &fakeRequests{approveErr: repository.ErrNotFound}
+	requests := &fakeRequests{getErr: repository.ErrNotFound}
 	service := newService(requests, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
 
 	_, err := service.Approve(context.Background(), reviewInput())
@@ -361,6 +363,28 @@ func TestResendRepeatsADeliveredNotification(t *testing.T) {
 	}
 }
 
+// A recovery ticket's resend must select the restore-access copy, not the
+// new-account one: the account was never opened by this flow.
+func TestResendRecoveryRepeatsTheRecoveredCopy(t *testing.T) {
+	t.Parallel()
+
+	ticket := pendingTicket()
+	ticket.ID = 15
+	ticket.Status = model.AlumniRequestStatusApproved
+	ticket.Intent = model.AlumniRequestIntentRecover
+	ticket.NotifiedAt = &testNow
+	notifier := &fakeNotifier{}
+	service := newService(&fakeRequests{getResult: ticket}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+	service.Notifier = notifier
+
+	if _, err := service.ResendNotification(context.Background(), reviewInput()); err != nil {
+		t.Fatalf("ResendNotification() error = %v", err)
+	}
+	if len(notifier.jobs) != 1 || !notifier.jobs[0].Recovered {
+		t.Fatalf("jobs = %+v, want one job with Recovered for a recover ticket", notifier.jobs)
+	}
+}
+
 // An unrecognized status filter is refused rather than ignored. Dropping it would
 // answer a filtered query with the unfiltered set, reading as "no pending tickets"
 // when the truth is "you misspelled pending".
@@ -459,5 +483,114 @@ func TestRequestViewOmitsTheSubmitterAddress(t *testing.T) {
 	view := result.Requests[0]
 	if strings.Contains(view.Name+view.Note+view.DepartmentNote, "203.0.113.7") {
 		t.Fatal("the submitter address leaked into the view")
+	}
+}
+
+// A recovery approval must not touch the provisioning machinery: no account is
+// created, no password discarded, and the audit row says so in one line.
+func TestApproveRecoversInsteadOfProvisioning(t *testing.T) {
+	t.Parallel()
+
+	ticket := pendingTicket()
+	ticket.ID = 9
+	ticket.Intent = model.AlumniRequestIntentRecover
+	requests := &fakeRequests{getResult: ticket}
+	audit := &fakeAudit{}
+	notifier := &fakeNotifier{}
+	service := newService(requests, &fakeUsers{}, audit, &fakeCaptcha{})
+	service.Notifier = notifier
+
+	result, err := service.Approve(context.Background(), reviewInput())
+	if err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	if !requests.recoverApproved {
+		t.Fatal("the recovery repository path did not run")
+	}
+	if requests.provisioned != nil {
+		t.Fatal("the provisioning callback ran for a recovery approval")
+	}
+	if result.UserID != requests.recoverTargetID {
+		t.Fatalf("UserID = %d, want the recovered account %d", result.UserID, requests.recoverTargetID)
+	}
+	if len(notifier.jobs) != 1 || !notifier.jobs[0].Recovered {
+		t.Fatalf("jobs = %+v, want one recovery notification", notifier.jobs)
+	}
+
+	entry := audit.find(actionApprove)
+	if entry == nil {
+		t.Fatalf("audit actions = %v, want an approve row", audit.actions())
+	}
+	detail := string(entry.Detail)
+	for _, marker := range []string{"\"recovered\":true", "\"target_user_id\":"} {
+		if !strings.Contains(detail, marker) {
+			t.Fatalf("approve detail %q missing %s", detail, marker)
+		}
+	}
+	if strings.Contains(detail, "admin_user_create") {
+		t.Fatal("recovery approval wrote an account-creation row")
+	}
+
+	if created := audit.find(actionCreateUser); created != nil {
+		t.Fatal("recovery approval audited an admin_user_create event")
+	}
+}
+
+// The dispatch refuses to feed a recovery ticket into the provisioning path:
+// the repository guards exist for exactly that misdirected call.
+func TestApproveDispatchesOnStoredIntent(t *testing.T) {
+	t.Parallel()
+
+	ticket := pendingTicket()
+	ticket.ID = 11
+	requests := &fakeRequests{getResult: ticket}
+	service := newService(requests, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+	if _, err := service.Approve(context.Background(), reviewInput()); err != nil {
+		t.Fatalf("provision intent: Approve() error = %v", err)
+	}
+	if requests.recoverApproved {
+		t.Fatal("a provision ticket took the recovery path")
+	}
+}
+
+// The approval-time failure branches added with recovery map onto the errcode
+// contract clients observe: the code drives how the console renders the verdict
+// failure, so each repository sentinel must land on the code the API文档 names.
+func TestApproveMapsRecoveryAndFoldedFailures(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		recover  bool
+		repoErr  error
+		wantCode int
+	}{
+		{"folded student id collision at approval", false,
+			repository.ErrStudentIDExists, errcode.CodeStudentIDOccupied},
+		{"recovery target no longer resolves", true,
+			repository.ErrRecoverTargetMissing, errcode.CodeConflict},
+		{"recovery target account closed", true,
+			repository.ErrAccountClosed, errcode.CodeValidationFailed},
+		{"recovery login email drifted", true,
+			repository.ErrLoginEmailMismatch, errcode.CodeValidationFailed},
+		{"recovery bind cap reached", true,
+			repository.ErrIdentityLimitExceeded, errcode.CodeIdentityLimitReached},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			ticket := pendingTicket()
+			if testCase.recover {
+				ticket.Intent = model.AlumniRequestIntentRecover
+			}
+			requests := &fakeRequests{getResult: ticket, approveErr: testCase.repoErr}
+			service := newService(requests, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+			_, err := service.Approve(context.Background(), reviewInput())
+			if errorCode(err) != testCase.wantCode {
+				t.Fatalf("code = %d, want %d (error %v)", errorCode(err), testCase.wantCode, err)
+			}
+		})
 	}
 }

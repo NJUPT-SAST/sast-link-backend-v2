@@ -31,14 +31,27 @@ type Requests interface {
 	Create(ctx context.Context, request *model.AlumniRequest) error
 	Get(ctx context.Context, requestID int64) (*model.AlumniRequest, error)
 	List(ctx context.Context, filter repository.AlumniRequestFilter) ([]model.AlumniRequest, int64, error)
-	// ApproveAlumniRequest locks the ticket, provisions the account through the
-	// callback, and writes the verdict in one transaction.
+	// EmailHasPendingTicket reports whether a ticket awaiting review already
+	// carries this address, so a submission cannot accumulate several pending
+	// tickets under one personal email.
+	EmailHasPendingTicket(ctx context.Context, email string) (bool, error)
+	// ApproveAlumniRequest locks a provision ticket, provisions the account
+	// through the callback, and writes the verdict in one transaction.
 	ApproveAlumniRequest(
 		ctx context.Context,
 		requestID int64,
 		reviewerID int64,
 		now time.Time,
 		provision repository.AlumniProvision,
+	) (*model.AlumniRequest, error)
+	// ApproveAlumniRequestRecover locks a recovery ticket, binds PersonalEmail as
+	// the target account's other_mail identity, and writes the verdict in one
+	// transaction. See repository.AlumniRequestRepository for the failure set.
+	ApproveAlumniRequestRecover(
+		ctx context.Context,
+		requestID int64,
+		reviewerID int64,
+		now time.Time,
 	) (*model.AlumniRequest, error)
 	RejectAlumniRequest(
 		ctx context.Context,
@@ -56,8 +69,11 @@ type Users interface {
 	// ExistsAsEmailAnywhere reports whether email is already a login email or an
 	// other_mail binding on some account.
 	ExistsAsEmailAnywhere(ctx context.Context, email string) (bool, error)
-	// ExistsByStudentID reports whether an account already holds this student ID.
-	ExistsByStudentID(ctx context.Context, studentID string) (bool, error)
+	// FindLoginEmailByStudentID resolves a student ID to the login email of the
+	// account holding it, folding case and whitespace the same way the approval
+	// transaction re-checks it. A recovery ticket requires the account to exist;
+	// a provision ticket requires that it does not.
+	FindLoginEmailByStudentID(ctx context.Context, studentID string) (string, bool, error)
 }
 
 // AuditLogRepository records audit events.
@@ -108,6 +124,8 @@ type NotificationJob struct {
 	Name         string
 	Approved     bool
 	RejectReason string
+	// Recovered selects the restore-access copy instead of the new-account copy.
+	Recovered bool
 }
 
 // SubmitInput is an anonymous account-request submission.
@@ -123,7 +141,10 @@ type SubmitInput struct {
 	JoinYear       string
 	DepartmentNote string
 	Note           string
-	// CaptchaToken is the Turnstile response from the widget.
+	// Intent selects what approval should do; blank means provision. See
+	// model.AlumniRequestIntent for the two values and what they imply for the
+	// occupancy checks.
+	Intent       string
 	CaptchaToken string
 	ClientIP     string
 	UserAgent    string
@@ -169,6 +190,10 @@ type RequestView struct {
 	DepartmentNote string
 	Note           string
 	Status         string
+	// Intent tells the console which approval action the ticket wants; recovery
+	// tickets render as a high-scrutiny card because approving one touches an
+	// existing account rather than minting a new one.
+	Intent         string
 	RejectReason   string
 	CreatedUserID  *int64
 	ReviewedBy     *int64
