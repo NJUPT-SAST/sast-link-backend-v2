@@ -759,3 +759,75 @@ func assertAudited(t *testing.T, h *harness, action string, success bool, errCod
 	}
 	return entry
 }
+
+// state_auto is the undo for a manual pin. It must reach the repository as a
+// derivation request, must not be accepted alongside an explicit state (two
+// instructions for one column), and must count as a change on its own — a
+// request that only re-derives is still a request that writes.
+func TestUpdateUserStateAuto(t *testing.T) {
+	t.Run("reaches the repository and counts as a change", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+		stateAuto := true
+		result, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.StateAuto = &stateAuto
+		}))
+		if err != nil {
+			t.Fatalf("UpdateUser(state_auto): %v", err)
+		}
+		if !h.users.updateInput.StateAuto {
+			t.Fatal("StateAuto did not reach the repository")
+		}
+		if h.users.updateInput.State != nil {
+			t.Fatalf("State = %v, want nil: the value is derived inside the transaction", *h.users.updateInput.State)
+		}
+		if !slices.Contains(result.ChangedFields, "state_auto") {
+			t.Fatalf("changed fields = %v, want state_auto recorded for the audit trail", result.ChangedFields)
+		}
+	})
+
+	t.Run("is refused alongside an explicit state", func(t *testing.T) {
+		h := newHarness(t)
+		stateAuto := true
+		state := "on_sast"
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.StateAuto = &stateAuto
+			input.State = &state
+		}))
+		assertKind(t, err, KindInvalidInput)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want no write", h.users.updateCalls)
+		}
+	})
+
+	t.Run("false alone is not a change", func(t *testing.T) {
+		h := newHarness(t)
+		stateAuto := false
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.StateAuto = &stateAuto
+		}))
+		assertKind(t, err, KindInvalidInput)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want no write", h.users.updateCalls)
+		}
+	})
+}
+
+// state written by hand is a decision, so the repository is told to pin it; a
+// derived default is not sent at all.
+func TestUpdateUserStatePassesPinToRepository(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+	state := "on_sast"
+	if _, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.State = &state
+	})); err != nil {
+		t.Fatalf("UpdateUser(state): %v", err)
+	}
+	if h.users.updateInput.StateAuto {
+		t.Fatal("StateAuto set alongside an explicit state")
+	}
+	if h.users.updateInput.State == nil || *h.users.updateInput.State != model.UserStateOnSAST {
+		t.Fatalf("State = %v, want on_sast passed down", h.users.updateInput.State)
+	}
+}

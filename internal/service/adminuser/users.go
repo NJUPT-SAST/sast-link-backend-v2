@@ -363,6 +363,11 @@ func (s Service) mapWriteError(ctx context.Context, err error) error {
 		return newError(ErrProtected, "系统中至少需要保留一名管理员", nil)
 	case errors.Is(err, repository.ErrIdentityLimitExceeded):
 		return newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
+	// state_auto cannot derive from an unreadable student ID. That is a field the
+	// administrator can fix (re-pin with an explicit state), so it reads as a 400
+	// naming the cause rather than an opaque 500.
+	case errors.Is(err, repository.ErrInvalidArgument):
+		return newError(ErrInvalidInput, "学号无法解析入学年份，请改用显式 state 钉住", nil)
 	}
 	return s.mapUniqueViolation(ctx, err, "更新用户失败")
 }

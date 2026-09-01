@@ -410,12 +410,16 @@ func (r *UserRepository) UpdateAdminUser(
 			return fmt.Errorf("load user for update: %w", err)
 		}
 		if update.StateAuto {
-			// Re-derive from the locked row's role and student_id, so the write cannot
-			// be based on values another writer is replacing. Unparseable student IDs
-			// are rejected rather than guessed: the format is guaranteed, so this is a
-			// defensive branch that tells the administrator to pin state by hand.
+			// state_auto re-derives from the locked row's role and student_id, so the
+			// write cannot be based on values another writer is replacing, and unpins
+			// in the same statement: there is no window where the row is unpinned but
+			// still carries a stale pinned value. revokedAt is the caller's clock, read
+			// once at the start of the request.
 			derived, derErr := validate.DeriveState(stored.Role, stored.StudentID, revokedAt)
 			if derErr != nil {
+				// Defensive branch: student IDs are guaranteed parseable. Refusing
+				// rather than guessing keeps the pin intact for the administrator to
+				// overwrite with an explicit state.
 				return fmt.Errorf("%w: cannot derive state from student_id: %v", ErrInvalidArgument, derErr)
 			}
 			columns["state"] = derived
@@ -431,22 +435,6 @@ func (r *UserRepository) UpdateAdminUser(
 		}
 		if roleChanged {
 			columns["token_version"] = gorm.Expr("token_version + 1")
-		}
-		if update.StateAuto {
-			// state_auto re-derives state from the locked row's own role and
-			// student_id (rule in internal/validate, never duplicated here) and
-			// unpins it in the same write, so there is no window where the row is
-			// unpinned but still carries a stale pinned value. revokedAt is the
-			// caller's clock, read once at the start of the request.
-			derived, derErr := validate.DeriveState(stored.Role, stored.StudentID, revokedAt)
-			if derErr != nil {
-				// Defensive branch: student IDs are guaranteed parseable. Refusing
-				// rather than guessing keeps the pin intact for the administrator
-				// to correct by hand.
-				return fmt.Errorf("%w: cannot derive state from student_id: %v", ErrInvalidArgument, derErr)
-			}
-			columns["state"] = derived
-			columns["state_manual"] = false
 		}
 		if len(columns) > 0 {
 			result := transaction.Model(&model.User{}).
