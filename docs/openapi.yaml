@@ -3842,6 +3842,13 @@ components:
           type: string
           format: date-time
           description: 创建时间
+        state_manual:
+          type: boolean
+          description: >-
+            state 是否由管理员手写钉住（PUT 传 state 即为钉住）。true 表示该账号跳过
+            自动推导与清算批次，值是人做的判断而非事实；false 表示由状态机推导。
+            控制台据此判断该不该发 state_auto 解除钉住。
+
         profile_needs_completion:
           type: boolean
           description: >-
@@ -3974,6 +3981,13 @@ components:
           type: string
           nullable: true
           description: 部门，用户尚无 profile 行时为 null
+        state_manual:
+          type: boolean
+          description: >-
+            state 是否由管理员手写钉住（PUT 传 state 即为钉住）。true 表示该账号跳过
+            自动推导与清算批次，值是人做的判断而非事实；false 表示由状态机推导。
+            控制台据此判断该不该发 state_auto 解除钉住。
+
         profile_needs_completion:
           type: boolean
           description: >-
@@ -4430,6 +4444,13 @@ components:
         major:
           type: string
           description: 专业
+        state_manual:
+          type: boolean
+          description: >-
+            state 是否由管理员手写钉住（PUT 传 state 即为钉住）。true 表示该账号跳过
+            自动推导与清算批次，值是人做的判断而非事实；false 表示由状态机推导。
+            控制台据此判断该不该发 state_auto 解除钉住。
+
         profile_needs_completion:
           type: boolean
           description: >-

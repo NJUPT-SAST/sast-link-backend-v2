@@ -589,7 +589,7 @@ njupter/on_sast/retired_sast ──(注销)──► is_deleted
 is_deleted ──(恢复)──► 按自动状态机重新推导
 ```
 
-手动通道：管理员 `PUT /admin/users/:id` 提交 `state` 即钉住（`state_manual`），自动推导与清算批次全部跳过；`state_auto=true` 在同一事务内重推并解除钉住（与 `state` 互斥，同时提交返回 `400`）。钉住本身目前没有对外可读字段，控制台要区分「谁被钉住」只能靠审计。清算批次挂在 retention worker 每小时跑，只改 state、不 bump `token_version`、不撤销会话。
+手动通道：管理员 `PUT /admin/users/:id` 提交 `state` 即钉住（`state_manual`），自动推导与清算批次全部跳过；`state_auto=true` 在同一事务内重推并解除钉住（与 `state` 互斥，同时提交返回 `400`）。`GET /admin/users`（列表 / 详情 / 批量）携带 `state_manual`，控制台据此判断某个 `state` 是人做的裁决还是机器推导，进而决定要不要发 `state_auto`。清算批次挂在 retention worker 每小时跑，只改 state、不 bump `token_version`、不撤销会话。
 
 ---
 

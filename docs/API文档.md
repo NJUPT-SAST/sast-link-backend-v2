@@ -1634,6 +1634,7 @@ GET /admin/users
       "department": "software",
       "profile_needs_completion": false,
       "incomplete_fields": [],
+      "state_manual": false,
       "created_at": "2026-05-28T12:00:00Z",
       "updated_at": "2026-05-28T12:00:00Z"
     }
@@ -1658,6 +1659,7 @@ GET /admin/users/:id
 
 - 完整档案（含联系方式与第三方绑定）；`phone_number` 仅 **admin** 视角返回，lecturer 视角该字段**不存在**（既不 null 也不空串）。其余字段（`qq_number` / 第三方绑定 / `profile.email` 等）所有角色可见。
 - `identities` 不含第三方 `access_token` / `refresh_token`，也不含 `identity_data`——该字段存的是第三方返回的完整用户对象（飞书含 `mobile`、`email`、`enterprise_email`、`employee_no`），列出绑定不等于交出绑定背后的联系方式。
+- `state_manual` 说明 `state` 的来源：`true` = 管理员手写钉住（该账号跳过自动推导与清算批次，值是人做的判断），`false` = 由状态机按 role + 学号入学年份 + 当前学年推导。`GET /admin/users`、`GET /admin/users/:id` 与 `GET /admin/users/batch` 同带此字段，admin / lecturer 视角一致——能看见 `state` 就必须能看见它是事实还是裁决，否则「要不要发 `state_auto` 解除钉住」这个判断无从做出。
 
 **错误码**：`40100`、`40300`、`40401`。
 
@@ -1678,6 +1680,7 @@ GET /admin/users/:id
   "qq_number": "1234567890",
   "profile_needs_completion": false,
   "incomplete_fields": [],
+  "state_manual": false,
   "profile": { ... },
   "identities": [ ... ],
   "created_at": "2026-05-28T12:00:00Z",
@@ -1886,6 +1889,7 @@ GET /admin/users/batch?ids=1,2,3
       "qq_number": "1234567890",
       "profile_needs_completion": false,
       "incomplete_fields": [],
+      "state_manual": false,
       "profile": { ... },
       "identities": [ ... ],
       "created_at": "2026-05-28T12:00:00Z",
