@@ -3769,10 +3769,12 @@ components:
         incomplete_by_state:
           type: object
           description: |
-            资料未补全的全部未注销账户，按状态分组。自动状态机下在校讲师/管理员为
-            on_sast，因此分组覆盖所有活跃状态而非仅 njupter，否则逾期未归类的
-            在校非学生账号会从控制台概览消失。同为 by_state 的子集，
-            语义与 incomplete_by_role 对称。
+            资料未补全**且**状态 = njupter（在校学生）的未注销账户，按状态分组。
+            与 incomplete_by_role 刻意对称：该维度按角色排除讲师 / 管理员，本维度按
+            状态排除 on_sast / retired_sast——组织内成员与已退休者即使资料未补全也不列为
+            待跟进对象，因此两者不可一宽一窄。同为 by_state 的子集。
+            注意自动状态机的一个后果：入学满 4 学年会在 9/1 把账号推离 njupter，
+            留级 / 延毕者若无人钉住其 state，便会从本桶消失（钉住即留在跟进列表）。
           additionalProperties:
             type: integer
     EmailType:

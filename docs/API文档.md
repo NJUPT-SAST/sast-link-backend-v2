@@ -2238,7 +2238,7 @@ GET /admin/stats
       "by_department": { "software": 400, "media": 300 },
       "no_department": 800,
       "incomplete_by_role": { "freshman": 120, "member": 30 },
-      "incomplete_by_state": { "njupter": 110, "on_sast": 5 }
+      "incomplete_by_state": { "njupter": 110 }
     },
     "clients": {
       "total": 10,
@@ -2258,7 +2258,9 @@ GET /admin/stats
   - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
   - `incomplete_by_role` / `incomplete_by_state` 是资料未补全（`profile_needs_completion = true`，见 V010 生成列）账户的分组计数，供控制台概览把迁移残留账户单独归为「未补全」扇区：
     - `incomplete_by_role`：未补全**且**角色 ∉ {`lecturer`, `admin`} 的未注销账户，按角色分组（讲师 / 管理员视为组织内成员，不列为待跟进对象）
-    - `incomplete_by_state`：未补全的**全部未注销账户**，按状态分组——自动状态机下在校讲师 / 管理员为 `on_sast`，所以从 `njupter` 单口径扩大为所有活跃状态，否则逾期未归类的在校非学生账号会从概览消失
+    - `incomplete_by_state`：未补全**且**状态 = `njupter` 的未注销账户，按状态分组（`on_sast` / `retired_sast` 同理不列入）
+    - 两个桶的排除口径**刻意对称**：`incomplete_by_role` 按角色排除讲师 / 管理员，`incomplete_by_state` 按状态排除 `on_sast` / `retired_sast`，两侧都是「组织内成员与已退休者不作为待跟进对象」这同一条判断，因此不可只放宽其中一维——否则同一概览页会出现两个不相等的「未补全」数。注意两维度的集合并不相同（一个未补全的 `retired_sast` 普通成员计入角色维度但不计入状态维度），各自只对自己的真实桶做减法
+    - 自动状态机带来一处需运维留意的口径后果：入学满 4 学年会在 9/1 把账号从 `njupter` 推走，**留级 / 延毕者若无人把其 state 钉在 `njupter`，就会从 `incomplete_by_state` 消失**（仍在 `by_state` 与角色桶里，只是不再单独标为待跟进）
     - 两者都是 `by_role` / `by_state` 的子集，而非独立桶。前端渲染时从对应真实桶里减去后合并成一个扇区，分母 `total` 不变。
 - `clients` 含全部注册（停用的也在内）：`total` 为注册总数，`active` 为 `is_active = true` 的数量
 - `audit.recent` 为最近 5 条审计日志（与 §6.11 同一排序 `created_at DESC`），条目结构同 §6.11；该路读取失败时记 WARN 日志并返回空列表（best-effort），不影响其余两路
