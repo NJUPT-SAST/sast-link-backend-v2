@@ -76,7 +76,9 @@ func (s Service) Approve(ctx context.Context, input ReviewInput) (*ApproveResult
 }
 
 // approveProvision is the original approval: mint an account with a discarded
-// password and a retired_sast state.
+// password and a state derived from the ticket's student ID (internal/validate),
+// so a graduate's old cohort lands on retired_sast without the rule being
+// hardcoded here.
 func (s Service) approveProvision(ctx context.Context, input ReviewInput) (*ApproveResult, error) {
 	var provisioned *model.User
 	approved, err := s.Requests.ApproveAlumniRequest(ctx, input.RequestID, input.AdminUserID, s.now(),

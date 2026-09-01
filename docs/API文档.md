@@ -1769,7 +1769,6 @@ PUT /admin/users/:id
   "login_email": "b2404****@njupt.edu.cn",
   "role": "member",
   "state": "on_sast",
-  "state_auto": true,
   "email_type": "njupt_email",
   "personal_email": "zhangsan@qq.com"
 }
@@ -2443,7 +2442,7 @@ POST /admin/alumni-requests/:id/approve
 
 **Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
 
-**Request**: 空 body 或 `{}`（角色与状态用后端默认：`member` / `retired_sast`，工单无法请求角色）。body 带字段、有 trailing JSON，或 Content-Type 不是 `application/json`，返回 `40000`。
+**Request**: 空 body 或 `{}`（角色固定 `member`，状态由自动状态机按工单学号的入学年份推导——毕业生学号旧 → `retired_sast`；工单无法请求角色或状态）。body 带字段、有 trailing JSON，或 Content-Type 不是 `application/json`，返回 `40000`。
 
 **Response** `200`:
 

@@ -12,7 +12,7 @@ import (
 // retired_sast), the single source of truth for the state machine. It is never
 // copied into SQL, never duplicated in a repository or service package.
 //
-// The rule (agreed with the product owner, see .pi/PLAN.md):
+// The rule:
 //   - student_id's first two digits are always the enrollment year (guaranteed
 //     format; the parse-failure branch below is a defensive fallback that real
 //     data never reaches);

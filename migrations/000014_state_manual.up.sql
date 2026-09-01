@@ -8,7 +8,8 @@
 -- must skip the row. is_deleted stays on the manual DELETE channel regardless.
 --
 -- Existing rows all get FALSE: the migration does not rewrite any state value.
--- The first retention-batch pass calibrates live rows to the derived values.
+-- The retention worker's derived-state pass calibrates live rows to the derived
+-- values, on the first tick for any table that fits one sweep.
 ALTER TABLE "user"
     ADD COLUMN state_manual BOOLEAN NOT NULL DEFAULT FALSE;
 
