@@ -1763,7 +1763,7 @@ func TestRegisterCreatesUserAndIssuesTokens(t *testing.T) {
 
 func TestRegisterRejectsUsedTicket(t *testing.T) {
 	service := newRegisterService(t)
-	_, err := service.Register(context.Background(), RegisterInput{RegisterTicket: "reg_missing", Password: "newpassword", Name: "x", StudentID: "B1", PhoneNumber: "1", QQNumber: "1", College: string(model.CollegeOther), Major: "CS"})
+	_, err := service.Register(context.Background(), RegisterInput{RegisterTicket: "reg_missing", Password: "newpassword", Name: "x", StudentID: "B24040525", PhoneNumber: "1", QQNumber: "1", College: string(model.CollegeOther), Major: "CS"})
 	assertKind(t, err, KindInvalidToken, errcode.CodeRegisterTicketInvalid)
 }
 
@@ -3146,4 +3146,25 @@ func auditOutcome(t *testing.T, entry model.AuditLog) string {
 		t.Fatalf("unmarshal audit detail %s: %v", entry.Detail, err)
 	}
 	return detail.Outcome
+}
+
+// The student ID cannot be read as an enrollment year, so the account has no
+// derivable state. This rejection must sit with the other costless field checks:
+// the Register-Ticket and the parked registration_state are both one-time, and a
+// typo must not burn the OAuth authorization behind them.
+func TestRegisterRejectsUnparseableStudentIDWithoutSpendingCredentials(t *testing.T) {
+	service, store := newOAuthRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+
+	input := oauthRegisterInput("rs_abc", "os_abc")
+	input.StudentID = "B1"
+	_, err := service.Register(context.Background(), input)
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+
+	if _, ok := tickets.tickets["reg_xxx"]; !ok {
+		t.Fatal("Register-Ticket was consumed by an unreadable student ID")
+	}
+	if _, ok := store.states["rs_abc"]; !ok {
+		t.Fatal("registration_state was consumed by an unreadable student ID: the applicant would have to re-authorize with GitHub")
+	}
 }
