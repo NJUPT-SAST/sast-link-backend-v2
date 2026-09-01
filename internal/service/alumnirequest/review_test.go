@@ -594,3 +594,31 @@ func TestApproveMapsRecoveryAndFoldedFailures(t *testing.T) {
 		})
 	}
 }
+
+// The retired_sast the old code hardcoded happens to be what the rule derives for
+// a 2020 cohort, so that assertion alone cannot tell derivation from a constant.
+// This one uses a current-cohort ID, where the rule says njupter and a leftover
+// constant would still say retired_sast.
+func TestApproveProvisionsDerivesStateFromStudentID(t *testing.T) {
+	t.Parallel()
+
+	ticket := pendingTicket()
+	ticket.StudentID = "B24040101" // testNow is 2026-08-25: academic year 2025, one in
+	ticket.Name = "李四"
+	requests := &fakeRequests{getResult: ticket}
+	service := newService(requests, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+	if _, err := service.Approve(context.Background(), reviewInput()); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+	user := requests.provisioned
+	if user == nil {
+		t.Fatal("no account provisioned")
+	}
+	if user.State != model.UserStateNJUPTer {
+		t.Fatalf("state = %s, want njupter: the state must be derived, not hardcoded retired_sast", user.State)
+	}
+	if user.StateManual {
+		t.Fatal("StateManual = true, want false: a derived default is not a pin")
+	}
+}

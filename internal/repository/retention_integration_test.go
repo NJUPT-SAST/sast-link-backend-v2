@@ -423,3 +423,58 @@ func TestRetentionRecomputeDerivedState(t *testing.T) {
 		t.Fatalf("second next cursor = %d, want 0", next)
 	}
 }
+
+// The candidate set is stable (an updated row still matches the predicate), so
+// the sweep only reaches the tail of the table if the cursor is honored. Every
+// other test here passes a batch size larger than the row count, which returns
+// 0 on the first pass and cannot tell a honored cursor from an ignored one.
+func TestRetentionRecomputeDerivedStateAdvancesCursor(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	retention := repository.NewRetention(database)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	var seeded []*model.User
+	for index := range 5 {
+		user := testUser(fmt.Sprintf("cursor-%d@njupt.edu.cn", index))
+		user.StudentID = fmt.Sprintf("B1%d040525", index) // all old cohorts: retired_sast
+		user.Role = model.UserRoleMember
+		user.State = model.UserStateNJUPTer // deliberately stale
+		if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+			t.Fatalf("seed cursor-%d: %v", index, err)
+		}
+		seeded = append(seeded, user)
+	}
+	ids := make([]int64, 0, len(seeded))
+	for _, user := range seeded {
+		ids = append(ids, user.ID)
+	}
+
+	// Walk the table two rows at a time. A batch that comes back short reports
+	// completion with 0, so the loop terminates on its own.
+	var cursor int64
+	for pass := 0; pass < 10; pass++ {
+		next, err := retention.RecomputeDerivedState(context.Background(), cursor, now, 2)
+		if err != nil {
+			t.Fatalf("pass %d error = %v", pass, err)
+		}
+		if next == 0 {
+			break
+		}
+		if next <= cursor {
+			t.Fatalf("pass %d cursor = %d, want strictly past %d", pass, next, cursor)
+		}
+		cursor = next
+	}
+
+	var corrected int64
+	if err := database.Model(&model.User{}).
+		Where("id IN ? AND state = ?", ids, model.UserStateRetiredSAST).
+		Count(&corrected).Error; err != nil {
+		t.Fatalf("count corrected: %v", err)
+	}
+	if corrected != int64(len(ids)) {
+		t.Fatalf("corrected %d of %d rows, want all: the cursor was ignored and the head rescanned",
+			corrected, len(ids))
+	}
+}

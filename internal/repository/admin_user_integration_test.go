@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -973,55 +974,54 @@ func TestUpdateAdminUserStateAutoDerivesAndUnpins(t *testing.T) {
 	}
 }
 
-// A hand-written state is a pin: it must survive the derived-state sweep even
-// when the sweep has already read the row as a candidate. Under READ COMMITTED
-// the concurrent UPDATE re-evaluates the WHERE clause against the new row
-// version (EvalPlanQual), so whichever transaction commits first wins and the
-// pin is never overwritten.
-func TestRecomputeDerivedStateSkipsRowPinnedConcurrently(t *testing.T) {
+// A hand-written state is a pin: the derived-state sweep must leave it alone.
+// Each sweep test first proves the sweep rewrites this exact row while unpinned
+// (a negative control), so "the pin held" cannot pass merely because the sweep
+// does nothing at all.
+func TestRecomputeDerivedStateSkipsPinnedRow(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)
 	retention := repository.NewRetention(database)
 	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 
 	user := testUser("race-pin@njupt.edu.cn")
-	user.StudentID = "B20040525" // derives to retired_sast
+	user.StudentID = "B20040525" // 2020 cohort: the rule wants retired_sast
 	user.Role = model.UserRoleMember
 	user.State = model.UserStateNJUPTer
 	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 
-	// The sweep reads candidates, then the pin commits first, then the sweep's
-	// UPDATE lands. The sweep's UPDATE carries state_manual = FALSE in its WHERE,
-	// so the re-evaluated predicate sees the pin and touches nothing.
-	_, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100)
-	if err != nil {
-		t.Fatalf("RecomputeDerivedState: %v", err)
+	var reloaded model.User
+	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
+		t.Fatalf("control RecomputeDerivedState: %v", err)
 	}
-	// Serialized equivalent: the sweep already ran; now pin and re-run the sweep.
-	// The pinned row must keep its manual state.
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload control: %v", err)
+	}
+	if reloaded.State != model.UserStateRetiredSAST {
+		t.Fatalf("unpinned sweep left state = %q, want retired_sast: the sweep is not live against this row, so the pin check below would be vacuous", reloaded.State)
+	}
+
+	pinned := model.UserStateOnSAST
 	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
-		repository.AdminUserUpdate{State: &user.State}, now); err != nil {
+		repository.AdminUserUpdate{State: &pinned}, now); err != nil {
 		t.Fatalf("pin state: %v", err)
 	}
 	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
-		t.Fatalf("second RecomputeDerivedState: %v", err)
+		t.Fatalf("RecomputeDerivedState after pin: %v", err)
 	}
-	var reloaded model.User
 	if err := database.First(&reloaded, user.ID).Error; err != nil {
-		t.Fatalf("reload user: %v", err)
+		t.Fatalf("reload pinned: %v", err)
 	}
-	if reloaded.State != model.UserStateNJUPTer || !reloaded.StateManual {
-		t.Fatalf("state/state_manual = %q/%v, want the pinned njupter/true", reloaded.State, reloaded.StateManual)
+	if reloaded.State != model.UserStateOnSAST || !reloaded.StateManual {
+		t.Fatalf("pinned row ended at %q/manual=%v, want on_sast/true", reloaded.State, reloaded.StateManual)
 	}
 }
 
-// A restore racing the derived-state sweep converges: the sweep's UPDATE carries
-// state <> 'is_deleted', so a row still deleted when it lands is skipped, and a
-// row restored first is re-evaluated against the restored state. Either way the
-// terminal value is the derived one.
-func TestRecomputeDerivedStateSkipsRowDeletedConcurrently(t *testing.T) {
+// The sweep never resurrects a closed account, and a restore re-derives instead
+// of replaying the old hardcoded njupter. Negative control first, same reason.
+func TestRecomputeDerivedStateSkipsClosedRow(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)
 	retention := repository.NewRetention(database)
@@ -1029,43 +1029,124 @@ func TestRecomputeDerivedStateSkipsRowDeletedConcurrently(t *testing.T) {
 	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
 
 	user := testUser("race-del@njupt.edu.cn")
-	user.StudentID = "B24040525" // derives to njupter
+	user.StudentID = "B20040525"
 	user.Role = model.UserRoleMember
 	user.State = model.UserStateNJUPTer
 	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-
-	// Sweep reads the candidate, the account closes, the sweep's UPDATE lands:
-	// the WHERE (state <> is_deleted) re-evaluated against the deleted row
-	// matches nothing, so the closed account is not resurrected.
+	var reloaded model.User
 	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
-		t.Fatalf("RecomputeDerivedState: %v", err)
+		t.Fatalf("control RecomputeDerivedState: %v", err)
 	}
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload control: %v", err)
+	}
+	if reloaded.State != model.UserStateRetiredSAST {
+		t.Fatalf("unpinned sweep left state = %q, want retired_sast: sweep not live, the rest would be vacuous", reloaded.State)
+	}
+
 	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, revokedAt); err != nil {
 		t.Fatalf("soft delete: %v", err)
 	}
 	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
-		t.Fatalf("second RecomputeDerivedState: %v", err)
+		t.Fatalf("RecomputeDerivedState after close: %v", err)
 	}
-	var reloaded model.User
 	if err := database.First(&reloaded, user.ID).Error; err != nil {
-		t.Fatalf("reload user: %v", err)
+		t.Fatalf("reload closed: %v", err)
 	}
 	if reloaded.State != model.UserStateDeleted {
 		t.Fatalf("state = %q, want is_deleted untouched by the sweep", reloaded.State)
 	}
 
-	// The restore lands afterwards and re-derives (njupter for a fresh ID),
-	// clearing any pin the sweep could not have left behind.
 	if err := users.RestoreUser(context.Background(), user.ID, now); err != nil {
 		t.Fatalf("RestoreUser: %v", err)
 	}
 	if err := database.First(&reloaded, user.ID).Error; err != nil {
 		t.Fatalf("reload after restore: %v", err)
 	}
-	if reloaded.State != model.UserStateNJUPTer || reloaded.StateManual {
-		t.Fatalf("state/state_manual = %q/%v after restore, want njupter/false", reloaded.State, reloaded.StateManual)
+	if reloaded.State != model.UserStateRetiredSAST || reloaded.StateManual {
+		t.Fatalf("state/state_manual = %q/%v after restore, want retired_sast/false", reloaded.State, reloaded.StateManual)
+	}
+}
+
+// The sweep selects candidates and then updates each row, so a pin can commit in
+// between. PostgreSQL re-evaluates the UPDATE's WHERE (state_manual = FALSE)
+// against the committed version, so the pin wins: no pinned row ever ends up
+// holding the value the rule would have written. Churning pin/unpin keeps the
+// sweep racing a moving target, which is what opens the window.
+func TestRecomputeDerivedStateNeverOverwritesPinnedRowUnderContention(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	retention := repository.NewRetention(database)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	user := testUser("race-pin-live@njupt.edu.cn")
+	user.StudentID = "B20040525" // rule output: retired_sast
+	user.Role = model.UserRoleMember
+	user.State = model.UserStateOnSAST
+	user.StateManual = true
+	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	// state_manual = TRUE together with retired_sast is only reachable by writing
+	// through a pin, because every pin here stores on_sast.
+	violation := func() string {
+		var count int64
+		if err := database.Model(&model.User{}).
+			Where("id = ? AND state_manual = ? AND state = ?",
+				user.ID, true, model.UserStateRetiredSAST).
+			Count(&count).Error; err != nil {
+			return fmt.Sprintf("probe failed: %v", err)
+		}
+		if count > 0 {
+			return "pinned row holds retired_sast: the sweep wrote through a manual pin"
+		}
+		return ""
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pinned := model.UserStateOnSAST
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
+				repository.AdminUserUpdate{State: &pinned}, now); err != nil {
+				t.Errorf("churn pin: %v", err)
+				return
+			}
+			// The raw unpin stands in for the state_auto path so the churn stays a
+			// single statement: it only clears the flag, leaving the row a candidate
+			// for the next sweep pass.
+			if err := database.Model(&model.User{}).Where("id = ?", user.ID).
+				Update("state_manual", false).Error; err != nil {
+				t.Errorf("churn unpin: %v", err)
+				return
+			}
+		}
+	}()
+
+	for round := 0; round < 300; round++ {
+		if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
+			t.Fatalf("RecomputeDerivedState: %v", err)
+		}
+		if msg := violation(); msg != "" {
+			close(stop)
+			<-done
+			t.Fatalf("round %d: %s", round, msg)
+		}
+	}
+	close(stop)
+	<-done
+	if msg := violation(); msg != "" {
+		t.Fatalf("final check: %s", msg)
 	}
 }
 

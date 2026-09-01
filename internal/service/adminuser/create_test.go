@@ -223,3 +223,68 @@ func TestCreateUserMapsRepositoryFailureToInternal(t *testing.T) {
 type errSentinel struct{}
 
 func (errSentinel) Error() string { return "repository exploded" }
+
+// The creation default is a derivation, not a constant: a lecturer's fresh
+// student ID lands on_sast where a member's lands njupter. An explicit state is
+// a hand decision and pins the row, while the derived default leaves the account
+// under the state machine. Nothing else in this package reads StateManual, so
+// these two assertions are what keep the pin from silently vanishing here.
+func TestCreateUserDerivesStateAndTracksPin(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		role       string
+		studentID  string
+		explicit   string
+		wantState  model.UserState
+		wantPinned bool
+	}{
+		{
+			name: "member defaults to derived njupter",
+			role: "", studentID: "B24040525", explicit: "",
+			wantState: model.UserStateNJUPTer, wantPinned: false,
+		},
+		{
+			name: "lecturer derives to on_sast, not a constant",
+			role: "lecturer", studentID: "B24040525", explicit: "",
+			wantState: model.UserStateOnSAST, wantPinned: false,
+		},
+		{
+			name: "old cohort derives to retired_sast",
+			role: "", studentID: "B20040525", explicit: "",
+			wantState: model.UserStateRetiredSAST, wantPinned: false,
+		},
+		{
+			name: "explicit state pins",
+			role: "", studentID: "B24040525", explicit: "on_sast",
+			wantState: model.UserStateOnSAST, wantPinned: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			input := createProbeInput()
+			input.StudentID = tc.studentID
+			if tc.role != "" {
+				role := tc.role
+				input.Role = &role
+			}
+			if tc.explicit != "" {
+				state := tc.explicit
+				input.State = &state
+			}
+
+			if _, err := h.service.CreateUser(context.Background(), input); err != nil {
+				t.Fatalf("CreateUser: %v", err)
+			}
+			user := h.users.createdUser
+			if user == nil {
+				t.Fatal("no user created")
+			}
+			if user.State != tc.wantState {
+				t.Fatalf("state = %q, want %q", user.State, tc.wantState)
+			}
+			if user.StateManual != tc.wantPinned {
+				t.Fatalf("StateManual = %v, want %v", user.StateManual, tc.wantPinned)
+			}
+		})
+	}
+}
