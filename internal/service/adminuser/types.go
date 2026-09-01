@@ -131,8 +131,13 @@ type UserListItem struct {
 	// what is missing without re-deriving the rule.
 	ProfileNeedsCompletion bool
 	IncompleteFields       []string
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	// StateManual reports whether State was decided by an administrator (PUT with
+	// state, which pins the row) or left to the state machine. Without it a
+	// reviewer sees a value and cannot tell whether it is a fact to trust or a
+	// judgement to reconsider, so the state_auto unpin channel is unusable.
+	StateManual bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // UpdateUserInput is a partial administrative edit. A nil field is left
@@ -296,10 +301,12 @@ type UserDetail struct {
 	// See UserListItem.
 	ProfileNeedsCompletion bool
 	IncompleteFields       []string
-	Profile                *ProfileDetail
-	Identities             []IdentityDetail
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	// StateManual is the pin flag; see UserListItem.
+	StateManual bool
+	Profile     *ProfileDetail
+	Identities  []IdentityDetail
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // ProfileDetail is the display-card half of a user record.

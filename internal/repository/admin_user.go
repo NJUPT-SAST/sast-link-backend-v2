@@ -75,9 +75,13 @@ type AdminUserRow struct {
 	Department  *model.Department `gorm:"column:department"`
 	// ProfileNeedsCompletion is V010's generated column, surfaced so the console
 	// list can mark the affected accounts without a second query.
-	ProfileNeedsCompletion bool      `gorm:"column:profile_needs_completion"`
-	CreatedAt              time.Time `gorm:"column:created_at"`
-	UpdatedAt              time.Time `gorm:"column:updated_at"`
+	ProfileNeedsCompletion bool `gorm:"column:profile_needs_completion"`
+	// StateManual is V014's pin flag: it says whether State was decided by a human
+	// or derived. It travels next to state because a value whose origin is unknown
+	// cannot be judged — see the state_auto channel on the update endpoint.
+	StateManual bool      `gorm:"column:state_manual"`
+	CreatedAt   time.Time `gorm:"column:created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at"`
 }
 
 // ListAdminUsers returns a filtered page of users plus the total matching count,
@@ -113,7 +117,7 @@ func (r *UserRepository) ListAdminUsers(
 		Select(`"user".id`, `"user".name`, `"user".student_id`, `"user".login_email`,
 			`"user".role`, `"user".state`, `"user".email_type`, `"user".phone_number`,
 			`"user".qq_number`, `"user".college`, `"user".major`,
-			`"user".profile_needs_completion`, `"user".created_at`,
+			`"user".profile_needs_completion`, `"user".state_manual`, `"user".created_at`,
 			`"user".updated_at`, "profile.department").
 		Order(`"user".id`).
 		Limit(filter.Limit).

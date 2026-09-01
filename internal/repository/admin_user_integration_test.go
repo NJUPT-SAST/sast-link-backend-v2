@@ -1184,3 +1184,45 @@ func TestRestoreUserDerivesState(t *testing.T) {
 		t.Fatalf("state_manual = true, want false: the pin died with the DELETE")
 	}
 }
+
+// The pin has to be readable, or a reviewer looking at a state cannot tell a
+// derived fact from a human judgement and the state_auto unpin channel is
+// unusable. A list query that forgets the state_manual column would scan it as
+// false for every row and still pass every other assertion here.
+func TestListAdminUsersReportsStateManual(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+
+	free := adminSeed(t, database, "pin-free@njupt.edu.cn", "自动",
+		model.UserRoleMember, model.UserStateNJUPTer, nil)
+	pinned := adminSeed(t, database, "pin-held@njupt.edu.cn", "钉住",
+		model.UserRoleMember, model.UserStateOnSAST, nil)
+	if err := database.Model(&model.User{}).Where("id = ?", pinned.ID).
+		Update("state_manual", true).Error; err != nil {
+		t.Fatalf("pin user: %v", err)
+	}
+
+	rows, _, err := users.ListAdminUsers(context.Background(), repository.AdminUserFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAdminUsers: %v", err)
+	}
+	seen := map[int64]repository.AdminUserRow{}
+	for _, row := range rows {
+		seen[row.ID] = row
+	}
+	if row, ok := seen[pinned.ID]; !ok || !row.StateManual {
+		t.Fatalf("pinned row StateManual = %v (present=%v), want true", row.StateManual, ok)
+	}
+	if row, ok := seen[free.ID]; !ok || row.StateManual {
+		t.Fatalf("derived row StateManual = %v (present=%v), want false", row.StateManual, ok)
+	}
+
+	// The detail path reads the whole row, so the same flag must reach it.
+	detail, err := users.FindByID(context.Background(), pinned.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if !detail.StateManual {
+		t.Fatal("FindByID lost state_manual")
+	}
+}
