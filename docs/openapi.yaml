@@ -2339,9 +2339,16 @@ paths:
                 state:
                   $ref: "#/components/schemas/UserState"
                   description: |
-                    用户状态。仅接受 njupter / on_sast / retired_sast，三者之间可任意修改以供纠错。
+                    用户状态。仅接受 njupter / on_sast / retired_sast。手写值即钉住（pin）：
+                    该账号自此跳过自动推导与清算批次，直到 state_auto 解除。
                     不接受 is_deleted（422）——注销必须走 DELETE，它才会在同一事务内撤销 Token。
                     对已注销用户调用本接口同样返回 422，需先恢复。
+                state_auto:
+                  type: boolean
+                  description: |
+                    为 true 时按 role + 学号入学年份 + 当前学年重新推导 state 并解除钉住，
+                    与其它字段在同一事务内完成。与 state 互斥，同时提交返回 400（两套指令
+                    指向同一列）。误钉后的恢复通道；留级/延毕等例外账号不传此字段，保持手写钉住。
                 email_type:
                   $ref: "#/components/schemas/EmailType"
                   description: |
@@ -2442,8 +2449,10 @@ paths:
       summary: 恢复已注销用户
       deprecated: false
       description: |
-        需 admin 角色，委派调用需 `admin:write` scope。将 user.state 从 is_deleted 恢复至 njupter。不记忆注销前的状态 ——
-        原 on_sast 成员恢复后为 njupter，需管理员另行调整。已撤销的 token 不恢复，
+        需 admin 角色，委派调用需 `admin:write` scope。将 user.state 从 is_deleted
+        恢复，并按自动状态机重新推导（role + 学号入学年份 + 当前学年），同时解除钉住——
+        注销时的 is_deleted 覆盖了此前的手写值，钉住无从保留，恢复即回到自动推导；
+        需要重新钉住的管理员在恢复后再提交一次 state 即可。已撤销的 token 不恢复，
         用户需重新登录。
       operationId: adminRestoreUser
       tags:
@@ -3215,7 +3224,8 @@ paths:
         一步失败整体回滚，工单留 pending，管理员可改字段重试。按钮被双击时第二
         个请求读到已是 approved，返回 42204 而不会重复建号。
 
-        角色与状态用后端默认（member / retired_sast），工单无法请求角色。
+        角色固定 member，状态由自动状态机按工单学号的入学年份推导（毕业生学号旧 →
+        retired_sast），工单无法请求角色或状态。
 
         不返回初始密码：系统生成的密码在审批时哈希后即丢弃，校友通过 /reset 自
         助设置，填写邮箱时用其第三方邮箱。通知邮件里也不含密码。
@@ -3524,7 +3534,11 @@ components:
         - on_sast
         - retired_sast
         - is_deleted
-      description: 用户状态 — njupter（在校未加入）/ on_sast（现任成员）/ retired_sast（已离开）/ is_deleted（已注销）
+      description: >-
+        用户状态。njupter / on_sast / retired_sast 由自动状态机推导（在校
+        freshman/member、在校 lecturer/admin、入学满 4 学年），除非该账号被管理员
+        钉住（state_manual）；is_deleted 是手动的注销通道，压过一切推导。
+        状态不是鉴权输入，除 is_deleted 外没有任何端点据此放行或拒绝。
     Department:
       type: string
       enum:
@@ -3755,8 +3769,10 @@ components:
         incomplete_by_state:
           type: object
           description: |
-            资料未补全且状态 = njupter（在校学生）的未注销账户，按状态分组。
-            同为 by_state 的子集，语义与 incomplete_by_role 对称。
+            资料未补全的全部未注销账户，按状态分组。自动状态机下在校讲师/管理员为
+            on_sast，因此分组覆盖所有活跃状态而非仅 njupter，否则逾期未归类的
+            在校非学生账号会从控制台概览消失。同为 by_state 的子集，
+            语义与 incomplete_by_role 对称。
           additionalProperties:
             type: integer
     EmailType:
@@ -3826,6 +3842,13 @@ components:
           type: string
           format: date-time
           description: 创建时间
+        state_manual:
+          type: boolean
+          description: >-
+            state 是否由管理员手写钉住（PUT 传 state 即为钉住）。true 表示该账号跳过
+            自动推导与清算批次，值是人做的判断而非事实；false 表示由状态机推导。
+            控制台据此判断该不该发 state_auto 解除钉住。
+
         profile_needs_completion:
           type: boolean
           description: >-
@@ -3958,6 +3981,13 @@ components:
           type: string
           nullable: true
           description: 部门，用户尚无 profile 行时为 null
+        state_manual:
+          type: boolean
+          description: >-
+            state 是否由管理员手写钉住（PUT 传 state 即为钉住）。true 表示该账号跳过
+            自动推导与清算批次，值是人做的判断而非事实；false 表示由状态机推导。
+            控制台据此判断该不该发 state_auto 解除钉住。
+
         profile_needs_completion:
           type: boolean
           description: >-
@@ -4414,6 +4444,13 @@ components:
         major:
           type: string
           description: 专业
+        state_manual:
+          type: boolean
+          description: >-
+            state 是否由管理员手写钉住（PUT 传 state 即为钉住）。true 表示该账号跳过
+            自动推导与清算批次，值是人做的判断而非事实；false 表示由状态机推导。
+            控制台据此判断该不该发 state_auto 解除钉住。
+
         profile_needs_completion:
           type: boolean
           description: >-
@@ -4712,7 +4749,11 @@ components:
           description: 缺省 member
         state:
           $ref: "#/components/schemas/UserState"
-          description: 缺省 retired_sast，不接受 is_deleted
+          description: >-
+            缺省由自动状态机推导（role + 学号入学年份 + 当前学年：毕业生学号旧 →
+            retired_sast，在校 lecturer/admin → on_sast，在校 freshman/member →
+            njupter）。显式传值则作为钉住值写入，该账号跳过自动推导与清算批次。
+            不接受 is_deleted。
     AdminCreateUserResponse:
       type: object
       description: 管理员建号响应

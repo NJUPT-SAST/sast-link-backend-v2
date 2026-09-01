@@ -75,9 +75,13 @@ type AdminUserRow struct {
 	Department  *model.Department `gorm:"column:department"`
 	// ProfileNeedsCompletion is V010's generated column, surfaced so the console
 	// list can mark the affected accounts without a second query.
-	ProfileNeedsCompletion bool      `gorm:"column:profile_needs_completion"`
-	CreatedAt              time.Time `gorm:"column:created_at"`
-	UpdatedAt              time.Time `gorm:"column:updated_at"`
+	ProfileNeedsCompletion bool `gorm:"column:profile_needs_completion"`
+	// StateManual is V014's pin flag: it says whether State was decided by a human
+	// or derived. It travels next to state because a value whose origin is unknown
+	// cannot be judged — see the state_auto channel on the update endpoint.
+	StateManual bool      `gorm:"column:state_manual"`
+	CreatedAt   time.Time `gorm:"column:created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at"`
 }
 
 // ListAdminUsers returns a filtered page of users plus the total matching count,
@@ -113,7 +117,7 @@ func (r *UserRepository) ListAdminUsers(
 		Select(`"user".id`, `"user".name`, `"user".student_id`, `"user".login_email`,
 			`"user".role`, `"user".state`, `"user".email_type`, `"user".phone_number`,
 			`"user".qq_number`, `"user".college`, `"user".major`,
-			`"user".profile_needs_completion`, `"user".created_at`,
+			`"user".profile_needs_completion`, `"user".state_manual`, `"user".created_at`,
 			`"user".updated_at`, "profile.department").
 		Order(`"user".id`).
 		Limit(filter.Limit).
@@ -145,9 +149,11 @@ type UserStats struct {
 	// The frontend subtracts these from ByRole and folds them into a single
 	// "未补全" bucket so an incomplete account is not double-counted.
 	IncompleteByRole map[model.UserRole]int64 `json:"incomplete_by_role"`
-	// IncompleteByState counts live accounts still flagged incomplete whose state
-	// is the in-school student state (njupter), grouped by state. The frontend
-	// subtracts these from ByState into the "未补全" bucket.
+	// IncompleteByState counts live accounts still flagged incomplete grouped by
+	// state. Every non-deleted state is included: the derived state machine
+	// (internal/validate) classifies in-school staff as on_sast, so a njupter-only
+	// count would drop them from the console overview's "未补全" bucket. The
+	// frontend subtracts these from ByState into the "未补全" bucket.
 	IncompleteByState map[model.UserState]int64 `json:"incomplete_by_state"`
 }
 
@@ -210,10 +216,13 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	}
 
 	rows = rows[:0]
-	// IncompleteByState: only live accounts still flagged incomplete in the
-	// in-school student state (njupter). Grouped by state for symmetry.
+	// IncompleteByState: live accounts still flagged incomplete, grouped by state.
+	// The group is every non-deleted state, not just njupter: since the derived
+	// state machine (internal/validate) classifies in-school lecturers and admins
+	// as on_sast, a njupter-only count would silently drop live staff accounts
+	// from the console overview's incomplete bucket.
 	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{}).
-		Where(`profile_needs_completion = true AND state = ?`, model.UserStateNJUPTer)).
+		Where(`profile_needs_completion = true`)).
 		Select(`state AS "group", COUNT(*) AS count`).Group("state").Scan(&rows).Error; err != nil {
 		return stats, fmt.Errorf("count users by state (incomplete): %w", err)
 	}
@@ -298,7 +307,12 @@ type AdminUserUpdate struct {
 	LoginEmail  *string
 	Role        *model.UserRole
 	State       *model.UserState
-	EmailType   *model.EmailType
+	// StateAuto, when true, re-derives state from the locked row's role and
+	// student_id (rule in internal/validate) and clears state_manual, instead of
+	// writing a pinned value. Mutually exclusive with State: the service layer
+	// refuses both present, and the repository refuses the pair defensively.
+	StateAuto bool
+	EmailType *model.EmailType
 	// PersonalEmail, when set, additionally binds the address as an other_mail
 	// identity on the account, in the same transaction. This is the fix of last
 	// resort for an alumnus whose school mailbox died before they bound anything:
@@ -325,6 +339,9 @@ func (u AdminUserUpdate) columns() map[string]any {
 	}
 	if u.State != nil {
 		columns["state"] = *u.State
+		// A state written by hand is a pin: the derived-state paths (write-side
+		// derivation, retention batch) skip the row until state_auto clears it.
+		columns["state_manual"] = true
 	}
 	if u.EmailType != nil {
 		columns["email_type"] = *u.EmailType
@@ -365,8 +382,13 @@ func (r *UserRepository) UpdateAdminUser(
 	if update.State != nil && *update.State == model.UserStateDeleted {
 		return nil, false, fmt.Errorf("%w: account close must go through SoftDeleteAndRevokeSessions", ErrInvalidArgument)
 	}
+	// state_auto re-derives state from the locked row; carrying a pinned state
+	// alongside it would be two contradictory instructions for one column.
+	if update.StateAuto && update.State != nil {
+		return nil, false, fmt.Errorf("%w: state and state_auto are mutually exclusive", ErrInvalidArgument)
+	}
 	columns := update.columns()
-	if len(columns) == 0 && update.PersonalEmail == nil {
+	if len(columns) == 0 && update.PersonalEmail == nil && !update.StateAuto {
 		return nil, false, fmt.Errorf("%w: update has no fields", ErrInvalidArgument)
 	}
 
@@ -383,13 +405,29 @@ func (r *UserRepository) UpdateAdminUser(
 		// decision below cannot be made against a value another writer is replacing.
 		var stored model.User
 		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Select("id", "role", "state").
+			Select("id", "role", "state", "student_id").
 			Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
 			First(&stored).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return classifyMissingUser(transaction, userID)
 			}
 			return fmt.Errorf("load user for update: %w", err)
+		}
+		if update.StateAuto {
+			// state_auto re-derives from the locked row's role and student_id, so the
+			// write cannot be based on values another writer is replacing, and unpins
+			// in the same statement: there is no window where the row is unpinned but
+			// still carries a stale pinned value. revokedAt is the caller's clock, read
+			// once at the start of the request.
+			derived, derErr := validate.DeriveState(stored.Role, stored.StudentID, revokedAt)
+			if derErr != nil {
+				// Defensive branch: student IDs are guaranteed parseable. Refusing
+				// rather than guessing keeps the pin intact for the administrator to
+				// overwrite with an explicit state.
+				return fmt.Errorf("%w: cannot derive state from student_id: %v", ErrInvalidArgument, derErr)
+			}
+			columns["state"] = derived
+			columns["state_manual"] = false
 		}
 		demotesAdmin := update.Role != nil &&
 			*update.Role != model.UserRoleAdmin && stored.Role == model.UserRoleAdmin
@@ -508,23 +546,46 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 	return entries, nil
 }
 
-// RestoreUser reopens a soft-deleted account at the njupter state. Revoked
-// tokens are deliberately not restored — the owner signs in again — and the
-// previous state is not remembered (PRD §4.9), so an administrator re-promotes
-// an on_sast member who comes back as a njupter.
-func (r *UserRepository) RestoreUser(ctx context.Context, userID int64) error {
+// RestoreUser reopens a soft-deleted account with the derived state, clearing
+// the manual pin. A pinned value is deliberately not preserved: the DELETE that
+// closed the account overwrote state with is_deleted, so the former pin is
+// already gone and "keep it" would invent a value that no longer exists;
+// re-deriving and unpinning is the only honest restart. An administrator who
+// wants the account pinned again re-PUTs state after the restore. Revoked
+// tokens are deliberately not restored — the owner signs in again.
+//
+// The row read and the UPDATE both target state = is_deleted, and no other
+// writer touches a closed row, so a plain read plus a guarded UPDATE is enough;
+// the RowsAffected guard still distinguishes "missing" from "already live".
+func (r *UserRepository) RestoreUser(ctx context.Context, userID int64, now time.Time) error {
 	if userID <= 0 {
 		return fmt.Errorf("%w: user id must be positive", ErrInvalidArgument)
 	}
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		var stored model.User
+		if err := transaction.Select("id", "role", "student_id").
+			Where("id = ? AND state = ?", userID, model.UserStateDeleted).
+			First(&stored).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// A live account is a state conflict rather than a missing one.
+				return classifyLiveUser(transaction, userID)
+			}
+			return fmt.Errorf("load user for restore: %w", err)
+		}
+		state := model.UserStateNJUPTer
+		if derived, derErr := validate.DeriveState(stored.Role, stored.StudentID, now); derErr == nil {
+			state = derived
+		}
+		// else: defensive branch (student IDs are guaranteed parseable) — leave the
+		// restore open rather than deadlocking the account on an unreadable ID,
+		// keeping the historic njupter fallback.
 		result := transaction.Model(&model.User{}).
 			Where("id = ? AND state = ?", userID, model.UserStateDeleted).
-			Update("state", model.UserStateNJUPTer)
+			Updates(map[string]any{"state": state, "state_manual": false})
 		if result.Error != nil {
 			return fmt.Errorf("restore user: %w", result.Error)
 		}
 		if result.RowsAffected == 0 {
-			// A live account is a state conflict rather than a missing one.
 			return classifyLiveUser(transaction, userID)
 		}
 		return nil

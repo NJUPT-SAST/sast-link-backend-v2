@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -543,29 +544,30 @@ func TestRestoreUser(t *testing.T) {
 		t.Fatalf("soft delete: %v", err)
 	}
 
-	if err := users.RestoreUser(context.Background(), user.ID); err != nil {
+	if err := users.RestoreUser(context.Background(), user.ID, time.Now().UTC()); err != nil {
 		t.Fatalf("RestoreUser: %v", err)
 	}
 	var reloaded model.User
 	if err := database.First(&reloaded, user.ID).Error; err != nil {
 		t.Fatalf("reload user: %v", err)
 	}
-	// The previous state is not remembered: an on_sast member comes back as a njupter
-	// and an administrator re-promotes them.
+	// The restore re-derives state from the locked row and clears any manual pin:
+	// the DELETE that closed the account already overwrote the old state, so there
+	// is nothing to remember. This member's fresh student ID derives to njupter.
 	if reloaded.State != model.UserStateNJUPTer {
 		t.Fatalf("state = %q, want njupter", reloaded.State)
 	}
 	assertPairRevokedAt(t, database, familyID, revokedAt)
 
 	t.Run("restoring a live account is a state conflict", func(t *testing.T) {
-		err := users.RestoreUser(context.Background(), user.ID)
+		err := users.RestoreUser(context.Background(), user.ID, time.Now().UTC())
 		if !errors.Is(err, repository.ErrStateConflict) {
 			t.Fatalf("error = %v, want ErrStateConflict", err)
 		}
 	})
 
 	t.Run("restoring a missing account is not found", func(t *testing.T) {
-		err := users.RestoreUser(context.Background(), 999999)
+		err := users.RestoreUser(context.Background(), 999999, time.Now().UTC())
 		if !errors.Is(err, repository.ErrNotFound) {
 			t.Fatalf("error = %v, want ErrNotFound", err)
 		}
@@ -802,7 +804,7 @@ func TestAdminUserDemoteAndSoftDeleteDoNotDeadlock(t *testing.T) {
 				}
 			}
 		}
-		if err := userRepository.RestoreUser(context.Background(), admin.ID); err != nil {
+		if err := userRepository.RestoreUser(context.Background(), admin.ID, time.Now().UTC()); err != nil {
 			t.Fatalf("round %d: RestoreUser: %v", round, err)
 		}
 		if err := database.Model(&model.User{}).Where("id = ?", admin.ID).
@@ -841,8 +843,8 @@ func TestUserRepositoryStatsIncompleteBuckets(t *testing.T) {
 		t.Fatalf("seed unfinished member: %v", err)
 	}
 
-	// unfinished lecturer - excluded from incomplete_by_role, and not njupter so
-	// excluded from incomplete_by_state
+	// unfinished lecturer - excluded from incomplete_by_role; on_sast, so it
+	// does appear in incomplete_by_state (the group covers every live state)
 	unfinishedLecturer := testUser("inc-003@njupt.edu.cn")
 	unfinishedLecturer.Name = "未补全讲师"
 	unfinishedLecturer.Role = model.UserRoleLecturer
@@ -903,16 +905,324 @@ func TestUserRepositoryStatsIncompleteBuckets(t *testing.T) {
 		t.Errorf("IncompleteByRole[admin] = %d, want 0", got)
 	}
 
-	// incomplete_by_state: only unfinished in-school freshmen, grouped by state.
-	// The njupter unfinished freshman counts; the unfinished member/lecturer/
-	// admin (on_sast) and deleted account do not.
+	// incomplete_by_state: every unfinished live account, grouped by state.
+	// The njupter unfinished freshman counts; so do the unfinished member /
+	// lecturer / admin (all on_sast here); the deleted account does not (live
+	// only). The group is every non-deleted state since the derived state
+	// machine classifies in-school staff as on_sast.
 	if got := stats.IncompleteByState[model.UserStateNJUPTer]; got != 1 {
 		t.Errorf("IncompleteByState[njupter] = %d, want 1", got)
 	}
-	if got := stats.IncompleteByState[model.UserStateOnSAST]; got != 0 {
-		t.Errorf("IncompleteByState[on_sast] = %d, want 0", got)
+	if got := stats.IncompleteByState[model.UserStateOnSAST]; got != 3 {
+		t.Errorf("IncompleteByState[on_sast] = %d, want 3", got)
 	}
 	if got := stats.IncompleteByState[model.UserStateDeleted]; got != 0 {
 		t.Errorf("IncompleteByState[is_deleted] = %d, want 0", got)
+	}
+}
+
+// state_auto re-derives state from the locked row and unpins it, in the same
+// write; a plain state write pins the row instead.
+func TestUpdateAdminUserStateAutoDerivesAndUnpins(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	// A 2020-cohort member pinned to on_sast: state_auto must re-derive it to
+	// retired_sast (old student ID) and clear the pin, so the batch sweep can
+	// keep it calibrated afterwards.
+	user := testUser("auto@njupt.edu.cn")
+	user.StudentID = "B20040525"
+	user.Role = model.UserRoleMember
+	user.State = model.UserStateOnSAST
+	user.StateManual = true
+	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
+		repository.AdminUserUpdate{StateAuto: true}, now); err != nil {
+		t.Fatalf("UpdateAdminUser(state_auto): %v", err)
+	}
+	var reloaded model.User
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if reloaded.State != model.UserStateRetiredSAST {
+		t.Fatalf("state = %q, want retired_sast (derived)", reloaded.State)
+	}
+	if reloaded.StateManual {
+		t.Fatalf("state_manual = true, want false after state_auto")
+	}
+	// No role change: sessions must be untouched.
+	if reloaded.TokenVersion != user.TokenVersion {
+		t.Fatalf("token_version = %d, want %d untouched", reloaded.TokenVersion, user.TokenVersion)
+	}
+
+	// A generated-column UPDATE without state would leave the pin intact; and a
+	// fresh StateAuto call re-derives again even when already unpinned (idempotent).
+	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
+		repository.AdminUserUpdate{StateAuto: true}, now); err != nil {
+		t.Fatalf("second UpdateAdminUser(state_auto): %v", err)
+	}
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload user (2nd): %v", err)
+	}
+	if reloaded.State != model.UserStateRetiredSAST || reloaded.StateManual {
+		t.Fatalf("state/state_manual = %q/%v after second state_auto, want retired_sast/false",
+			reloaded.State, reloaded.StateManual)
+	}
+}
+
+// A hand-written state is a pin: the derived-state sweep must leave it alone.
+// Each sweep test first proves the sweep rewrites this exact row while unpinned
+// (a negative control), so "the pin held" cannot pass merely because the sweep
+// does nothing at all.
+func TestRecomputeDerivedStateSkipsPinnedRow(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	retention := repository.NewRetention(database)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	user := testUser("race-pin@njupt.edu.cn")
+	user.StudentID = "B20040525" // 2020 cohort: the rule wants retired_sast
+	user.Role = model.UserRoleMember
+	user.State = model.UserStateNJUPTer
+	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	var reloaded model.User
+	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
+		t.Fatalf("control RecomputeDerivedState: %v", err)
+	}
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload control: %v", err)
+	}
+	if reloaded.State != model.UserStateRetiredSAST {
+		t.Fatalf("unpinned sweep left state = %q, want retired_sast: the sweep is not live against this row, so the pin check below would be vacuous", reloaded.State)
+	}
+
+	pinned := model.UserStateOnSAST
+	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
+		repository.AdminUserUpdate{State: &pinned}, now); err != nil {
+		t.Fatalf("pin state: %v", err)
+	}
+	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
+		t.Fatalf("RecomputeDerivedState after pin: %v", err)
+	}
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload pinned: %v", err)
+	}
+	if reloaded.State != model.UserStateOnSAST || !reloaded.StateManual {
+		t.Fatalf("pinned row ended at %q/manual=%v, want on_sast/true", reloaded.State, reloaded.StateManual)
+	}
+}
+
+// The sweep never resurrects a closed account, and a restore re-derives instead
+// of replaying the old hardcoded njupter. Negative control first, same reason.
+func TestRecomputeDerivedStateSkipsClosedRow(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	retention := repository.NewRetention(database)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
+
+	user := testUser("race-del@njupt.edu.cn")
+	user.StudentID = "B20040525"
+	user.Role = model.UserRoleMember
+	user.State = model.UserStateNJUPTer
+	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	var reloaded model.User
+	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
+		t.Fatalf("control RecomputeDerivedState: %v", err)
+	}
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload control: %v", err)
+	}
+	if reloaded.State != model.UserStateRetiredSAST {
+		t.Fatalf("unpinned sweep left state = %q, want retired_sast: sweep not live, the rest would be vacuous", reloaded.State)
+	}
+
+	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, revokedAt); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
+		t.Fatalf("RecomputeDerivedState after close: %v", err)
+	}
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload closed: %v", err)
+	}
+	if reloaded.State != model.UserStateDeleted {
+		t.Fatalf("state = %q, want is_deleted untouched by the sweep", reloaded.State)
+	}
+
+	if err := users.RestoreUser(context.Background(), user.ID, now); err != nil {
+		t.Fatalf("RestoreUser: %v", err)
+	}
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload after restore: %v", err)
+	}
+	if reloaded.State != model.UserStateRetiredSAST || reloaded.StateManual {
+		t.Fatalf("state/state_manual = %q/%v after restore, want retired_sast/false", reloaded.State, reloaded.StateManual)
+	}
+}
+
+// The sweep selects candidates and then updates each row, so a pin can commit in
+// between. PostgreSQL re-evaluates the UPDATE's WHERE (state_manual = FALSE)
+// against the committed version, so the pin wins: no pinned row ever ends up
+// holding the value the rule would have written. Churning pin/unpin keeps the
+// sweep racing a moving target, which is what opens the window.
+func TestRecomputeDerivedStateNeverOverwritesPinnedRowUnderContention(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	retention := repository.NewRetention(database)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	user := testUser("race-pin-live@njupt.edu.cn")
+	user.StudentID = "B20040525" // rule output: retired_sast
+	user.Role = model.UserRoleMember
+	user.State = model.UserStateOnSAST
+	user.StateManual = true
+	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	// state_manual = TRUE together with retired_sast is only reachable by writing
+	// through a pin, because every pin here stores on_sast.
+	violation := func() string {
+		var count int64
+		if err := database.Model(&model.User{}).
+			Where("id = ? AND state_manual = ? AND state = ?",
+				user.ID, true, model.UserStateRetiredSAST).
+			Count(&count).Error; err != nil {
+			return fmt.Sprintf("probe failed: %v", err)
+		}
+		if count > 0 {
+			return "pinned row holds retired_sast: the sweep wrote through a manual pin"
+		}
+		return ""
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pinned := model.UserStateOnSAST
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
+				repository.AdminUserUpdate{State: &pinned}, now); err != nil {
+				t.Errorf("churn pin: %v", err)
+				return
+			}
+			// The raw unpin stands in for the state_auto path so the churn stays a
+			// single statement: it only clears the flag, leaving the row a candidate
+			// for the next sweep pass.
+			if err := database.Model(&model.User{}).Where("id = ?", user.ID).
+				Update("state_manual", false).Error; err != nil {
+				t.Errorf("churn unpin: %v", err)
+				return
+			}
+		}
+	}()
+
+	for round := 0; round < 300; round++ {
+		if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
+			t.Fatalf("RecomputeDerivedState: %v", err)
+		}
+		if msg := violation(); msg != "" {
+			close(stop)
+			<-done
+			t.Fatalf("round %d: %s", round, msg)
+		}
+	}
+	close(stop)
+	<-done
+	if msg := violation(); msg != "" {
+		t.Fatalf("final check: %s", msg)
+	}
+}
+
+// restore re-derives state instead of hardcoding njupter: an old-student-ID
+// admin comes back as retired_sast, and the pin is cleared (the DELETE that
+// closed the account already destroyed the pinned value).
+func TestRestoreUserDerivesState(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
+
+	user := testUser("restore-derive@njupt.edu.cn")
+	user.StudentID = "B20040525" // 2020 cohort: retired_sast
+	user.Role = model.UserRoleMember
+	user.State = model.UserStateOnSAST
+	user.StateManual = true
+	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, revokedAt); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if err := users.RestoreUser(context.Background(), user.ID, now); err != nil {
+		t.Fatalf("RestoreUser: %v", err)
+	}
+	var reloaded model.User
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if reloaded.State != model.UserStateRetiredSAST {
+		t.Fatalf("state = %q, want retired_sast (derived from 2020 cohort)", reloaded.State)
+	}
+	if reloaded.StateManual {
+		t.Fatalf("state_manual = true, want false: the pin died with the DELETE")
+	}
+}
+
+// The pin has to be readable, or a reviewer looking at a state cannot tell a
+// derived fact from a human judgement and the state_auto unpin channel is
+// unusable. A list query that forgets the state_manual column would scan it as
+// false for every row and still pass every other assertion here.
+func TestListAdminUsersReportsStateManual(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+
+	free := adminSeed(t, database, "pin-free@njupt.edu.cn", "自动",
+		model.UserRoleMember, model.UserStateNJUPTer, nil)
+	pinned := adminSeed(t, database, "pin-held@njupt.edu.cn", "钉住",
+		model.UserRoleMember, model.UserStateOnSAST, nil)
+	if err := database.Model(&model.User{}).Where("id = ?", pinned.ID).
+		Update("state_manual", true).Error; err != nil {
+		t.Fatalf("pin user: %v", err)
+	}
+
+	rows, _, err := users.ListAdminUsers(context.Background(), repository.AdminUserFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAdminUsers: %v", err)
+	}
+	seen := map[int64]repository.AdminUserRow{}
+	for _, row := range rows {
+		seen[row.ID] = row
+	}
+	if row, ok := seen[pinned.ID]; !ok || !row.StateManual {
+		t.Fatalf("pinned row StateManual = %v (present=%v), want true", row.StateManual, ok)
+	}
+	if row, ok := seen[free.ID]; !ok || row.StateManual {
+		t.Fatalf("derived row StateManual = %v (present=%v), want false", row.StateManual, ok)
+	}
+
+	// The detail path reads the whole row, so the same flag must reach it.
+	detail, err := users.FindByID(context.Background(), pinned.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if !detail.StateManual {
+		t.Fatal("FindByID lost state_manual")
 	}
 }

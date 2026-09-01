@@ -337,3 +337,144 @@ func TestRetentionRejectsInvalidArguments(t *testing.T) {
 		t.Error("DeleteExpiredAuditLogs(zero batch) error = nil, want ErrInvalidArgument")
 	}
 }
+
+// The derived-state sweep recalibrates unpinned live rows against the rule in
+// internal/validate, advances by id rather than rescanning the head, and leaves
+// pinned and deleted rows alone.
+func TestRetentionRecomputeDerivedState(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	retention := repository.NewRetention(database)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC) // 2022 cohort retires on this day
+
+	// 2020 cohort: derives to retired_sast. Stored wrong (njupter) on purpose.
+	old := testUser("old2020@njupt.edu.cn")
+	old.StudentID = "B20040525"
+	old.Role = model.UserRoleMember
+	old.State = model.UserStateNJUPTer
+	// 2024 cohort member: derives to njupter, already correct.
+	fresh := testUser("fresh2024@njupt.edu.cn")
+	fresh.StudentID = "B24040525"
+	fresh.Role = model.UserRoleMember
+	fresh.State = model.UserStateNJUPTer
+	// Staff with a fresh ID: derives to on_sast.
+	staff := testUser("staff@njupt.edu.cn")
+	staff.StudentID = "B23040525"
+	staff.Role = model.UserRoleLecturer
+	staff.State = model.UserStateNJUPTer
+	// Pinned row: manual state must survive the sweep.
+	pinned := testUser("pinned@njupt.edu.cn")
+	pinned.StudentID = "B18040525"
+	pinned.Role = model.UserRoleMember
+	pinned.State = model.UserStateOnSAST
+	pinned.StateManual = true
+	// Deleted row: never touched.
+	closed := testUser("closed@njupt.edu.cn")
+	closed.StudentID = "B17040525"
+	closed.Role = model.UserRoleMember
+	closed.State = model.UserStateDeleted
+
+	for _, user := range []*model.User{old, fresh, staff, pinned, closed} {
+		if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+			t.Fatalf("seed %s: %v", user.LoginEmail, err)
+		}
+	}
+
+	next, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100)
+	if err != nil {
+		t.Fatalf("RecomputeDerivedState() error = %v", err)
+	}
+	if next != 0 {
+		t.Fatalf("next cursor = %d, want 0 for a short final batch", next)
+	}
+
+	var ids []int64
+	if pluckErr := database.Model(&model.User{}).Where("id IN ?", []int64{old.ID, fresh.ID, staff.ID, pinned.ID, closed.ID}).
+		Order("id").Pluck("id", &ids).Error; pluckErr != nil {
+		t.Fatalf("reload user ids: %v", pluckErr)
+	}
+	states := map[int64]model.UserState{}
+	var rows []model.User
+	if findErr := database.Model(&model.User{}).Where("id IN ?", ids).Find(&rows).Error; findErr != nil {
+		t.Fatalf("reload users: %v", findErr)
+	}
+	for _, row := range rows {
+		states[row.ID] = row.State
+	}
+	want := map[int64]model.UserState{
+		old.ID:    model.UserStateRetiredSAST,
+		fresh.ID:  model.UserStateNJUPTer,
+		staff.ID:  model.UserStateOnSAST,
+		pinned.ID: model.UserStateOnSAST,  // pinned: untouched
+		closed.ID: model.UserStateDeleted, // deleted: untouched
+	}
+	for id, expected := range want {
+		if states[id] != expected {
+			t.Errorf("user %d state = %q, want %q", id, states[id], expected)
+		}
+	}
+
+	// Idempotent: a second pass re-evaluates and changes nothing, returning 0.
+	next, err = retention.RecomputeDerivedState(context.Background(), 0, now, 100)
+	if err != nil {
+		t.Fatalf("second RecomputeDerivedState() error = %v", err)
+	}
+	if next != 0 {
+		t.Fatalf("second next cursor = %d, want 0", next)
+	}
+}
+
+// The candidate set is stable (an updated row still matches the predicate), so
+// the sweep only reaches the tail of the table if the cursor is honored. Every
+// other test here passes a batch size larger than the row count, which returns
+// 0 on the first pass and cannot tell a honored cursor from an ignored one.
+func TestRetentionRecomputeDerivedStateAdvancesCursor(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	retention := repository.NewRetention(database)
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+
+	var seeded []*model.User
+	for index := range 5 {
+		user := testUser(fmt.Sprintf("cursor-%d@njupt.edu.cn", index))
+		user.StudentID = fmt.Sprintf("B1%d040525", index) // all old cohorts: retired_sast
+		user.Role = model.UserRoleMember
+		user.State = model.UserStateNJUPTer // deliberately stale
+		if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+			t.Fatalf("seed cursor-%d: %v", index, err)
+		}
+		seeded = append(seeded, user)
+	}
+	ids := make([]int64, 0, len(seeded))
+	for _, user := range seeded {
+		ids = append(ids, user.ID)
+	}
+
+	// Walk the table two rows at a time. A batch that comes back short reports
+	// completion with 0, so the loop terminates on its own.
+	var cursor int64
+	for pass := 0; pass < 10; pass++ {
+		next, err := retention.RecomputeDerivedState(context.Background(), cursor, now, 2)
+		if err != nil {
+			t.Fatalf("pass %d error = %v", pass, err)
+		}
+		if next == 0 {
+			break
+		}
+		if next <= cursor {
+			t.Fatalf("pass %d cursor = %d, want strictly past %d", pass, next, cursor)
+		}
+		cursor = next
+	}
+
+	var corrected int64
+	if err := database.Model(&model.User{}).
+		Where("id IN ? AND state = ?", ids, model.UserStateRetiredSAST).
+		Count(&corrected).Error; err != nil {
+		t.Fatalf("count corrected: %v", err)
+	}
+	if corrected != int64(len(ids)) {
+		t.Fatalf("corrected %d of %d rows, want all: the cursor was ignored and the head rescanned",
+			corrected, len(ids))
+	}
+}

@@ -39,10 +39,14 @@ type adminUserDTO struct {
 	// the previous database, and IncompleteFields names them. Both let the console
 	// show and work through the backlog; combine with ?needs_completion=true to
 	// list only those accounts.
-	ProfileNeedsCompletion bool      `json:"profile_needs_completion"`
-	IncompleteFields       []string  `json:"incomplete_fields"`
-	CreatedAt              time.Time `json:"created_at"`
-	UpdatedAt              time.Time `json:"updated_at"`
+	ProfileNeedsCompletion bool     `json:"profile_needs_completion"`
+	IncompleteFields       []string `json:"incomplete_fields"`
+	// StateManual says whether state above was hand-written (and therefore pins
+	// the row out of the derived-state machine) or derived. The console needs it
+	// to decide whether state_auto is the right next request.
+	StateManual bool      `json:"state_manual"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type adminUserListResponse struct {
@@ -90,6 +94,7 @@ type userDetailDTO struct {
 	// See adminUserDTO.
 	ProfileNeedsCompletion bool              `json:"profile_needs_completion"`
 	IncompleteFields       []string          `json:"incomplete_fields"`
+	StateManual            bool              `json:"state_manual"`
 	Profile                *userProfileDTO   `json:"profile"`
 	Identities             []userIdentityDTO `json:"identities"`
 	CreatedAt              time.Time         `json:"created_at"`
@@ -173,6 +178,7 @@ func mapAdminUser(user adminuser.UserListItem, role string) adminUserDTO {
 
 		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
 		IncompleteFields:       user.IncompleteFields,
+		StateManual:            user.StateManual,
 
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
@@ -205,6 +211,7 @@ func mapUserDetail(detail adminuser.UserDetail, role string) userDetailDTO {
 
 		ProfileNeedsCompletion: detail.ProfileNeedsCompletion,
 		IncompleteFields:       detail.IncompleteFields,
+		StateManual:            detail.StateManual,
 
 		Identities: make([]userIdentityDTO, 0, len(detail.Identities)),
 		CreatedAt:  detail.CreatedAt,

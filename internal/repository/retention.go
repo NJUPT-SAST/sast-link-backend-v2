@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // retentionLockKey serializes retention sweeps across API instances. Every delete
@@ -202,4 +203,68 @@ func (r *RetentionRepository) DeleteExpiredAlumniRequests(
 		&model.AlumniRequest{}, "alumni_requests",
 		"status <> ? AND reviewed_at IS NOT NULL AND reviewed_at < ?",
 		model.AlumniRequestStatusPending, cutoff)
+}
+
+// RecomputeDerivedState recalibrates user.state against the derivation rule
+// (internal/validate, the single source of truth — this SQL never re-derives).
+// Candidates are unpinned (state_manual = FALSE) live accounts; rows whose
+// derived value differs from the stored one are updated in place. The batch does
+// not bump token_version and does not revoke sessions: state plays no part in
+// authorization, so a state change is not a session cut.
+//
+// Rows are visited in id order past cursor, so repeated passes advance instead
+// of rescanning the same head of the table — unlike a delete, an unchanged row
+// still matches the candidate predicate, so a plain LIMIT would loop forever
+// over the same first page. Returns the next cursor; 0 means the sweep reached
+// the end.
+func (r *RetentionRepository) RecomputeDerivedState(
+	ctx context.Context,
+	cursor int64,
+	now time.Time,
+	batchSize int,
+) (int64, error) {
+	if batchSize <= 0 {
+		return 0, fmt.Errorf("recompute derived state: %w", ErrInvalidArgument)
+	}
+	var rows []model.User
+	if err := r.database.WithContext(ctx).
+		Select("id", "role", "student_id", "state").
+		Where("state_manual = ? AND state <> ? AND id > ?",
+			false, model.UserStateDeleted, cursor).
+		Order("id").Limit(batchSize).
+		Find(&rows).Error; err != nil {
+		return 0, fmt.Errorf("recompute derived state: %w", err)
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	next := rows[len(rows)-1].ID
+	for _, row := range rows {
+		derived, err := validate.DeriveState(row.Role, row.StudentID, now)
+		if err != nil {
+			// Defensive branch (student IDs are guaranteed parseable): leave the
+			// row alone rather than guessing; the next pass skips it the same way.
+			continue
+		}
+		if derived == row.State {
+			continue
+		}
+		result := r.database.WithContext(ctx).
+			Model(&model.User{}).
+			Where("id = ? AND state_manual = ? AND state <> ?",
+				row.ID, false, model.UserStateDeleted).
+			Update("state", derived)
+		if result.Error != nil {
+			return 0, fmt.Errorf("recompute derived state: %w", result.Error)
+		}
+		// RowsAffected == 0 means a concurrent writer pinned the row or closed the
+		// account between the read and the update; both are between-state changes
+		// the sweep must not fight, so the update is simply skipped.
+	}
+	// A short batch means the cursor reached the end: report it as 0 so the
+	// worker loop terminates without one extra no-op pass.
+	if len(rows) < batchSize {
+		return 0, nil
+	}
+	return next, nil
 }

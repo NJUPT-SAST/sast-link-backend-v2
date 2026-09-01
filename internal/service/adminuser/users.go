@@ -151,6 +151,7 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		LoginEmail:    validated.loginEmail,
 		Role:          validated.role,
 		State:         validated.state,
+		StateAuto:     validated.stateAuto,
 		EmailType:     validated.emailType,
 		PersonalEmail: validated.personalEmail,
 		// A role change invalidates sessions: a demoted account's live refresh tokens
@@ -306,7 +307,9 @@ func (s Service) DeleteUser(ctx context.Context, input TargetUserInput) error {
 	return nil
 }
 
-// RestoreUser reopens a closed account at the njupter state.
+// RestoreUser reopens a closed account with the derived state (internal/
+// validate), clearing any manual pin — the DELETE that closed the account
+// already overwrote the pinned value, so the restore cannot preserve it.
 func (s Service) RestoreUser(ctx context.Context, input TargetUserInput) error {
 	if s.Users == nil {
 		return newError(ErrInternal, "用户仓储未配置", nil)
@@ -314,7 +317,7 @@ func (s Service) RestoreUser(ctx context.Context, input TargetUserInput) error {
 	if input.UserID <= 0 {
 		return newError(ErrNotFound, "用户不存在", nil)
 	}
-	err := s.Users.RestoreUser(ctx, input.UserID)
+	err := s.Users.RestoreUser(ctx, input.UserID, s.now())
 	if err != nil {
 		var mapped error
 		switch {
@@ -360,6 +363,11 @@ func (s Service) mapWriteError(ctx context.Context, err error) error {
 		return newError(ErrProtected, "系统中至少需要保留一名管理员", nil)
 	case errors.Is(err, repository.ErrIdentityLimitExceeded):
 		return newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
+	// state_auto cannot derive from an unreadable student ID. That is a field the
+	// administrator can fix (re-pin with an explicit state), so it reads as a 400
+	// naming the cause rather than an opaque 500.
+	case errors.Is(err, repository.ErrInvalidArgument):
+		return newError(ErrInvalidInput, "学号无法解析入学年份，请改用显式 state 钉住", nil)
 	}
 	return s.mapUniqueViolation(ctx, err, "更新用户失败")
 }

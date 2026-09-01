@@ -31,6 +31,14 @@ type fakeRetentionStore struct {
 	// through more than one batch.
 	remaining map[string]int64
 	failOn    string
+	// recomputeRowsLeft budgets the derived-state sweep; recomputeCalls counts
+	// how many passes ran; recomputeErr fails one pass.
+	recomputeRowsLeft int64
+	recomputeCalls    int
+	recomputeErr      error
+	// recomputeCursors records the cursor each pass was handed, so a test can
+	// assert the sweep advances instead of re-reading the same head.
+	recomputeCursors []int64
 }
 
 func newFakeRetentionStore() *fakeRetentionStore {
@@ -98,6 +106,12 @@ func (s *fakeRetentionStore) remainingFor(table string) int64 {
 	return s.remaining[table]
 }
 
+func (s *fakeRetentionStore) recomputeSnapshot() (calls int, cursors []int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recomputeCalls, append([]int64(nil), s.recomputeCursors...)
+}
+
 func (s *fakeRetentionStore) unlocks() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -128,6 +142,27 @@ func (s *fakeRetentionStore) DeleteExpiredAuditLogs(_ context.Context, cutoff ti
 
 func (s *fakeRetentionStore) DeleteExpiredAlumniRequests(_ context.Context, cutoff time.Time, batchSize int) (int64, error) {
 	return s.del("alumni_requests", cutoff, batchSize)
+}
+
+func (s *fakeRetentionStore) RecomputeDerivedState(_ context.Context, cursor int64, _ time.Time, batchSize int) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recomputeCalls++
+	s.recomputeCursors = append(s.recomputeCursors, cursor)
+	if s.recomputeErr != nil {
+		return 0, s.recomputeErr
+	}
+	if s.recomputeRowsLeft <= 0 {
+		return 0, nil
+	}
+	// Hand out batches of batchSize rows until the fake's budget is spent; a
+	// short final batch is reported as "swept" via 0, like the real store.
+	next := cursor + int64(batchSize)
+	s.recomputeRowsLeft -= int64(batchSize)
+	if s.recomputeRowsLeft <= 0 {
+		return 0, nil
+	}
+	return next, nil
 }
 
 func testRetention(store RetentionStore, now time.Time) Retention {
@@ -291,5 +326,101 @@ func TestRetentionRunSweepsBeforeFirstTick(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("Run() error = %v, want nil after cancel", err)
+	}
+}
+
+// The derived-state pass advances by cursor instead of re-reading the same head
+// of the table: an unchanged row stays a candidate, so a sweep that restarts its
+// scan every pass would never reach the tail.
+func TestRetentionDerivedStateAdvancesByCursor(t *testing.T) {
+	store := newFakeRetentionStore()
+	store.recomputeRowsLeft = 25
+	testRetention(store, time.Now().UTC()).sweep(context.Background())
+
+	calls, cursors := store.recomputeSnapshot()
+	if calls != 3 {
+		t.Fatalf("recompute calls = %d, want 3 passes over 25 rows at batch size 10", calls)
+	}
+	want := []int64{0, 10, 20}
+	for i, expected := range want {
+		if cursors[i] != expected {
+			t.Fatalf("pass %d cursor = %d, want %d", i, cursors[i], expected)
+		}
+	}
+}
+
+// Sweeping to the end resets the carried cursor, so the next tick re-checks
+// every row against the academic-year rule instead of trusting the last pass.
+func TestRetentionDerivedStateResetsCursorAfterFullSweep(t *testing.T) {
+	store := newFakeRetentionStore()
+	store.recomputeRowsLeft = 5
+	cursor := int64(7)
+	w := testRetention(store, time.Now().UTC())
+	w.DerivedStateCursor = &cursor
+	w.sweep(context.Background())
+
+	if cursor != 0 {
+		t.Fatalf("carried cursor = %d, want 0 after a sweep that reached the end", cursor)
+	}
+}
+
+// A table larger than one tick's budget must not have its tail starved forever:
+// the position is carried so the next tick continues where this one stopped.
+func TestRetentionDerivedStateCarriesCursorAtPassCap(t *testing.T) {
+	store := newFakeRetentionStore()
+	store.recomputeRowsLeft = int64(maxRetentionPasses*10) + 100
+	cursor := int64(0)
+	w := testRetention(store, time.Now().UTC())
+	w.DerivedStateCursor = &cursor
+	w.sweep(context.Background())
+
+	calls, _ := store.recomputeSnapshot()
+	if calls != maxRetentionPasses {
+		t.Fatalf("recompute calls = %d, want the pass cap %d", calls, maxRetentionPasses)
+	}
+	if cursor != int64(maxRetentionPasses*10) {
+		t.Fatalf("carried cursor = %d, want %d so the next tick resumes instead of restarting",
+			cursor, int64(maxRetentionPasses*10))
+	}
+
+	// Second tick: resumes from the carried position rather than re-reading the head.
+	resumedFrom := cursor
+	store.recomputeRowsLeft = 5
+	w.sweep(context.Background())
+	_, cursors := store.recomputeSnapshot()
+	if first := cursors[len(cursors)-1]; first != resumedFrom {
+		t.Fatalf("next tick started at cursor %d, want the carried %d", first, resumedFrom)
+	}
+}
+
+// A failed derived-state pass is logged and abandoned until the next tick, like a
+// failed delete: it must not take the API process down and must not spin.
+func TestRetentionDerivedStateFailureStopsPasses(t *testing.T) {
+	store := newFakeRetentionStore()
+	store.recomputeRowsLeft = 1000
+	store.recomputeErr = errors.New("recompute failed")
+	testRetention(store, time.Now().UTC()).sweep(context.Background())
+
+	calls, _ := store.recomputeSnapshot()
+	if calls != 1 {
+		t.Fatalf("recompute calls = %d, want 1: the error must end the loop, not retry it", calls)
+	}
+	// The lock is still released for the next tick to re-acquire.
+	if got := store.unlocks(); got != 1 {
+		t.Fatalf("unlock calls = %d, want 1 after a failed pass", got)
+	}
+}
+
+// Losing the advisory lock means another instance owns the sweep, so no
+// derived-state pass may run either: two instances writing state concurrently
+// would duplicate work the winner is already doing.
+func TestRetentionDerivedStateSkippedWithoutLock(t *testing.T) {
+	store := newFakeRetentionStore()
+	store.lockResult = false
+	store.recomputeRowsLeft = 100
+	testRetention(store, time.Now().UTC()).sweep(context.Background())
+
+	if calls, _ := store.recomputeSnapshot(); calls != 0 {
+		t.Fatalf("recompute calls = %d, want 0 when the lock is held elsewhere", calls)
 	}
 }

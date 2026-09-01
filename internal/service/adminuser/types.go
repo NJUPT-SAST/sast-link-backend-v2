@@ -46,7 +46,7 @@ type UserRepository interface {
 		userID int64,
 		revokedAt time.Time,
 	) ([]model.BlacklistEntry, error)
-	RestoreUser(ctx context.Context, userID int64) error
+	RestoreUser(ctx context.Context, userID int64, now time.Time) error
 	// Stats returns the aggregate account counts for the console overview.
 	Stats(ctx context.Context) (repository.UserStats, error)
 	// NamesByIDs returns display names for the given user ids.
@@ -131,8 +131,13 @@ type UserListItem struct {
 	// what is missing without re-deriving the rule.
 	ProfileNeedsCompletion bool
 	IncompleteFields       []string
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	// StateManual reports whether State was decided by an administrator (PUT with
+	// state, which pins the row) or left to the state machine. Without it a
+	// reviewer sees a value and cannot tell whether it is a fact to trust or a
+	// judgement to reconsider, so the state_auto unpin channel is unusable.
+	StateManual bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // UpdateUserInput is a partial administrative edit. A nil field is left
@@ -153,7 +158,12 @@ type UpdateUserInput struct {
 	LoginEmail  *string
 	Role        *string
 	State       *string
-	EmailType   *string
+	// StateAuto, when true, re-derives state from the account's role and student_id
+	// and unpins it, instead of writing a pinned value. Mutually exclusive with
+	// State: sending both is refused. This is the undo for a manual pin — the
+	// escape hatch for a mistyped or outdated override.
+	StateAuto *bool
+	EmailType *string
 	// PersonalEmail, when set, binds the address as an other_mail identity on the
 	// account in the same transaction as any field changes. The rescue path for an
 	// alumnus whose school mailbox died: one bound address lets the reset flow
@@ -291,10 +301,12 @@ type UserDetail struct {
 	// See UserListItem.
 	ProfileNeedsCompletion bool
 	IncompleteFields       []string
-	Profile                *ProfileDetail
-	Identities             []IdentityDetail
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	// StateManual is the pin flag; see UserListItem.
+	StateManual bool
+	Profile     *ProfileDetail
+	Identities  []IdentityDetail
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // ProfileDetail is the display-card half of a user record.

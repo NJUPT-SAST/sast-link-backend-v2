@@ -65,7 +65,10 @@ func TestCreateUserProvisionsWithBoundEmail(t *testing.T) {
 
 // role and state are optional at creation and default to the population this
 // endpoint exists for; college defaults to the V001 row default. A provision
-// without a personal email creates no identity.
+// without a personal email creates no identity. The state defaults to the
+// derived value (internal/validate): the probe's 2024-cohort member is still
+// in school at the harness clock (2026-07-30), so it derives to njupter rather
+// than the retired_sast the code used to hardcode.
 func TestCreateUserDefaultsRoleStateAndCollege(t *testing.T) {
 	h := newHarness(t)
 	input := createProbeInput()
@@ -78,8 +81,8 @@ func TestCreateUserDefaultsRoleStateAndCollege(t *testing.T) {
 		t.Fatal("no user id returned")
 	}
 	user := h.users.createdUser
-	if user.Role != model.UserRoleMember || user.State != model.UserStateRetiredSAST {
-		t.Fatalf("role/state = %s/%s, want member/retired_sast", user.Role, user.State)
+	if user.Role != model.UserRoleMember || user.State != model.UserStateNJUPTer {
+		t.Fatalf("role/state = %s/%s, want member/njupter", user.Role, user.State)
 	}
 	if user.College != model.CollegeOther || user.Major != "" {
 		t.Fatalf("college/major = %q/%q, want 其他/''", user.College, user.Major)
@@ -220,3 +223,68 @@ func TestCreateUserMapsRepositoryFailureToInternal(t *testing.T) {
 type errSentinel struct{}
 
 func (errSentinel) Error() string { return "repository exploded" }
+
+// The creation default is a derivation, not a constant: a lecturer's fresh
+// student ID lands on_sast where a member's lands njupter. An explicit state is
+// a hand decision and pins the row, while the derived default leaves the account
+// under the state machine. Nothing else in this package reads StateManual, so
+// these two assertions are what keep the pin from silently vanishing here.
+func TestCreateUserDerivesStateAndTracksPin(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		role       string
+		studentID  string
+		explicit   string
+		wantState  model.UserState
+		wantPinned bool
+	}{
+		{
+			name: "member defaults to derived njupter",
+			role: "", studentID: "B24040525", explicit: "",
+			wantState: model.UserStateNJUPTer, wantPinned: false,
+		},
+		{
+			name: "lecturer derives to on_sast, not a constant",
+			role: "lecturer", studentID: "B24040525", explicit: "",
+			wantState: model.UserStateOnSAST, wantPinned: false,
+		},
+		{
+			name: "old cohort derives to retired_sast",
+			role: "", studentID: "B20040525", explicit: "",
+			wantState: model.UserStateRetiredSAST, wantPinned: false,
+		},
+		{
+			name: "explicit state pins",
+			role: "", studentID: "B24040525", explicit: "on_sast",
+			wantState: model.UserStateOnSAST, wantPinned: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			input := createProbeInput()
+			input.StudentID = tc.studentID
+			if tc.role != "" {
+				role := tc.role
+				input.Role = &role
+			}
+			if tc.explicit != "" {
+				state := tc.explicit
+				input.State = &state
+			}
+
+			if _, err := h.service.CreateUser(context.Background(), input); err != nil {
+				t.Fatalf("CreateUser: %v", err)
+			}
+			user := h.users.createdUser
+			if user == nil {
+				t.Fatal("no user created")
+			}
+			if user.State != tc.wantState {
+				t.Fatalf("state = %q, want %q", user.State, tc.wantState)
+			}
+			if user.StateManual != tc.wantPinned {
+				t.Fatalf("StateManual = %v, want %v", user.StateManual, tc.wantPinned)
+			}
+		})
+	}
+}

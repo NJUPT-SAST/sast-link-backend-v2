@@ -89,6 +89,8 @@ CREATE TABLE "user" (
     password      VARCHAR(512)    NOT NULL,
     student_id    VARCHAR(50)     NOT NULL UNIQUE,
     state         state_enum      NOT NULL DEFAULT 'njupter',
+    -- V014 新增：管理员手写 state 的钉住标记。TRUE = 该行跳过自动推导与清算批次
+    state_manual   BOOLEAN         NOT NULL DEFAULT FALSE,
     email_type    email_enum      NOT NULL,
     login_email   VARCHAR(255)    NOT NULL UNIQUE,
     created_at    TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
@@ -117,7 +119,9 @@ CREATE TABLE "user" (
 |password|密码，不可为空|
 |token_version|Token 版本号，改密/重置密码后递增，JWT 校验时比对，不匹配则拒绝|
 |student_id|学号|
-|state|enum {'is_deleted','on_sast','retired_sast','njupter'}|
+|state|enum {'is_deleted','on_sast','retired_sast','njupter'}。V014 起 `njupter`/`on_sast`/`retired_sast` 由自动状态机推导（规则单一事实源在 `internal/validate`，不复制进 SQL）：学号前两位数字=入学年份（格式保证），东八区 9/1 为学年切点，入学满 4 年→`retired_sast`；否则在校 `lecturer`/`admin`→`on_sast`，在校 `freshman`/`member`→`njupter`。`is_deleted` 保持手动独立通道。管理员传 `state` 即钉住（`state_manual=TRUE`），`state_auto=true` 重推并解除；清算批次每 tick 校准未钉住的活跃行，只改 state 不撤销会话|
+|state_manual|V014 钉住标记，见 `state` 行|
+
 |email_type|注册邮箱类型，见 `email_enum`|
 |login_email|注册邮箱|
 |created_at|创建时间|
@@ -976,14 +980,16 @@ oauth_authorizations.family_id
 - 项目已有同类先例：`internal/service/session/worker/token_blacklist.go` 早已在 Go 侧
   每小时清理 `token_blacklist_outbox`。因此这里沿用既有模式，而非引入第二套调度机制。
 
-代价是清理只在 API 进程存活期间发生。服务全停时不清理，但此时也没有新数据写入，
-不影响正确性。
+代价是清理与状态校准只在 API 进程存活期间发生。服务全停时两者都停：没有新数据写入，
+而已注销行的 `state` 也保持不动；`state` 除 `is_deleted` 外不参与任何鉴权判定，所以
+派生值陈旧不会放行任何请求，进程恢复后的下一轮即追平。
 
 #### 多实例协调
 
 每轮 sweep 前用 `pg_try_advisory_lock` 抢锁，抢不到就跳过本轮（而非排队等待）——清理
 错过一轮无害，下一轮覆盖同样的行。所有删除都是 `DELETE WHERE 已死`，天然幂等，锁只是
-避免多实例重复扫描。
+避免多实例重复扫描。派生状态的重算同样幂等（写入的是规则的函数，而非增量），
+且每条 UPDATE 的 WHERE 自带 `state_manual = FALSE`，并发钉住会令其落空。
 
 该锁是 session 级的，而 GORM 连接池每条语句可能取到不同连接，因此 `TryLock` 会固定
 （pin）一条连接，`Unlock` 在同一条连接上释放后再归还。否则 `pg_advisory_unlock` 可能
@@ -1001,6 +1007,7 @@ oauth_authorizations.family_id
 | `oauth_access_tokens` | 已过期元数据 | `expires_at` + 24h | 远宽于默认 1h 的 access token TTL，且校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的配置。原因：中间件对「JTI 不存在」与「已撤销」返回同一个 401，若在 JWT 仍处于 `exp` 内时删掉元数据，仅仅过期的 token 会被呈现为已撤销——客户端读到的是被强制登出，而不是该去刷新。JWT 校验器没有 leeway 可依赖，这些行又很小，窗口宽一点很便宜 |
 | `oauth_refresh_tokens` | 已撤销且 `sequence > 0`；或整个 family 已死（无任何未撤销且未过期的成员） | `expires_at` + 24h | 两个分支：轮换掉的行（`revoked_at` 已设）由 V001 的部分索引服务；死族分支还包括从未旋转的 sequence-0 行（`revoked_at IS NULL`），其外层 `expires_at` 谓词由 **V008** 的 `idx_oauth_refresh_tokens_expires_at_live` 服务，族内探测用 `family_id` 索引。**必须保留每个存活 family 的 sequence-0 行**：`FindFamilyOriginCreatedAt`（family 首授权时刻，`created_at`）是 capability 封顶（`JWT_REFRESH_CAPABILITY_MAX_LIFETIME`）与轮换一致性检查的基准，而该行从首次轮换起就带有 `revoked_at`。只要 family 还在轮换，它会活得比自己的 `expires_at` 更久；删掉会让刷新流程撤销整个 family 并返回 500——即用户被强制登出。每个 family 长期留一行，是换取 capability 封顶基准的代价 |
 | `audit_logs` | 超过保留期 | `created_at` + 90d | 90 天（PRD §9）是**默认值**：审计日志在这里属运维用途而非合规强制，可调大以保留更多历史，也可收紧至 30 天下限；低于下限启动时拒绝，避免误配到「事故排查时相关记录已被删」的程度 |
+| `user.state`（重算，非删除） | 未钉住的活跃账号（`state_manual = FALSE AND state <> 'is_deleted'`） | 每轮 sweep | 派生状态校准：Go 里算 `validate.DeriveState`，只写与现值不同的行，**不 bump `token_version`、不撤销会话**（state 不是鉴权输入）。按 `id` keyset 游标推进，一批不满即结束；超过单轮预算（`20 × RETENTION_BATCH_SIZE`）时游标跨 tick 保留，下一轮续扫而非重头，因此尾部不会被永久饿死。V014 上线时不刷值，由首个批次自然校准 |
 | `alumni_requests` | 已审批（approved/rejected）且超过保留期 | `reviewed_at` + 180d | **pending 永不清理**，无论多久：三天处理时限只是前端文案，后端不做硬限制，删掉一条未审的申请是丢掉某人的请求而不是让它过期。窗口从 `reviewed_at` 起算而非 `created_at`——保留期的钟在「被决定」时才开始走，未审的没有起点。谓词显式带 `reviewed_at IS NOT NULL`：有状态但无时间戳的行否则会被拿去和一个它无值可比的 cutoff 比较。部分索引 `idx_alumni_requests_pending_notification` 服务的是通知积压视图，不是本清理 |
 
 `oauth_grants` 不在此列，且**刻意永不清理**：授权记录是长效 consent history（当前态，历史

@@ -578,6 +578,14 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if len(password) < validate.MinPasswordLength {
 		return nil, newError(ErrPasswordTooShort, "密码长度不足 8 位", nil)
 	}
+	// The derived-state rule is a pure read of role + student ID, so it belongs
+	// with the other rejectable-but-costless field checks: passing it here means a
+	// rejected registration neither spends the Register-Ticket, burns the
+	// one-time registration_state, nor charges the rate limiter.
+	state, stateErr := validate.DeriveState(model.UserRoleFreshman, studentID, s.now())
+	if stateErr != nil {
+		return nil, newError(ErrInvalidInput, "学号无法解析入学年份", stateErr)
+	}
 
 	// Read the ticket without spending it until every rejectable condition has
 	// passed: an occupied student ID must not cost the user their one-time ticket.
@@ -635,7 +643,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 
 	user := &model.User{
 		Role:         model.UserRoleFreshman,
-		State:        model.UserStateNJUPTer,
+		State:        state,
 		College:      college,
 		Name:         name,
 		PhoneNumber:  phone,

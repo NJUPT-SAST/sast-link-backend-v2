@@ -823,3 +823,91 @@ func TestAdminE2EBatchReadAndRoleUpdate(t *testing.T) {
 		}
 	}
 }
+
+// The pin is only actionable if the console can read it: an administrator looking
+// at a state must be able to tell a derived fact from a human judgement before
+// deciding whether state_auto is the right next request. This walks that loop over
+// real HTTP — read, pin, read, un-pin, read — on both the list and the detail.
+func TestAdminE2EStatePinIsVisibleAndReversible(t *testing.T) {
+	testutil.RequireProvider(t)
+	h := setupAdminE2E(t)
+
+	// A 2020-cohort member: the rule derives retired_sast, so any other value on
+	// the row can only have come from a human.
+	user := adminE2EUser("pin-e2e@njupt.edu.cn", "B20040525", model.UserRoleMember)
+	if err := repository.NewUser(h.database).
+		CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	detail := func() (state string, manual bool, code int) {
+		recorder := h.do(t, http.MethodGet,
+			"/admin/users/"+strconv.FormatInt(user.ID, 10), "", "")
+		var payload struct {
+			Code int `json:"code"`
+			Data struct {
+				State       string `json:"state"`
+				StateManual bool   `json:"state_manual"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode detail: %v (%s)", err, recorder.Body.String())
+		}
+		return payload.Data.State, payload.Data.StateManual, recorder.Code
+	}
+
+	// Seeded straight into the database: not pinned, so the row is under the
+	// state machine even though its stored value is not what the rule says.
+	state, manual, code := detail()
+	if code != http.StatusOK || manual {
+		t.Fatalf("seeded detail = %d state=%q manual=%v, want 200 with manual=false", code, state, manual)
+	}
+
+	idPath := "/admin/users/" + strconv.FormatInt(user.ID, 10)
+	pinned := h.do(t, http.MethodPut, idPath, "application/json", `{"state":"on_sast"}`)
+	if pinned.Code != http.StatusOK {
+		t.Fatalf("pin status = %d: %s", pinned.Code, pinned.Body.String())
+	}
+	state, manual, _ = detail()
+	if !manual || state != "on_sast" {
+		t.Fatalf("after pin state=%q manual=%v, want on_sast/true", state, manual)
+	}
+
+	// The list must say the same thing as the detail: it is where a reviewer
+	// finds the pinned accounts in the first place.
+	list := h.do(t, http.MethodGet, "/admin/users?keyword=B20040525", "", "")
+	var listPayload struct {
+		Data struct {
+			Users []struct {
+				ID          int64  `json:"id"`
+				State       string `json:"state"`
+				StateManual bool   `json:"state_manual"`
+			} `json:"users"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("decode list: %v (%s)", err, list.Body.String())
+	}
+	if len(listPayload.Data.Users) != 1 {
+		t.Fatalf("list users = %d, want the one match", len(listPayload.Data.Users))
+	}
+	if row := listPayload.Data.Users[0]; row.ID != user.ID || !row.StateManual || row.State != "on_sast" {
+		t.Fatalf("list row = %+v, want the pinned account reported with state_manual=true", row)
+	}
+
+	unpinned := h.do(t, http.MethodPut, idPath, "application/json", `{"state_auto":true}`)
+	if unpinned.Code != http.StatusOK {
+		t.Fatalf("state_auto status = %d: %s", unpinned.Code, unpinned.Body.String())
+	}
+	if state, manual, _ = detail(); manual || state != "retired_sast" {
+		t.Fatalf("after state_auto state=%q manual=%v, want retired_sast/false", state, manual)
+	}
+
+	// The two are one instruction per column: sending both is refused.
+	both := h.do(t, http.MethodPut, idPath, "application/json",
+		`{"state":"njupter","state_auto":true}`)
+	if both.Code != http.StatusBadRequest {
+		t.Fatalf("contradictory request status = %d, want 400: %s",
+			both.Code, both.Body.String())
+	}
+}

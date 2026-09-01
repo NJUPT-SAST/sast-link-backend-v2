@@ -441,11 +441,11 @@ Payload: {
 | 端点 | 方法 | 角色 | 委派 scope | 说明 |
 | ------ | ------ | ------ | ------ | ------ |
 | `/admin/users` | GET | admin / lecturer | admin:read | 分页列表，支持按 role / state / department / student_id / keyword 筛选 |
-| `/admin/users` | POST | admin | admin:write | 创建账号（管理员建号）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份，无需邮箱验证；绑定后可用于登录和密码重置（见 §4.13）；role / state 缺省 member / retired_sast；系统生成随机初始密码，仅在响应中返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
+| `/admin/users` | POST | admin | admin:write | 创建账号（管理员建号）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份，无需邮箱验证；绑定后可用于登录和密码重置（见 §4.13）；role 缺省 member，state 缺省由自动状态机推导（role + 学号入学年份 + 当前学年），显式传 state 则钉住；系统生成随机初始密码，仅在响应中返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
 | `/admin/users/:id` | GET | admin / lecturer | admin:read | 用户详情（含 profile + identities） |
-| `/admin/users/:id` | PUT | admin | admin:write | 更新用户信息（含 role / state / email_type） |
+| `/admin/users/:id` | PUT | admin | admin:write | 更新用户信息（含 role / state / state_auto / email_type） |
 | `/admin/users/:id` | DELETE | admin | admin:write | 软删除（state → is_deleted），级联撤销所有 token |
-| `/admin/users/:id/restore` | PUT | admin | admin:write | 恢复已注销用户（state: is_deleted → njupter） |
+| `/admin/users/:id/restore` | PUT | admin | admin:write | 恢复已注销用户：state 按自动状态机重新推导并解除钉住（注销时 is_deleted 覆盖了一切旧值，钉住无从保留；恢复即回到自动推导，需重新钉住者再提交一次 state） |
 | `/admin/users/batch` | GET | admin / lecturer | admin:read | 批量查询：`ids` 逗号分隔（≤100），按请求顺序返回详情（字段同 `/admin/users/:id`），缺失 id 缺席，重复 id 只返回一次 |
 | `/admin/users` | PUT | admin | admin:write | 批量改角色：`ids`（≤500，去重）+ `role`（同单条枚举），逐条独立执行并复用单条全部守卫（自查角色 / 最后一名管理员 / 已注销），响应逐条 `results`（success / reason），审计逐条 `admin_user_update` 且 detail 带 `batch: true` |
 | `/admin/oauth-clients` | GET | admin | admin:read | 客户端列表 |
@@ -580,12 +580,16 @@ Payload: {
 
 ### 用户状态机
 
+`njupter` / `on_sast` / `retired_sast` 由自动状态机推导（规则单一事实源在 `internal/validate`，不复制进 SQL 或 repository）：学号前两位数字为入学年份（格式保证），当前学年在东八区 9/1 切换，入学满 4 年一律 `retired_sast`（压过 role）；否则在校 `lecturer` / `admin` 为 `on_sast`，在校 `freshman` / `member` 为 `njupter`。
+
 ```
-njupter ──(加入SAST)──► on_sast
+njupter ──(加入SAST)──► on_sast    ← 手动通道（PUT state 钉住），不再由状态机自动迁移
 on_sast ──(离开SAST)──► retired_sast
 njupter/on_sast/retired_sast ──(注销)──► is_deleted
-is_deleted ──(恢复)──► njupter
+is_deleted ──(恢复)──► 按自动状态机重新推导
 ```
+
+手动通道：管理员 `PUT /admin/users/:id` 提交 `state` 即钉住（`state_manual`），自动推导与清算批次全部跳过；`state_auto=true` 在同一事务内重推并解除钉住（与 `state` 互斥，同时提交返回 `400`）。`GET /admin/users`（列表 / 详情 / 批量）携带 `state_manual`，控制台据此判断某个 `state` 是人做的裁决还是机器推导，进而决定要不要发 `state_auto`。清算批次挂在 retention worker 每小时跑，只改 state、不 bump `token_version`、不撤销会话。
 
 ---
 
@@ -707,6 +711,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | `oauth_authorizations` 已过期（无论是否使用） | +1h | V006 增设全量 `expires_at` 索引，因 V001 的索引是 `WHERE is_used = FALSE` 的部分索引，而已兑换才是常态。本表曾是「已授权应用」列表的数据源，因此该列表在 consent 后约 65 分钟必然清空；V009 迁到长效的 `oauth_grants` 修正 |
 | `oauth_access_tokens` 已过期元数据 | +24h | 中间件对「JTI 不存在」与「已撤销」返回同一个 401，窗口过短会把仅仅过期的 token 呈现为已撤销，客户端读成被强制登出而不去刷新。校验拒绝小于 `JWT_ACCESS_TOKEN_EXPIRY` 的值 |
 | `oauth_refresh_tokens` 已撤销、已过期且 `sequence > 0` | +24h | 每个 family 的 sequence-0 行永久保留：它是 capability 封顶（`JWT_REFRESH_CAPABILITY_MAX_LIFETIME`）的起始基准，且从首次轮换起即带 `revoked_at`；删掉会让活跃 family 的刷新返回 500 |
+| `user.state` 派生重算（更新，非删除） | 每轮 | 未钉住的活跃账号按 `internal/validate` 的规则重算，写入与现值不同者；不撤销会话。按 id 游标推进，超预算时跨 tick 续扫 |
 | `audit_logs` 超过保留期 | 90d | 审计日志属运维用途而非合规强制，故 90 天是**默认值**而非硬下限：可调大，也可收紧到 720h（30 天）的下限；低于下限启动时拒绝 |
 
 `token_blacklist_outbox` 由 `sessionworker.TokenBlacklist` 自行清理，不重复接管。

@@ -1634,6 +1634,7 @@ GET /admin/users
       "department": "software",
       "profile_needs_completion": false,
       "incomplete_fields": [],
+      "state_manual": false,
       "created_at": "2026-05-28T12:00:00Z",
       "updated_at": "2026-05-28T12:00:00Z"
     }
@@ -1658,6 +1659,7 @@ GET /admin/users/:id
 
 - 完整档案（含联系方式与第三方绑定）；`phone_number` 仅 **admin** 视角返回，lecturer 视角该字段**不存在**（既不 null 也不空串）。其余字段（`qq_number` / 第三方绑定 / `profile.email` 等）所有角色可见。
 - `identities` 不含第三方 `access_token` / `refresh_token`，也不含 `identity_data`——该字段存的是第三方返回的完整用户对象（飞书含 `mobile`、`email`、`enterprise_email`、`employee_no`），列出绑定不等于交出绑定背后的联系方式。
+- `state_manual` 说明 `state` 的来源：`true` = 管理员手写钉住（该账号跳过自动推导与清算批次，值是人做的判断），`false` = 由状态机按 role + 学号入学年份 + 当前学年推导。`GET /admin/users`、`GET /admin/users/:id` 与 `GET /admin/users/batch` 同带此字段，admin / lecturer 视角一致——能看见 `state` 就必须能看见它是事实还是裁决，否则「要不要发 `state_auto` 解除钉住」这个判断无从做出。
 
 **错误码**：`40100`、`40300`、`40401`。
 
@@ -1678,6 +1680,7 @@ GET /admin/users/:id
   "qq_number": "1234567890",
   "profile_needs_completion": false,
   "incomplete_fields": [],
+  "state_manual": false,
   "profile": { ... },
   "identities": [ ... ],
   "created_at": "2026-05-28T12:00:00Z",
@@ -1725,7 +1728,7 @@ POST /admin/users
 | `college` | – | 学院（college_enum 枚举），缺省「其他」 |
 | `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（§1.8/1.9）。不可与 `login_email` 相同，且不得已被其他账号占用（作为主登录邮箱或已绑身份） |
 | `role` | – | freshman / member / lecturer / admin，缺省 member |
-| `state` | – | njupter / on_sast / retired_sast，缺省 retired_sast；不接受 `is_deleted`（新建即注销无意义，返回 `42200`） |
+| `state` | – | njupter / on_sast / retired_sast；不接受 `is_deleted`（新建即注销无意义，返回 `42200`）。**缺省由自动状态机推导**（role + 学号入学年份 + 当前学年；毕业生学号旧 → retired_sast，在校 lecturer/admin → on_sast，在校 freshman/member → njupter）；显式传 `state` 则作为钉住值写入，该账号从此跳过自动推导与清算批次 |
 
 **Response** `200`:
 
@@ -1780,7 +1783,8 @@ PUT /admin/users/:id
 - `name` / `phone_number` / `qq_number` / `student_id` 不可传空串（列为 `NOT NULL`）；`major` 可置空。长度按 V001 列宽校验，中文按字符数而非字节数计。
 - `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。
 - `role` 实际发生变化时，同一事务内递增 `token_version` 并撤销该用户全部 Token，响应 `message` 变为 `"用户信息更新成功，已撤销该用户的全部 Token"`。仅提交与当前值相同的 `role` 不算变化，不触发撤销。
-- `state` 可在 `njupter` / `on_sast` / `retired_sast` 之间任意修改（供管理员纠错），但不接受 `is_deleted`。
+- `state` 可在 `njupter` / `on_sast` / `retired_sast` 之间任意修改（供管理员纠错），但不接受 `is_deleted`。**手写的 state 是钉住（pin）**：该账号从此由管理员接管，自动推导与定时清算批次一律跳过它。
+- `state_auto`（布尔，可选）：恢复该账号的自动状态机——按 role + 学号入学年份 + 当前学年重新推导 `state` 并解除钉住，同一事务内完成。与 `state` 互斥，同时提交返回 `400`。用于误钉后的恢复；留级 / 延毕等例外账号不传此字段、保持手写钉住即可。
 - `personal_email` 提供时，在**同一事务**内将地址直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（与建号时的绑定同一语义，是已有账号的救援通道，§1.8/1.9）。不可与 `login_email` 相同（含本次修改后的值），不得已被其他账号占用，且每账号 `other_mail` 绑定总数不超过 2 个；不可对已注销用户绑定。
 
 **错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
@@ -1835,7 +1839,7 @@ PUT /admin/users/:id/restore
 }
 ```
 
-**说明**: 将 `user.state` 从 `is_deleted` 恢复至 `njupter`。不记忆注销前的状态 —— 原 `on_sast` 成员恢复后为 `njupter`，需管理员另行调整。已撤销的 token 不恢复，需用户重新登录。
+**说明**: 将 `user.state` 从 `is_deleted` 恢复，并按自动状态机重新推导（role + 学号入学年份 + 当前学年），同时解除钉住——注销时的 `is_deleted` 覆盖了此前的手写值，钉住无从保留，恢复即回到自动推导；需要重新钉住的管理员在恢复后再提交一次 `state` 即可。已撤销的 token 不恢复，需用户重新登录。
 
 对未注销的用户调用返回 `422`。
 
@@ -1885,6 +1889,7 @@ GET /admin/users/batch?ids=1,2,3
       "qq_number": "1234567890",
       "profile_needs_completion": false,
       "incomplete_fields": [],
+      "state_manual": false,
       "profile": { ... },
       "identities": [ ... ],
       "created_at": "2026-05-28T12:00:00Z",
@@ -2233,7 +2238,7 @@ GET /admin/stats
       "by_department": { "software": 400, "media": 300 },
       "no_department": 800,
       "incomplete_by_role": { "freshman": 120, "member": 30 },
-      "incomplete_by_state": { "njupter": 110 }
+      "incomplete_by_state": { "njupter": 110, "on_sast": 5 }
     },
     "clients": {
       "total": 10,
@@ -2253,7 +2258,7 @@ GET /admin/stats
   - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
   - `incomplete_by_role` / `incomplete_by_state` 是资料未补全（`profile_needs_completion = true`，见 V010 生成列）账户的分组计数，供控制台概览把迁移残留账户单独归为「未补全」扇区：
     - `incomplete_by_role`：未补全**且**角色 ∉ {`lecturer`, `admin`} 的未注销账户，按角色分组（讲师 / 管理员视为组织内成员，不列为待跟进对象）
-    - `incomplete_by_state`：未补全**且**状态 = `njupter` 的未注销账户，按状态分组（`on_sast` / `retired_sast` 同理不列入）
+    - `incomplete_by_state`：未补全的**全部未注销账户**，按状态分组——自动状态机下在校讲师 / 管理员为 `on_sast`，所以从 `njupter` 单口径扩大为所有活跃状态，否则逾期未归类的在校非学生账号会从概览消失
     - 两者都是 `by_role` / `by_state` 的子集，而非独立桶。前端渲染时从对应真实桶里减去后合并成一个扇区，分母 `total` 不变。
 - `clients` 含全部注册（停用的也在内）：`total` 为注册总数，`active` 为 `is_active = true` 的数量
 - `audit.recent` 为最近 5 条审计日志（与 §6.11 同一排序 `created_at DESC`），条目结构同 §6.11；该路读取失败时记 WARN 日志并返回空列表（best-effort），不影响其余两路
@@ -2441,7 +2446,7 @@ POST /admin/alumni-requests/:id/approve
 
 **Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
 
-**Request**: 空 body 或 `{}`（角色与状态用后端默认：`member` / `retired_sast`，工单无法请求角色）。body 带字段、有 trailing JSON，或 Content-Type 不是 `application/json`，返回 `40000`。
+**Request**: 空 body 或 `{}`（角色固定 `member`，状态由自动状态机按工单学号的入学年份推导——毕业生学号旧 → `retired_sast`；工单无法请求角色或状态）。body 带字段、有 trailing JSON，或 Content-Type 不是 `application/json`，返回 `40000`。
 
 **Response** `200`:
 
