@@ -149,11 +149,17 @@ type UserStats struct {
 	// The frontend subtracts these from ByRole and folds them into a single
 	// "未补全" bucket so an incomplete account is not double-counted.
 	IncompleteByRole map[model.UserRole]int64 `json:"incomplete_by_role"`
-	// IncompleteByState counts live accounts still flagged incomplete grouped by
-	// state. Every non-deleted state is included: the derived state machine
-	// (internal/validate) classifies in-school staff as on_sast, so a njupter-only
-	// count would drop them from the console overview's "未补全" bucket. The
+	// IncompleteByState counts live accounts still flagged incomplete whose state
+	// is the in-school student state (njupter), grouped by state. The group is
+	// deliberately njupter-only and mirrors IncompleteByRole's exclusion of staff:
+	// an account that is in-school staff or already retired is not a follow-up
+	// target even when its profile is unfinished, so widening this to every live
+	// state would make the two dimensions disagree about what "未补全" means. The
 	// frontend subtracts these from ByState into the "未补全" bucket.
+	//
+	// One consequence of the derived state machine: since enrollment year + 4
+	// moves an account to retired_sast on 9/1, a held-over student leaves this
+	// bucket with them. Pinning their state keeps them in it.
 	IncompleteByState map[model.UserState]int64 `json:"incomplete_by_state"`
 }
 
@@ -216,13 +222,12 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	}
 
 	rows = rows[:0]
-	// IncompleteByState: live accounts still flagged incomplete, grouped by state.
-	// The group is every non-deleted state, not just njupter: since the derived
-	// state machine (internal/validate) classifies in-school lecturers and admins
-	// as on_sast, a njupter-only count would silently drop live staff accounts
-	// from the console overview's incomplete bucket.
+	// IncompleteByState: only live accounts still flagged incomplete in the
+	// in-school student state (njupter). Grouped by state for symmetry with
+	// IncompleteByRole, which drops the same population by role instead — staff
+	// and retired members are organization members, not follow-up targets.
 	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{}).
-		Where(`profile_needs_completion = true`)).
+		Where(`profile_needs_completion = true AND state = ?`, model.UserStateNJUPTer)).
 		Select(`state AS "group", COUNT(*) AS count`).Group("state").Scan(&rows).Error; err != nil {
 		return stats, fmt.Errorf("count users by state (incomplete): %w", err)
 	}
