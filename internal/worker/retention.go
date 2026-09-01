@@ -21,10 +21,14 @@ const (
 	maxRetentionPasses = 20
 )
 
-// RetentionStore deletes rows past their retention window, in batches.
+// RetentionStore runs the periodic maintenance the service needs from PostgreSQL:
+// deleting rows past their retention window, in batches, and recalibrating the
+// derived user.state values.
 //
 // Each Delete* method returns the number of rows removed so the worker can keep
-// sweeping until a pass comes back short.
+// sweeping until a pass comes back short. RecomputeDerivedState cannot use that
+// stop rule (an unchanged row is still a candidate the next tick), so it advances
+// by id instead.
 type RetentionStore interface {
 	TryLock(ctx context.Context) (bool, error)
 	Unlock(ctx context.Context) error
@@ -46,7 +50,8 @@ type RetentionStore interface {
 	RecomputeDerivedState(ctx context.Context, cursor int64, now time.Time, batchSize int) (int64, error)
 }
 
-// Retention deletes expired OAuth metadata and aged-out audit logs.
+// Retention deletes expired OAuth metadata and aged-out audit logs, and keeps
+// user.state calibrated against the derivation rule in internal/validate.
 //
 // Scheduling lives here rather than in pg_cron because the production database has
 // no pg_cron extension and loading one needs shared_preload_libraries plus a
@@ -66,6 +71,14 @@ type Retention struct {
 	// start.
 	AlumniRequestAge time.Duration
 	Clock            auth.Clock
+	// DerivedStateCursor carries the user.state recompute position across ticks.
+	// It is optional (nil restarts every tick, which is correct for any table that
+	// fits in one sweep) and exists so a table larger than maxRetentionPasses x
+	// BatchSize cannot starve its highest ids forever: the budget then advances
+	// instead of restarting, and a completed sweep resets it to the head so the
+	// next tick re-checks everything against the academic-year rule. Only the
+	// advisory-lock holder touches it, from the single Run goroutine.
+	DerivedStateCursor *int64
 }
 
 // Run sweeps on a ticker until ctx is canceled.
@@ -137,9 +150,13 @@ func (w Retention) sweep(ctx context.Context) {
 	// advisory lock, so two instances cannot interleave state writes. Unlike the
 	// deletes above, an unchanged row still matches the candidate predicate, so
 	// the cursor advances by id and a short batch ends the loop.
-	var cursor int64
+	cursor := int64(0)
+	if w.DerivedStateCursor != nil {
+		cursor = *w.DerivedStateCursor
+	}
 	for pass := 0; pass < maxRetentionPasses; pass++ {
 		if ctx.Err() != nil {
+			w.rememberDerivedStateCursor(cursor)
 			return
 		}
 		next, recErr := w.Store.RecomputeDerivedState(ctx, cursor, now, w.batchSize())
@@ -147,17 +164,31 @@ func (w Retention) sweep(ctx context.Context) {
 			if ctx.Err() == nil {
 				slog.Error("retention sweep derived state", "error", recErr)
 			}
+			// Resume from where this tick got to rather than re-reading the same
+			// head forever while a later table stays unreachable.
+			w.rememberDerivedStateCursor(cursor)
 			return
 		}
 		if next == 0 {
+			w.rememberDerivedStateCursor(0)
 			return
 		}
 		cursor = next
 	}
 	// Hitting the pass cap means the table outgrew one tick's budget. Say so,
-	// rather than letting a permanent backlog look like a clean sweep.
+	// rather than letting a permanent backlog look like a clean sweep, and carry
+	// the position so the next tick continues rather than restarts.
 	slog.Warn("retention derived-state sweep truncated at pass cap",
 		"cursor", cursor, "passes", maxRetentionPasses)
+	w.rememberDerivedStateCursor(cursor)
+}
+
+// rememberDerivedStateCursor stores the sweep position for the next tick when a
+// caller supplied a place to keep it.
+func (w Retention) rememberDerivedStateCursor(cursor int64) {
+	if w.DerivedStateCursor != nil {
+		*w.DerivedStateCursor = cursor
+	}
 }
 
 // drain deletes in batches until a pass comes back short or the pass cap is hit.

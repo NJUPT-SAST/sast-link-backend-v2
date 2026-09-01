@@ -368,6 +368,10 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		SameSite: http.SameSiteLaxMode,
 	}
 
+	// Carries the user.state recompute position across retention ticks so a table
+	// larger than one tick's batch budget advances instead of restarting. Only the
+	// advisory-lock holder writes it, from the worker's single goroutine.
+	var derivedStateCursor int64
 	return &sessionRuntime{
 		Handler: sessionhandler.Handler{Service: service, Cookies: sessionCookie},
 		OAuth: oauthhandler.Handler{
@@ -393,14 +397,15 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			forgotPasswords,
 			alumniNotifier,
 			worker.Retention{
-				Store:            repository.NewRetention(database),
-				Interval:         cfg.RetentionInterval,
-				BatchSize:        cfg.RetentionBatchSize,
-				AuthorizationAge: cfg.RetentionAuthorizationAge,
-				AccessTokenAge:   cfg.RetentionAccessTokenAge,
-				RefreshTokenAge:  cfg.RetentionRefreshTokenAge,
-				AuditLogAge:      cfg.RetentionAuditLogAge,
-				AlumniRequestAge: cfg.RetentionAlumniRequestAge,
+				Store:              repository.NewRetention(database),
+				Interval:           cfg.RetentionInterval,
+				BatchSize:          cfg.RetentionBatchSize,
+				AuthorizationAge:   cfg.RetentionAuthorizationAge,
+				AccessTokenAge:     cfg.RetentionAccessTokenAge,
+				RefreshTokenAge:    cfg.RetentionRefreshTokenAge,
+				AuditLogAge:        cfg.RetentionAuditLogAge,
+				AlumniRequestAge:   cfg.RetentionAlumniRequestAge,
+				DerivedStateCursor: &derivedStateCursor,
 			},
 		},
 	}, nil
