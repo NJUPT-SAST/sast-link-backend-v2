@@ -843,8 +843,8 @@ func TestUserRepositoryStatsIncompleteBuckets(t *testing.T) {
 		t.Fatalf("seed unfinished member: %v", err)
 	}
 
-	// unfinished lecturer - excluded from incomplete_by_role; on_sast, so it
-	// does appear in incomplete_by_state (the group covers every live state)
+	// unfinished lecturer - excluded from incomplete_by_role by role and from
+	// incomplete_by_state by state
 	unfinishedLecturer := testUser("inc-003@njupt.edu.cn")
 	unfinishedLecturer.Name = "未补全讲师"
 	unfinishedLecturer.Role = model.UserRoleLecturer
@@ -875,6 +875,20 @@ func TestUserRepositoryStatsIncompleteBuckets(t *testing.T) {
 		t.Fatalf("seed finished student: %v", err)
 	}
 
+	// unfinished retired member - the case that tells "njupter only" apart from
+	// "exclude staff": it counts in incomplete_by_role (the role dimension does not
+	// look at state) but not in incomplete_by_state, because the state dimension
+	// follows the same "organization member, not a follow-up target" judgement the
+	// role dimension makes for lecturer/admin.
+	unfinishedRetiree := testUser("inc-007@njupt.edu.cn")
+	unfinishedRetiree.Name = "未补全已毕业"
+	unfinishedRetiree.Role = model.UserRoleMember
+	unfinishedRetiree.State = model.UserStateRetiredSAST
+	if err := users.CreateWithProfile(context.Background(), unfinishedRetiree,
+		&model.Profile{}); err != nil {
+		t.Fatalf("seed unfinished retiree: %v", err)
+	}
+
 	// unfinished deleted - excluded from both (live only)
 	unfinishedDeleted := testUser("inc-006@njupt.edu.cn")
 	unfinishedDeleted.Name = "未补全已注销"
@@ -895,8 +909,10 @@ func TestUserRepositoryStatsIncompleteBuckets(t *testing.T) {
 	if got := stats.IncompleteByRole[model.UserRoleFreshman]; got != 1 {
 		t.Errorf("IncompleteByRole[freshman] = %d, want 1", got)
 	}
-	if got := stats.IncompleteByRole[model.UserRoleMember]; got != 1 {
-		t.Errorf("IncompleteByRole[member] = %d, want 1", got)
+	// The role dimension ignores state, so the retired member counts here while
+	// the state dimension leaves it out below.
+	if got := stats.IncompleteByRole[model.UserRoleMember]; got != 2 {
+		t.Errorf("IncompleteByRole[member] = %d, want 2", got)
 	}
 	if got := stats.IncompleteByRole[model.UserRoleLecturer]; got != 0 {
 		t.Errorf("IncompleteByRole[lecturer] = %d, want 0", got)
@@ -905,19 +921,24 @@ func TestUserRepositoryStatsIncompleteBuckets(t *testing.T) {
 		t.Errorf("IncompleteByRole[admin] = %d, want 0", got)
 	}
 
-	// incomplete_by_state: every unfinished live account, grouped by state.
-	// The njupter unfinished freshman counts; so do the unfinished member /
-	// lecturer / admin (all on_sast here); the deleted account does not (live
-	// only). The group is every non-deleted state since the derived state
-	// machine classifies in-school staff as on_sast.
+	// incomplete_by_state: njupter only. The unfinished freshman counts; the
+	// on_sast member / lecturer / admin, the retired member and the deleted
+	// account do not, so this stays the mirror image of incomplete_by_role's
+	// "staff are not follow-up targets" rule rather than a second, wider net.
 	if got := stats.IncompleteByState[model.UserStateNJUPTer]; got != 1 {
 		t.Errorf("IncompleteByState[njupter] = %d, want 1", got)
 	}
-	if got := stats.IncompleteByState[model.UserStateOnSAST]; got != 3 {
-		t.Errorf("IncompleteByState[on_sast] = %d, want 3", got)
+	if got := stats.IncompleteByState[model.UserStateOnSAST]; got != 0 {
+		t.Errorf("IncompleteByState[on_sast] = %d, want 0", got)
+	}
+	if got := stats.IncompleteByState[model.UserStateRetiredSAST]; got != 0 {
+		t.Errorf("IncompleteByState[retired_sast] = %d, want 0", got)
 	}
 	if got := stats.IncompleteByState[model.UserStateDeleted]; got != 0 {
 		t.Errorf("IncompleteByState[is_deleted] = %d, want 0", got)
+	}
+	if len(stats.IncompleteByState) != 1 {
+		t.Fatalf("incomplete_by_state buckets = %v, want only the njupter key", stats.IncompleteByState)
 	}
 }
 
