@@ -2,6 +2,7 @@ package validate_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
@@ -109,6 +110,38 @@ func TestIncompleteProfileFields(t *testing.T) {
 			name: "NBSP-only name counts as blank", userName: "\u00a0",
 			phoneNumber: "13800000005", qqNumber: "10005", major: "软件工程", studentID: "B24040005",
 			want: []string{"name"},
+		},
+		{
+			// The write path refuses a C0/C1 control character (the import left
+			// some rows with binary debris), so the report must prompt for the
+			// field — otherwise the account is told it is fine and every edit
+			// that touches the value is refused.
+			name: "control character in name is reported", userName: "张三\x01",
+			phoneNumber: "13800000008", qqNumber: "10008", major: "软件工程", studentID: "B24040008",
+			want: []string{"name"},
+		},
+		{
+			name: "control character in phone is reported", userName: "王五",
+			phoneNumber: "13800000009\x1f", qqNumber: "10009", major: "软件工程", studentID: "B24040009",
+			want: []string{"phone_number"},
+		},
+		{
+			name: "control character in major is reported", userName: "王五",
+			phoneNumber: "13800000010", qqNumber: "10010", major: "软\u009f件工程", studentID: "B24040010",
+			want: []string{"major"},
+		},
+		{
+			// Over-length is refused by the write path and by V015's flag.
+			name: "over-long name is reported", userName: strings.Repeat("名", validate.MaxNameLength+1),
+			phoneNumber: "13800000011", qqNumber: "10011", major: "软件工程", studentID: "B24040011",
+			want: []string{"name"},
+		},
+		{
+			// Zero-width codepoints are not whitespace and not control characters:
+			// the write path accepts them, so the flag must not prompt.
+			name: "zero-width name counts as complete", userName: "\u200b张三",
+			phoneNumber: "13800000012", qqNumber: "10012", major: "软件工程", studentID: "B24040012",
+			want: nil,
 		},
 		{
 			// Every NOT NULL banner field the user can fill in is treated alike.

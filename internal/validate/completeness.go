@@ -23,27 +23,42 @@ func IsBlank(value string) bool {
 	return strings.TrimSpace(value) == ""
 }
 
+// fieldUnusable reports whether a required profile field holds a shape the
+// write path (PUT /user/profile) would refuse: blank, over the column width, or
+// containing a C0/C1 control character. The rule mirrors buildProfileUpdate's
+// required-field checks so the completion report and the write validation line
+// up: an account must be told to fix exactly the values an edit would reject.
+//
+// This is the Go half of the V010/V015 generated-column rule. Keep it in
+// lockstep with the SQL expression and with the limits in limits.go —
+// TestProfileCompletenessMatchesSQL feeds both implementations the same inputs.
+func fieldUnusable(value string, limit int) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed == "" || !WithinLength(trimmed, limit) || HasControlCharacter(trimmed)
+}
+
 // IncompleteProfileFields returns the required "user" fields that still hold
-// unusable values, in a stable order, matching V010's generated column:
-// a blank required banner field (name, phone_number, qq_number, major) or a name
-// equal to the student ID (compared case-insensitively). college is deliberately
-// not reported — '其他' is a valid choice — and student_id, login_email and
-// password are identifiers or credentials rather than profile fields.
+// unusable values, in a stable order, matching V015's generated column:
+// a blank, over-long or control-character-bearing required banner field
+// (name, phone_number, qq_number, major), or a name equal to the student ID
+// (compared case-insensitively). college is deliberately not reported — '其他'
+// is a valid choice — and student_id, login_email and password are identifiers
+// or credentials rather than profile fields.
 //
 // A nil return means the account is complete. Callers must treat this as a
 // display hint only — it is never an authorization input.
 func IncompleteProfileFields(name, phoneNumber, qqNumber, major, studentID string) []string {
 	var fields []string
-	if IsBlank(name) || strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(studentID)) {
+	if fieldUnusable(name, MaxNameLength) || strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(studentID)) {
 		fields = append(fields, FieldName)
 	}
-	if IsBlank(phoneNumber) {
+	if fieldUnusable(phoneNumber, MaxPhoneNumberLength) {
 		fields = append(fields, FieldPhoneNumber)
 	}
-	if IsBlank(qqNumber) {
+	if fieldUnusable(qqNumber, MaxQQNumberLength) {
 		fields = append(fields, FieldQQNumber)
 	}
-	if IsBlank(major) {
+	if fieldUnusable(major, MaxMajorLength) {
 		fields = append(fields, FieldMajor)
 	}
 	return fields

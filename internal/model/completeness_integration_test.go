@@ -2,6 +2,7 @@ package model_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"gorm.io/gorm"
@@ -65,6 +66,90 @@ func TestProfileCompletenessMatchesSQL(t *testing.T) {
 	}
 }
 
+// V015's sl_has_control_character is the SQL half of the control-character
+// rule; validate.HasControlCharacter is the Go half. A drift between them has
+// the same failure shape as a drift in blankness: a control character the flag
+// misses hides from the completion page while every edit refuses it (the
+// "张三\x01" deadlock), and one the flag reports but validation accepts raises
+// a prompt the user cannot clear.
+func TestControlCharacterTestMatchesSQL(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	migrateV1(t, databaseURL)
+	database := testutil.OpenGORM(t, databaseURL)
+
+	values := []struct {
+		name  string
+		value string
+		ctrl  bool
+	}{
+		{name: "C0 start U+0001", value: "\x01", ctrl: true},
+		{name: "C0 end U+001F", value: "\x1f", ctrl: true},
+		{name: "embedded C0", value: "张三\x01", ctrl: true},
+		{name: "DEL U+007F", value: "\u007f", ctrl: true},
+		{name: "C1 start U+0080", value: "\u0080", ctrl: true},
+		{name: "C1 end U+009F", value: "\u009f", ctrl: true},
+		{name: "embedded C1", value: "13800000000\u009f", ctrl: true},
+		{name: "real name", value: "张三", ctrl: false},
+		{name: "latin name", value: "John", ctrl: false},
+		{name: "NEL U+0085 is whitespace not control", value: "\u0085", ctrl: false},
+		{name: "NBSP U+00A0 is not control", value: "\u00a0", ctrl: false},
+		{name: "zero-width space U+200B is not control", value: "\u200b", ctrl: false},
+	}
+	for _, test := range values {
+		t.Run(test.name, func(t *testing.T) {
+			var sqlCtrl bool
+			if err := database.Raw("SELECT sl_has_control_character(?)", test.value).
+				Scan(&sqlCtrl).Error; err != nil {
+				t.Fatalf("call sl_has_control_character: %v", err)
+			}
+			if goCtrl := validate.HasControlCharacter(test.value); goCtrl != sqlCtrl {
+				t.Fatalf("control-character disagreement for %q: SQL=%t, Go=%t",
+					test.value, sqlCtrl, goCtrl)
+			}
+		})
+	}
+}
+
+// V015 flags over-length values (a shape the write path refuses) so the flag
+// cannot drift away from the width checks if the columns are ever widened.
+// The SQL expression trims and measures in characters, exactly like the Go
+// RequiredField path, so this test pins the boundary at every column width.
+func TestOverlengthTestMatchesSQL(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	migrateV1(t, databaseURL)
+	database := testutil.OpenGORM(t, databaseURL)
+
+	// (field value, SQL width literal, Go limit) — mirrors V015's expression.
+	cases := []struct {
+		name       string
+		sqlLiteral string
+		goLimit    int
+		sample     string
+	}{
+		{name: "name", sqlLiteral: "255", goLimit: validate.MaxNameLength, sample: "名"},
+		{name: "phone_number", sqlLiteral: "20", goLimit: validate.MaxPhoneNumberLength, sample: "1"},
+		{name: "qq_number", sqlLiteral: "20", goLimit: validate.MaxQQNumberLength, sample: "1"},
+		{name: "major", sqlLiteral: "50", goLimit: validate.MaxMajorLength, sample: "软"},
+	}
+	for _, test := range cases {
+		for _, delta := range []int{-1, 0, 1} {
+			value := strings.Repeat(test.sample, test.goLimit+delta)
+			t.Run(fmt.Sprintf("%s/%d", test.name, test.goLimit+delta), func(t *testing.T) {
+				var sqlOver bool
+				if err := database.Raw("SELECT length(btrim(?)) > "+test.sqlLiteral, value).
+					Scan(&sqlOver).Error; err != nil {
+					t.Fatalf("call length check: %v", err)
+				}
+				goOver := !validate.WithinLength(strings.TrimSpace(value), test.goLimit)
+				if goOver != sqlOver {
+					t.Fatalf("over-length disagreement for %q: SQL=%t, Go=%t",
+						test.name, sqlOver, goOver)
+				}
+			})
+		}
+	}
+}
+
 // The generated column and IncompleteProfileFields have to answer the same
 // question at row level, not just per field: the column is what routes a user to
 // the completion page, and the field list is what the page renders.
@@ -88,6 +173,13 @@ func TestGeneratedFlagMatchesIncompleteFields(t *testing.T) {
 		{name: "name is student id", userName: "", phoneNumber: "13800000001", qqNumber: "10002", major: "通信工程"},
 		{name: "nbsp name", userName: "\u00a0", phoneNumber: "13800000002", qqNumber: "10003", major: "软件工程"},
 		{name: "padded real name", userName: "  王五  ", phoneNumber: "13800000003", qqNumber: "10004", major: "软件工程"},
+		// V015: shapes the flag used to call complete while every edit refused
+		// them — the control-character deadlock. Zero-width U+200B is NOT one of
+		// them: the write path accepts it, so the flag must not prompt.
+		{name: "control name", userName: "张三\x01", phoneNumber: "13800000004", qqNumber: "10005", major: "软件工程"},
+		{name: "control phone", userName: "王五", phoneNumber: "13800000005\x1f", qqNumber: "10006", major: "软件工程"},
+		{name: "control major", userName: "王五", phoneNumber: "13800000006", qqNumber: "10007", major: "软\u009f件工程"},
+		{name: "zero-width name is accepted by both sides", userName: "\u200b张三", phoneNumber: "13800000007", qqNumber: "10008", major: "软件工程"},
 	}
 
 	for index, row := range rows {
