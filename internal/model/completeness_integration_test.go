@@ -95,6 +95,54 @@ func TestControlCharacterMatchesSQL(t *testing.T) {
 	}
 }
 
+// V016's sl_name_invalid is the SQL half of the product name rule;
+// validate.IsInvalidName is the Go half. The rule is a whitelist (Han blocks
+// through Unicode 16 plus interpunct variants) because PostgreSQL has no
+// \p{Script=Han}, so both sides spell the ranges out. A drift between them has
+// the same failure shape as every other half-pair: a name the flag misses
+// hides from the completion page while the edit form refuses it forever.
+func TestNameRuleMatchesSQL(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	migrateV1(t, databaseURL)
+	database := testutil.OpenGORM(t, databaseURL)
+
+	values := []struct {
+		name  string
+		value string
+		trash bool
+	}{
+		{name: "basic Han", value: "张三", trash: false},
+		{name: "single Han", value: "张", trash: false},
+		{name: "Han with interpunct", value: "张·三", trash: false},
+		{name: "interpunct variant U+30FB", value: "张・三", trash: false},
+		{name: "Extension A", value: "\u3400", trash: false},
+		{name: "Extension B", value: "\U00020bb7", trash: false},
+		{name: "padded name", value: "  张三  ", trash: false},
+		{name: "blank", value: "", trash: true},
+		{name: "whitespace only", value: "  ", trash: true},
+		{name: "latin name", value: "AAA", trash: true},
+		{name: "english name", value: "John", trash: true},
+		{name: "digits", value: "B24040525", trash: true},
+		{name: "control character", value: "张\x01三", trash: true},
+		{name: "zero-width space", value: "张\u200b三", trash: true},
+		{name: "full-width space", value: "张\u3000三", trash: true},
+		{name: "emoji", value: "张😀", trash: true},
+	}
+	for _, test := range values {
+		t.Run(test.name, func(t *testing.T) {
+			var sqlTrash bool
+			if err := database.Raw("SELECT sl_name_invalid(?)", test.value).
+				Scan(&sqlTrash).Error; err != nil {
+				t.Fatalf("call sl_name_invalid: %v", err)
+			}
+			if goTrash := validate.IsInvalidName(test.value); goTrash != sqlTrash {
+				t.Fatalf("name-rule disagreement for %q: SQL=%t, Go=%t",
+					test.value, sqlTrash, goTrash)
+			}
+		})
+	}
+}
+
 // The generated column and IncompleteProfileFields have to answer the same
 // question at row level, not just per field: the column is what routes a user to
 // the completion page, and the field list is what the page renders.
@@ -118,6 +166,11 @@ func TestGeneratedFlagMatchesIncompleteFields(t *testing.T) {
 		{name: "name is student id", userName: "", phoneNumber: "13800000001", qqNumber: "10002", major: "通信工程"},
 		{name: "nbsp name", userName: "\u00a0", phoneNumber: "13800000002", qqNumber: "10003", major: "软件工程"},
 		{name: "control major", userName: "王五", phoneNumber: "13800000006", qqNumber: "10007", major: "软\u009f件工程"},
+		// V016 name-rule cases: out-of-set names must be surfaced as incomplete,
+		// while a valid Han name with an interpunct remains complete.
+		{name: "latin name", userName: "AAA", phoneNumber: "13800000007", qqNumber: "10008", major: "软件工程"},
+		{name: "zero-width name", userName: "\u200b张三", phoneNumber: "13800000008", qqNumber: "10009", major: "软件工程"},
+		{name: "interpunct name is complete", userName: "张·三", phoneNumber: "13800000009", qqNumber: "10010", major: "软件工程"},
 	}
 
 	for index, row := range rows {

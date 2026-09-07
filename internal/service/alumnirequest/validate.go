@@ -95,6 +95,14 @@ func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 		*field.target = value
 	}
 
+	// Name-only character rule, mirroring the frontend registration form: the
+	// name the approval will write becomes the account's name, and a latin or
+	// otherwise out-of-set name would provision an account the completion flag
+	// flags the moment it exists.
+	if validate.IsInvalidName(result.name) {
+		return validatedSubmit{}, newError(ErrInvalidInput, "name 仅限中文与间隔号（·）", nil)
+	}
+
 	// Structural checks for fields that are numeric by convention, so free text
 	// cannot land in join_year/phone/qq and then surface in the directory.
 	if !digitsOnly(result.joinYear) {
