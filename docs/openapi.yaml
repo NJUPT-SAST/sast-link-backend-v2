@@ -173,7 +173,7 @@ paths:
                   example: your_password
                 name:
                   type: string
-                  description: 真实姓名
+                  description: 真实姓名（仅汉字与间隔号，同补全判据的字符集规则）
                   example: 张三
                 phone_number:
                   type: string
@@ -2308,7 +2308,7 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 255
-                  description: 真实姓名（列为 NOT NULL，不可传空串）
+                  description: 真实姓名（列为 NOT NULL，不可传空串；仅汉字与间隔号 · 及其常见变体）
                 phone_number:
                   type: string
                   minLength: 1
@@ -3572,8 +3572,8 @@ components:
           type: string
           maxLength: 255
           description: |
-            不能与 student_id 相同（大小写与空白归一后比较）。学号占位是上一代
-            数据库导入留下的形态，也是 profile_needs_completion 生成列（V010/V015）判定资料残缺的形态之一。
+            不能与 student_id 相同（大小写与空白归一后比较），且仅限汉字与间隔号（· 及其常见变体）。学号占位是上一代
+            数据库导入留下的形态，也是 profile_needs_completion 生成列（V010/V015/V016）判定资料残缺的形态之一。
           example: 张三
         student_id:
           type: string
