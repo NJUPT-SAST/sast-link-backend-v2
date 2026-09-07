@@ -173,7 +173,7 @@ paths:
                   example: your_password
                 name:
                   type: string
-                  description: 真实姓名
+                  description: 真实姓名（仅汉字与间隔号，同补全判据的字符集规则）
                   example: 张三
                 phone_number:
                   type: string
@@ -2308,7 +2308,7 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 255
-                  description: 真实姓名（列为 NOT NULL，不可传空串）
+                  description: 真实姓名（列为 NOT NULL，不可传空串；仅汉字与间隔号 · 及其常见变体）
                 phone_number:
                   type: string
                   minLength: 1
@@ -3016,7 +3016,7 @@ paths:
         学号的占用查询，它们留在人机校验之后。
 
         major 必填、name 不能等于 student_id，均比 POST /admin/users 更严：这
-        两项正是 V010 生成列判定资料残缺的两种形态，放宽会让审批建出的新号一
+        两项正是 profile_needs_completion 生成列（V010/V015）判定资料残缺的两种形态，放宽会让审批建出的新号一
         登录就被赶去资料补全页。
       operationId: submitAlumniRequest
       tags:
@@ -3572,8 +3572,8 @@ components:
           type: string
           maxLength: 255
           description: |
-            不能与 student_id 相同（大小写与空白归一后比较）。学号占位是上一代
-            数据库导入留下的形态，也是 V010 生成列判定资料残缺的两种形态之一。
+            不能与 student_id 相同（大小写与空白归一后比较），且仅限汉字与间隔号（· 及其常见变体）。学号占位是上一代
+            数据库导入留下的形态，也是 profile_needs_completion 生成列（V010/V015/V016）判定资料残缺的形态之一。
           example: 张三
         student_id:
           type: string
@@ -3611,8 +3611,8 @@ components:
           maxLength: 50
           minLength: 1
           description: |
-            必填，比 POST /admin/users 更严（后者允许为空）。空白 major 是 V010
-            生成列判定资料残缺的另一种形态，放宽会让审批建出的新号一登录就被赶
+            必填，比 POST /admin/users 更严（后者允许为空）。空白 major 是
+            profile_needs_completion 生成列（V010/V015）判定资料残缺的另一种形态，放宽会让审批建出的新号一登录就被赶
             去资料补全页——为了校友从未被要求填写的字段。
           example: 软件工程
         join_year:
@@ -3854,7 +3854,7 @@ components:
         profile_needs_completion:
           type: boolean
           description: >-
-            旧库迁移账号仍有必填字段为空、超长或含 C0/C1 控制字符，或 name 等于 student_id。纯展示提示，
+            旧库迁移账号仍有必填字段为空，或 name 等于 student_id。纯展示提示，
             没有任何端点会因此拒绝请求；重定向到补全页由前端自行决定。详见 API 文档 §3.0。
         incomplete_fields:
           type: array
@@ -3993,7 +3993,7 @@ components:
         profile_needs_completion:
           type: boolean
           description: >-
-            旧库迁移账号仍有必填字段为空、超长或含 C0/C1 控制字符，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
+            旧库迁移账号仍有必填字段为空，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
         incomplete_fields:
           type: array
           items:
@@ -4456,7 +4456,7 @@ components:
         profile_needs_completion:
           type: boolean
           description: >-
-            旧库迁移账号仍有必填字段为空、超长或含 C0/C1 控制字符，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
+            旧库迁移账号仍有必填字段为空，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
         incomplete_fields:
           type: array
           items:
