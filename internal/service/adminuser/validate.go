@@ -116,6 +116,14 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 		present[field.field] = true
 	}
 
+	// Name-only character rule, shared with the self-service write path: a name
+	// outside the product rule would flag the account incomplete the moment it
+	// is written, and an administrator's typo must not hand the user a
+	// completion loop.
+	if result.name != nil && validate.IsInvalidName(*result.name) {
+		return validatedUpdate{}, newError(ErrInvalidInput, "name 仅限中文与间隔号（·）", nil)
+	}
+
 	if input.College != nil {
 		college := model.College(strings.TrimSpace(*input.College))
 		if !college.Valid() {
@@ -367,6 +375,13 @@ func validateCreate(input CreateUserInput, now time.Time) (validatedCreate, erro
 			return validatedCreate{}, fieldError(refused)
 		}
 		*field.target = value
+	}
+
+	// Name-only character rule: an administrator provisioning an account whose
+	// name the product refuses would create an account flagged incomplete the
+	// moment it exists.
+	if validate.IsInvalidName(result.name) {
+		return validatedCreate{}, newError(ErrInvalidInput, "name 仅限中文与间隔号（·）", nil)
 	}
 
 	major := ""

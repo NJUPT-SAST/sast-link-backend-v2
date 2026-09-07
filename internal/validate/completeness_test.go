@@ -121,6 +121,29 @@ func TestIncompleteProfileFields(t *testing.T) {
 			want: []string{"name"},
 		},
 		{
+			// The product's name rule (frontend realNameSchema) accepts Han and
+			// interpuncts only. A legacy name outside the set is unreachable
+			// through the edit form — the Han-only schema refuses any request
+			// carrying it — so it must be reported and routed to the completion
+			// page, or the account can never fix any profile field.
+			name: "latin name is reported", userName: "AAA",
+			phoneNumber: "13800000013", qqNumber: "10013", major: "软件工程", studentID: "B24040013",
+			want: []string{"name"},
+		},
+		{
+			name: "interpunct name counts as complete", userName: "张·三",
+			phoneNumber: "13800000014", qqNumber: "10014", major: "软件工程", studentID: "B24040014",
+			want: nil,
+		},
+		{
+			// Zero-width codepoints are not whitespace and not control characters,
+			// but they are outside the name whitelist, and the frontend refuses
+			// them — so the flag reports the name, exactly like a latin one.
+			name: "zero-width name is reported", userName: "\u200b张三",
+			phoneNumber: "13800000015", qqNumber: "10015", major: "软件工程", studentID: "B24040015",
+			want: []string{"name"},
+		},
+		{
 			name: "control character in phone is reported", userName: "王五",
 			phoneNumber: "13800000009\x1f", qqNumber: "10009", major: "软件工程", studentID: "B24040009",
 			want: []string{"phone_number"},
@@ -137,11 +160,9 @@ func TestIncompleteProfileFields(t *testing.T) {
 			want: []string{"name"},
 		},
 		{
-			// Zero-width codepoints are not whitespace and not control characters:
-			// the write path accepts them, so the flag must not prompt.
-			name: "zero-width name counts as complete", userName: "\u200b张三",
-			phoneNumber: "13800000012", qqNumber: "10012", major: "软件工程", studentID: "B24040012",
-			want: nil,
+			name: "latin name in reported order", userName: "John",
+			phoneNumber: "13800000016", qqNumber: "10016", major: "软件工程", studentID: "B24040016",
+			want: []string{"name"},
 		},
 		{
 			// Every NOT NULL banner field the user can fill in is treated alike.

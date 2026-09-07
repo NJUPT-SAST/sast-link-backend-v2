@@ -38,18 +38,20 @@ func fieldUnusable(value string, limit int) bool {
 }
 
 // IncompleteProfileFields returns the required "user" fields that still hold
-// unusable values, in a stable order, matching V015's generated column:
+// unusable values, in a stable order, matching V016's generated column:
 // a blank, over-long or control-character-bearing required banner field
-// (name, phone_number, qq_number, major), or a name equal to the student ID
-// (compared case-insensitively). college is deliberately not reported — '其他'
-// is a valid choice — and student_id, login_email and password are identifiers
-// or credentials rather than profile fields.
+// (name, phone_number, qq_number, major), a name outside the product's
+// character rule (Han + interpunct — the frontend's realNameSchema), or a name
+// equal to the student ID (compared case-insensitively). college is
+// deliberately not reported — '其他' is a valid choice — and student_id,
+// login_email and password are identifiers or credentials rather than profile
+// fields.
 //
 // A nil return means the account is complete. Callers must treat this as a
 // display hint only — it is never an authorization input.
 func IncompleteProfileFields(name, phoneNumber, qqNumber, major, studentID string) []string {
 	var fields []string
-	if fieldUnusable(name, MaxNameLength) || strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(studentID)) {
+	if fieldUnusable(name, MaxNameLength) || IsInvalidName(name) || strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(studentID)) {
 		fields = append(fields, FieldName)
 	}
 	if fieldUnusable(phoneNumber, MaxPhoneNumberLength) {

@@ -1693,7 +1693,7 @@ func TestFailClosedStoresReturnDependencyUnavailable(t *testing.T) {
 		_, err := service.Register(context.Background(), RegisterInput{
 			RegisterTicket: "reg_xxx",
 			Password:       "newpassword",
-			Name:           "New",
+			Name:           "张三",
 			StudentID:      "B24040099",
 			PhoneNumber:    "13800138000",
 			QQNumber:       "10000",
@@ -1743,7 +1743,7 @@ func TestRegisterCreatesUserAndIssuesTokens(t *testing.T) {
 	result, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "newpassword",
-		Name:           "New User",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -1763,7 +1763,7 @@ func TestRegisterCreatesUserAndIssuesTokens(t *testing.T) {
 
 func TestRegisterRejectsUsedTicket(t *testing.T) {
 	service := newRegisterService(t)
-	_, err := service.Register(context.Background(), RegisterInput{RegisterTicket: "reg_missing", Password: "newpassword", Name: "x", StudentID: "B24040525", PhoneNumber: "1", QQNumber: "1", College: string(model.CollegeOther), Major: "CS"})
+	_, err := service.Register(context.Background(), RegisterInput{RegisterTicket: "reg_missing", Password: "newpassword", Name: "张三", StudentID: "B24040525", PhoneNumber: "1", QQNumber: "1", College: string(model.CollegeOther), Major: "CS"})
 	assertKind(t, err, KindInvalidToken, errcode.CodeRegisterTicketInvalid)
 }
 
@@ -1776,7 +1776,7 @@ func TestRegisterRejectsInvalidCollege(t *testing.T) {
 	_, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "newpassword",
-		Name:           "New",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -1817,7 +1817,7 @@ func oauthRegisterInput(registrationState, oauthState string) RegisterInput {
 	return RegisterInput{
 		RegisterTicket:    "reg_xxx",
 		Password:          "newpassword",
-		Name:              "New",
+		Name:              "张三",
 		StudentID:         "B24040099",
 		PhoneNumber:       "13800138000",
 		QQNumber:          "10000",
@@ -2021,7 +2021,7 @@ func TestRegisterRejectsExistingEmail(t *testing.T) {
 	_, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "newpassword",
-		Name:           "Dup",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -2045,7 +2045,7 @@ func TestRegisterRejectsEmailBoundAsOtherMailIdentity(t *testing.T) {
 	_, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "newpassword",
-		Name:           "Dup",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -2065,7 +2065,7 @@ func TestRegisterRejectsShortPassword(t *testing.T) {
 	_, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "short",
-		Name:           "New",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -2700,7 +2700,7 @@ func TestRegisterKeepsTicketWhenStudentIDOccupied(t *testing.T) {
 	_, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "newpassword",
-		Name:           "Dup",
+		Name:           "张三",
 		StudentID:      occupied,
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -2716,7 +2716,7 @@ func TestRegisterKeepsTicketWhenStudentIDOccupied(t *testing.T) {
 	if _, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "newpassword",
-		Name:           "Fixed",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -2847,7 +2847,7 @@ func validRegisterInput(ticket, studentID string) RegisterInput {
 	return RegisterInput{
 		RegisterTicket: ticket,
 		Password:       "newpassword",
-		Name:           "pt",
+		Name:           "张三",
 		StudentID:      studentID,
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -2937,7 +2937,7 @@ func TestRegisterThrottlesPerRegisterTicket(t *testing.T) {
 	_, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "newpassword",
-		Name:           "New User",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -2973,7 +2973,7 @@ func TestRegisterDoesNotSpendQuotaOnCheapRejections(t *testing.T) {
 	_, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "short",
-		Name:           "New User",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",
@@ -2998,7 +2998,7 @@ func TestRegisterAllowsWhenLimiterUnavailable(t *testing.T) {
 	if _, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "newpassword",
-		Name:           "New User",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",

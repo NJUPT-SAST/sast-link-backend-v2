@@ -572,6 +572,9 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if name == "" || studentID == "" || phone == "" || qq == "" || college == "" || major == "" || password == "" {
 		return nil, newError(ErrInvalidInput, "注册信息不完整", nil)
 	}
+	if validate.IsInvalidName(name) {
+		return nil, newError(ErrInvalidInput, "name 仅限中文与间隔号（·）", nil)
+	}
 	if !college.Valid() {
 		return nil, newError(ErrInvalidInput, "学院不在枚举范围内", nil)
 	}
