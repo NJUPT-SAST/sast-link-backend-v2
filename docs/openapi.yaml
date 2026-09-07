@@ -3854,7 +3854,7 @@ components:
         profile_needs_completion:
           type: boolean
           description: >-
-            旧库迁移账号仍有必填字段为空，或 name 等于 student_id。纯展示提示，
+            旧库迁移账号仍有必填字段为空、超长或含 C0/C1 控制字符，或 name 等于 student_id。纯展示提示，
             没有任何端点会因此拒绝请求；重定向到补全页由前端自行决定。详见 API 文档 §3.0。
         incomplete_fields:
           type: array
@@ -3993,7 +3993,7 @@ components:
         profile_needs_completion:
           type: boolean
           description: >-
-            旧库迁移账号仍有必填字段为空，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
+            旧库迁移账号仍有必填字段为空、超长或含 C0/C1 控制字符，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
         incomplete_fields:
           type: array
           items:
@@ -4456,7 +4456,7 @@ components:
         profile_needs_completion:
           type: boolean
           description: >-
-            旧库迁移账号仍有必填字段为空，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
+            旧库迁移账号仍有必填字段为空、超长或含 C0/C1 控制字符，或 name 等于 student_id。纯展示提示，详见 API 文档 §3.0。
         incomplete_fields:
           type: array
           items:

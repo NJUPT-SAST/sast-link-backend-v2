@@ -98,12 +98,20 @@ CREATE TABLE "user" (
     college       college_enum    NOT NULL DEFAULT '其他',
     major         VARCHAR(50)     NOT NULL DEFAULT '',
     token_version INT             NOT NULL DEFAULT 0,
-    -- V010 新增，生成列（GENERATED ALWAYS AS ... STORED）
+    -- V010 / V015 新增，生成列（GENERATED ALWAYS AS ... STORED）
     profile_needs_completion BOOLEAN GENERATED ALWAYS AS (
         sl_profile_is_blank(name)
         OR sl_profile_is_blank(phone_number)
         OR sl_profile_is_blank(qq_number)
         OR sl_profile_is_blank(major)
+        OR length(btrim(name)) > 255
+        OR length(btrim(phone_number)) > 20
+        OR length(btrim(qq_number)) > 20
+        OR length(btrim(major)) > 50
+        OR sl_has_control_character(btrim(name))
+        OR sl_has_control_character(btrim(phone_number))
+        OR sl_has_control_character(btrim(qq_number))
+        OR sl_has_control_character(btrim(major))
         OR lower(btrim(name)) = lower(btrim(student_id))
     ) STORED
 );
@@ -128,12 +136,12 @@ CREATE TABLE "user" (
 |updated_at|最后更新时间|
 |college|学院，见 `college_enum`|
 |major|专业|
-|profile_needs_completion|V010 生成列。旧库迁移账号的资料补全标志，详见下方说明|
+|profile_needs_completion|V010 生成列（V015 重建）。旧库迁移账号的资料补全标志，详见下方说明|
 
-### profile_needs_completion（V010）
+### profile_needs_completion（V010 初建，V015 重建）
 
 旧数据库迁移过来的账号，部分必填字段带着当前写入路径不会接受的值：`name` / `phone_number` / `qq_number` / `major`
-为空白，或 `name` 被填成了 `student_id`。这些形态都会被现有输入层拒绝
+为空白、超长或含 C0/C1 控制字符，或 `name` 被填成了 `student_id`。这些形态都会被现有输入层拒绝
 （`internal/service/session/profile.go`、`internal/service/adminuser/validate.go`），所以是纯存量
 遗留，不是仍在产生的问题。该列把这个事实暴露给前端，用于引导用户补全。
 
@@ -160,6 +168,8 @@ NOT NULL 资料字段一视同仁，为空即为待补全。旧库没有该字�
 （`unicode.IsSpace` 加 U+0085、U+00A0），与 `internal/validate.IsBlank` 成对，由
 `TestProfileCompletenessMatchesSQL` 用同一组输入喂两侧来防漂移。零宽字符（U+200B..U+200D、
 U+FEFF）两侧都不算空白，由 `validate.HasControlCharacter` 负责。
+
+`profile_needs_completion` 的判据与写路径保持一致：空白、超长、C0/C1 控制字符，以及 `name` 与 `student_id` 重名。V015 通过重建生成列扩展判据，历史行在 migration 时自动重算；Go 的 `validate.IncompleteProfileFields` 与 SQL 表达式由 integration tests 对照。
 
 `name` 与 `student_id` 的比较忽略大小写：迁移数据中同时存在 `B24040525` 与 `b24040525` 两种形式。
 
@@ -1048,7 +1058,7 @@ oauth_authorizations.family_id
 
 12. `oauth_grants` 表（V009，FK → user, oauth_clients）
 
-12.1 `sl_profile_is_blank()` 函数与 `"user".profile_needs_completion` 生成列（V010，生成列依赖该函数，顺序不可反；`down` 时先删列再删函数）
+12.1 `sl_profile_is_blank()`（V010）、`sl_has_control_character()`（V015）函数与 `"user".profile_needs_completion` 生成列（V010 初建 / V015 重建，生成列依赖函数，顺序不可反；`down` 时先删列再删本 migration 创建的函数）
 
 12.2 `alumni_requests` 表（V011，FK → user ×2，均 ON DELETE SET NULL；复用 V001 的 `update_updated_at_column()`，`down` 时不得 drop 该函数）
 

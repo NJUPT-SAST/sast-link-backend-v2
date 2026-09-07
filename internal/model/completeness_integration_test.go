@@ -20,8 +20,8 @@ import (
 //
 // The specific trap this catches: PostgreSQL's one-argument btrim() strips ASCII
 // spaces only, while Go's strings.TrimSpace strips the whole Unicode whitespace
-// set. V010 spells the character set out for exactly this reason, and a future
-// edit that reverts it to plain btrim() fails here.
+// set. V010 spells the character set out for exactly this reason, and the
+// emergency migration extends the same SQL/Go agreement to control characters.
 func TestProfileCompletenessMatchesSQL(t *testing.T) {
 	databaseURL := testutil.StartPostgres(t)
 	migrateV1(t, databaseURL)
@@ -65,6 +65,36 @@ func TestProfileCompletenessMatchesSQL(t *testing.T) {
 	}
 }
 
+func TestControlCharacterMatchesSQL(t *testing.T) {
+	databaseURL := testutil.StartPostgres(t)
+	migrateV1(t, databaseURL)
+	database := testutil.OpenGORM(t, databaseURL)
+
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "C0", value: "张三\x01", want: true},
+		{name: "DEL", value: "张三\x7f", want: true},
+		{name: "C1", value: "13800000000\u009f", want: true},
+		{name: "plain text", value: "张三", want: false},
+		{name: "zero width is not control", value: "张\u200b三", want: false},
+		{name: "NBSP is not control", value: "张\u00a0三", want: false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			var got bool
+			if err := database.Raw("SELECT sl_has_control_character(?)", test.value).Scan(&got).Error; err != nil {
+				t.Fatalf("call sl_has_control_character: %v", err)
+			}
+			if got != test.want || got != validate.HasControlCharacter(test.value) {
+				t.Fatalf("control-character result = %t, want SQL/Go=%t", got, test.want)
+			}
+		})
+	}
+}
+
 // The generated column and IncompleteProfileFields have to answer the same
 // question at row level, not just per field: the column is what routes a user to
 // the completion page, and the field list is what the page renders.
@@ -87,7 +117,7 @@ func TestGeneratedFlagMatchesIncompleteFields(t *testing.T) {
 		{name: "real name blank contact", userName: "李四", phoneNumber: "", qqNumber: "", major: ""},
 		{name: "name is student id", userName: "", phoneNumber: "13800000001", qqNumber: "10002", major: "通信工程"},
 		{name: "nbsp name", userName: "\u00a0", phoneNumber: "13800000002", qqNumber: "10003", major: "软件工程"},
-		{name: "padded real name", userName: "  王五  ", phoneNumber: "13800000003", qqNumber: "10004", major: "软件工程"},
+		{name: "control major", userName: "王五", phoneNumber: "13800000006", qqNumber: "10007", major: "软\u009f件工程"},
 	}
 
 	for index, row := range rows {

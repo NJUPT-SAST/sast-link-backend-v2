@@ -2,6 +2,7 @@ package validate_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
@@ -111,10 +112,29 @@ func TestIncompleteProfileFields(t *testing.T) {
 			want: []string{"name"},
 		},
 		{
+			// A control character is rejected by the profile write path, so the
+			// completion report must expose it rather than hide it.
+			name: "control character in name is reported", userName: "张三\x01",
+			phoneNumber: "13800000008", qqNumber: "10008", major: "软件工程", studentID: "B24040008",
+			want: []string{"name"},
+		},
+		{
+			name: "control character in phone is reported", userName: "王五",
+			phoneNumber: "13800000009\x1f", qqNumber: "10009", major: "软件工程", studentID: "B24040009",
+			want: []string{"phone_number"},
+		},
+		{
+			name: "control character in major is reported", userName: "王五",
+			phoneNumber: "13800000010", qqNumber: "10010", major: "软\u009f件工程", studentID: "B24040010",
+			want: []string{"major"},
+		},
+		{
+			name: "over-long name is reported", userName: strings.Repeat("名", validate.MaxNameLength+1),
+			phoneNumber: "13800000011", qqNumber: "10011", major: "软件工程", studentID: "B24040011",
+			want: []string{"name"},
+		},
+		{
 			// Every NOT NULL banner field the user can fill in is treated alike.
-			// The import left qq_number empty for every row because the previous
-			// database had no such field, but a first login prompting to collect
-			// it once is the point of the guided completion.
 			name: "blank qq_number alone is reported", userName: "王五",
 			phoneNumber: "13800000007", qqNumber: "", major: "软件工程", studentID: "B24040007",
 			want: []string{"qq_number"},
