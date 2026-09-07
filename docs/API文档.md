@@ -670,7 +670,7 @@ POST /oauth/exchange-code
 
 | 字段 | 类型 | 语义 |
 | ---- | ---- | ---- |
-| `profile_needs_completion` | `bool` | 仍有必填字段为空，或 `name` 等于 `student_id` |
+| `profile_needs_completion` | `bool` | 仍有必填字段为空、超长或含 C0/C1 控制字符，或 `name` 等于 `student_id` |
 | `incomplete_fields` | `string[]` | 待补全的字段名，取值为 `name` / `phone_number` / `qq_number` / `major`；无待补全时为 `[]`（**不是** `null`） |
 
 **出现位置**：密码登录（§1.4）、完成注册（§1.3）、交换登录码（§2.5，GitHub / 飞书登录）的 `user` 对象，以及 `GET`/`PUT /user/profile`（§3.1 / §3.2）的顶层。登录响应就带着它，所以前端无需额外请求即可判定是否跳转补全页。
@@ -679,8 +679,8 @@ POST /oauth/exchange-code
 
 - **纯提示，不影响任何正常路径**。没有任何端点会因为 `profile_needs_completion = true` 而拒绝请求，登录、刷新、OAuth 授权均不受影响。重定向完全由前端自行决定。
 - 不是权限输入，不参与任何鉴权判断。
-- 只读。该列是 PostgreSQL 生成列（V010），用户通过 `PUT /user/profile`（§3.2）补齐字段后自动转为 `false`，无专门的「确认已补全」接口。
-- **NOT NULL 自助字段一视同仁**：`name` / `phone_number` / `qq_number` / `major` 四个用户可自助补的必填字段只要为空（含纯空白）即触发提示。旧库无 `qq_number` 字段，迁移账号此列全空，老用户首次登录会被要求补全一次正是引导式补全的目的。
+- 只读。该列是 PostgreSQL 生成列（V010 初建 / V015 重建），用户通过 `PUT /user/profile`（§3.2）补齐字段后自动转为 `false`，无专门的「确认已补全」接口。判定与写路径的拒绝形状对齐：空白、超长、C0/C1 控制字符，以及 `name` 与 `student_id` 重名都会让对应字段留在 `incomplete_fields` 里；这样旧库中的不可编辑脏值不会从补全提示中消失。
+- **NOT NULL 自助字段一视同仁**：`name` / `phone_number` / `qq_number` / `major` 四个用户可自助补的必填字段只要为空（含纯空白）、超长或含 C0/C1 控制字符即触发提示。旧库无 `qq_number` 字段，迁移账号此列全空，老用户首次登录会被要求补全一次正是引导式补全的目的。
 - **不包含 `college`**：`其他` 是合法枚举值，无法区分「迁移默认值」与「用户真实选择」，否则会产生用户无法消除的提示。`student_id` / `login_email` / `password` 是标识或凭据而非资料字段，不在补全范畴。
 - `name` 与 `student_id` 的比较**忽略大小写**：迁移数据中同时存在 `B24040525` 与 `b24040525` 两种形式。
 - 判空口径与 `PUT /user/profile` 完全一致（含 NBSP、U+3000 等 Unicode 空白），因此不会出现「提示已完成但提交被拒」或反之的死循环。
