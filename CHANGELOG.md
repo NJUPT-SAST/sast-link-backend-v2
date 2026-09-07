@@ -87,8 +87,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **V008 接入方客户端 seed 迁移**（[PR #44](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/44)，2026-08-11）：删除 `000008_seed_ops_oauth_client`，接入方客户端（含委派管理）改为一律经控制台注册。原因是 seed 迁移与凭证轮换不相容：漂移检测把 `client_secret` 哈希纳入比对（不纳入则 `down`/`up` 会把轮换后的行重建成迁移里的旧 secret，让已作废凭证复活），因此生产库一旦轮换 secret，任何需要重跑 V008 的路径——`down` 后再 `up`、灾备重建、从生产 dump 恢复后跑迁移——都会 `RAISE EXCEPTION` 中止且无法绕过。委派授予本就是控制台操作（`checkCapabilityScopeGrant` 四道守卫 + 审计行），schema 层授予反而绕过了这套校验。该迁移从未在生产执行过，故直接删除而非追加一个 `down` 迁移。测试改为自行注册 fixture 客户端（`delegated-e2e-admin`），不再依赖 seed 存在。
 - **pg_cron 清理方案**（2026-08-01，[PR #33](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/33)）：被进程内 retention worker 取代；不用 pg_cron，因为生产库未安装该扩展且测试镜像无法加载。
 
-### Fixed
-
+- **资料补全死锁紧急修复（V015）**：`profile_needs_completion` / `incomplete_fields` 原先只识别空白和 `name` 等于 `student_id`，而资料编辑还会拒绝超长值和 C0/C1 控制字符。旧库脏数据因此可能不显示在补全页，用户补完其他字段后仍无法提交资料。V015 重建生成列，将四个必填资料字段的判据与现有写路径对齐，并新增 SQL/Go 控制字符一致性回归测试；不改变其软提示语义，也不引入额外 name 字符集规则。
 - x/net 升级修 CVE-2026-25680、x/text 升级修 GO-2026-5970（2026-07-22 / 07-27）。
 - 认证基础设施修复（2026-07-22，[PR #22](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/22)）：refresh rotation 原子化、限流器溢出、hash decode、空 JWT key ID 拒绝。
 - 注册 / 密码 / 邮箱绑定修复（2026-07-28，[PR #26](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/26)）：跨表邮箱唯一（`login_email` 不能同时是 other_mail 身份）、注册冲突错误映射到具体字段、错误验证码 / 被拒请求不再烧一次性 token、mailer 收件人校验防 header 注入、验证码 key 按 purpose 隔离、错误信息中文化。
