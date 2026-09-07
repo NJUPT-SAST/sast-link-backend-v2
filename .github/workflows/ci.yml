@@ -40,7 +40,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: v2.13.2
 
   # OpenAPI contract lint against the redocly recommended ruleset. Runs only on
   # PRs (and main pushes) that touch docs/openapi.yaml: the current contract does
