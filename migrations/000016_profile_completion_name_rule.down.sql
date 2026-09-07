@@ -1,7 +1,7 @@
 -- Restore V015's generated column: blank / over-long / control-character
 -- shapes plus the name = student_id placeholder. sl_profile_is_blank and
--- sl_has_control_character predate V016 and stay; sl_name_invalid is only
--- referenced by the column being recreated, so it drops with it.
+-- sl_has_control_character predate V016 and stay (sl_name_invalid is only
+-- referenced by the column being recreated, so it drops with it).
 
 ALTER TABLE "user"
     DROP COLUMN profile_needs_completion;
