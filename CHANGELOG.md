@@ -89,6 +89,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **补全判据与写路径校验对齐（V015 重建生成列）**：`profile_needs_completion` / `incomplete_fields` 原先只判空白与 `name` 等于 `student_id`，而 `PUT /user/profile`（§3.2）还会拒绝**超长**与**含 C0/C1 控制字符**的值。旧库导入的字段若带着二进制残渣（如姓名尾随 U+0001），补全页永远不会提示该字段；用户补完其他空字段后生成列直接翻回 `false`，不可用值永久留存且不再被引导。V015 把判据扩为写路径的完整拒绝形状（空白 / 超长 / 控制字符，`name` 另有学号重名，TrimSpace 后比较），新增 SQL 函数 `sl_has_control_character` 与 Go 的 `validate.HasControlCharacter` 成对，列宽字面量与 `internal/validate/limits.go` 锁步；`TestControlCharacterTestMatchesSQL` / `TestOverlengthTestMatchesSQL` 把函数与行级判据钉在同一组输入上。零宽字符（U+200B 等）并非控制字符、写路径接受它们，不在扩围之内。
 - x/net 升级修 CVE-2026-25680、x/text 升级修 GO-2026-5970（2026-07-22 / 07-27）。
 - 认证基础设施修复（2026-07-22，[PR #22](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/22)）：refresh rotation 原子化、限流器溢出、hash decode、空 JWT key ID 拒绝。
 - 注册 / 密码 / 邮箱绑定修复（2026-07-28，[PR #26](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/26)）：跨表邮箱唯一（`login_email` 不能同时是 other_mail 身份）、注册冲突错误映射到具体字段、错误验证码 / 被拒请求不再烧一次性 token、mailer 收件人校验防 header 注入、验证码 key 按 purpose 隔离、错误信息中文化。

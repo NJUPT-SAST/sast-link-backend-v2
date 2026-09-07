@@ -3016,7 +3016,7 @@ paths:
         学号的占用查询，它们留在人机校验之后。
 
         major 必填、name 不能等于 student_id，均比 POST /admin/users 更严：这
-        两项正是 V010 生成列判定资料残缺的两种形态，放宽会让审批建出的新号一
+        两项正是 profile_needs_completion 生成列（V010/V015）判定资料残缺的两种形态，放宽会让审批建出的新号一
         登录就被赶去资料补全页。
       operationId: submitAlumniRequest
       tags:
@@ -3573,7 +3573,7 @@ components:
           maxLength: 255
           description: |
             不能与 student_id 相同（大小写与空白归一后比较）。学号占位是上一代
-            数据库导入留下的形态，也是 V010 生成列判定资料残缺的两种形态之一。
+            数据库导入留下的形态，也是 profile_needs_completion 生成列（V010/V015）判定资料残缺的形态之一。
           example: 张三
         student_id:
           type: string
@@ -3611,8 +3611,8 @@ components:
           maxLength: 50
           minLength: 1
           description: |
-            必填，比 POST /admin/users 更严（后者允许为空）。空白 major 是 V010
-            生成列判定资料残缺的另一种形态，放宽会让审批建出的新号一登录就被赶
+            必填，比 POST /admin/users 更严（后者允许为空）。空白 major 是
+            profile_needs_completion 生成列（V010/V015）判定资料残缺的另一种形态，放宽会让审批建出的新号一登录就被赶
             去资料补全页——为了校友从未被要求填写的字段。
           example: 软件工程
         join_year:

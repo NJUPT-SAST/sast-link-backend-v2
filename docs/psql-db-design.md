@@ -98,12 +98,20 @@ CREATE TABLE "user" (
     college       college_enum    NOT NULL DEFAULT '其他',
     major         VARCHAR(50)     NOT NULL DEFAULT '',
     token_version INT             NOT NULL DEFAULT 0,
-    -- V010 新增，生成列（GENERATED ALWAYS AS ... STORED）
+    -- V015 重建，生成列（GENERATED ALWAYS AS ... STORED）
     profile_needs_completion BOOLEAN GENERATED ALWAYS AS (
         sl_profile_is_blank(name)
         OR sl_profile_is_blank(phone_number)
         OR sl_profile_is_blank(qq_number)
         OR sl_profile_is_blank(major)
+        OR length(btrim(name)) > 255
+        OR length(btrim(phone_number)) > 20
+        OR length(btrim(qq_number)) > 20
+        OR length(btrim(major)) > 50
+        OR sl_has_control_character(btrim(name))
+        OR sl_has_control_character(btrim(phone_number))
+        OR sl_has_control_character(btrim(qq_number))
+        OR sl_has_control_character(btrim(major))
         OR lower(btrim(name)) = lower(btrim(student_id))
     ) STORED
 );
@@ -128,14 +136,21 @@ CREATE TABLE "user" (
 |updated_at|最后更新时间|
 |college|学院，见 `college_enum`|
 |major|专业|
-|profile_needs_completion|V010 生成列。旧库迁移账号的资料补全标志，详见下方说明|
+|profile_needs_completion|V015 生成列（V010 初建）。旧库迁移账号的资料补全标志，详见下方说明|
 
-### profile_needs_completion（V010）
+### profile_needs_completion（V010 初建，V015 重建）
 
 旧数据库迁移过来的账号，部分必填字段带着当前写入路径不会接受的值：`name` / `phone_number` / `qq_number` / `major`
-为空白，或 `name` 被填成了 `student_id`。这些形态都会被现有输入层拒绝
+为空白、超长或含 C0/C1 控制字符，或 `name` 被填成了 `student_id`。这些形态都会被现有输入层拒绝
 （`internal/service/session/profile.go`、`internal/service/adminuser/validate.go`），所以是纯存量
 遗留，不是仍在产生的问题。该列把这个事实暴露给前端，用于引导用户补全。
+
+**V015 为何重建**：V010 只判空白与学号重名，而写路径还会拒绝**超长**与**含控制字符**的值。
+带二进制残渣的脏字段（如 `'张三\x01'`）因此被旧判据判为「已完成」：补全页不提示、用户补完
+其他空字段后该列直接翻回 `false`，不可用值永久留存且不再被引导。重建后的判据与写路径拒绝形状
+完全对齐（空白 / 超长 / 控制字符，`name` 另有学号重名），由 `TestProfileCompletenessMatchesSQL`
+同源喂两侧防漂移。超长是理论边界——V001 的 `varchar(n)` 物理拒绝入库——但列宽未来放宽时
+两侧规则不会脱节。列宽字面量（255/20/20/50）与 `internal/validate/limits.go` 锁步。
 
 **纯软提示**：没有任何认证或鉴权路径读取它，也没有任何端点因它为 `true` 而拒绝请求。
 
@@ -159,7 +174,12 @@ NOT NULL 资料字段一视同仁，为空即为待补全。旧库没有该字�
 拒绝任何提交 —— 用户被告知一切正常却什么都改不了。该函数的字符集即 Go 的口径
 （`unicode.IsSpace` 加 U+0085、U+00A0），与 `internal/validate.IsBlank` 成对，由
 `TestProfileCompletenessMatchesSQL` 用同一组输入喂两侧来防漂移。零宽字符（U+200B..U+200D、
-U+FEFF）两侧都不算空白，由 `validate.HasControlCharacter` 负责。
+U+FEFF）两侧都不算空白，**也不算控制字符**——写路径接受它们，生成列不得因此提示。
+
+**`sl_has_control_character`**（V015）是控制字符判定的 SQL 半边，与 `validate.HasControlCharacter`
+成对：正则 `[\x01-\x1F\x7F\x80-\x9F]` 覆盖 C0（不含 NUL，PostgreSQL 无法存储）、DEL 与 C1，
+由 `TestControlCharacterTestMatchesSQL` 同源对照，`TestOverlengthTestMatchesSQL` 另把超长判据
+的边界钉在每个列宽上。
 
 `name` 与 `student_id` 的比较忽略大小写：迁移数据中同时存在 `B24040525` 与 `b24040525` 两种形式。
 
@@ -1048,7 +1068,7 @@ oauth_authorizations.family_id
 
 12. `oauth_grants` 表（V009，FK → user, oauth_clients）
 
-12.1 `sl_profile_is_blank()` 函数与 `"user".profile_needs_completion` 生成列（V010，生成列依赖该函数，顺序不可反；`down` 时先删列再删函数）
+12.1 `sl_profile_is_blank()` 函数（V010）与 `sl_has_control_character()` 函数（V015）、`"user".profile_needs_completion` 生成列（V010 初建 / V015 重建，生成列依赖两函数，顺序不可反；`down` 时先删列再删函数，V015 的 `down` 仅删 V015 自建的 `sl_has_control_character`）
 
 12.2 `alumni_requests` 表（V011，FK → user ×2，均 ON DELETE SET NULL；复用 V001 的 `update_updated_at_column()`，`down` 时不得 drop 该函数）
 
