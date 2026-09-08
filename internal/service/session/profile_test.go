@@ -158,7 +158,7 @@ func TestUpdateProfileRejectsInteriorSpaceName(t *testing.T) {
 		Intro:  stringPtr("hello world"),
 	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
-	if err == nil || !strings.Contains(err.Error(), "仅限中文") {
+	if err == nil || !strings.Contains(err.Error(), "输入值非法") {
 		t.Fatalf("UpdateProfile() error = %v, want the name-rule refusal", err)
 	}
 }

@@ -109,7 +109,7 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 	// already reject blank/over-long/control characters; this rejects any
 	// other character the whitelist excludes.
 	if input.Name != nil && validate.IsInvalidName(*input.Name) {
-		return update, nil, newError(ErrInvalidInput, "name 仅限中文与间隔号（·）", nil)
+		return update, nil, newError(ErrInvalidInput, "输入值非法", nil)
 	}
 
 	if input.College != nil {
