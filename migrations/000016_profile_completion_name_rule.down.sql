@@ -1,8 +1,8 @@
 -- Restore V015's generated column: blank / over-long / control-character
 -- Keep the SQL body free of semicolons inside comments because the migration
 -- runner splits statements without parsing SQL comments.
--- sl_has_control_character predate V016 and stay; sl_name_invalid is only
--- referenced by the column being recreated, so it drops with it.
+-- sl_has_control_character predate V016 and stay. The name helper is dropped
+-- after the generated column no longer references it.
 
 ALTER TABLE "user"
     DROP COLUMN profile_needs_completion;
