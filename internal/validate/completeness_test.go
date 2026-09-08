@@ -8,14 +8,43 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
+// blankCases are the values whose blankness SQL and Go have to agree on. The
+// interesting ones are the invisible codepoints: PostgreSQL's one-argument
+// btrim() strips ASCII spaces only, so a naive `btrim(name) = ”` in V010 would
+// call a name holding a single NBSP complete while PUT /user/profile refuses
+// every edit to it. The account would be told it is fine and still be unable to
+// submit anything.
+//
+// Zero-width codepoints are deliberately NOT blank on either side: they are not
+// whitespace, and validate.HasControlCharacter is what rejects them on input.
 var blankCases = []struct {
 	name  string
 	value string
 	blank bool
 }{
-	{"empty", "", true}, {"ascii spaces", "   ", true}, {"tab", "\t", true},
-	{"newline", "\n", true}, {"NBSP", "\u00a0", true}, {"ideographic space", "\u3000", true},
-	{"zero width", "\u200b", false}, {"real name", "张三", false}, {"padded", "  张三  ", false},
+	{name: "empty", value: "", blank: true},
+	{name: "ascii spaces", value: "   ", blank: true},
+	{name: "tab", value: "\t", blank: true},
+	{name: "newline", value: "\n", blank: true},
+	{name: "carriage return", value: "\r", blank: true},
+	{name: "vertical tab", value: "\v", blank: true},
+	{name: "form feed", value: "\f", blank: true},
+	{name: "NEL U+0085", value: "\u0085", blank: true},
+	{name: "NBSP U+00A0", value: "\u00a0", blank: true},
+	{name: "ogham space U+1680", value: "\u1680", blank: true},
+	{name: "en quad U+2000", value: "\u2000", blank: true},
+	{name: "em space U+2003", value: "\u2003", blank: true},
+	{name: "line separator U+2028", value: "\u2028", blank: true},
+	{name: "paragraph separator U+2029", value: "\u2029", blank: true},
+	{name: "narrow NBSP U+202F", value: "\u202f", blank: true},
+	{name: "medium mathematical space U+205F", value: "\u205f", blank: true},
+	{name: "ideographic space U+3000", value: "\u3000", blank: true},
+	{name: "mixed whitespace", value: " \t\u00a0\u3000 ", blank: true},
+	{name: "zero-width space U+200B is not blank", value: "\u200b", blank: false},
+	{name: "zero-width non-joiner U+200C is not blank", value: "\u200c", blank: false},
+	{name: "BOM U+FEFF is not blank", value: "\ufeff", blank: false},
+	{name: "real name", value: "张三", blank: false},
+	{name: "padded real name", value: "  张三  ", blank: false},
 }
 
 func TestIsBlank(t *testing.T) {
@@ -28,26 +57,88 @@ func TestIsBlank(t *testing.T) {
 	}
 }
 
+// The four shapes below are the ones the production import actually produced,
+// measured against a dump of the legacy database: a fully dirty row (blank
+// phone/qq/major plus name filled in with the student ID), a row whose name is
+// real but whose phone/qq/major are blank, a row where only the name is wrong,
+// and a clean row.
 func TestIncompleteProfileFields(t *testing.T) {
 	tests := []struct {
-		name                                              string
-		userName, phoneNumber, qqNumber, major, studentID string
-		want                                              []string
+		name        string
+		userName    string
+		phoneNumber string
+		qqNumber    string
+		major       string
+		studentID   string
+		want        []string
 	}{
-		{"clean account reports nothing", "张三", "13800000000", "10001", "软件工程", "B24040001", nil},
-		{"fully dirty import row", "B24040525", "", "", "", "B24040525", []string{"name", "phone_number", "qq_number", "major"}},
-		{"real name but blank contact fields", "李四", "", "", "", "B24040002", []string{"phone_number", "qq_number", "major"}},
-		{"case-insensitive student ID placeholder", "b24040003", "13800000003", "10003", "通信工程", "B24040003", []string{"name"}},
-		{"student ID with surrounding space", " B24040006 ", "13800000006", "10006", "软件工程", "B24040006", []string{"name"}},
-		{"NBSP-only name counts as blank", "\u00a0", "13800000005", "10005", "软件工程", "B24040005", []string{"name"}},
-		{"control character in name is reported", "张三\x01", "13800000008", "10008", "软件工程", "B24040008", []string{"name"}},
-		{"control character in phone is reported", "王五", "13800000009\x1f", "10009", "软件工程", "B24040009", []string{"phone_number"}},
-		{"control character in major is reported", "王五", "13800000010", "10010", "软\u009f件工程", "B24040010", []string{"major"}},
-		{"over-long name is reported", strings.Repeat("名", validate.MaxNameLength+1), "13800000011", "10011", "软件工程", "B24040011", []string{"name"}},
-		{"latin name is reported", "John", "13800000016", "10016", "软件工程", "B24040016", []string{"name"}},
-		{"zero-width name is reported", "\u200b张三", "13800000017", "10017", "软件工程", "B24040017", []string{"name"}},
-		{"interpunct name is complete", "张·三", "13800000018", "10018", "软件工程", "B24040018", nil},
-		{"blank qq_number alone is reported", "王五", "13800000007", "", "软件工程", "B24040007", []string{"qq_number"}},
+		{
+			name: "clean account reports nothing", userName: "张三",
+			phoneNumber: "13800000000", qqNumber: "10001", major: "软件工程", studentID: "B24040001",
+			want: nil,
+		},
+		{
+			name: "fully dirty import row", userName: "B24040525",
+			phoneNumber: "", qqNumber: "", major: "", studentID: "B24040525",
+			want: []string{"name", "phone_number", "qq_number", "major"},
+		},
+		{
+			name: "real name but blank contact fields", userName: "李四",
+			phoneNumber: "", qqNumber: "", major: "", studentID: "B24040002",
+			want: []string{"phone_number", "qq_number", "major"},
+		},
+		{
+			// The name equals the student ID, and the comparison is case-insensitive.
+			// The lowercase form is what the import produced for some rows.
+			name: "only the name is a student ID", userName: "b24040003",
+			phoneNumber: "13800000003", qqNumber: "10003", major: "通信工程", studentID: "B24040003",
+			want: []string{"name"},
+		},
+		{
+			// The import produced both cases. A case-sensitive comparison would
+			// pass this row and leave the placeholder in place.
+			name: "lowercase name matches uppercase student ID", userName: "b24042022",
+			phoneNumber: "13800000004", qqNumber: "10004", major: "软件工程", studentID: "B24042022",
+			want: []string{"name"},
+		},
+		{
+			name: "name is student ID with surrounding space", userName: " B24040006 ",
+			phoneNumber: "13800000006", qqNumber: "10006", major: "软件工程", studentID: "B24040006",
+			want: []string{"name"},
+		},
+		{
+			name: "NBSP-only name counts as blank", userName: "\u00a0",
+			phoneNumber: "13800000005", qqNumber: "10005", major: "软件工程", studentID: "B24040005",
+			want: []string{"name"},
+		},
+		{
+			// A control character is rejected by the profile write path, so the
+			// completion report must expose it rather than hide it.
+			name: "control character in name is reported", userName: "张三\x01",
+			phoneNumber: "13800000008", qqNumber: "10008", major: "软件工程", studentID: "B24040008",
+			want: []string{"name"},
+		},
+		{
+			name: "control character in phone is reported", userName: "王五",
+			phoneNumber: "13800000009\x1f", qqNumber: "10009", major: "软件工程", studentID: "B24040009",
+			want: []string{"phone_number"},
+		},
+		{
+			name: "control character in major is reported", userName: "王五",
+			phoneNumber: "13800000010", qqNumber: "10010", major: "软\u009f件工程", studentID: "B24040010",
+			want: []string{"major"},
+		},
+		{
+			name: "over-long name is reported", userName: strings.Repeat("名", validate.MaxNameLength+1),
+			phoneNumber: "13800000011", qqNumber: "10011", major: "软件工程", studentID: "B24040011",
+			want: []string{"name"},
+		},
+		{
+			// Every NOT NULL banner field the user can fill in is treated alike.
+			name: "blank qq_number alone is reported", userName: "王五",
+			phoneNumber: "13800000007", qqNumber: "", major: "软件工程", studentID: "B24040007",
+			want: []string{"qq_number"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
