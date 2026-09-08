@@ -9,7 +9,7 @@ import (
 )
 
 var blankCases = []struct {
-	name string
+	name  string
 	value string
 	blank bool
 }{
@@ -30,9 +30,9 @@ func TestIsBlank(t *testing.T) {
 
 func TestIncompleteProfileFields(t *testing.T) {
 	tests := []struct {
-		name string
+		name                                              string
 		userName, phoneNumber, qqNumber, major, studentID string
-		want []string
+		want                                              []string
 	}{
 		{"clean account reports nothing", "张三", "13800000000", "10001", "软件工程", "B24040001", nil},
 		{"fully dirty import row", "B24040525", "", "", "", "B24040525", []string{"name", "phone_number", "qq_number", "major"}},
