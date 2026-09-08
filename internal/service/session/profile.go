@@ -102,6 +102,16 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 		present[entry.field] = true
 	}
 
+	// The character rule is name-only: the product accepts Han + interpunct
+	// (frontend realNameSchema), and a name the frontend refuses must not be
+	// stored through an API that bypasses it — otherwise the account lands in
+	// the completion loop the rule exists to break. The shape checks above
+	// already reject blank/over-long/control characters; this rejects any
+	// other character the whitelist excludes.
+	if input.Name != nil && validate.IsInvalidName(*input.Name) {
+		return update, nil, newError(ErrInvalidInput, "name 仅限中文与间隔号（·）", nil)
+	}
+
 	if input.College != nil {
 		college := model.College(strings.TrimSpace(*input.College))
 		if !college.Valid() {

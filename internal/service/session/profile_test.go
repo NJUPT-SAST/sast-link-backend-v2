@@ -146,21 +146,20 @@ func TestUpdateProfileRejectsControlCharacters(t *testing.T) {
 
 // Interior spaces are legitimate in display text and must survive the control
 // character guard; only the edges are trimmed.
-func TestUpdateProfileKeepsInteriorSpaces(t *testing.T) {
+func TestUpdateProfileRejectsInteriorSpaceName(t *testing.T) {
 	service := newRegisterService(t)
-	result, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
+	// A name with interior whitespace is outside the Han + interpunct
+	// character rule (frontend realNameSchema refuses it too), so the write
+	// path must refuse it rather than store a value the completion flag
+	// immediately reports.
+	_, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
 		UserID: 42,
 		Name:   stringPtr("  张 三  "),
 		Intro:  stringPtr("hello world"),
 	})
-	if err != nil {
-		t.Fatalf("UpdateProfile() error = %v", err)
-	}
-	if got := result.Profile.Name; got != "张 三" {
-		t.Fatalf("name = %q, want interior space kept and edges trimmed", got)
-	}
-	if got := result.Profile.Profile.Intro; got == nil || *got != "hello world" {
-		t.Fatalf("intro = %v, want \"hello world\"", got)
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if err == nil || !strings.Contains(err.Error(), "仅限中文") {
+		t.Fatalf("UpdateProfile() error = %v, want the name-rule refusal", err)
 	}
 }
 

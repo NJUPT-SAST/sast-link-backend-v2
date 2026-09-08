@@ -204,7 +204,7 @@ func TestRegisterRegistersDevice(t *testing.T) {
 	_, err := service.Register(context.Background(), RegisterInput{
 		RegisterTicket: "reg_xxx",
 		Password:       "newpassword",
-		Name:           "New User",
+		Name:           "张三",
 		StudentID:      "B24040099",
 		PhoneNumber:    "13800138000",
 		QQNumber:       "10000",

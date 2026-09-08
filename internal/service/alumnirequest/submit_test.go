@@ -75,7 +75,13 @@ func TestSubmitRejectsNameEqualToStudentID(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Submit(name=%q) error = nil, want a refusal", name)
 		}
-		assertInvalidInput(t, err, "student_id")
+		// A student-id-shaped name is refused by the character rule before the
+		// completeness comparison can name it: the message points at the field
+		// and at the fix (a real Chinese name).
+		assertInvalidInput(t, err, "name")
+		if !strings.Contains(err.Error(), "仅限中文") {
+			t.Fatalf("Submit(name=%q) error = %v, want the name-rule message", name, err)
+		}
 	}
 }
 
