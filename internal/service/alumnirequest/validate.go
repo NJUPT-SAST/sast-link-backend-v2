@@ -100,7 +100,7 @@ func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 	// otherwise out-of-set name would provision an account the completion flag
 	// flags the moment it exists.
 	if validate.IsInvalidName(result.name) {
-		return validatedSubmit{}, newError(ErrInvalidInput, "name 仅限中文与间隔号（·）", nil)
+		return validatedSubmit{}, newError(ErrInvalidInput, "输入值非法", nil)
 	}
 
 	// Structural checks for fields that are numeric by convention, so free text

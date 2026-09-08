@@ -121,7 +121,7 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 	// is written, and an administrator's typo must not hand the user a
 	// completion loop.
 	if result.name != nil && validate.IsInvalidName(*result.name) {
-		return validatedUpdate{}, newError(ErrInvalidInput, "name 仅限中文与间隔号（·）", nil)
+		return validatedUpdate{}, newError(ErrInvalidInput, "输入值非法", nil)
 	}
 
 	if input.College != nil {
@@ -381,7 +381,7 @@ func validateCreate(input CreateUserInput, now time.Time) (validatedCreate, erro
 	// name the product refuses would create an account flagged incomplete the
 	// moment it exists.
 	if validate.IsInvalidName(result.name) {
-		return validatedCreate{}, newError(ErrInvalidInput, "name 仅限中文与间隔号（·）", nil)
+		return validatedCreate{}, newError(ErrInvalidInput, "输入值非法", nil)
 	}
 
 	major := ""
