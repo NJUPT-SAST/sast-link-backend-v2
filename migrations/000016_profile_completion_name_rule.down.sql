@@ -1,5 +1,6 @@
 -- Restore V015's generated column: blank / over-long / control-character
--- shapes plus the name = student_id placeholder. sl_profile_is_blank and
+-- Keep the SQL body free of semicolons inside comments because the migration
+-- runner splits statements without parsing SQL comments.
 -- sl_has_control_character predate V016 and stay; sl_name_invalid is only
 -- referenced by the column being recreated, so it drops with it.
 
@@ -30,4 +31,4 @@ COMMENT ON COLUMN "user".profile_needs_completion IS
 CREATE INDEX idx_user_profile_needs_completion
     ON "user"(id) WHERE profile_needs_completion;
 
-DROP FUNCTION sl_name_invalid(text);
+DROP FUNCTION sl_name_invalid(text)
