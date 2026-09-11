@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -142,5 +143,58 @@ func TestTokenBlacklistOutboxRepositoryClaimDueIsMultiInstanceSafe(t *testing.T)
 				t.Fatalf("invalid %s error = %v, want ErrInvalidArgument", invalid.name, err)
 			}
 		})
+	}
+}
+
+// Truncation must land on a rune boundary. The failure text comes from a provider
+// or a driver and routinely carries non-ASCII; a byte-index cut that splits a
+// multi-byte sequence produces invalid UTF-8, which PostgreSQL rejects with
+// "invalid byte sequence for encoding" — so recording the failure would itself
+// fail, and the row would sit in its lease until that lease expired. A transient
+// network error would then turn into a delayed retry for no reason anyone could
+// see in the logs.
+func TestTokenBlacklistOutboxRepositoryFailTruncatesOnARuneBoundary(t *testing.T) {
+	database := setupDatabase(t)
+	outbox := repository.NewTokenBlacklistOutbox(database)
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	entry := model.TokenBlacklistOutbox{ //nolint:gosec // Non-secret fixture row id, not a credential.
+		TokenID:        "outbox-utf8",
+		ExpiresAt:      now.Add(time.Hour),
+		NextDeliveryAt: now.Add(-time.Second),
+	}
+	if err := database.Create(&entry).Error; err != nil {
+		t.Fatalf("create outbox entry: %v", err)
+	}
+	claimed, err := outbox.ClaimDue(context.Background(), now, time.Minute, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimDue() = %#v, %v, want one entry", claimed, err)
+	}
+
+	// Three bytes per rune over a length that is not a multiple of three, so a cut
+	// at byte 1024 lands inside a character.
+	deliveryError := strings.Repeat("错", 700)
+	failed, err := outbox.Fail(context.Background(), claimed[0].ID, *claimed[0].ClaimToken, now,
+		now.Add(5*time.Second), deliveryError)
+	if err != nil || !failed {
+		t.Fatalf("Fail() = %t, %v, want true, nil: a byte-index cut is rejected by PostgreSQL here", failed, err)
+	}
+
+	var stored model.TokenBlacklistOutbox
+	if readErr := database.First(&stored, claimed[0].ID).Error; readErr != nil {
+		t.Fatalf("read failed entry: %v", readErr)
+	}
+	if stored.LastError == nil {
+		t.Fatal("last_error was not recorded")
+	}
+	if !utf8.ValidString(*stored.LastError) {
+		t.Fatalf("last_error holds invalid UTF-8 (%d bytes)", len(*stored.LastError))
+	}
+	if len(*stored.LastError) > 1024 {
+		t.Fatalf("last_error length = %d bytes, want at most 1024", len(*stored.LastError))
+	}
+	// The cap is a ceiling, not a target: a generous cut would satisfy the byte
+	// bound while discarding text that fits.
+	if len(*stored.LastError) < 1021 {
+		t.Fatalf("last_error length = %d bytes, want the full 1024-byte budget used (1021-1024)", len(*stored.LastError))
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -156,5 +157,13 @@ func truncateOutboxDeliveryError(value string) string {
 	if len(value) <= maxOutboxDeliveryErrorLength {
 		return value
 	}
-	return value[:maxOutboxDeliveryErrorLength]
+	// Truncate on a rune boundary, not a byte index: a cut inside a multi-byte
+	// sequence leaves invalid UTF-8, which PostgreSQL rejects with "invalid byte
+	// sequence for encoding", so recording the failure would itself fail and the
+	// row would sit in its lease until it expired.
+	limit := maxOutboxDeliveryErrorLength
+	for limit > 0 && !utf8.ValidString(value[:limit]) {
+		limit--
+	}
+	return value[:limit]
 }
