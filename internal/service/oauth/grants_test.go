@@ -88,3 +88,49 @@ func TestGrantRevokeThrottlesByUserUnderOwnKey(t *testing.T) {
 		t.Fatalf("limiter calls = %v, want one revoke keyed by user", calls)
 	}
 }
+
+// A missing dependency is a wiring fault, not an empty list. Answering 200 with
+// no grants would report "you have authorized nothing" for a service that cannot
+// read the table at all, and the console would look healthy.
+func TestGrantsReportsAMissingRepositoryAsInternal(t *testing.T) {
+	h := newHarness(t)
+	h.service.Authorizations = nil
+
+	_, err := h.service.Grants(context.Background(), 1)
+	oauthErr := oauthError(t, err, ErrorServerError)
+	if oauthErr.Kind != KindInternal {
+		t.Fatalf("Kind = %s, want internal", oauthErr.Kind)
+	}
+}
+
+// grants is a list field: an empty result must serialize as [] rather than null,
+// so no client needs a nil check for the case that carries no information. The
+// fake returns a nil slice, which is what a repository with no rows produces.
+func TestGrantsReturnsAnEmptySliceNotNull(t *testing.T) {
+	h := newHarness(t)
+
+	grants, err := h.service.Grants(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Grants() error = %v", err)
+	}
+	if grants == nil {
+		t.Fatal("Grants() = nil, want an empty non-nil slice so the JSON field is [] and not null")
+	}
+	if len(grants) != 0 {
+		t.Fatalf("len(Grants()) = %d, want 0", len(grants))
+	}
+}
+
+// Same wiring fault as the list: a nil token repository must not read as a
+// successful revoke, or the console reports access as cut while every token
+// stays live.
+func TestRevokeGrantReportsAMissingTokenRepositoryAsInternal(t *testing.T) {
+	h := newHarness(t)
+	h.service.Tokens = nil
+
+	err := h.service.RevokeGrant(context.Background(), 1, 42, "sast-people")
+	oauthErr := oauthError(t, err, ErrorServerError)
+	if oauthErr.Kind != KindInternal {
+		t.Fatalf("Kind = %s, want internal", oauthErr.Kind)
+	}
+}
