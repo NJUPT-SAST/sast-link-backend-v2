@@ -86,7 +86,14 @@ func (r *IdentityRepository) DeleteIdentityGuardingLoginMethod(ctx context.Conte
 			Select("login_email").
 			Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ?", userID).
-			Scan(&loginEmail).Error; err != nil {
+			Take(&loginEmail).Error; err != nil {
+			// Take rather than Scan so a vanished user row surfaces as
+			// ErrRecordNotFound: Scan leaves RowsAffected at 0 without an error, which
+			// would send this path on to report "last login method" for an account that
+			// does not exist.
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
 			return fmt.Errorf("lock user for unbind: %w", err)
 		}
 		if strings.TrimSpace(loginEmail) != "" {
