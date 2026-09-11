@@ -930,7 +930,7 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 		return nil, newError(ErrInternal, "生成 Bind-Ticket 失败", err)
 	}
 	if err := s.BindTicket.SaveBindTicket(ctx, ticket, BindTicketPayload{Email: email, UserID: input.UserID}, verificationTTL); err != nil {
-		return nil, newError(ErrInternal, "保存 Bind-Ticket 失败", err)
+		return nil, newError(ErrDependencyUnavailable, "保存 Bind-Ticket 失败", err)
 	}
 	if err := s.Mailer.SendVerificationCode(ctx, email, code, mailer.VerificationPurposeBindEmail); err != nil {
 		slog.Error("send bind email verification", "email", email, "error", err)
