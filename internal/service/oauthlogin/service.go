@@ -67,6 +67,13 @@ type Service struct {
 	// require a session, so the cap bounds probing of the code space.
 	ExchangeLimiter EndpointLimiter
 
+	// BindLimiter throttles attaching a provider account to the signed-in caller,
+	// keyed on the user rather than the IP: the endpoint is authenticated, so the
+	// subject is known, and every accepted call spends one provider code exchange
+	// against GitHub or Lark. Without it an authenticated client can drive that
+	// exchange in a loop.
+	BindLimiter EndpointLimiter
+
 	Issuer tokenissue.Issuer
 	Clock  auth.Clock
 
@@ -88,21 +95,36 @@ type Service struct {
 	RefreshTTL           time.Duration
 }
 
-// checkLimit applies one per-IP endpoint cap.
+// ipSubject namespaces a caller IP for a limiter bucket, or returns "" when the
+// IP is unknown. An empty subject skips the check rather than putting every
+// unknown caller in one bucket, where one of them could lock out the rest.
+func ipSubject(clientIP string) string {
+	trimmed := strings.TrimSpace(clientIP)
+	if trimmed == "" {
+		return ""
+	}
+	return "ip:" + trimmed
+}
+
+// checkLimit applies one endpoint cap.
 //
 // Fail-open: these limiters bound abuse volume, while PostgreSQL and the
 // fail-closed Redis state this flow consults remain authoritative for every
 // decision that matters; refusing all third-party logins during a Redis blip
 // would take the feature down to protect a counter.
 //
-// An empty clientIP skips the check rather than sharing one bucket, so one
+// subject is already namespaced by the caller — "ip:…" for the unauthenticated
+// endpoints, "user:…" for the authenticated ones — because which identity a
+// bucket keys on is a property of the endpoint, not of this helper.
+//
+// An empty subject skips the check rather than sharing one bucket, so one
 // unknown caller cannot lock out the rest.
-func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, clientIP string) error {
-	subject := strings.TrimSpace(clientIP)
+func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoint, subject string) error {
+	subject = strings.TrimSpace(subject)
 	if limiter == nil || subject == "" {
 		return nil
 	}
-	result, err := limiter.Allow(ctx, endpoint, "ip:"+subject)
+	result, err := limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
 		slog.WarnContext(ctx, "oauth login limiter unavailable, allowing request",
 			"endpoint", endpoint, "error", err)
@@ -118,7 +140,7 @@ func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoi
 func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*AuthorizeResult, error) {
 	// Throttled before the provider is resolved, so a disabled provider's route
 	// cannot serve as an unthrottled probe.
-	if err := s.checkLimit(ctx, s.AuthorizeLimiter, "oauth_login", input.ClientIP); err != nil {
+	if err := s.checkLimit(ctx, s.AuthorizeLimiter, "oauth_login", ipSubject(input.ClientIP)); err != nil {
 		return nil, err
 	}
 	client, err := s.providerClient(input.Provider)
@@ -345,7 +367,7 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 	// Throttled ahead of the empty-code check: probing controls the input, so
 	// rejecting blanks for free would leave the expensive Redis GetDel path
 	// uncapped.
-	if err := s.checkLimit(ctx, s.ExchangeLimiter, "oauth_exchange_code", input.ClientIP); err != nil {
+	if err := s.checkLimit(ctx, s.ExchangeLimiter, "oauth_exchange_code", ipSubject(input.ClientIP)); err != nil {
 		return nil, err
 	}
 	if input.Code == "" {

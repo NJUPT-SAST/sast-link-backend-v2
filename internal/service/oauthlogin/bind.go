@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -26,6 +27,13 @@ func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error)
 	}
 	if input.Code == "" {
 		return nil, newError(ErrInvalidInput, "code 不能为空", nil)
+	}
+	// Throttled before the provider is resolved and before any exchange runs: each
+	// accepted call spends one provider code, so the cap has to sit in front of the
+	// work rather than behind it.
+	if err := s.checkLimit(ctx, s.BindLimiter, "oauth_bind",
+		"user:"+strconv.FormatInt(input.UserID, 10)); err != nil {
+		return nil, err
 	}
 	client, err := s.providerClient(input.Provider)
 	if err != nil {

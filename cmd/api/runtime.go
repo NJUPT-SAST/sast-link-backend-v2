@@ -263,10 +263,12 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	}
 	oauthLoginAuthorizeLimiter := newOAuthLoginLimiter(cfg.RateLimitOAuthLoginRPM, cfg.RateLimitOAuthLoginWindow)
 	oauthLoginExchangeLimiter := newOAuthLoginLimiter(cfg.RateLimitExchangeCodeRPM, cfg.RateLimitExchangeCodeWindow)
+	oauthLoginBindLimiter := newOAuthLoginLimiter(cfg.RateLimitOAuthBindRPM, cfg.RateLimitOAuthBindWindow)
 	oauthLoginService := oauthlogin.Service{
 		Providers:         loginProviders,
 		AuthorizeLimiter:  oauthLoginAuthorizeLimiter,
 		ExchangeLimiter:   oauthLoginExchangeLimiter,
+		BindLimiter:       oauthLoginBindLimiter,
 		Users:             users,
 		Identities:        identities,
 		Clients:           clients,

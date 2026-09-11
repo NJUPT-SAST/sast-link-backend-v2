@@ -216,6 +216,13 @@ type Config struct {
 	// legitimately redeems once, but a shared egress IP multiplies that.
 	RateLimitExchangeCodeRPM    int           `env:"RATE_LIMIT_EXCHANGE_CODE_RPM" envDefault:"300"`
 	RateLimitExchangeCodeWindow time.Duration `env:"RATE_LIMIT_EXCHANGE_CODE_WINDOW" envDefault:"60s"`
+	// Throttles POST /user/identities/github and .../lark per user, not per IP: the
+	// endpoint is authenticated, so the subject is known, and every accepted call
+	// spends one provider code exchange against GitHub or Lark. Lower than the
+	// unauthenticated caps because attaching a binding is a deliberate, infrequent
+	// action rather than a per-session one.
+	RateLimitOAuthBindRPM    int           `env:"RATE_LIMIT_OAUTH_BIND_RPM" envDefault:"60"`
+	RateLimitOAuthBindWindow time.Duration `env:"RATE_LIMIT_OAUTH_BIND_WINDOW" envDefault:"60s"`
 	// Throttles POST /auth/register per Register-Ticket, not per IP: the ticket is
 	// the credential an accepted call spends on one argon2id derivation, and
 	// keying on IP would put a whole campus NAT behind one counter. Ticket
@@ -583,6 +590,10 @@ func (c *Config) validateRateLimits() error {
 		return fmt.Errorf("RATE_LIMIT_EXCHANGE_CODE_RPM must be positive")
 	case c.RateLimitExchangeCodeWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_EXCHANGE_CODE_WINDOW must be at least 1s")
+	case c.RateLimitOAuthBindRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_BIND_RPM must be positive")
+	case c.RateLimitOAuthBindWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_BIND_WINDOW must be at least 1s")
 	case c.RateLimitRegisterAttempts <= 0:
 		return fmt.Errorf("RATE_LIMIT_REGISTER_ATTEMPTS must be positive")
 	case c.RateLimitRegisterWindow < time.Second:
