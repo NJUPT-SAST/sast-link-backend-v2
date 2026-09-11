@@ -21,12 +21,18 @@ type ClientRepository interface {
 	// client's live tokens in the same transaction, returning the access-token
 	// entries that still need revocation delivery plus the count of unrevoked
 	// refresh tokens that were revoked.
+	//
+	// expectedUpdatedAt is required and must be the updated_at of the row the
+	// caller's guards were evaluated against. The repository re-reads the row under
+	// a lock and answers ErrStateConflict when it moved, so a guard can never be
+	// applied to a row other than the one it decided on.
 	UpdateAndRevoke(
 		ctx context.Context,
 		id int64,
 		fields map[string]any,
 		revokeTokens bool,
 		revokedAt time.Time,
+		expectedUpdatedAt time.Time,
 	) ([]model.BlacklistEntry, int64, error)
 	// DeleteAndRevoke permanently removes a client and revokes its live tokens in
 	// the same transaction, returning the access-token entries that still need

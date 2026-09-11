@@ -261,3 +261,16 @@ func jsonEqual(left model.JSONB, right model.JSONB) bool {
 	}
 	return reflect.DeepEqual(leftValue, rightValue)
 }
+
+// currentClientVersion reads a registration's updated_at, the version token
+// UpdateAndRevoke requires. Tests that do not exercise the conflict path pass it
+// so the write proceeds exactly as it did before the guard existed.
+func currentClientVersion(t *testing.T, database *gorm.DB, id int64) time.Time {
+	t.Helper()
+	var client model.OAuthClient
+	if err := database.Select("updated_at").Where("id = ?", id).Take(&client).Error; err != nil {
+		t.Fatalf("read client version for %d: %v", id, err)
+	}
+	return client.UpdatedAt
+}
+
