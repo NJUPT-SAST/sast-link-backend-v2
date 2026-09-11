@@ -451,6 +451,9 @@ func (c *Config) ValidateAPIAuth() error {
 	if err := c.validateAuthStateCache(); err != nil {
 		return err
 	}
+	if err := c.validateRedis(); err != nil {
+		return err
+	}
 	if err := c.validateRetention(); err != nil {
 		return err
 	}
@@ -480,6 +483,9 @@ func (c *Config) ValidateAPIAuth() error {
 		return err
 	}
 	c.TrustedProxies = normalizedProxies
+	if err := validateCORSOrigins(c.CORSAllowedOrigins); err != nil {
+		return err
+	}
 	// Canonicalized here so both consumers of this one value agree: the JWT
 	// manager's iss claim and the base the discovery document concatenates endpoint
 	// URLs onto. Discovery strips a trailing slash while the signer does not, and
@@ -637,6 +643,21 @@ func (c *Config) validateArgon2() error {
 // validateAuthStateCache bounds how long a non-revoking state change stays
 // invisible to the middleware; revocation itself is covered by the tombstone, not
 // by this value.
+// validateRedis requires a Redis password on the API startup path, and only there.
+//
+// Redis holds the only copy of every fail-closed one-time value — verification
+// codes, OAuth state, Register-Ticket, login_code — so an unauthenticated Redis is
+// an unauthenticated path to redeeming a session. The check is deliberately not in
+// Load's shared validate(): cmd/migrate calls Load and never opens a Redis
+// connection, so requiring the variable there would fail a container that has no
+// use for it.
+func (c *Config) validateRedis() error {
+	if strings.TrimSpace(c.RedisSecret) == "" {
+		return fmt.Errorf("REDIS_PASSWORD is required")
+	}
+	return nil
+}
+
 func (c *Config) validateAuthStateCache() error {
 	switch {
 	case c.AuthStateCacheTTL > time.Minute:
@@ -806,6 +827,39 @@ func (c *Config) validateStorage() error {
 // host. The URLs it guards end up in a Location header: a relative value would
 // resolve against this API's own origin, and a non-http scheme would redirect
 // users somewhere a browser should never follow.
+// validateCORSOrigins rejects entries the exact-match CORS middleware can never
+// honor. The middleware compares the Origin header byte for byte, and a browser
+// sends scheme://host[:port] with no path and no trailing slash — so `*`, a
+// trailing slash, a path or a missing scheme all configure an allow-list that
+// silently allows nothing. That failure has no symptom on the server side; it
+// surfaces later as CORS errors in a frontend, attributed to the frontend.
+func validateCORSOrigins(origins []string) error {
+	for _, raw := range origins {
+		origin := strings.TrimSpace(raw)
+		if origin == "" {
+			continue
+		}
+		if origin == "*" {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS must list explicit origins, not %q: the middleware matches the Origin header exactly and never emits a wildcard",
+				origin)
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil {
+			return fmt.Errorf("CORS_ALLOWED_ORIGINS entry %q is not a valid URL", origin)
+		}
+		if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("CORS_ALLOWED_ORIGINS entry %q must be an absolute http(s) origin", origin)
+		}
+		if parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS entry %q must be a bare origin: a browser sends only scheme://host[:port] in the Origin header, so this entry can never match",
+				origin)
+		}
+	}
+	return nil
+}
+
 func isAbsoluteHTTPURL(value string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(value))
 	if err != nil {
@@ -831,8 +885,19 @@ func normalizeTrustedProxies(proxies []string) ([]string, error) {
 			continue
 		}
 		if net.ParseIP(entry) == nil {
-			if _, _, err := net.ParseCIDR(entry); err != nil {
+			_, network, err := net.ParseCIDR(entry)
+			if err != nil {
 				return nil, fmt.Errorf("TRUSTED_PROXIES entry %q is not a valid IP or CIDR", entry)
+			}
+			// A zero-length prefix trusts every peer address. gin then accepts a
+			// caller-supplied X-Forwarded-For from anywhere, so c.ClientIP() becomes
+			// whatever the caller writes: every per-IP rate limit is defeated and every
+			// client_ip audit entry can be forged. Name the consequence rather than
+			// saying "too broad", since the value looks deliberate.
+			if ones, _ := network.Mask.Size(); ones == 0 {
+				return nil, fmt.Errorf(
+					"TRUSTED_PROXIES entry %q trusts every address, which makes ClientIP spoofable and every per-IP limit and client_ip audit entry forgeable",
+					entry)
 			}
 		}
 		normalized = append(normalized, entry)
