@@ -12,7 +12,7 @@ import (
 // StartRedis starts an isolated Redis 8 instance and returns a connected client.
 func StartRedis(t *testing.T) *goredis.Client {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
+	RequireProvider(t)
 
 	ctx := context.Background()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
