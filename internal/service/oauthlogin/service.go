@@ -11,6 +11,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
 )
 
@@ -431,23 +432,9 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 		slog.WarnContext(ctx, "revoke evicted device family failed", "user_id", userID, "device_id", evicted, "error", err)
 		return
 	}
-	if s.Blacklist != nil {
-		jtis := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			// The auth-state cache entry must be deleted so the middleware cannot serve a
-			// stale non-revoked state for a token the DB now says revoked.
-			if entry.ExpiresAt.Sub(now) <= 0 || strings.TrimSpace(entry.TokenID) == "" {
-				continue
-			}
-			jtis = append(jtis, entry.TokenID)
-		}
-		if len(jtis) > 0 {
-			if err := s.Blacklist.DeleteAuthStates(ctx, jtis); err != nil {
-				// The same-transaction outbox row guarantees a worker retry.
-				slog.WarnContext(ctx, "deliver auth-state invalidation, outbox worker will retry", "count", len(jtis), "error", err)
-			}
-		}
-	}
+	// The shared helper applies the same two filters (expired entry, empty JTI) and
+	// the same fail-open log; this path used to carry its own copy of both.
+	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
 	// Drop the displaced record (idempotent): the script already removed the
 	// member, and this closes the gap where a failed Hash delete would leave an
 	// orphan record.
