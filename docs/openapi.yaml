@@ -2638,6 +2638,10 @@ paths:
         （403）：`scopes` 启动时会被断言为规范值，改动会导致下次重启拒绝引导；
         `grant_types` 由 V003 种子值钉死（`authorization_code` + `refresh_token`），
         控制台自身的 OAuth 会话经 refresh grant 续期，且 V003 drift 检测会中止非规范行。
+
+        本接口是**乐观并发写**：上述四道守卫均基于读取到的那一行，写入时仓库在事务内
+        重读该行并比对版本，被并发修改则返回 409（请求未落地），客户端应重新读取后再
+        决定，不要自动重试。
       operationId: adminUpdateOAuthClient
       tags:
         - Admin
@@ -2732,6 +2736,22 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
           description: 资源不存在（404xx）
+        "409":
+          description: |
+            并发冲突（40900）：该注册行在本次请求读取之后、写入之前被其他请求修改，
+            本次更新未落地。四道守卫（内置客户端保护、能力 scope 授予限制、scope 合并、
+            撤销判定）都基于读取到的那一行；判定与写入之间若允许行变动，一个委派 token
+            就能在被授予 `admin:read` 的客户端的回调地址上做手脚。仓库因此在写入事务内
+            `SELECT ... FOR UPDATE` 重读并比对 `updated_at`，不一致即拒绝而不是重新判定
+            ——重判等于替运维人员下一个他没做过的结论。
+
+            客户端行为：重新读取该客户端后再决定，不自动重试。与同码的
+            「OAuth 客户端已存在」区分：本条不是重复项，文案也不同。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StandardEnvelope"
+          headers: {}
       security:
         - bearerAuth: []
     delete:
@@ -2838,6 +2858,11 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
           description: 资源不存在（404xx）
+        "409":
+          description: |
+            并发冲突（40900）：轮换所依据的那一行在写入前被其他请求修改，本次轮换未落地。
+            与更新接口同一套乐观并发语义：轮换同样基于读取到的那一行做前置判定（公开客户端、
+            控制台发起），写入时仓库重读并比对版本。客户端应重新读取后再决定。
       security:
         - bearerAuth: []
   /admin/audit-logs:
