@@ -555,8 +555,6 @@ POST /auth/reset-password
 >
 > **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`GET /oauth/{github,lark}/callback` 另有**独立**的 per-IP 配额（默认 120 次/60s，`RATE_LIMIT_OAUTH_CALLBACK_RPM`）：callback 是公开入口，扫描与 state 重放都打在这里，而 authorize 的配额管不到它，每次无效调用仍要读一次 state 并写一条审计。限流在读取 state **之前**生效，被限流的请求不消费 state、不写审计、不调用 provider。阈值刻意高于其他名额：出口 NAT 后每个用户每次登录只发一次 callback，配额定得太低会一次性锁死整个宿舍或社团；它刹住的是单一来源重放，**挡不住多 IP 分布式洪峰**——后者要靠边缘层，因为每个来源的成本本来就不高。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。三处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 >
-> 回调端点（`/oauth/{github,lark}/callback`）不单独限流：它需要一个有效的一次性 `oauth_state` 才能推进，而该 state 由已限流的授权端点签发。
->
 > **登录 CSRF 防护**（OAuth 2.0 §10.12）：`GET /oauth/{github,lark}` 响应同时下发 `sl_oauth_state` cookie（HttpOnly、SameSite=Lax、值为 `state` 的 SHA-256 摘要、Path/Secure 与 `sl_session` 相同、有效期与 state TTL 一致）。回调要求浏览器携带与 `state` 匹配的该 cookie，缺失或不匹配按 state 无效处理（重定向到错误页）；state 单次消费，回调结束后 cookie 即清除。
 
 ### 2.1 GitHub 登录
@@ -1002,6 +1000,8 @@ GET /user/identities
 > GitHub OAuth App 只能配**一条** callback URL，匹配规则是 host（不含子域）与端口精确相等、请求路径必须位于已注册路径**之下**（官方示例表中，注册 `/path` 时 `/` 会被拒绝）。因此两条回调必须共享一个已注册的父路径：生产上把绑定页放在 `/v2/oauth/bind/{provider}`、与登录回调同处 `/v2/oauth` 之下，注册 `https://link.sast.fun/v2/oauth`；本地则利用 loopback 免端口匹配的例外，注册 `http://127.0.0.1/oauth`。完整配置与 Caddy 分流规则见 `docs/runbooks/caddy-reverse-proxy.md`。
 >
 > 为绑定单独开一个 OAuth App **行不通**：`Bind()` 用 `OAUTH_GITHUB_CLIENT_ID/SECRET` 这一套凭据交换 code，另一个 App 签发的 code 会被拒绝。若要走这条路，需先为绑定增加一组 client 配置项。
+>
+> **限流**：两个绑定端点按**调用者（用户）**限流（`RATE_LIMIT_OAUTH_BIND_RPM`，默认 60 次/60s，fail-open）。限流在解析 provider 与 code 交换**之前**生效：被限流的请求不调用 GitHub / Lark、不消耗 `code`；超限返回 `42900` 并带 `Retry-After`。
 
 ```
 POST /user/identities/lark

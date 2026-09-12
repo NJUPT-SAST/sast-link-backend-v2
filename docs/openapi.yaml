@@ -588,6 +588,14 @@ paths:
             错误以 `?error=<业务码>&error_description=<消息>` 附加在错误页 URL 上
             （GitHub 不可用即 `error=50300`），而不是返回 4xx/5xx。
           headers: {}
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+          description: >-
+            `42900`（带 Retry-After）—— callback 的独立 per-IP 配额，默认 120 次/60s
+            （RATE_LIMIT_OAUTH_CALLBACK_RPM），与 authorize 配额分开计。限流在读取
+            state 之前生效：被限流的请求不消费 state、不写审计、不调用 provider。
+            仅在 OAUTH_LOGIN_ERROR_REDIRECT 为空（失败以信封返回）时可见；配置了
+            错误页时被限流同样以 302 + `error=42900` 呈现。
         "502":
           $ref: "#/components/responses/BadGateway"
           description: >-
@@ -666,6 +674,14 @@ paths:
             错误以 `?error=<业务码>&error_description=<消息>` 附加在错误页 URL 上
             （飞书不可用即 `error=50300`），而不是返回 4xx/5xx。
           headers: {}
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+          description: >-
+            `42900`（带 Retry-After）—— callback 的独立 per-IP 配额，默认 120 次/60s
+            （RATE_LIMIT_OAUTH_CALLBACK_RPM），与 authorize 配额分开计。限流在读取
+            state 之前生效：被限流的请求不消费 state、不写审计、不调用 provider。
+            仅在 OAUTH_LOGIN_ERROR_REDIRECT 为空（失败以信封返回）时可见；配置了
+            错误页时被限流同样以 302 + `error=42900` 呈现。
         "502":
           $ref: "#/components/responses/BadGateway"
           description: >-
@@ -1005,6 +1021,9 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+          description: 绑定过于频繁（42900，带 Retry-After）—— 按调用者（用户）限流，默认 60 次/60s（RATE_LIMIT_OAUTH_BIND_RPM）；限流在解析 provider 之前生效，被限流的请求不消耗 code
         "502":
           $ref: "#/components/responses/BadGateway"
       security:
@@ -1060,6 +1079,9 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
           description: 资源冲突（409xx）
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+          description: 绑定过于频繁（42900，带 Retry-After）—— 按调用者（用户）限流，默认 60 次/60s（RATE_LIMIT_OAUTH_BIND_RPM）；限流在解析 provider 之前生效，被限流的请求不消耗 code
         "502":
           $ref: "#/components/responses/BadGateway"
       security:

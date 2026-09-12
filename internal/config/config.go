@@ -670,6 +670,7 @@ func (c *Config) validateArgon2() error {
 // validateAuthStateCache bounds how long a non-revoking state change stays
 // invisible to the middleware; revocation itself is covered by the tombstone, not
 // by this value.
+
 // validateRedis requires a Redis password on the API startup path, and only there.
 //
 // Redis holds the only copy of every fail-closed one-time value — verification
@@ -854,6 +855,7 @@ func (c *Config) validateStorage() error {
 // host. The URLs it guards end up in a Location header: a relative value would
 // resolve against this API's own origin, and a non-http scheme would redirect
 // users somewhere a browser should never follow.
+
 // validateCORSOrigins rejects entries the exact-match CORS middleware can never
 // honor. The middleware compares the Origin header byte for byte, and a browser
 // sends scheme://host[:port] with no path and no trailing slash — so `*`, a
