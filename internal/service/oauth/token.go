@@ -292,13 +292,23 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	if scopeErr := checkScopeForClient(client, scopes); scopeErr != nil {
 		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
+	// A capability family's refresh token is already clamped to origin+cap, so its
+	// own expiry is the delegation boundary. Clamping the signed access TTL to it
+	// keeps the JWT exp, the persisted row and the reported expires_in inside the
+	// same boundary; the rotation transaction repeats the clamp as a backstop.
+	accessTTL := s.accessTTL()
+	if s.capabilityRefreshLifetime(scopes) > 0 {
+		if remaining := current.ExpiresAt.Sub(s.now()); remaining > 0 && remaining < accessTTL {
+			accessTTL = remaining
+		}
+	}
 	pair, err := s.issuer().Issue(tokenissue.Request{
 		User:       user,
 		Client:     client,
 		Sequence:   current.Sequence + 1,
 		FamilyID:   current.FamilyID,
 		Scopes:     scopes,
-		AccessTTL:  s.accessTTL(),
+		AccessTTL:  accessTTL,
 		RefreshTTL: s.refreshTTL(),
 	})
 	if err != nil {
@@ -448,11 +458,15 @@ func (s Service) signIDToken(
 }
 
 func (s Service) tokenResult(pair *tokenissue.Pair, idToken string) *TokenResult {
+	expiresIn := int(math.Ceil(pair.Access.ExpiresAt.Sub(s.now()).Seconds()))
+	if expiresIn < 0 {
+		expiresIn = 0
+	}
 	return &TokenResult{
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,
 		TokenType:    BearerTokenType,
-		ExpiresIn:    int(math.Ceil(s.accessTTL().Seconds())),
+		ExpiresIn:    expiresIn,
 		Scope:        pair.ScopeClaim,
 		IDToken:      idToken,
 	}
