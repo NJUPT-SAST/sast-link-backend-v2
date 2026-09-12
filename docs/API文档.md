@@ -553,7 +553,7 @@ POST /auth/reset-password
 >
 > **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
 >
-> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。两处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`GET /oauth/{github,lark}/callback` 另有**独立**的 per-IP 配额（默认 120 次/60s，`RATE_LIMIT_OAUTH_CALLBACK_RPM`）：callback 是公开入口，扫描与 state 重放都打在这里，而 authorize 的配额管不到它，每次无效调用仍要读一次 state 并写一条审计。限流在读取 state **之前**生效，被限流的请求不消费 state、不写审计、不调用 provider。阈值刻意高于其他名额：出口 NAT 后每个用户每次登录只发一次 callback，配额定得太低会一次性锁死整个宿舍或社团；它刹住的是单一来源重放，**挡不住多 IP 分布式洪峰**——后者要靠边缘层，因为每个来源的成本本来就不高。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。三处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 >
 > 回调端点（`/oauth/{github,lark}/callback`）不单独限流：它需要一个有效的一次性 `oauth_state` 才能推进，而该 state 由已限流的授权端点签发。
 >
@@ -2183,7 +2183,11 @@ GET /admin/audit-logs
 
 `actor_client_id` 记录**执行**该操作的 OAuth 客户端（行为主体，而非被操作对象——后者在 `resource_id`）。控制台操作记录内置客户端 id，委派调用记录该第三方客户端的 `client_id`，两者据此可区分「管理员亲自操作」与「工具代其操作」。
 
-目前写入该字段的是管理端六个 action、OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`，以及 `/user` 自助面的 `logout` / `change_password` / `update_profile` / `upload_avatar` / `oauth_bind` / `oauth_unbind` / `bind_email_send_code` / `logout_device`（`user:*` 第三方 token 执行时记其 `azp`，控制台会话显式记内置客户端 id）。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
+目前写入该字段的是管理端六个 action、OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`、`/oauth/exchange-code` 的 `oauth_login_exchange`，以及 `/user` 自助面的 `logout` / `change_password` / `update_profile` / `upload_avatar` / `oauth_bind` / `oauth_unbind` / `bind_email_send_code` / `logout_device`（`user:*` 第三方 token 执行时记其 `azp`，控制台会话显式记内置客户端 id）。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码、**第三方 OAuth callback**）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
+
+`oauth_login` 的 callback 是公开未认证入口，因此它的 **成功与失败行 `actor_client_id` 均为 `null`**：没有 OAuth 凭证授权了那次跳转，记内置客户端会把扫描流量伪装成控制台操作。签发内部会话的 `oauth_login_exchange` 才记内置客户端 id。
+
+`oauth_login` 失败行还会带 `detail.failure_stage` 与 `detail.failure_reason`（固定枚举，如 `request_validation`/`missing_code`、`state`/`state_cookie_mismatch`、`provider`/`provider_invalid_grant`）。多个失败原因共用同一个业务码（缺 `code` 与 state 失效都是 `40000`），这两个字段是审计侧区分它们、并把扫描流量与真实回调故障分开的唯一依据；成功行不写这两个字段。
 
 **错误码**：`40000`（参数格式非法 / 时间窗口倒置）、`40100`、`40300`。
 

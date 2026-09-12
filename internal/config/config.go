@@ -210,6 +210,18 @@ type Config struct {
 	// oauth_state key — so it carries the same cap. Fail-open, per PRD §6.0.
 	RateLimitOAuthLoginRPM    int           `env:"RATE_LIMIT_OAUTH_LOGIN_RPM" envDefault:"300"`
 	RateLimitOAuthLoginWindow time.Duration `env:"RATE_LIMIT_OAUTH_LOGIN_WINDOW" envDefault:"60s"`
+	// Throttles the provider callbacks (GET /oauth/{github,lark}/callback) per
+	// caller IP, separately from the authorize endpoints and deliberately tighter.
+	// The callback is public and is what scanners and replay loops hit; the
+	// authorize budget does not bound it, and every invalid call otherwise still
+	// costs a state read and an audit row.
+	//
+	// The default stays well clear of a campus login spike: egress behind one NAT
+	// sends one callback per login, so a tight cap would lock out a whole dorm or
+	// club at once. It brakes a single source, not a distributed flood — that needs
+	// the edge, since each source here is cheap.
+	RateLimitOAuthCallbackRPM    int           `env:"RATE_LIMIT_OAUTH_CALLBACK_RPM" envDefault:"120"`
+	RateLimitOAuthCallbackWindow time.Duration `env:"RATE_LIMIT_OAUTH_CALLBACK_WINDOW" envDefault:"60s"`
 	// Throttles POST /oauth/exchange-code per caller IP. Unauthenticated by
 	// design — redeeming a login_code is how a session is obtained — so without a cap
 	// the code space can be probed for free. Higher than the login cap: one login
@@ -586,6 +598,10 @@ func (c *Config) validateRateLimits() error {
 		return fmt.Errorf("RATE_LIMIT_OAUTH_LOGIN_RPM must be positive")
 	case c.RateLimitOAuthLoginWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_OAUTH_LOGIN_WINDOW must be at least 1s")
+	case c.RateLimitOAuthCallbackRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_CALLBACK_RPM must be positive")
+	case c.RateLimitOAuthCallbackWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_CALLBACK_WINDOW must be at least 1s")
 	case c.RateLimitExchangeCodeRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_EXCHANGE_CODE_RPM must be positive")
 	case c.RateLimitExchangeCodeWindow < time.Second:

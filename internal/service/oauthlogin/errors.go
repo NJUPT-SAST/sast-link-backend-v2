@@ -136,3 +136,94 @@ func withRetryAfter(err error, retryAfter time.Duration) error {
 	serviceErr.RetryAfter = retryAfter
 	return serviceErr
 }
+
+// Callback failure stages and reasons are fixed enums recorded in the audit
+// detail. Several distinct failures share one business code (a missing code and
+// a stale state are both 40000), so without them an incident review cannot tell
+// a scanner sending no parameters from a replayed state or a provider rejection
+// without correlating application logs.
+const (
+	StageRequestValidation = "request_validation"
+	StageState             = "state"
+	StageProvider          = "provider"
+	StageIdentity          = "identity"
+	StageUser              = "user"
+	StageSession           = "session"
+	StageUnknown           = "unknown"
+)
+
+const (
+	ReasonMissingCode             = "missing_code"
+	ReasonMissingState            = "missing_state"
+	ReasonProviderDisabled        = "provider_disabled"
+	ReasonStateNotFound           = "state_not_found"
+	ReasonStateStoreFailed        = "state_store_failed"
+	ReasonStateCookieMissing      = "state_cookie_missing"
+	ReasonStateCookieMismatch     = "state_cookie_mismatch"
+	ReasonProviderMismatch        = "provider_mismatch"
+	ReasonProviderInvalidGrant    = "provider_invalid_grant"
+	ReasonProviderTimeout         = "provider_timeout"
+	ReasonProviderCanceled        = "provider_canceled"
+	ReasonProviderUnavailable     = "provider_unavailable"
+	ReasonForeignTenant           = "foreign_tenant"
+	ReasonIdentityLookupFailed    = "identity_lookup_failed"
+	ReasonUserLookupFailed        = "user_lookup_failed"
+	ReasonUserNotFound            = "user_not_found"
+	ReasonUserDeleted             = "user_deleted"
+	ReasonLoginCodeStoreFailed    = "login_code_store_failed"
+	ReasonRegistrationStateFailed = "registration_state_failed"
+	ReasonUnknown                 = "unknown"
+)
+
+// failureTag attaches a fixed audit stage/reason (and the provider-side account
+// once it is known) to a callback error, without changing its Kind or business
+// code. The HTTP layer never sees these fields; they exist for the audit row.
+type failureTag struct {
+	Stage      string
+	Reason     string
+	ProviderID string
+	Err        error
+}
+
+func (e *failureTag) Error() string {
+	if e == nil || e.Err == nil {
+		return "oauthlogin: callback failure"
+	}
+	return e.Err.Error()
+}
+
+func (e *failureTag) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// tagCallbackFailure wraps err with the audit stage and reason for one callback
+// failure step. A nil error is returned unchanged so callers can wrap inline.
+func tagCallbackFailure(stage, reason string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &failureTag{Stage: stage, Reason: reason, Err: err}
+}
+
+// tagCallbackFailureWithProvider is tagCallbackFailure once the provider
+// exchange succeeded, so the audit row names the provider-side account.
+func tagCallbackFailureWithProvider(stage, reason, providerID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &failureTag{Stage: stage, Reason: reason, ProviderID: providerID, Err: err}
+}
+
+// failureDetail extracts the audit stage/reason/provider id, defaulting to the
+// unknown stage and reason so the fields are always present on a failed
+// callback row.
+func failureDetail(err error) (stage, reason, providerID string) {
+	var tag *failureTag
+	if errors.As(err, &tag) {
+		return tag.Stage, tag.Reason, tag.ProviderID
+	}
+	return StageUnknown, ReasonUnknown, ""
+}

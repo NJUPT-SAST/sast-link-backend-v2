@@ -78,6 +78,28 @@ func TestValidateAPIAuthRejectsBadRetentionSettings(t *testing.T) {
 	}
 }
 
+// The provider callback carries its own cap, separate from the authorize
+// endpoints it shares a shape with: it is the public endpoint scanners hit.
+func TestValidateAPIAuthRejectsBadOAuthCallbackRateLimit(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"RATE_LIMIT_OAUTH_CALLBACK_RPM", "0", "RATE_LIMIT_OAUTH_CALLBACK_RPM must be positive"},
+		{"RATE_LIMIT_OAUTH_CALLBACK_WINDOW", "500ms", "RATE_LIMIT_OAUTH_CALLBACK_WINDOW must be at least 1s"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateAPIAuthRejectsBadDeviceRateLimit(t *testing.T) {
 	for _, test := range []struct{ key, value, want string }{
 		{"RATE_LIMIT_DEVICE_RPM", "0", "RATE_LIMIT_DEVICE_RPM must be positive"},

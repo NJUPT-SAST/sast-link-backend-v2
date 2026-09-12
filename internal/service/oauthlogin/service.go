@@ -63,6 +63,11 @@ type Service struct {
 	// AuthorizeLimiter throttles the unauthenticated provider-login endpoints per
 	// IP; each call writes one oauth_state key.
 	AuthorizeLimiter EndpointLimiter
+	// CallbackLimiter throttles provider callbacks per IP. The callback is a public
+	// endpoint that scanners and replay loops hit; without a cap of its own every
+	// invalid call still consumes state and writes an audit row, and the authorize
+	// budget does not cover it.
+	CallbackLimiter EndpointLimiter
 	// ExchangeLimiter throttles login_code redemption per IP; the endpoint cannot
 	// require a session, so the cap bounds probing of the code space.
 	ExchangeLimiter EndpointLimiter
@@ -173,12 +178,20 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 // Callback validates the provider callback and splits into the login branch or
 // the registration branch.
 func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
+	// Throttled before any state is consumed: the point of the cap is to keep an
+	// invalid-callback flood from spending state and audit writes.
+	if err := s.checkLimit(ctx, s.CallbackLimiter, "oauth_login_callback", ipSubject(input.ClientIP)); err != nil {
+		return nil, err
+	}
 	result, err := s.callback(ctx, input)
 	if err != nil {
 		// Audit failed callbacks too — they are the events an incident review wants
 		// when someone drives a stolen or replayed state at the endpoint; the success
-		// legs audit themselves.
-		s.auditLogin(ctx, nil, input, false, auditErrorCode(err), "")
+		// legs audit themselves. The stage and reason make a scanner sending no
+		// parameters distinguishable from a replayed state or a provider rejection,
+		// which one shared business code cannot express.
+		stage, reason, providerID := failureDetail(err)
+		s.auditLogin(ctx, nil, input, false, auditErrorCode(err), providerID, stage, reason)
 		return nil, err
 	}
 	return result, nil
@@ -187,7 +200,7 @@ func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackRe
 func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
 	client, err := s.providerClient(input.Provider)
 	if err != nil {
-		return nil, err
+		return nil, tagCallbackFailure(StageRequestValidation, ReasonProviderDisabled, err)
 	}
 
 	// Cancelling on the provider's page is a third outcome, not a failure: GitHub
@@ -200,7 +213,8 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		if input.State != "" {
 			payload, found, consumeErr := s.States.ConsumeOAuthState(ctx, input.State)
 			if consumeErr != nil {
-				return nil, newError(ErrDependencyUnavailable, "读取 OAuth state 失败", consumeErr)
+				return nil, tagCallbackFailure(StageState, ReasonStateStoreFailed,
+					newError(ErrDependencyUnavailable, "读取 OAuth state 失败", consumeErr))
 			}
 			// The stored redirect is never empty, but a spent or forged state reports
 			// not-found and falls back to the default; a state issued for the other
@@ -216,19 +230,23 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		}, nil
 	}
 	if input.Code == "" {
-		return nil, newError(ErrInvalidInput, "code 不能为空", nil)
+		return nil, tagCallbackFailure(StageRequestValidation, ReasonMissingCode,
+			newError(ErrInvalidInput, "code 不能为空", nil))
 	}
 	if input.State == "" {
-		return nil, newError(ErrStateInvalid, "state 不能为空", nil)
+		return nil, tagCallbackFailure(StageRequestValidation, ReasonMissingState,
+			newError(ErrStateInvalid, "state 不能为空", nil))
 	}
 	// The state is consumed before the provider is called, so a replayed callback
 	// cannot even reach the exchange.
 	statePayload, found, err := s.States.ConsumeOAuthState(ctx, input.State)
 	if err != nil {
-		return nil, newError(ErrDependencyUnavailable, "读取 OAuth state 失败", err)
+		return nil, tagCallbackFailure(StageState, ReasonStateStoreFailed,
+			newError(ErrDependencyUnavailable, "读取 OAuth state 失败", err))
 	}
 	if !found {
-		return nil, newError(ErrStateInvalid, "state 无效或已过期", nil)
+		return nil, tagCallbackFailure(StageState, ReasonStateNotFound,
+			newError(ErrStateInvalid, "state 无效或已过期", nil))
 	}
 	// Login CSRF (OAuth 2.0 §10.12): the state alone proves somebody started a
 	// login, not that the browser completing it is the one that did. The digest
@@ -237,17 +255,24 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 	// handing it a login_code or registration_state would plant the attacker's
 	// provider identity into the victim's session.
 	if !stateDigestMatches(input.State, input.StateCookie) {
-		return nil, newError(ErrStateInvalid, "state 与发起授权的浏览器不匹配", nil)
+		reason := ReasonStateCookieMismatch
+		if strings.TrimSpace(input.StateCookie) == "" {
+			reason = ReasonStateCookieMissing
+		}
+		return nil, tagCallbackFailure(StageState, reason,
+			newError(ErrStateInvalid, "state 与发起授权的浏览器不匹配", nil))
 	}
 	// A state issued for one provider must not be redeemable at another's
 	// callback, which would pair a GitHub state with a Lark identity.
 	if statePayload.Provider != input.Provider {
-		return nil, newError(ErrStateInvalid, "state 与回调 provider 不匹配", nil)
+		return nil, tagCallbackFailure(StageState, ReasonProviderMismatch,
+			newError(ErrStateInvalid, "state 与回调 provider 不匹配", nil))
 	}
 
 	identity, err := client.Exchange(ctx, input.Code, "")
 	if err != nil {
-		return nil, providerError(err)
+		stage, reason, outcome := providerFailureOutcome(err)
+		return nil, tagCallbackFailure(stage, reason, outcome)
 	}
 
 	// Taken from the state rather than re-resolved: Authorize validated it before
@@ -257,7 +282,8 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 
 	existing, err := s.Identities.FindByProviderID(ctx, input.Provider, identity.ProviderID)
 	if err != nil && !isNotFound(err) {
-		return nil, newError(ErrInternal, "查询第三方绑定失败", err)
+		return nil, tagCallbackFailureWithProvider(StageIdentity, ReasonIdentityLookupFailed, identity.ProviderID,
+			newError(ErrInternal, "查询第三方绑定失败", err))
 	}
 	if existing == nil {
 		return s.registrationBranch(ctx, input, identity, redirect)
@@ -279,13 +305,17 @@ func (s Service) loginBranch(
 		if isNotFound(err) {
 			// The binding outlived its user row; nothing the caller can fix, and it must
 			// not mint a login_code for a missing account.
-			return nil, newError(ErrUserNotFound, "绑定对应的用户不存在", err)
+			return nil, tagCallbackFailureWithProvider(StageUser, ReasonUserNotFound, identity.ProviderID,
+				newError(ErrUserNotFound, "绑定对应的用户不存在", err))
 		}
-		return nil, newError(ErrInternal, "查询用户失败", err)
+		return nil, tagCallbackFailureWithProvider(StageUser, ReasonUserLookupFailed, identity.ProviderID,
+			newError(ErrInternal, "查询用户失败", err))
 	}
 	if user.State == model.UserStateDeleted {
-		s.auditLogin(ctx, &user.ID, input, false, ErrUserDeleted.Code, identity.ProviderID)
-		return nil, newError(ErrUserDeleted, "账号已注销", nil)
+		// Audited by Callback's unified failure path, which reads the tag below, so
+		// this case does not write its own row and cannot double-log the event.
+		return nil, tagCallbackFailureWithProvider(StageUser, ReasonUserDeleted, identity.ProviderID,
+			newError(ErrUserDeleted, "账号已注销", nil))
 	}
 
 	// Credential refresh is best effort: failing the login over a metadata write
@@ -298,13 +328,15 @@ func (s Service) loginBranch(
 
 	code, err := randomToken(loginCodePrefix)
 	if err != nil {
-		return nil, newError(ErrInternal, "生成 login_code 失败", err)
+		return nil, tagCallbackFailureWithProvider(StageSession, ReasonLoginCodeStoreFailed, identity.ProviderID,
+			newError(ErrInternal, "生成 login_code 失败", err))
 	}
 	if err := s.LoginCodes.SaveLoginCode(ctx, code, user.ID, s.loginCodeTTL()); err != nil {
-		return nil, newError(ErrDependencyUnavailable, "保存 login_code 失败", err)
+		return nil, tagCallbackFailureWithProvider(StageSession, ReasonLoginCodeStoreFailed, identity.ProviderID,
+			newError(ErrDependencyUnavailable, "保存 login_code 失败", err))
 	}
 
-	s.auditLogin(ctx, &user.ID, input, true, 0, identity.ProviderID)
+	s.auditLogin(ctx, &user.ID, input, true, 0, identity.ProviderID, "", "")
 	return &CallbackResult{Bound: true, LoginCode: code, Redirect: redirect}, nil
 }
 
@@ -318,7 +350,8 @@ func (s Service) registrationBranch(
 ) (*CallbackResult, error) {
 	state, err := randomToken(registrationStatePrefix)
 	if err != nil {
-		return nil, newError(ErrInternal, "生成 registration_state 失败", err)
+		return nil, tagCallbackFailureWithProvider(StageSession, ReasonRegistrationStateFailed, identity.ProviderID,
+			newError(ErrInternal, "生成 registration_state 失败", err))
 	}
 	payload := RegistrationPayload{
 		Provider:     input.Provider,
@@ -333,10 +366,11 @@ func (s Service) registrationBranch(
 		TokenExpiresAt: identity.TokenExpiresAt,
 	}
 	if err := s.RegistrationState.SaveRegistrationState(ctx, state, payload, s.registrationStateTTL()); err != nil {
-		return nil, newError(ErrDependencyUnavailable, "保存 registration_state 失败", err)
+		return nil, tagCallbackFailureWithProvider(StageSession, ReasonRegistrationStateFailed, identity.ProviderID,
+			newError(ErrDependencyUnavailable, "保存 registration_state 失败", err))
 	}
 
-	s.auditLogin(ctx, nil, input, true, 0, identity.ProviderID)
+	s.auditLogin(ctx, nil, input, true, 0, identity.ProviderID, "", "")
 	return &CallbackResult{
 		Bound:             false,
 		RegistrationState: state,
@@ -354,7 +388,7 @@ func (s Service) ExchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 	if err != nil {
 		// The user is unknown on most failure legs (the code may name no one), so the
 		// subject stays nil; the action and outcome are what matter.
-		if auditErr := s.audit(ctx, nil, "oauth_login_exchange", "session", nil, false, auditErrorCode(err), "",
+		if auditErr := s.audit(ctx, nil, "oauth_login_exchange", "session", nil, false, auditErrorCode(err), s.InternalClientID,
 			input.ClientIP, input.UserAgent, nil); auditErr != nil {
 			logAuditFailure(ctx, "oauth_login_exchange", auditErr)
 		}
@@ -413,7 +447,7 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 		return nil, newError(ErrInternal, "保存 Token 失败", err)
 	}
 
-	if auditErr := s.audit(ctx, &user.ID, "oauth_login_exchange", "session", nil, true, 0, "",
+	if auditErr := s.audit(ctx, &user.ID, "oauth_login_exchange", "session", nil, true, 0, s.InternalClientID,
 		input.ClientIP, input.UserAgent, map[string]any{"user_id": user.ID}); auditErr != nil {
 		slog.ErrorContext(ctx, "audit oauth login exchange", "user_id", user.ID, "error", auditErr)
 	}
@@ -465,7 +499,7 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, true, 0, "", clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
+	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, true, 0, s.InternalClientID, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
 		slog.ErrorContext(ctx, "audit evict device", "user_id", userID, "device_id", evicted, "error", auditErr)
 	}
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // Bind attaches a provider account to the authenticated caller.
@@ -167,7 +168,8 @@ func (s Service) auditBind(
 		"provider":    string(input.Provider),
 		"provider_id": providerID,
 	}
-	if err := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, success, errCode, input.ActorClientID,
+	if err := s.audit(ctx, &input.UserID, "oauth_bind", "identity", nil, success, errCode,
+		shared.ActorClientID(input.ActorClientID, s.InternalClientID),
 		input.ClientIP, input.UserAgent, detail); err != nil {
 		logAuditFailure(ctx, "oauth_bind", err)
 	}
