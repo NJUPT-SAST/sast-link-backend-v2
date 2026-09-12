@@ -858,8 +858,9 @@ func (c *Config) validateStorage() error {
 
 // validateCORSOrigins rejects entries the exact-match CORS middleware can never
 // honor. The middleware compares the Origin header byte for byte, and a browser
-// sends scheme://host[:port] with no path and no trailing slash — so `*`, a
-// trailing slash, a path or a missing scheme all configure an allow-list that
+// sends scheme://host[:port] with no path and no trailing slash — so `*`,
+// uppercase text, a trailing dot, a trailing slash, a path or a missing scheme
+// all configure an allow-list that
 // silently allows nothing. That failure has no symptom on the server side; it
 // surfaces later as CORS errors in a frontend, attributed to the frontend.
 func validateCORSOrigins(origins []string) error {
@@ -873,6 +874,11 @@ func validateCORSOrigins(origins []string) error {
 				"CORS_ALLOWED_ORIGINS must list explicit origins, not %q: the middleware matches the Origin header exactly and never emits a wildcard",
 				origin)
 		}
+		if origin != strings.ToLower(origin) {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS entry %q must be lowercase: browsers send the Origin header with a lowercase scheme and host, so this entry can never match",
+				origin)
+		}
 		parsed, err := url.Parse(origin)
 		if err != nil {
 			return fmt.Errorf("CORS_ALLOWED_ORIGINS entry %q is not a valid URL", origin)
@@ -883,6 +889,11 @@ func validateCORSOrigins(origins []string) error {
 		if parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
 			return fmt.Errorf(
 				"CORS_ALLOWED_ORIGINS entry %q must be a bare origin: a browser sends only scheme://host[:port] in the Origin header, so this entry can never match",
+				origin)
+		}
+		if strings.HasSuffix(parsed.Host, ".") {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS entry %q ends in a dot: browsers send origins without the FQDN trailing dot, so this entry can never match",
 				origin)
 		}
 	}

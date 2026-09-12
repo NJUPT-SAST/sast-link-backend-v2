@@ -100,6 +100,26 @@ func TestValidateAPIAuthRejectsBadOAuthCallbackRateLimit(t *testing.T) {
 	}
 }
 
+func TestValidateAPIAuthRejectsBadOAuthBindRateLimit(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"RATE_LIMIT_OAUTH_BIND_RPM", "0", "RATE_LIMIT_OAUTH_BIND_RPM must be positive"},
+		{"RATE_LIMIT_OAUTH_BIND_WINDOW", "500ms", "RATE_LIMIT_OAUTH_BIND_WINDOW must be at least 1s"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateAPIAuthRejectsBadDeviceRateLimit(t *testing.T) {
 	for _, test := range []struct{ key, value, want string }{
 		{"RATE_LIMIT_DEVICE_RPM", "0", "RATE_LIMIT_DEVICE_RPM must be positive"},
@@ -955,6 +975,8 @@ func TestValidateAPIAuthRejectsUnmatchableCORSOrigins(t *testing.T) {
 		{name: "path", value: "https://app.example.test/callback"},
 		{name: "missing scheme", value: "app.example.test"},
 		{name: "query string", value: "https://app.example.test?x=1"},
+		{name: "uppercase host", value: "https://App.Example.test"},
+		{name: "FQDN trailing dot", value: "https://app.example.test."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
