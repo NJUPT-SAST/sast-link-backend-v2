@@ -97,6 +97,13 @@ func mapServiceError(err error) error {
 		status = http.StatusConflict
 		// This surface names the exact duplicate, unlike the canonical 40900.
 		message = "OAuth 客户端已存在"
+	case adminclient.KindStateConflict:
+		// Also 409, but a different outcome from the duplicate above: nothing was
+		// created or matched, the row changed under the request. The service's copy
+		// names the retry, so it is returned verbatim rather than reusing
+		// "OAuth 客户端已存在", which would send the operator looking for a duplicate.
+		status = http.StatusConflict
+		message = serviceErr.Message
 	case adminclient.KindProtected:
 		// 403 rather than 400: the request is well formed and the administrator is
 		// authorized, but the built-in client is not theirs to disable; the message

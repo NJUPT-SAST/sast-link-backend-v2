@@ -32,7 +32,7 @@ func (h Handler) ListUsers(c *gin.Context) {
 	// Tri-state: absent means "no filter". An unrecognized value is a 400 rather
 	// than false, since needs_completion=ture would otherwise list the healthy
 	// accounts and look like it worked.
-	needsCompletion, err := parseOptionalBool(c.Query("needs_completion"))
+	needsCompletion, err := webutil.ParseOptionalBool(c.Query("needs_completion"))
 	if err != nil {
 		response.Error(c, badRequest())
 		return

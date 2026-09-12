@@ -76,24 +76,32 @@ func (s Service) resolveRedirect(requested string) (string, error) {
 // KindInvalidState with a genuinely expired state, whose default string would
 // send the user looking for a fault in a valid state.
 func providerError(err error) error {
+	_, _, outcome := providerFailureOutcome(err)
+	return outcome
+}
+
+// providerFailureOutcome is the single source of truth for an outbound provider
+// failure: the audit stage/reason plus the client-visible outcome, so the two can
+// never disagree about which case was hit.
+func providerFailureOutcome(err error) (stage, reason string, outcome error) {
 	switch {
 	case errors.Is(err, provider.ErrForeignTenant):
-		return newError(ErrForeignTenant, "仅限 SAST 成员登录", err)
+		return StageProvider, ReasonForeignTenant, newError(ErrForeignTenant, "仅限 SAST 成员登录", err)
 	case errors.Is(err, provider.ErrInvalidGrant):
 		// The only input the user controls is the code their browser carried, so
 		// this is a restart-the-login outcome, not a server fault.
-		return newDisplayError(ErrStateInvalid, "第三方授权码无效或已过期", err)
+		return StageProvider, ReasonProviderInvalidGrant, newDisplayError(ErrStateInvalid, "第三方授权码无效或已过期", err)
 	case errors.Is(err, context.DeadlineExceeded):
 		// The provider accepted the connection and then did not answer within
 		// httpIOTimeout — a single slow round trip is not evidence the provider is
 		// down, so this is a restartable failure.
-		return newDisplayError(ErrStateInvalid, "连接第三方登录服务超时", err)
+		return StageProvider, ReasonProviderTimeout, newDisplayError(ErrStateInvalid, "连接第三方登录服务超时", err)
 	case errors.Is(err, context.Canceled):
 		// The caller went away mid-exchange; reporting a provider outage would blame
 		// the provider for a client disconnect.
-		return newError(ErrDependencyUnavailable, "第三方授权请求被中断", err)
+		return StageProvider, ReasonProviderCanceled, newError(ErrDependencyUnavailable, "第三方授权请求被中断", err)
 	default:
-		return newError(ErrProviderUnavailable, "第三方服务暂时不可用", err)
+		return StageProvider, ReasonProviderUnavailable, newError(ErrProviderUnavailable, "第三方服务暂时不可用", err)
 	}
 }
 
@@ -185,10 +193,12 @@ func (s Service) audit(
 		UserAgent:  userAgentPtr,
 		Success:    &successValue,
 		ErrCode:    errCodePtr,
-		// The acting client, or the built-in console client for an internal
-		// session: an authenticated bind is not an unauthenticated action, so
-		// NULL here must stay unambiguous.
-		ActorClientID: shared.NullableString(shared.ActorClientID(actorClientID, s.InternalClientID)),
+		// The actor is resolved by the caller: it must pass an explicit client id
+		// for an authenticated action (the azp, or the built-in console client when
+		// the session has none) and an empty value for an unauthenticated one. A
+		// default applied here would record anonymous endpoint traffic as console
+		// activity, which is exactly the ambiguity NULL exists to prevent.
+		ActorClientID: shared.NullableString(strings.TrimSpace(actorClientID)),
 		CreatedAt:     s.now(),
 	})
 }
@@ -210,7 +220,13 @@ func identityJSONB(ctx context.Context, data map[string]any) model.JSONB {
 
 // auditLogin records an oauth_login attempt. The detail names the provider and
 // the provider-side account so a support request can be traced without joining
-// against the identities table.
+// against the identities table; the stage and reason fields are set on failures,
+// so the several outcomes that share one business code stay distinguishable.
+//
+// The actor is deliberately NULL: /oauth/*/callback is an unauthenticated public
+// endpoint, so no OAuth credential authorized the call. Recording the built-in
+// client here made anonymous scanner traffic indistinguishable from console
+// activity.
 func (s Service) auditLogin(
 	ctx context.Context,
 	userID *int64,
@@ -218,10 +234,22 @@ func (s Service) auditLogin(
 	success bool,
 	errCode int,
 	providerID string,
+	stage string,
+	reason string,
 ) {
 	detail := map[string]any{
 		"provider":    string(input.Provider),
 		"provider_id": providerID,
+	}
+	if !success {
+		if stage == "" {
+			stage = StageUnknown
+		}
+		if reason == "" {
+			reason = ReasonUnknown
+		}
+		detail["failure_stage"] = stage
+		detail["failure_reason"] = reason
 	}
 	if err := s.audit(ctx, userID, "oauth_login", "session", nil, success, errCode, "",
 		input.ClientIP, input.UserAgent, detail); err != nil {

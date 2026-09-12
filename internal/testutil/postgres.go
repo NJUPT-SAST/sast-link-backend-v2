@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -19,24 +21,43 @@ import (
 	"gorm.io/gorm"
 )
 
-// RequireProvider calls t.Fatal if the Docker provider is not healthy.
-// Use this in TestMain or environment-guarded helpers for environments where
-// skipped integration tests should surface as explicit failures.
+// RequireProvider fails the test when the container runtime is unavailable or
+// unhealthy.
+//
+// It is deliberately not testcontainers.SkipIfProviderIsNotHealthy, which skips:
+// a skipped test reports as a passing package, and the packages that reach this
+// helper hold this repo's entire database surface — family revocation, the
+// concurrent-refresh race, migration down, the folded occupancy guards. A silent
+// skip on a machine without Docker turns `go test ./...` green over assertions
+// that never ran, which is worse than a red suite.
+//
+// SKIP_INTEGRATION_TESTS=1 is the escape hatch. Skipping has to be something the
+// operator asked for, not something that quietly happened.
 func RequireProvider(t *testing.T) {
 	t.Helper()
+	if strings.TrimSpace(os.Getenv(skipIntegrationEnv)) != "" {
+		t.Skipf("%s is set: container-backed assertions are not running", skipIntegrationEnv)
+	}
 	provider, err := testcontainers.NewDockerProvider()
 	if err != nil {
-		t.Fatalf("Testcontainers Docker provider is required but unavailable: %v", err)
+		t.Fatalf("Docker is required for this package's integration tests (set %s=1 to skip them explicitly): %v",
+			skipIntegrationEnv, err)
 	}
 	if err := provider.Health(context.Background()); err != nil {
-		t.Fatalf("Testcontainers Docker health check failed: %v", err)
+		t.Fatalf("Docker health check failed for this package's integration tests (set %s=1 to skip them explicitly): %v",
+			skipIntegrationEnv, err)
 	}
 }
+
+// skipIntegrationEnv names the variable that opts out of the container-backed
+// suites. Naming it in one place keeps the three call sites and the failure
+// messages in step.
+const skipIntegrationEnv = "SKIP_INTEGRATION_TESTS"
 
 // StartPostgres starts an isolated PostgreSQL 16 database and returns its URL.
 func StartPostgres(t *testing.T) string {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
+	RequireProvider(t)
 
 	ctx := context.Background()
 	container, err := tcpostgres.Run(
@@ -158,7 +179,7 @@ func startSharedPostgres() (string, *sql.DB, error) {
 // container boot — happens once per process instead of once per test.
 func SharedPostgresURL(t *testing.T) string {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
+	RequireProvider(t)
 
 	baseURL, admin, err := startSharedPostgres()
 	if err != nil {

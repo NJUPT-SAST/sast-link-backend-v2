@@ -238,3 +238,63 @@ func TestIdentityRepositoryDeleteFreesOtherMailSlot(t *testing.T) {
 		t.Fatalf("CreateWithinLimit() after unbind error = %v, want a freed slot", err)
 	}
 }
+
+// The guard reads the user's login_email to decide whether the account keeps a way
+// to sign in. A lookup that silently returns an empty string for a missing row
+// (Scan reports RowsAffected=0 without an error) would send this path on to report
+// "last login method" for an account that does not exist — a 400 describing a rule
+// that was never in play, where the truth is that the row is gone.
+func TestIdentityRepositoryDeleteGuardingLoginMethodRequiresTheUserRow(t *testing.T) {
+	database := setupDatabase(t)
+	identityRepository := repository.NewIdentity(database)
+
+	err := identityRepository.DeleteIdentityGuardingLoginMethod(context.Background(), 1, 999999)
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("DeleteIdentityGuardingLoginMethod(missing user) error = %v, want ErrNotFound", err)
+	}
+}
+
+// V001's trigger refuses a user row whose login_email is not on an allowed domain,
+// so every real account has one: the "last login method" branch is unreachable in
+// practice and the ordinary path is a plain delete.
+func TestIdentityRepositoryDeleteGuardingLoginMethodAllowsWhenLoginEmailExists(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	identityRepository := repository.NewIdentity(database)
+	user := createUserWithProfile(t, userRepository, "unbind@njupt.edu.cn")
+
+	identity := &model.Identity{UserID: user.ID, Provider: model.LoginMethodGitHub, ProviderID: "gh-1"}
+	if err := identityRepository.CreateWithinLimit(context.Background(), identity, 2); err != nil {
+		t.Fatalf("CreateWithinLimit() error = %v", err)
+	}
+
+	if err := identityRepository.DeleteIdentityGuardingLoginMethod(context.Background(), identity.ID, user.ID); err != nil {
+		t.Fatalf("DeleteIdentityGuardingLoginMethod() error = %v", err)
+	}
+	if _, err := identityRepository.FindByIDAndUser(context.Background(), identity.ID, user.ID); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("identity still present after guarded delete: %v", err)
+	}
+}
+
+// The guard must not become a way to delete someone else's binding: the ownership
+// predicate has to apply to the delete itself, not only to the read that precedes it.
+func TestIdentityRepositoryDeleteGuardingLoginMethodIsOwnerScoped(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	identityRepository := repository.NewIdentity(database)
+	owner := createUserWithProfile(t, userRepository, "guard-owner@njupt.edu.cn")
+	stranger := createUserWithProfile(t, userRepository, "guard-stranger@njupt.edu.cn")
+
+	theirs := &model.Identity{UserID: stranger.ID, Provider: model.LoginMethodGitHub, ProviderID: "gh-2"}
+	if err := identityRepository.CreateWithinLimit(context.Background(), theirs, 2); err != nil {
+		t.Fatalf("CreateWithinLimit() error = %v", err)
+	}
+
+	err := identityRepository.DeleteIdentityGuardingLoginMethod(context.Background(), theirs.ID, owner.ID)
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("DeleteIdentityGuardingLoginMethod(foreign) error = %v, want ErrNotFound", err)
+	}
+	if _, err := identityRepository.FindByIDAndUser(context.Background(), theirs.ID, stranger.ID); err != nil {
+		t.Fatalf("another account's binding was deleted: %v", err)
+	}
+}

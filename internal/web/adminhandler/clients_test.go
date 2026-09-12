@@ -563,3 +563,31 @@ func TestDeleteClientRejectsBadPathID(t *testing.T) {
 		t.Fatalf("DeleteClient called %d times on a bad path id, want 0", service.deleteCalls)
 	}
 }
+
+// A registration that moved under the request is a 409 the operator retries, not
+// a 200 that reports someone else's edit as their own. The message names the
+// retry: the canonical 40900 copy ("OAuth 客户端已存在") would send them looking
+// for a duplicate that does not exist.
+func TestUpdateClientReportsAConcurrentChangeAsConflict(t *testing.T) {
+	service := &fakeClients{updateErr: adminclient.ErrConcurrentUpdate}
+	router := newRouter(t, service)
+
+	recorder := doRequest(t, router, http.MethodPut, "/admin/oauth-clients/5", "application/json",
+		`{"client_name":"renamed"}`)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Code != errcode.CodeConflict {
+		t.Fatalf("code = %d, want %d", body.Code, errcode.CodeConflict)
+	}
+	if body.Message != adminclient.ErrConcurrentUpdate.Message {
+		t.Fatalf("message = %q, want the retry copy %q", body.Message, adminclient.ErrConcurrentUpdate.Message)
+	}
+}

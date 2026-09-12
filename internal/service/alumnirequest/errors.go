@@ -125,10 +125,16 @@ var (
 	// ErrNotReviewed is a notification resend for a ticket with no verdict: there is
 	// no result to notify anyone about.
 	ErrNotReviewed = &Error{Kind: KindStateConflict, Code: errcode.CodeValidationFailed}
-	ErrCaptcha     = &Error{Kind: KindCaptchaFailed, Code: errcode.CodeCaptchaFailed}
-	ErrUnavailable = &Error{Kind: KindUnavailable, Code: errcode.CodeAlumniRequestUnavailable}
-	ErrRateLimited = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
-	ErrInternal    = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	// ErrUnparseableStudentID is an approval whose ticket carries a student_id the
+	// derivation rule cannot read. Submission bounds the field's length only, so the
+	// reviewer is the first to see such a value. 400 rather than 500: the ticket's
+	// data is at fault and the reviewer has an action (reject it), where a 500 would
+	// report a server fault for a request the service handled correctly.
+	ErrUnparseableStudentID = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
+	ErrCaptcha              = &Error{Kind: KindCaptchaFailed, Code: errcode.CodeCaptchaFailed}
+	ErrUnavailable          = &Error{Kind: KindUnavailable, Code: errcode.CodeAlumniRequestUnavailable}
+	ErrRateLimited          = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
+	ErrInternal             = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 )
 
 // newError builds a typed error carrying sentinel's Kind and Code. The message is a
@@ -143,6 +149,14 @@ func newError(sentinel *Error, message string, cause error) error {
 func internalError(ctx context.Context, operation, message string, cause error) error {
 	slog.ErrorContext(ctx, operation, "error", cause)
 	return newError(ErrInternal, message, cause)
+}
+
+// inputError builds a KindInvalidInput error and logs the cause. The cause is a
+// defect in stored data that the client cannot observe, so the 400 alone would
+// leave the operator with nothing to correlate.
+func inputError(ctx context.Context, operation, message string, cause error) error {
+	slog.ErrorContext(ctx, operation, "error", cause)
+	return newError(ErrInvalidInput, message, cause)
 }
 
 // errorCode returns the business code carried by err, or 0.

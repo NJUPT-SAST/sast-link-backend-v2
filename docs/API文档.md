@@ -553,9 +553,7 @@ POST /auth/reset-password
 >
 > **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
 >
-> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。两处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
->
-> 回调端点（`/oauth/{github,lark}/callback`）不单独限流：它需要一个有效的一次性 `oauth_state` 才能推进，而该 state 由已限流的授权端点签发。
+> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`GET /oauth/{github,lark}/callback` 另有**独立**的 per-IP 配额（默认 120 次/60s，`RATE_LIMIT_OAUTH_CALLBACK_RPM`）：callback 是公开入口，扫描与 state 重放都打在这里，而 authorize 的配额管不到它，每次无效调用仍要读一次 state 并写一条审计。限流在读取 state **之前**生效，被限流的请求不消费 state、不写审计、不调用 provider。阈值刻意高于其他名额：出口 NAT 后每个用户每次登录只发一次 callback，配额定得太低会一次性锁死整个宿舍或社团；它刹住的是单一来源重放，**挡不住多 IP 分布式洪峰**——后者要靠边缘层，因为每个来源的成本本来就不高。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。三处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 >
 > **登录 CSRF 防护**（OAuth 2.0 §10.12）：`GET /oauth/{github,lark}` 响应同时下发 `sl_oauth_state` cookie（HttpOnly、SameSite=Lax、值为 `state` 的 SHA-256 摘要、Path/Secure 与 `sl_session` 相同、有效期与 state TTL 一致）。回调要求浏览器携带与 `state` 匹配的该 cookie，缺失或不匹配按 state 无效处理（重定向到错误页）；state 单次消费，回调结束后 cookie 即清除。
 
@@ -1002,6 +1000,8 @@ GET /user/identities
 > GitHub OAuth App 只能配**一条** callback URL，匹配规则是 host（不含子域）与端口精确相等、请求路径必须位于已注册路径**之下**（官方示例表中，注册 `/path` 时 `/` 会被拒绝）。因此两条回调必须共享一个已注册的父路径：生产上把绑定页放在 `/v2/oauth/bind/{provider}`、与登录回调同处 `/v2/oauth` 之下，注册 `https://link.sast.fun/v2/oauth`；本地则利用 loopback 免端口匹配的例外，注册 `http://127.0.0.1/oauth`。完整配置与 Caddy 分流规则见 `docs/runbooks/caddy-reverse-proxy.md`。
 >
 > 为绑定单独开一个 OAuth App **行不通**：`Bind()` 用 `OAUTH_GITHUB_CLIENT_ID/SECRET` 这一套凭据交换 code，另一个 App 签发的 code 会被拒绝。若要走这条路，需先为绑定增加一组 client 配置项。
+>
+> **限流**：两个绑定端点按**调用者（用户）**限流（`RATE_LIMIT_OAUTH_BIND_RPM`，默认 60 次/60s，fail-open）。限流在解析 provider 与 code 交换**之前**生效：被限流的请求不调用 GitHub / Lark、不消耗 `code`；超限返回 `42900` 并带 `Retry-After`。
 
 ```
 POST /user/identities/lark
@@ -1553,13 +1553,15 @@ DELETE /oauth/grants/:client_id
 
 > **实现状态**：本章全部端点已注册。
 >
-> 以下五处对 OpenAPI 契约做了收紧，实现按本文档为准：
+> 以下七处对 OpenAPI 契约做了收紧，实现按本文档为准：
 >
 > 1. **`PUT /admin/users/:id` 不接受 `state: is_deleted`**，返回 `422`。注销必须走 `DELETE`，恢复必须走 `PUT .../restore` —— 只有这两条路径会在同一事务内撤销该用户的全部 Token。若允许 PUT 直接置为 `is_deleted`，会留下「账号已注销但 Refresh Token 仍可换新 Access Token」的窗口。对已注销用户执行 PUT 同样返回 `422`，需先恢复。
 > 2. **`email_type` 只能与 `login_email` 一同提交，且必须与其域名一致**，否则返回 `400`。V001 触发器 `auto_set_email_type` 仅在 `login_email` 出现在 UPDATE 列中时才重算该字段，单独提交 `email_type` 会写入与邮箱域名矛盾的值。
-> 3. **`page_size` 上限统一为 100**（含 `/admin/audit-logs` 与 `/admin/alumni-requests`）。超出上限返回 `400`，不截断——静默截断会让调用方拿到的 `page_size` 与请求值对不上。`page` / `page_size` 传非正整数或非数字同样返回 `400`，不静默回落默认值。`page` 另有上限 2^30：偏移量由 `page × page_size` 算出，`page` 过大时该乘积会整数溢出，`4611686018427387905` 会绕回 0，结果回显了请求的页码却返回第一页；溢出按 `400` 拒绝，而不是截断。
-> 4. **`keyword` 长度上限 255**（所匹配列的最宽列宽）。超长返回 `400`：该参数会展开为多个无法走索引的 `ILIKE` 加一次全表 `COUNT(*)`，且本组端点未接入限流。
-> 5. **批量接口单次上限**：`GET /admin/users/batch` 的 `ids` 最多 100 个、`PUT /admin/users` 的 `ids` 最多 500 个，超出返回 `400`（不截断——静默截断会让调用方拿到的结果无法与其输入对齐）。
+> 3. **`PUT /admin/oauth-clients/:id` 与 `POST /admin/oauth-clients/:id/rotate-secret` 是乐观并发写**：请求读取的注册行若在写入前被其他请求改动，返回 `409`（`40900`，文案「OAuth 客户端配置已被其他操作修改，请刷新后重试」），不自动重试。该接口的保护规则（内置客户端不可改 `redirect_uris`、能力 scope 只能由控制台授予、收窄 scope 需撤销 Token）全部基于读取到的行做判定；判定与写入之间若允许行变动，一个委派 Token 就能在被授予 `admin:read` 的客户端的回调地址上做手脚，把授权码引向任意主机。返回码复用 `40900` 而非新开代码：客户端要处理的动作与「资源已存在」同属「重新读取后再决定」，文案已区分两者。
+> 4. **`page_size` 上限统一为 100**（含 `/admin/audit-logs` 与 `/admin/alumni-requests`）。超出上限返回 `400`，不截断——静默截断会让调用方拿到的 `page_size` 与请求值对不上。`page` / `page_size` 传非正整数或非数字同样返回 `400`，不静默回落默认值。`page` 另有上限 2^30：偏移量由 `page × page_size` 算出，`page` 过大时该乘积会整数溢出，`4611686018427387905` 会绕回 0，结果回显了请求的页码却返回第一页；溢出按 `400` 拒绝，而不是截断。
+> 5. **`keyword` 长度上限 255**（所匹配列的最宽列宽）。超长返回 `400`：该参数会展开为多个无法走索引的 `ILIKE` 加一次全表 `COUNT(*)`，且本组端点未接入限流。
+> 6. **批量接口单次上限**：`GET /admin/users/batch` 的 `ids` 最多 100 个、`PUT /admin/users` 的 `ids` 最多 500 个，超出返回 `400`（不截断——静默截断会让调用方拿到的结果无法与其输入对齐）。
+> 7. **审批建号工单时学号必须可解析出入学年份**：`POST /admin/alumni-requests/:id/approve` 遇到无法解析的 `student_id` 返回 `400`（`40000`，文案「学号无法解析入学年份，请驳回该申请」），并记一条 `slog` 错误。提交侧只校验该字段非空与长度，因此审核人是第一个看到此类值的人；`400` 而非 `500`：问题出在工单数据上，审核人有一个明确动作（驳回），而 `500` 会把一张数据有问题的工单报成服务故障。控制台建号路径（`POST /admin/users`）对同一条件本就返回 `400`，两条路径现在一致。
 >
 > 另有三条契约未写明的管理员自我保护规则，均返回 `403`：不可修改自己的 `role`；不可注销自己的账号；不可将系统中最后一名活跃管理员降权或注销（「活跃」指 `role = admin` 且 `state <> is_deleted`）。三者都会让自己失去撤销该操作的权限，因此无法自行恢复。
 >
@@ -2181,7 +2183,11 @@ GET /admin/audit-logs
 
 `actor_client_id` 记录**执行**该操作的 OAuth 客户端（行为主体，而非被操作对象——后者在 `resource_id`）。控制台操作记录内置客户端 id，委派调用记录该第三方客户端的 `client_id`，两者据此可区分「管理员亲自操作」与「工具代其操作」。
 
-目前写入该字段的是管理端六个 action、OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`，以及 `/user` 自助面的 `logout` / `change_password` / `update_profile` / `upload_avatar` / `oauth_bind` / `oauth_unbind` / `bind_email_send_code` / `logout_device`（`user:*` 第三方 token 执行时记其 `azp`，控制台会话显式记内置客户端 id）。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
+目前写入该字段的是管理端六个 action、OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`、`/oauth/exchange-code` 的 `oauth_login_exchange`，以及 `/user` 自助面的 `logout` / `change_password` / `update_profile` / `upload_avatar` / `oauth_bind` / `oauth_unbind` / `bind_email_send_code` / `logout_device`（`user:*` 第三方 token 执行时记其 `azp`，控制台会话显式记内置客户端 id）。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码、**第三方 OAuth callback**）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
+
+`oauth_login` 的 callback 是公开未认证入口，因此它的 **成功与失败行 `actor_client_id` 均为 `null`**：没有 OAuth 凭证授权了那次跳转，记内置客户端会把扫描流量伪装成控制台操作。签发内部会话的 `oauth_login_exchange` 才记内置客户端 id。
+
+`oauth_login` 失败行还会带 `detail.failure_stage` 与 `detail.failure_reason`（固定枚举，如 `request_validation`/`missing_code`、`state`/`state_cookie_mismatch`、`provider`/`provider_invalid_grant`）。多个失败原因共用同一个业务码（缺 `code` 与 state 失效都是 `40000`），这两个字段是审计侧区分它们、并把扫描流量与真实回调故障分开的唯一依据；成功行不写这两个字段。
 
 **错误码**：`40000`（参数格式非法 / 时间窗口倒置）、`40100`、`40300`。
 

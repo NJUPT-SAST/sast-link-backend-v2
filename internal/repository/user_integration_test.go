@@ -3,6 +3,7 @@ package repository_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -872,4 +873,43 @@ func TestAdminUserUpdateBindsPersonalEmail(t *testing.T) {
 			t.Fatalf("error = %v; constraint = %q, want ck_identities_provider_id_not_login_email", err, got)
 		}
 	})
+}
+
+// FindLoginEmailByStudentID is the recovery ticket's pre-check: it resolves the
+// account a folded student ID names, and the approval transaction later re-checks
+// the same comparison against the locked row. The two must agree byte for byte —
+// which is the whole point of folding here — so a case- or whitespace-differing
+// variant has to resolve to the same account, and the returned address has to be
+// the stored one rather than the submitted spelling.
+//
+// Its sibling ExistsByStudentID has its own fold test; without this one the folded
+// form of *this* query could drift and only surface as a recovery ticket whose
+// pre-check passes and whose approval reports a mismatch.
+func TestUserRepositoryFindLoginEmailByStudentIDFoldsCase(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	user := createUserWithProfile(t, userRepository, "recover-fold@njupt.edu.cn")
+
+	for _, candidate := range []string{user.StudentID, strings.ToUpper(user.StudentID), " " + user.StudentID + " "} {
+		email, found, err := userRepository.FindLoginEmailByStudentID(context.Background(), candidate)
+		if err != nil {
+			t.Fatalf("FindLoginEmailByStudentID(%q) error = %v", candidate, err)
+		}
+		if !found {
+			t.Fatalf("FindLoginEmailByStudentID(%q) found = false, want the account it names", candidate)
+		}
+		if email != user.LoginEmail {
+			t.Fatalf("FindLoginEmailByStudentID(%q) = %q, want the stored %q", candidate, email, user.LoginEmail)
+		}
+	}
+
+	// An ID nobody holds is (\"\", false, nil): absent, not an error. The submission
+	// path turns that into "use the provision flow instead".
+	email, found, err := userRepository.FindLoginEmailByStudentID(context.Background(), "B99999999")
+	if err != nil {
+		t.Fatalf("FindLoginEmailByStudentID(absent) error = %v, want nil", err)
+	}
+	if found || email != "" {
+		t.Fatalf("FindLoginEmailByStudentID(absent) = %q, %v, want empty and false", email, found)
+	}
 }

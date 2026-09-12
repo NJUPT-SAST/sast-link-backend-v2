@@ -210,12 +210,31 @@ type Config struct {
 	// oauth_state key — so it carries the same cap. Fail-open, per PRD §6.0.
 	RateLimitOAuthLoginRPM    int           `env:"RATE_LIMIT_OAUTH_LOGIN_RPM" envDefault:"300"`
 	RateLimitOAuthLoginWindow time.Duration `env:"RATE_LIMIT_OAUTH_LOGIN_WINDOW" envDefault:"60s"`
+	// Throttles the provider callbacks (GET /oauth/{github,lark}/callback) per
+	// caller IP, separately from the authorize endpoints and deliberately tighter.
+	// The callback is public and is what scanners and replay loops hit; the
+	// authorize budget does not bound it, and every invalid call otherwise still
+	// costs a state read and an audit row.
+	//
+	// The default stays well clear of a campus login spike: egress behind one NAT
+	// sends one callback per login, so a tight cap would lock out a whole dorm or
+	// club at once. It brakes a single source, not a distributed flood — that needs
+	// the edge, since each source here is cheap.
+	RateLimitOAuthCallbackRPM    int           `env:"RATE_LIMIT_OAUTH_CALLBACK_RPM" envDefault:"120"`
+	RateLimitOAuthCallbackWindow time.Duration `env:"RATE_LIMIT_OAUTH_CALLBACK_WINDOW" envDefault:"60s"`
 	// Throttles POST /oauth/exchange-code per caller IP. Unauthenticated by
 	// design — redeeming a login_code is how a session is obtained — so without a cap
 	// the code space can be probed for free. Higher than the login cap: one login
 	// legitimately redeems once, but a shared egress IP multiplies that.
 	RateLimitExchangeCodeRPM    int           `env:"RATE_LIMIT_EXCHANGE_CODE_RPM" envDefault:"300"`
 	RateLimitExchangeCodeWindow time.Duration `env:"RATE_LIMIT_EXCHANGE_CODE_WINDOW" envDefault:"60s"`
+	// Throttles POST /user/identities/github and .../lark per user, not per IP: the
+	// endpoint is authenticated, so the subject is known, and every accepted call
+	// spends one provider code exchange against GitHub or Lark. Lower than the
+	// unauthenticated caps because attaching a binding is a deliberate, infrequent
+	// action rather than a per-session one.
+	RateLimitOAuthBindRPM    int           `env:"RATE_LIMIT_OAUTH_BIND_RPM" envDefault:"60"`
+	RateLimitOAuthBindWindow time.Duration `env:"RATE_LIMIT_OAUTH_BIND_WINDOW" envDefault:"60s"`
 	// Throttles POST /auth/register per Register-Ticket, not per IP: the ticket is
 	// the credential an accepted call spends on one argon2id derivation, and
 	// keying on IP would put a whole campus NAT behind one counter. Ticket
@@ -451,6 +470,9 @@ func (c *Config) ValidateAPIAuth() error {
 	if err := c.validateAuthStateCache(); err != nil {
 		return err
 	}
+	if err := c.validateRedis(); err != nil {
+		return err
+	}
 	if err := c.validateRetention(); err != nil {
 		return err
 	}
@@ -480,6 +502,9 @@ func (c *Config) ValidateAPIAuth() error {
 		return err
 	}
 	c.TrustedProxies = normalizedProxies
+	if err := validateCORSOrigins(c.CORSAllowedOrigins); err != nil {
+		return err
+	}
 	// Canonicalized here so both consumers of this one value agree: the JWT
 	// manager's iss claim and the base the discovery document concatenates endpoint
 	// URLs onto. Discovery strips a trailing slash while the signer does not, and
@@ -573,10 +598,18 @@ func (c *Config) validateRateLimits() error {
 		return fmt.Errorf("RATE_LIMIT_OAUTH_LOGIN_RPM must be positive")
 	case c.RateLimitOAuthLoginWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_OAUTH_LOGIN_WINDOW must be at least 1s")
+	case c.RateLimitOAuthCallbackRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_CALLBACK_RPM must be positive")
+	case c.RateLimitOAuthCallbackWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_CALLBACK_WINDOW must be at least 1s")
 	case c.RateLimitExchangeCodeRPM <= 0:
 		return fmt.Errorf("RATE_LIMIT_EXCHANGE_CODE_RPM must be positive")
 	case c.RateLimitExchangeCodeWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_EXCHANGE_CODE_WINDOW must be at least 1s")
+	case c.RateLimitOAuthBindRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_BIND_RPM must be positive")
+	case c.RateLimitOAuthBindWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_OAUTH_BIND_WINDOW must be at least 1s")
 	case c.RateLimitRegisterAttempts <= 0:
 		return fmt.Errorf("RATE_LIMIT_REGISTER_ATTEMPTS must be positive")
 	case c.RateLimitRegisterWindow < time.Second:
@@ -637,6 +670,22 @@ func (c *Config) validateArgon2() error {
 // validateAuthStateCache bounds how long a non-revoking state change stays
 // invisible to the middleware; revocation itself is covered by the tombstone, not
 // by this value.
+
+// validateRedis requires a Redis password on the API startup path, and only there.
+//
+// Redis holds the only copy of every fail-closed one-time value — verification
+// codes, OAuth state, Register-Ticket, login_code — so an unauthenticated Redis is
+// an unauthenticated path to redeeming a session. The check is deliberately not in
+// Load's shared validate(): cmd/migrate calls Load and never opens a Redis
+// connection, so requiring the variable there would fail a container that has no
+// use for it.
+func (c *Config) validateRedis() error {
+	if strings.TrimSpace(c.RedisSecret) == "" {
+		return fmt.Errorf("REDIS_PASSWORD is required")
+	}
+	return nil
+}
+
 func (c *Config) validateAuthStateCache() error {
 	switch {
 	case c.AuthStateCacheTTL > time.Minute:
@@ -806,6 +855,51 @@ func (c *Config) validateStorage() error {
 // host. The URLs it guards end up in a Location header: a relative value would
 // resolve against this API's own origin, and a non-http scheme would redirect
 // users somewhere a browser should never follow.
+
+// validateCORSOrigins rejects entries the exact-match CORS middleware can never
+// honor. The middleware compares the Origin header byte for byte, and a browser
+// sends scheme://host[:port] with no path and no trailing slash — so `*`,
+// uppercase text, a trailing dot, a trailing slash, a path or a missing scheme
+// all configure an allow-list that
+// silently allows nothing. That failure has no symptom on the server side; it
+// surfaces later as CORS errors in a frontend, attributed to the frontend.
+func validateCORSOrigins(origins []string) error {
+	for _, raw := range origins {
+		origin := strings.TrimSpace(raw)
+		if origin == "" {
+			continue
+		}
+		if origin == "*" {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS must list explicit origins, not %q: the middleware matches the Origin header exactly and never emits a wildcard",
+				origin)
+		}
+		if origin != strings.ToLower(origin) {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS entry %q must be lowercase: browsers send the Origin header with a lowercase scheme and host, so this entry can never match",
+				origin)
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil {
+			return fmt.Errorf("CORS_ALLOWED_ORIGINS entry %q is not a valid URL", origin)
+		}
+		if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("CORS_ALLOWED_ORIGINS entry %q must be an absolute http(s) origin", origin)
+		}
+		if parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS entry %q must be a bare origin: a browser sends only scheme://host[:port] in the Origin header, so this entry can never match",
+				origin)
+		}
+		if strings.HasSuffix(parsed.Host, ".") {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS entry %q ends in a dot: browsers send origins without the FQDN trailing dot, so this entry can never match",
+				origin)
+		}
+	}
+	return nil
+}
+
 func isAbsoluteHTTPURL(value string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(value))
 	if err != nil {
@@ -831,8 +925,19 @@ func normalizeTrustedProxies(proxies []string) ([]string, error) {
 			continue
 		}
 		if net.ParseIP(entry) == nil {
-			if _, _, err := net.ParseCIDR(entry); err != nil {
+			_, network, err := net.ParseCIDR(entry)
+			if err != nil {
 				return nil, fmt.Errorf("TRUSTED_PROXIES entry %q is not a valid IP or CIDR", entry)
+			}
+			// A zero-length prefix trusts every peer address. gin then accepts a
+			// caller-supplied X-Forwarded-For from anywhere, so c.ClientIP() becomes
+			// whatever the caller writes: every per-IP rate limit is defeated and every
+			// client_ip audit entry can be forged. Name the consequence rather than
+			// saying "too broad", since the value looks deliberate.
+			if ones, _ := network.Mask.Size(); ones == 0 {
+				return nil, fmt.Errorf(
+					"TRUSTED_PROXIES entry %q trusts every address, which makes ClientIP spoofable and every per-IP limit and client_ip audit entry forgeable",
+					entry)
 			}
 		}
 		normalized = append(normalized, entry)

@@ -646,3 +646,88 @@ func TestTokenRepositoryCreatePairWithUserAndClientLock(t *testing.T) {
 }
 
 func ptr[T any](value T) *T { return &value }
+
+// RevokeUserClientTokens is the only SQL behind DELETE /oauth/grants/:client_id —
+// a user removing an application's access. Its predicate is (user_id, client_id):
+// a wrong or over-broad one either leaves the revoked application's tokens live
+// (the user believes access was cut) or cuts every other application's session for
+// that user. The service-layer fake answers true unconditionally, so only a real
+// database can tell those apart.
+func TestTokenRepositoryRevokeUserClientTokensIsScopedToUserAndClient(t *testing.T) {
+	database := setupDatabase(t)
+	tokens := repository.NewToken(database)
+	users := repository.NewUser(database)
+	target := createOAuthClient(t, database)
+	otherClient := createOAuthClientNamed(t, database, "repository-test-client-2")
+	user := createUserWithProfile(t, users, "revoke-grant@njupt.edu.cn")
+	otherUser := createUserWithProfile(t, users, "revoke-grant-other@njupt.edu.cn")
+
+	createTokenPair(t, tokens, "grant-target", "family-grant-target", 0, target.ID, user.ID)
+	createTokenPair(t, tokens, "grant-other-client", "family-grant-other-client", 0, otherClient.ID, user.ID)
+	createTokenPair(t, tokens, "grant-other-user", "family-grant-other-user", 0, target.ID, otherUser.ID)
+
+	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
+	entries, err := tokens.RevokeUserClientTokens(context.Background(), user.ID, target.ID, revokedAt)
+	if err != nil {
+		t.Fatalf("RevokeUserClientTokens() error = %v", err)
+	}
+
+	// Exactly the target's live access token needs blacklist delivery.
+	if len(entries) != 1 || entries[0].TokenID != "grant-target-access" {
+		t.Fatalf("entries = %+v, want only grant-target-access", entries)
+	}
+	assertTokenRevokedAt(t, database, "grant-target-access", "grant-target-refresh", revokedAt)
+	// The same user's other application keeps its session...
+	assertTokenUnrevoked(t, database, "grant-other-client-access", "grant-other-client-refresh")
+	// ...and so does the same application's session for another user.
+	assertTokenUnrevoked(t, database, "grant-other-user-access", "grant-other-user-refresh")
+
+	// The durable outbox row is what makes the Redis blacklist non-authoritative.
+	var queued int64
+	if err := database.Model(&model.TokenBlacklistOutbox{}).
+		Where("token_id = ?", "grant-target-access").
+		Count(&queued).Error; err != nil {
+		t.Fatalf("count outbox rows: %v", err)
+	}
+	if queued != 1 {
+		t.Fatalf("outbox rows = %d, want 1 for the revoked access token", queued)
+	}
+}
+
+// A second revoke of the same pair finds nothing live: no entries, no error, and
+// no duplicate outbox row for an already-revoked token. The console's revoke is
+// idempotent, so a double-clicked button must not fail or re-enqueue.
+func TestTokenRepositoryRevokeUserClientTokensIsIdempotent(t *testing.T) {
+	database := setupDatabase(t)
+	tokens := repository.NewToken(database)
+	users := repository.NewUser(database)
+	client := createOAuthClient(t, database)
+	user := createUserWithProfile(t, users, "revoke-twice@njupt.edu.cn")
+	createTokenPair(t, tokens, "twice", "family-twice", 0, client.ID, user.ID)
+
+	first := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := tokens.RevokeUserClientTokens(context.Background(), user.ID, client.ID, first); err != nil {
+		t.Fatalf("first revoke error = %v", err)
+	}
+	second := first.Add(time.Minute)
+	entries, err := tokens.RevokeUserClientTokens(context.Background(), user.ID, client.ID, second)
+	if err != nil {
+		t.Fatalf("second revoke error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %+v, want none on a repeat revoke", entries)
+	}
+	// The original revocation timestamp stands: a repeat must not rewrite it, or the
+	// audit trail would show the access ending later than it did.
+	assertTokenRevokedAt(t, database, "twice-access", "twice-refresh", first)
+
+	var queued int64
+	if err := database.Model(&model.TokenBlacklistOutbox{}).
+		Where("token_id = ?", "twice-access").
+		Count(&queued).Error; err != nil {
+		t.Fatalf("count outbox rows: %v", err)
+	}
+	if queued != 1 {
+		t.Fatalf("outbox rows = %d, want 1 (the repeat must not re-enqueue)", queued)
+	}
+}

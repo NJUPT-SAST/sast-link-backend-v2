@@ -78,6 +78,48 @@ func TestValidateAPIAuthRejectsBadRetentionSettings(t *testing.T) {
 	}
 }
 
+// The provider callback carries its own cap, separate from the authorize
+// endpoints it shares a shape with: it is the public endpoint scanners hit.
+func TestValidateAPIAuthRejectsBadOAuthCallbackRateLimit(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"RATE_LIMIT_OAUTH_CALLBACK_RPM", "0", "RATE_LIMIT_OAUTH_CALLBACK_RPM must be positive"},
+		{"RATE_LIMIT_OAUTH_CALLBACK_WINDOW", "500ms", "RATE_LIMIT_OAUTH_CALLBACK_WINDOW must be at least 1s"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateAPIAuthRejectsBadOAuthBindRateLimit(t *testing.T) {
+	for _, test := range []struct{ key, value, want string }{
+		{"RATE_LIMIT_OAUTH_BIND_RPM", "0", "RATE_LIMIT_OAUTH_BIND_RPM must be positive"},
+		{"RATE_LIMIT_OAUTH_BIND_WINDOW", "500ms", "RATE_LIMIT_OAUTH_BIND_WINDOW must be at least 1s"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if err := cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateAPIAuth() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateAPIAuthRejectsBadDeviceRateLimit(t *testing.T) {
 	for _, test := range []struct{ key, value, want string }{
 		{"RATE_LIMIT_DEVICE_RPM", "0", "RATE_LIMIT_DEVICE_RPM must be positive"},
@@ -509,6 +551,11 @@ func TestValidateAPIAuthRejectsInvalidTrustedProxies(t *testing.T) {
 		{name: "hostname", value: "proxy.example.com"},
 		{name: "garbled CIDR", value: "10.0.0.0/33"},
 		{name: "port suffix", value: "127.0.0.1:8080"},
+		// A zero-length prefix trusts every peer, which hands ClientIP to the caller:
+		// gin reads X-Forwarded-For from anyone, so every per-IP limit and every
+		// client_ip audit entry becomes whatever the request says it is.
+		{name: "every IPv4 address", value: "0.0.0.0/0"},
+		{name: "every IPv6 address", value: "::/0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -893,5 +940,69 @@ func TestAlumniResetURLRequiresExplicitValue(t *testing.T) {
 				t.Fatalf("ValidateAPIAuth() error = %v, want ALUMNI_RESET_URL validation", err)
 			}
 		})
+	}
+}
+
+// Redis holds the only copy of every fail-closed one-time value — verification
+// codes, OAuth state, Register-Ticket, login_code — so a reachable Redis with no
+// password is a path to redeeming someone's session without ever authenticating
+// to the service. Checked on the API startup path only: cmd/migrate loads the
+// same config and never opens a Redis connection.
+func TestValidateAPIAuthRejectsMissingRedisPassword(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("REDIS_PASSWORD", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want the CLI path to tolerate a missing Redis password", err)
+	}
+	if err := cfg.ValidateAPIAuth(); err == nil || !strings.Contains(err.Error(), "REDIS_PASSWORD") {
+		t.Fatalf("ValidateAPIAuth() error = %v, want a REDIS_PASSWORD requirement", err)
+	}
+}
+
+// The CORS middleware matches the Origin header byte for byte, so an entry a
+// browser can never send configures an allow-list that silently allows nothing.
+// Nothing on the server side reports it; the symptom shows up later as CORS
+// failures in a frontend.
+func TestValidateAPIAuthRejectsUnmatchableCORSOrigins(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{name: "wildcard", value: "*"},
+		{name: "trailing slash", value: "https://app.example.test/"},
+		{name: "path", value: "https://app.example.test/callback"},
+		{name: "missing scheme", value: "app.example.test"},
+		{name: "query string", value: "https://app.example.test?x=1"},
+		{name: "uppercase host", value: "https://App.Example.test"},
+		{name: "FQDN trailing dot", value: "https://app.example.test."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setConfigEnv(t, "user", "pass", "db")
+			t.Setenv("CORS_ALLOWED_ORIGINS", tc.value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			err = cfg.ValidateAPIAuth()
+			if err == nil || !strings.Contains(err.Error(), "CORS_ALLOWED_ORIGINS") {
+				t.Fatalf("ValidateAPIAuth() error = %v, want CORS_ALLOWED_ORIGINS validation for %q", err, tc.value)
+			}
+		})
+	}
+}
+
+func TestValidateAPIAuthAcceptsBareCORSOrigins(t *testing.T) {
+	setConfigEnv(t, "user", "pass", "db")
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://app.example.test,http://localhost:3000")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := cfg.ValidateAPIAuth(); err != nil {
+		t.Fatalf("ValidateAPIAuth() error = %v, want nil for bare origins", err)
 	}
 }

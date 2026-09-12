@@ -92,9 +92,8 @@ services:
       SESSION_COOKIE_PATH: ${SESSION_COOKIE_PATH:-/}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       LOG_LEVEL: ${LOG_LEVEL:-warn}
-      # PPROF_ENABLED exposes /debug/pprof in production; the dev stack already
-      # enables it through APP_ENV=development, so the compose default keeps the
-      # fail-closed posture of the code default.
+      # PPROF_ENABLED exposes /debug/pprof; nothing else turns it on, so the dev
+      # stack sets it explicitly when profiling is wanted. Default stays false.
       PPROF_ENABLED: ${PPROF_ENABLED:-false}
       # Kept below the 512M container limit with headroom for non-heap memory — a
       # GOMEMLIMIT above the cgroup limit stops the GC from tightening and gets

@@ -228,12 +228,24 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 	revoke := (input.IsActive != nil && !*input.IsActive && current.IsActive != nil && *current.IsActive) ||
 		reason.scopesNarrowed() || reason.AdminScopeGranted || reason.UserScopeGranted
 	now := s.now()
-	entries, revokedRefresh, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, fields, revoke, now)
+	// current.UpdatedAt is the version the guards above were evaluated against; the
+	// repository re-reads the row under a lock and refuses the write if it moved.
+	entries, revokedRefresh, err := s.Clients.UpdateAndRevoke(
+		ctx, input.ClientPK, fields, revoke, now, current.UpdatedAt)
 	if errors.Is(err, repository.ErrNotFound) {
 		// Audited: a row that vanished between the read and the write is how an
 		// incident review finds the concurrent delete that raced this update.
 		s.auditUpdate(ctx, input, false, ErrNotFound.Code, 0, &current.ClientID, nil)
 		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+	}
+	if errors.Is(err, repository.ErrStateConflict) {
+		// The registration moved between the read and the write, so the guards above
+		// described a row that no longer exists. Reported rather than retried:
+		// re-deciding against the new row would apply a verdict the operator never
+		// made, and the operator is the one who knows whether the other change should
+		// stand.
+		s.auditUpdate(ctx, input, false, ErrConcurrentUpdate.Code, 0, &current.ClientID, nil)
+		return nil, newError(ErrConcurrentUpdate, "OAuth 客户端配置已被其他操作修改，请刷新后重试", err)
 	}
 	if err != nil {
 		// The update never persisted, so the audit records it without the computed
@@ -340,10 +352,18 @@ func (s Service) RotateClientSecret(ctx context.Context, input RotateClientSecre
 		return nil, newError(ErrInternal, "生成 client_secret 失败", err)
 	}
 	now := s.now()
-	if _, _, err := s.Clients.UpdateAndRevoke(ctx, input.ClientPK, map[string]any{"client_secret": hash}, false, now); err != nil {
+	// The secret write is guarded by the same row version as every other update on
+	// this surface: a concurrent edit that rewrote the scopes must not be silently
+	// overwritten by a rotation that was decided against the old registration.
+	if _, _, err := s.Clients.UpdateAndRevoke(
+		ctx, input.ClientPK, map[string]any{"client_secret": hash}, false, now, current.UpdatedAt); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrNotFound.Code)
 			return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
+		}
+		if errors.Is(err, repository.ErrStateConflict) {
+			s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrConcurrentUpdate.Code)
+			return nil, newError(ErrConcurrentUpdate, "OAuth 客户端配置已被其他操作修改，请刷新后重试", err)
 		}
 		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrInternal.Code)
 		return nil, newError(ErrInternal, "更新 client_secret 失败", err)

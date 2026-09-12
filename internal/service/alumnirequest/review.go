@@ -182,8 +182,11 @@ func (s Service) buildAccount(
 	// console provisioning default this path used to hardcode.
 	state, stateErr := validate.DeriveState(model.UserRoleMember, request.StudentID, s.now())
 	if stateErr != nil {
-		return nil, nil, nil, internalError(ctx, "derive alumni state",
-			"学号无法解析入学年份，请驳回工单", stateErr)
+		// The submission path bounds student_id's length only, so an unreadable
+		// enrollment year reaches the reviewer first. 400 with an action the reviewer
+		// can take, not a 500 that names the ticket as a server fault.
+		return nil, nil, nil, inputError(ctx, "derive alumni state",
+			"学号无法解析入学年份，请驳回该申请", stateErr)
 	}
 
 	user := &model.User{

@@ -255,8 +255,15 @@ func (f *fakeTokens) RotateRefreshTokenWithAuditCapped(
 		now := f.nowUTC()
 		if deadline := origin.Add(maxLifetime); !deadline.After(now) {
 			return origin, repository.ErrTokenFamilyExpired
-		} else if refresh.ExpiresAt.After(deadline) {
-			refresh.ExpiresAt = deadline
+		} else {
+			// Mirror the repository: both rotated rows are clamped to the same
+			// deadline, so a service-level expires_in cannot exceed the boundary.
+			if refresh.ExpiresAt.After(deadline) {
+				refresh.ExpiresAt = deadline
+			}
+			if !access.ExpiresAt.Before(deadline) {
+				access.ExpiresAt = deadline
+			}
 		}
 	}
 	return origin, nil

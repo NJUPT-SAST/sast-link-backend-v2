@@ -22,12 +22,21 @@ func nullableClientID(value string) *string {
 // screen.
 func (s Service) Grants(ctx context.Context, userID int64) ([]repository.OAuthGrant, error) {
 	if s.Authorizations == nil {
-		return nil, nil
+		return nil, newError(ErrInternal, "授权仓储未配置", nil)
 	}
 	if err := s.checkGrantsListLimit(ctx, userID); err != nil {
 		return nil, err
 	}
-	return s.Authorizations.ListGrantsByUser(ctx, userID)
+	grants, err := s.Authorizations.ListGrantsByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if grants == nil {
+		// The field is a list on the wire, so the empty case must serialize as []
+		// rather than null — otherwise every client carries a nil check for it.
+		grants = []repository.OAuthGrant{}
+	}
+	return grants, nil
 }
 
 // RevokeGrant removes one application's access for the user: every token they
@@ -38,7 +47,7 @@ func (s Service) Grants(ctx context.Context, userID int64) ([]repository.OAuthGr
 // client-addressed OAuth endpoints.
 func (s Service) RevokeGrant(ctx context.Context, userID, clientID int64, actorClientID string) error {
 	if s.Tokens == nil {
-		return nil
+		return newError(ErrInternal, "令牌仓储未配置", nil)
 	}
 	// The revoke runs a family-revocation transaction plus a consent-history delete,
 	// so it gets its own per-user budget that the read path cannot starve.

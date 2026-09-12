@@ -40,15 +40,19 @@ func (r *OAuthAuthorizationRepository) CreateWithGrant(ctx context.Context, auth
 		authorization.ClientID <= 0 || authorization.UserID <= 0 {
 		return fmt.Errorf("create authorization with grant: %w", ErrInvalidArgument)
 	}
-	grant := &model.OAuthGrant{
-		UserID:    authorization.UserID,
-		ClientID:  authorization.ClientID,
-		Scopes:    authorization.Scopes,
-		GrantedAt: authorization.CreatedAt,
-	}
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		if err := transaction.Create(authorization).Error; err != nil {
 			return err
+		}
+		// Read CreatedAt after the insert so a caller relying on GORM's
+		// autoCreateTime gets the value the row actually carries. Evaluating it
+		// before the insert would write the zero time (oauth_grants.granted_at is
+		// NOT NULL with no DEFAULT, so V009 would accept 0001-01-01 silently).
+		grant := &model.OAuthGrant{
+			UserID:    authorization.UserID,
+			ClientID:  authorization.ClientID,
+			Scopes:    authorization.Scopes,
+			GrantedAt: authorization.CreatedAt,
 		}
 		return transaction.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "user_id"}, {Name: "client_id"}},

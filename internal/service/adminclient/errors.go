@@ -19,6 +19,11 @@ const (
 	KindInvalidInput Kind = "invalid_input"
 	KindNotFound     Kind = "not_found"
 	KindConflict     Kind = "conflict"
+	// KindStateConflict is an update whose target registration changed between the
+	// read the guards were evaluated against and the write. HTTP 409: the request is
+	// well formed, the row simply is not the one that was decided on, and the caller
+	// re-reads before retrying.
+	KindStateConflict Kind = "state_conflict"
 	// KindProtected is an attempt to change the built-in client in a way that would
 	// break authentication for everyone. HTTP 403: the request is understood and
 	// well formed, the target is simply not the caller's to change.
@@ -65,6 +70,12 @@ var (
 	ErrInvalidInput = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
 	ErrNotFound     = &Error{Kind: KindNotFound, Code: errcode.CodeClientNotFound}
 	ErrConflict     = &Error{Kind: KindConflict, Code: errcode.CodeConflict}
+	// ErrConcurrentUpdate reports a registration that moved between the read the
+	// guards used and the write. It reuses CodeConflict rather than taking a code of
+	// its own: 409 is already what a client handles as "retry after re-reading", and
+	// the message names the retry. Distinct from ErrConflict, whose message is
+	// "OAuth 客户端已存在" and whose outcome is not retryable.
+	ErrConcurrentUpdate = &Error{Kind: KindStateConflict, Code: errcode.CodeConflict, Message: "OAuth 客户端配置已被其他操作修改，请刷新后重试"}
 	// ErrProtectedClient refuses a change to the built-in client that would break
 	// the internal session flow; distinct from ErrInvalidInput because the target
 	// is off limits, not the input.
