@@ -896,6 +896,18 @@ func validateCORSOrigins(origins []string) error {
 				"CORS_ALLOWED_ORIGINS entry %q ends in a dot: browsers send origins without the FQDN trailing dot, so this entry can never match",
 				origin)
 		}
+		// Browsers also omit a scheme's default port when serializing the Origin
+		// header, and never send a trailing colon at all.
+		if (parsed.Scheme == "https" && parsed.Port() == "443") || (parsed.Scheme == "http" && parsed.Port() == "80") {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS entry %q carries a default port: browsers omit %s's default port from the Origin header, so this entry can never match",
+				origin, parsed.Scheme)
+		}
+		if strings.HasSuffix(parsed.Host, ":") {
+			return fmt.Errorf(
+				"CORS_ALLOWED_ORIGINS entry %q ends in a colon: the Origin header never carries an empty port",
+				origin)
+		}
 	}
 	return nil
 }

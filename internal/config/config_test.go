@@ -977,6 +977,9 @@ func TestValidateAPIAuthRejectsUnmatchableCORSOrigins(t *testing.T) {
 		{name: "query string", value: "https://app.example.test?x=1"},
 		{name: "uppercase host", value: "https://App.Example.test"},
 		{name: "FQDN trailing dot", value: "https://app.example.test."},
+		{name: "explicit https default port", value: "https://app.example.test:443"},
+		{name: "explicit http default port", value: "http://app.example.test:80"},
+		{name: "trailing empty port", value: "https://app.example.test:"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -996,7 +999,8 @@ func TestValidateAPIAuthRejectsUnmatchableCORSOrigins(t *testing.T) {
 
 func TestValidateAPIAuthAcceptsBareCORSOrigins(t *testing.T) {
 	setConfigEnv(t, "user", "pass", "db")
-	t.Setenv("CORS_ALLOWED_ORIGINS", "https://app.example.test,http://localhost:3000")
+	// A non-default port is part of the origin a browser actually sends.
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://app.example.test,http://localhost:3000,http://app.example.test:8080")
 
 	cfg, err := Load()
 	if err != nil {
