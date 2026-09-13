@@ -290,15 +290,7 @@ func (f *fakeTokens) RotateRefreshToken(
 		return time.Time{}, f.originErr
 	}
 	// Mirror the repository: the origin is the lowest-sequence row of the family.
-	var origin *model.OAuthRefreshToken
-	for _, candidate := range f.refreshByHash {
-		if candidate.FamilyID != familyID {
-			continue
-		}
-		if origin == nil || candidate.Sequence < origin.Sequence {
-			origin = candidate
-		}
-	}
+	origin := f.originOf(familyID)
 	if origin == nil {
 		return time.Time{}, repository.ErrNotFound
 	}
@@ -317,6 +309,32 @@ func (f *fakeTokens) FindRefreshToken(_ context.Context, tokenHash string) (*mod
 		return nil, repository.ErrNotFound
 	}
 	return refresh, nil
+}
+
+func (f *fakeTokens) FamilyOriginCreatedAt(_ context.Context, familyID string) (time.Time, error) {
+	if f.originErr != nil {
+		return time.Time{}, f.originErr
+	}
+	origin := f.originOf(familyID)
+	if origin == nil {
+		return time.Time{}, repository.ErrNotFound
+	}
+	return origin.CreatedAt, nil
+}
+
+// originOf returns the lowest-sequence row of a family, mirroring the
+// repository's origin lookup.
+func (f *fakeTokens) originOf(familyID string) *model.OAuthRefreshToken {
+	var origin *model.OAuthRefreshToken
+	for _, candidate := range f.refreshByHash {
+		if candidate.FamilyID != familyID {
+			continue
+		}
+		if origin == nil || candidate.Sequence < origin.Sequence {
+			origin = candidate
+		}
+	}
+	return origin
 }
 
 func (f *fakeTokens) FindAccessTokenByJTI(_ context.Context, jti string) (*model.OAuthAccessToken, error) {
