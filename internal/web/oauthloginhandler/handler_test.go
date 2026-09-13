@@ -763,6 +763,36 @@ func TestCallbackPassesStateCookieAndClearsIt(t *testing.T) {
 	}
 }
 
+// The callback cap rejects before the state is consumed, so the pairing cookie
+// must survive it: clearing it would break the in-flight login the user is about
+// to retry, and shared-NAT neighbors can trip the cap.
+func TestCallbackRateLimitKeepsStateCookie(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind: oauthlogin.KindRateLimited,
+		Code: errcode.CodeRateLimited,
+	}}
+	stateCookie := &middleware.SessionCookie{
+		Name: "sl_oauth_state", Path: "/v2", Secure: true, SameSite: http.SameSiteLaxMode,
+	}
+	router := newTestRouter(Handler{Service: service, StateCookie: stateCookie}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=provider-code&state=os_abc", nil)
+	// #nosec G124 -- test fixture: a browser callback request, not a cookie this
+	// service writes.
+	request.AddCookie(&http.Cookie{Name: "sl_oauth_state", Value: "deadbeef"})
+	router.ServeHTTP(recorder, request)
+
+	response := recorder.Result()
+	defer response.Body.Close()
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "sl_oauth_state" {
+			t.Fatalf("state cookie was touched on a throttled callback (Max-Age = %d)", cookie.MaxAge)
+		}
+	}
+}
+
 // Without the state cookie wired, the handler passes an empty cookie value —
 // the service refuses the callback rather than silently dropping the defense.
 func TestCallbackWithoutStateCookieWirePassesEmptyValue(t *testing.T) {
