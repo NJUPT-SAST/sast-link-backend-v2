@@ -182,7 +182,11 @@ type failureTag struct {
 	Stage      string
 	Reason     string
 	ProviderID string
-	Err        error
+	// UserID is the account a failing step had already resolved — the binding's
+	// user, even when the row itself turned out to be gone — so the unified
+	// failure row keeps the attribution those steps used to lose.
+	UserID *int64
+	Err    error
 }
 
 func (e *failureTag) Error() string {
@@ -217,13 +221,22 @@ func tagCallbackFailureWithProvider(stage, reason, providerID string, err error)
 	return &failureTag{Stage: stage, Reason: reason, ProviderID: providerID, Err: err}
 }
 
-// failureDetail extracts the audit stage/reason/provider id, defaulting to the
-// unknown stage and reason so the fields are always present on a failed
-// callback row.
-func failureDetail(err error) (stage, reason, providerID string) {
+// tagCallbackFailureForUser is tagCallbackFailureWithProvider once the failing
+// step had resolved the account, so the unified failure row keeps naming it.
+func tagCallbackFailureForUser(stage, reason, providerID string, userID int64, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &failureTag{Stage: stage, Reason: reason, ProviderID: providerID, UserID: &userID, Err: err}
+}
+
+// failureDetail extracts the audit stage/reason/provider id and the resolved
+// account (if the failing step knew one), defaulting to the unknown stage and
+// reason so the fields are always present on a failed callback row.
+func failureDetail(err error) (stage, reason, providerID string, userID *int64) {
 	var tag *failureTag
 	if errors.As(err, &tag) {
-		return tag.Stage, tag.Reason, tag.ProviderID
+		return tag.Stage, tag.Reason, tag.ProviderID, tag.UserID
 	}
-	return StageUnknown, ReasonUnknown, ""
+	return StageUnknown, ReasonUnknown, "", nil
 }

@@ -3,6 +3,8 @@ package oauthlogin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -200,6 +202,26 @@ func TestCallbackAuditLeavesActorClientIDNull(t *testing.T) {
 	}
 }
 
+// The success leg is held to the same rule as the failure leg: an authenticated
+// login outcome is not a console action either.
+func TestCallbackSuccessAuditLeavesActorClientIDNull(t *testing.T) {
+	service, doubles := newTestService(t)
+	state, digest := authorizedState(t, service)
+	if _, err := service.Callback(context.Background(), CallbackInput{
+		Provider: model.LoginMethodGitHub, Code: "provider-code",
+		State: state, StateCookie: digest,
+	}); err != nil {
+		t.Fatalf("Callback() error = %v", err)
+	}
+	entry := lastAuditEntry(t, doubles.Audits)
+	if entry.Success == nil || !*entry.Success {
+		t.Fatalf("success = %v, want a success row", entry.Success)
+	}
+	if entry.ActorClientID != nil {
+		t.Fatalf("actor_client_id = %q, want NULL on a success row too", *entry.ActorClientID)
+	}
+}
+
 // The login-code exchange happens after the callback, so it is still attributed
 // to the built-in client that mints the internal session.
 func TestExchangeCodeAuditKeepsInternalActor(t *testing.T) {
@@ -254,6 +276,38 @@ func TestCallbackDeletedUserAuditsOnce(t *testing.T) {
 	if got := detailString(t, entries[0], "provider_id"); got != "145339646" {
 		t.Fatalf("provider_id = %q, want the provider account the exchange resolved", got)
 	}
+	// A deleted account's login attempt is exactly what an incident review
+	// correlates by, so the resolved subject must survive the unified failure row.
+	if entries[0].UserID == nil || *entries[0].UserID != 42 {
+		t.Fatalf("user_id = %v, want the account the deleted-user leg resolved", entries[0].UserID)
+	}
+}
+
+// A binding whose user row is gone still names the account: the failure row
+// keeps its user_id even though no user was loaded.
+func TestCallbackVanishedUserAuditKeepsUserID(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.Identities.put(&model.Identity{
+		UserID: 42, Provider: model.LoginMethodGitHub, ProviderID: "145339646",
+	})
+	state, digest := authorizedState(t, service)
+
+	if _, err := service.Callback(context.Background(), CallbackInput{
+		Provider: model.LoginMethodGitHub, Code: "provider-code",
+		State: state, StateCookie: digest,
+	}); err == nil {
+		t.Fatal("Callback() error = nil, want a rejection")
+	}
+	entries := auditEntries(doubles.Audits)
+	if len(entries) != 1 {
+		t.Fatalf("audit rows = %d, want exactly 1", len(entries))
+	}
+	if got := detailString(t, entries[0], "failure_reason"); got != ReasonUserNotFound {
+		t.Fatalf("failure_reason = %q, want %q", got, ReasonUserNotFound)
+	}
+	if entries[0].UserID == nil || *entries[0].UserID != 42 {
+		t.Fatalf("user_id = %v, want the binding's account", entries[0].UserID)
+	}
 }
 
 // The callback cap exists to keep an invalid-callback flood from spending state
@@ -279,5 +333,45 @@ func TestCallbackLimiterRejectsBeforeStateConsumption(t *testing.T) {
 	}
 	if doubles.GitHub.calls != 0 {
 		t.Fatal("a throttled callback reached the provider exchange")
+	}
+}
+
+// providerFailureOutcome is the single source behind both the client-visible
+// outcome and the audit tag, so every branch's mapping is pinned here — a drift
+// would make the two disagree about which case was hit.
+func TestProviderFailureOutcomeClassification(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		stage  string
+		reason string
+		kind   Kind
+		code   int
+	}{
+		{"foreign tenant", fmt.Errorf("exchange: %w", provider.ErrForeignTenant),
+			StageProvider, ReasonForeignTenant, KindForbidden, errcode.CodeLarkTenantRequired},
+		{"invalid grant", fmt.Errorf("exchange: %w", provider.ErrInvalidGrant),
+			StageProvider, ReasonProviderInvalidGrant, KindInvalidState, errcode.CodeBadRequest},
+		{"timeout", fmt.Errorf("exchange: %w", context.DeadlineExceeded),
+			StageProvider, ReasonProviderTimeout, KindInvalidState, errcode.CodeBadRequest},
+		{"canceled", fmt.Errorf("exchange: %w", context.Canceled),
+			StageProvider, ReasonProviderCanceled, KindDependencyUnavailable, errcode.CodeDependencyUnavailable},
+		{"unavailable", errors.New("connection reset"),
+			StageProvider, ReasonProviderUnavailable, KindProviderUnavailable, errcode.CodeDependencyUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stage, reason, outcome := providerFailureOutcome(tc.err)
+			if stage != tc.stage || reason != tc.reason {
+				t.Fatalf("stage/reason = %q/%q, want %q/%q", stage, reason, tc.stage, tc.reason)
+			}
+			var typed *Error
+			if !errors.As(outcome, &typed) {
+				t.Fatalf("outcome %v is not a typed error", outcome)
+			}
+			if typed.Kind != tc.kind || typed.Code != tc.code {
+				t.Fatalf("kind/code = %s/%d, want %s/%d", typed.Kind, typed.Code, tc.kind, tc.code)
+			}
+		})
 	}
 }

@@ -189,9 +189,10 @@ func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		// when someone drives a stolen or replayed state at the endpoint; the success
 		// legs audit themselves. The stage and reason make a scanner sending no
 		// parameters distinguishable from a replayed state or a provider rejection,
-		// which one shared business code cannot express.
-		stage, reason, providerID := failureDetail(err)
-		s.auditLogin(ctx, nil, input, false, auditErrorCode(err), providerID, stage, reason)
+		// which one shared business code cannot express. A step that had resolved
+		// the account tags it, so its row keeps the user_id it used to lose.
+		stage, reason, providerID, userID := failureDetail(err)
+		s.auditLogin(ctx, userID, input, false, auditErrorCode(err), providerID, stage, reason)
 		return nil, err
 	}
 	return result, nil
@@ -304,8 +305,9 @@ func (s Service) loginBranch(
 	if err != nil {
 		if isNotFound(err) {
 			// The binding outlived its user row; nothing the caller can fix, and it must
-			// not mint a login_code for a missing account.
-			return nil, tagCallbackFailureWithProvider(StageUser, ReasonUserNotFound, identity.ProviderID,
+			// not mint a login_code for a missing account. The binding still names the
+			// account, so the failure row keeps its user_id.
+			return nil, tagCallbackFailureForUser(StageUser, ReasonUserNotFound, identity.ProviderID, existing.UserID,
 				newError(ErrUserNotFound, "绑定对应的用户不存在", err))
 		}
 		return nil, tagCallbackFailureWithProvider(StageUser, ReasonUserLookupFailed, identity.ProviderID,
@@ -314,7 +316,7 @@ func (s Service) loginBranch(
 	if user.State == model.UserStateDeleted {
 		// Audited by Callback's unified failure path, which reads the tag below, so
 		// this case does not write its own row and cannot double-log the event.
-		return nil, tagCallbackFailureWithProvider(StageUser, ReasonUserDeleted, identity.ProviderID,
+		return nil, tagCallbackFailureForUser(StageUser, ReasonUserDeleted, identity.ProviderID, user.ID,
 			newError(ErrUserDeleted, "账号已注销", nil))
 	}
 

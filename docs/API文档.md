@@ -2185,7 +2185,7 @@ GET /admin/audit-logs
 
 目前写入该字段的是管理端六个 action、OAuth 协议端点的 `oauth_authorize` / `oauth_token` / `oauth_revoke`、`/oauth/exchange-code` 的 `oauth_login_exchange`，以及 `/user` 自助面的 `logout` / `change_password` / `update_profile` / `upload_avatar` / `oauth_bind` / `oauth_unbind` / `bind_email_send_code` / `logout_device`（`user:*` 第三方 token 执行时记其 `azp`，控制台会话显式记内置客户端 id）。其余情形为 `null`，且 `null` 是有意义的取值：**没有任何 OAuth 凭证授权该操作** —— 未认证流程（登录、注册、重置密码、**第三方 OAuth callback**）、后台任务，以及 V007 迁移之前写入的历史行。历史行的这层歧义会随 90 天保留期自行消失。
 
-`oauth_login` 的 callback 是公开未认证入口，因此它的 **成功与失败行 `actor_client_id` 均为 `null`**：没有 OAuth 凭证授权了那次跳转，记内置客户端会把扫描流量伪装成控制台操作。签发内部会话的 `oauth_login_exchange` 才记内置客户端 id。
+`oauth_login` 的 callback 是公开未认证入口，因此它的 **成功与失败行 `actor_client_id` 均为 `null`**：没有 OAuth 凭证授权了那次跳转，记内置客户端会把扫描流量伪装成控制台操作。签发内部会话的 `oauth_login_exchange` 及其淘汰超限旧设备的副作用 `evict_device` 才记内置客户端 id。此外，`oauth_login` 失败行在失败步骤已解析出账号时（如绑定对应的用户已注销 / 用户行不存在）会写 `user_id`，未知主体则为 `null`。
 
 `oauth_login` 失败行还会带 `detail.failure_stage` 与 `detail.failure_reason`（固定枚举，如 `request_validation`/`missing_code`、`state`/`state_cookie_mismatch`、`provider`/`provider_invalid_grant`）。多个失败原因共用同一个业务码（缺 `code` 与 state 失效都是 `40000`），这两个字段是审计侧区分它们、并把扫描流量与真实回调故障分开的唯一依据；成功行不写这两个字段。
 
