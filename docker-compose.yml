@@ -181,6 +181,12 @@ services:
       RATE_LIMIT_OAUTH_LOGIN_WINDOW: ${RATE_LIMIT_OAUTH_LOGIN_WINDOW:-60s}
       RATE_LIMIT_EXCHANGE_CODE_RPM: ${RATE_LIMIT_EXCHANGE_CODE_RPM:-300}
       RATE_LIMIT_EXCHANGE_CODE_WINDOW: ${RATE_LIMIT_EXCHANGE_CODE_WINDOW:-60s}
+      # The public provider callbacks and the authenticated provider bindings
+      # each carry their own budget (state reads / provider code exchanges).
+      RATE_LIMIT_OAUTH_CALLBACK_RPM: ${RATE_LIMIT_OAUTH_CALLBACK_RPM:-120}
+      RATE_LIMIT_OAUTH_CALLBACK_WINDOW: ${RATE_LIMIT_OAUTH_CALLBACK_WINDOW:-60s}
+      RATE_LIMIT_OAUTH_BIND_RPM: ${RATE_LIMIT_OAUTH_BIND_RPM:-60}
+      RATE_LIMIT_OAUTH_BIND_WINDOW: ${RATE_LIMIT_OAUTH_BIND_WINDOW:-60s}
       # Keyed by Register-Ticket, so the window must not outlive the ticket's
       # 5-minute TTL; the service refuses to start if it does.
       RATE_LIMIT_REGISTER_ATTEMPTS: ${RATE_LIMIT_REGISTER_ATTEMPTS:-5}
