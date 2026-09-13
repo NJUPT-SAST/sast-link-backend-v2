@@ -153,10 +153,11 @@ func internalError(ctx context.Context, operation, message string, cause error) 
 
 // inputError builds a KindInvalidInput error and logs the cause. The cause is a
 // defect in stored data that the client cannot observe, so the 400 alone would
-// leave the operator with nothing to correlate.
-func inputError(ctx context.Context, operation, message string, cause error) error {
+// leave the operator with nothing to correlate. The sentinel names the specific
+// defect when one has a dedicated outcome.
+func inputError(ctx context.Context, sentinel *Error, operation, message string, cause error) error {
 	slog.ErrorContext(ctx, operation, "error", cause)
-	return newError(ErrInvalidInput, message, cause)
+	return newError(sentinel, message, cause)
 }
 
 // errorCode returns the business code carried by err, or 0.

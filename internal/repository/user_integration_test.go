@@ -903,7 +903,7 @@ func TestUserRepositoryFindLoginEmailByStudentIDFoldsCase(t *testing.T) {
 		}
 	}
 
-	// An ID nobody holds is (\"\", false, nil): absent, not an error. The submission
+	// An ID nobody holds is ("", false, nil): absent, not an error. The submission
 	// path turns that into "use the provision flow instead".
 	email, found, err := userRepository.FindLoginEmailByStudentID(context.Background(), "B99999999")
 	if err != nil {

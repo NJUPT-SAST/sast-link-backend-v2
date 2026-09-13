@@ -154,6 +154,11 @@ func newOutboxClaimToken() (string, error) {
 
 func truncateOutboxDeliveryError(value string) string {
 	value = strings.TrimSpace(value)
+	// A provider or driver can hand back bytes that are not valid UTF-8 at all;
+	// replacing them keeps the text instead of dropping everything after the
+	// first invalid byte, which on garbage-heavy payloads would leave the column
+	// nearly empty for no diagnostic gain.
+	value = strings.ToValidUTF8(value, string(utf8.RuneError))
 	if len(value) <= maxOutboxDeliveryErrorLength {
 		return value
 	}

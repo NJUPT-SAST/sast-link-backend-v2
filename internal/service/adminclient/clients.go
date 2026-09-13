@@ -245,7 +245,7 @@ func (s Service) UpdateClient(ctx context.Context, input UpdateClientInput) (*Up
 		// made, and the operator is the one who knows whether the other change should
 		// stand.
 		s.auditUpdate(ctx, input, false, ErrConcurrentUpdate.Code, 0, &current.ClientID, nil)
-		return nil, newError(ErrConcurrentUpdate, "OAuth 客户端配置已被其他操作修改，请刷新后重试", err)
+		return nil, newError(ErrConcurrentUpdate, ErrConcurrentUpdate.Message, err)
 	}
 	if err != nil {
 		// The update never persisted, so the audit records it without the computed
@@ -363,7 +363,7 @@ func (s Service) RotateClientSecret(ctx context.Context, input RotateClientSecre
 		}
 		if errors.Is(err, repository.ErrStateConflict) {
 			s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrConcurrentUpdate.Code)
-			return nil, newError(ErrConcurrentUpdate, "OAuth 客户端配置已被其他操作修改，请刷新后重试", err)
+			return nil, newError(ErrConcurrentUpdate, ErrConcurrentUpdate.Message, err)
 		}
 		s.auditRotateSecret(ctx, input, &current.ClientID, false, ErrInternal.Code)
 		return nil, newError(ErrInternal, "更新 client_secret 失败", err)

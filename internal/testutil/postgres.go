@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 
@@ -35,7 +34,7 @@ import (
 // operator asked for, not something that quietly happened.
 func RequireProvider(t *testing.T) {
 	t.Helper()
-	if strings.TrimSpace(os.Getenv(skipIntegrationEnv)) != "" {
+	if os.Getenv(skipIntegrationEnv) == "1" {
 		t.Skipf("%s is set: container-backed assertions are not running", skipIntegrationEnv)
 	}
 	provider, err := testcontainers.NewDockerProvider()
