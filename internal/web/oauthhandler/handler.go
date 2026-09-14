@@ -6,11 +6,14 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
@@ -25,6 +28,9 @@ const maxOAuthBodyBytes int64 = 8 << 10
 type Service interface {
 	Authorize(ctx context.Context, input oauth.AuthorizeInput) (*oauth.AuthorizeResult, error)
 	Consent(ctx context.Context, input oauth.ConsentInput) (*oauth.ConsentResult, error)
+	// SilentConsent completes a pending authorization from an identified link
+	// session when the user's standing grant already covers the scopes.
+	SilentConsent(ctx context.Context, input oauth.SilentConsentInput) (*oauth.ConsentResult, error)
 	ConsentInfo(ctx context.Context, input oauth.ConsentInfoInput) (*oauth.ConsentInfoResult, error)
 	Token(ctx context.Context, input oauth.TokenInput) (*oauth.TokenResult, error)
 	Revoke(ctx context.Context, input oauth.RevokeInput) error
@@ -44,6 +50,17 @@ type Service interface {
 // middleware.Authenticate instead, which rejects third-party tokens.
 type Authenticator interface {
 	AuthenticateAnyClient(ctx context.Context, header string) (middleware.Principal, error)
+	// Authenticate admits only the internal client's session tokens. It backs the
+	// silent authorize path, where a third-party application's own token must not
+	// be able to vouch for the browser's link session.
+	Authenticate(ctx context.Context, header string) (middleware.Principal, error)
+}
+
+// SessionRefresher renews a link session from its refresh credential. Refresh
+// rotates the family exactly like POST /auth/refresh, so the silent authorize
+// path admits precisely the sessions a fresh tab could rebuild.
+type SessionRefresher interface {
+	Refresh(ctx context.Context, input session.RefreshInput) (*session.RefreshResult, error)
 }
 
 // Handler serves the OAuth 2.1 and OIDC endpoints.
@@ -52,8 +69,23 @@ type Handler struct {
 	// Auth backs /userinfo, which authenticates itself rather than sitting behind
 	// the JWT middleware so it can answer in RFC 6750 form.
 	Auth Authenticator
+	// Sessions and Cookies back the silent authorize path's cookie leg: a
+	// top-level navigation carries no Authorization header, only the httpOnly
+	// session cookie, whose refresh token is rotated and written back here.
+	Sessions SessionRefresher
+	Cookies  *middleware.SessionCookie
 	// ConsentURL is the front-end page that collects the user's decision.
 	ConsentURL string
+	// Clock is injected so tests can pin "now"; the session cookie's Max-Age is
+	// computed against it to stay consistent with the rotated token's expiry.
+	Clock auth.Clock
+}
+
+func (h Handler) now() time.Time {
+	if h.Clock != nil {
+		return h.Clock.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // RegisterRoutes mounts the OAuth and OIDC endpoints.
@@ -104,6 +136,14 @@ func (h Handler) Authorize(c *gin.Context) {
 		h.redirectAuthorizeError(c, input, err)
 		return
 	}
+	// SSO fast path: when the browser carries a link session whose grant with
+	// this client already covers the requested scopes, the code is minted here
+	// and the browser goes straight back to the client — the consent page only
+	// renders for a first authorization, a broader scope set, or no session.
+	if redirect := h.trySilentConsent(c, result.RequestID, input.ClientIP); redirect != "" {
+		c.Redirect(http.StatusFound, redirect)
+		return
+	}
 	c.Redirect(http.StatusFound, h.consentPageURL(map[string]string{
 		"request_id":  result.RequestID,
 		"client_name": result.ClientName,
@@ -112,6 +152,66 @@ func (h Handler) Authorize(c *gin.Context) {
 		// submitting into a 400 with no warning.
 		"expires_in": strconv.Itoa(result.ExpiresIn),
 	}))
+}
+
+// trySilentConsent attempts to complete a stashed authorization without the
+// consent page and returns the client redirect on success, or "" when the flow
+// must fall back to the consent page. Every silent failure — no recognizable
+// session, no covering grant, a spent or dead stash, a throttle — is a normal
+// fallback rather than an error the user sees: the consent page re-runs the
+// same checks interactively.
+func (h Handler) trySilentConsent(c *gin.Context, requestID, clientIP string) string {
+	userID, ok := h.identifyUser(c)
+	if !ok {
+		return ""
+	}
+	result, err := h.Service.SilentConsent(c.Request.Context(), oauth.SilentConsentInput{
+		RequestID: requestID,
+		UserID:    userID,
+		ClientIP:  clientIP,
+		UserAgent: c.Request.UserAgent(),
+	})
+	if err != nil || result == nil {
+		return ""
+	}
+	return result.RedirectURI
+}
+
+// identifyUser resolves the browser's link session to a user ID for the silent
+// authorize path, without which that path is skipped entirely.
+//
+// A Bearer header is tried first and must be an internal-client session token
+// (middleware.Authenticate): a third-party token belongs to the application
+// holding it, not to the browser's link session. Otherwise the httpOnly session
+// cookie is refreshed exactly like POST /auth/refresh — the only other way a
+// signed-in browser proves itself on a top-level navigation — and the rotated
+// refresh token is written back, or the next request would present a dead one.
+// A failed refresh clears nothing here: the standard refresh endpoint owns that
+// decision, so a cross-site stray or a grace-window race degrades to the consent
+// page instead of destroying a live cookie.
+func (h Handler) identifyUser(c *gin.Context) (int64, bool) {
+	if h.Auth != nil {
+		if principal, err := h.Auth.Authenticate(c.Request.Context(), c.GetHeader("Authorization")); err == nil && principal.UserID > 0 {
+			return principal.UserID, true
+		}
+	}
+	if h.Sessions == nil || h.Cookies == nil {
+		return 0, false
+	}
+	token := h.Cookies.Read(c)
+	if token == "" {
+		return 0, false
+	}
+	result, err := h.Sessions.Refresh(c.Request.Context(), session.RefreshInput{
+		RefreshToken: token,
+		ClientIP:     c.ClientIP(),
+		UserAgent:    c.Request.UserAgent(),
+	})
+	if err != nil || result == nil || result.UserID <= 0 {
+		return 0, false
+	}
+	h.Cookies.Set(c, result.RefreshToken, result.RefreshExpiresAt.Sub(h.now()))
+	return result.UserID, true
 }
 
 // Consent records the user's decision and redirects to the client.

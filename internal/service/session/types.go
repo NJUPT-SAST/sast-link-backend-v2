@@ -281,6 +281,10 @@ type RefreshInput struct {
 }
 
 type RefreshResult struct {
+	// UserID is the session's subject, read inside the refresh transaction. Callers
+	// that need only tokens can ignore it; /oauth/authorize's silent path uses it
+	// to authorize a code mint without parsing the new access token.
+	UserID           int64
 	AccessToken      string
 	RefreshToken     string
 	TokenType        string

@@ -97,6 +97,10 @@ type AuthorizationRepository interface {
 	// snapshot taken inside the consume transaction, which the pair write verifies
 	// against so a revocation committing between the two refuses the pair.
 	Consume(ctx context.Context, code string, now time.Time) (*model.OAuthAuthorization, int64, error)
+	// FindGrantScopes returns the scopes of the user's standing consent with one
+	// client, keyed by the client's numeric ID. found is false when the user has
+	// never consented or has revoked the grant.
+	FindGrantScopes(ctx context.Context, userID, clientID int64) (scopes model.StringArray, found bool, err error)
 	// ListGrantsByUser returns the applications a user has authorized.
 	ListGrantsByUser(ctx context.Context, userID int64) ([]repository.OAuthGrant, error)
 	// DeleteByUserClient removes every authorization and consent grant a user
@@ -191,6 +195,16 @@ type ConsentInput struct {
 // the client as access_denied rather than swallowed here.
 type ConsentResult struct {
 	RedirectURI string
+}
+
+// SilentConsentInput asks to complete a pending authorization without user
+// interaction. The user is the one the HTTP layer identified from the browser's
+// link session (bearer token or session cookie), never a request-supplied value.
+type SilentConsentInput struct {
+	RequestID string
+	UserID    int64
+	ClientIP  string
+	UserAgent string
 }
 
 // ConsentInfoInput identifies the pending authorization request whose verified

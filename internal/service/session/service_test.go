@@ -1193,6 +1193,11 @@ func TestRefreshRotatesSameFamilyAndScopes(t *testing.T) {
 	if refresh.RefreshToken == login.RefreshToken || refresh.Scope != "openid profile email" {
 		t.Fatalf("refresh result = %+v, want rotated canonical token", refresh)
 	}
+	// The subject names the session's owner for callers that authorize from the
+	// refresh alone (the silent authorize path).
+	if refresh.UserID != 42 {
+		t.Fatalf("refresh UserID = %d, want the login's subject 42", refresh.UserID)
+	}
 	if tokens.rotatedRefresh.Sequence != tokens.createdRefresh.Sequence+1 || tokens.rotatedRefresh.FamilyID != tokens.createdRefresh.FamilyID {
 		t.Fatalf("rotated refresh = %+v, current = %+v, want same family seq+1", tokens.rotatedRefresh, tokens.createdRefresh)
 	}

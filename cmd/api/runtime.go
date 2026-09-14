@@ -375,8 +375,13 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	return &sessionRuntime{
 		Handler: sessionhandler.Handler{Service: service, Cookies: sessionCookie},
 		OAuth: oauthhandler.Handler{
-			Service:    oauthService,
-			Auth:       authenticator,
+			Service: oauthService,
+			Auth:    authenticator,
+			// The silent authorize path: the session service's refresh rotates the
+			// cookie's token exactly like POST /auth/refresh, and the handler writes
+			// the rotated value back so the next navigation stays signed in.
+			Sessions:   service,
+			Cookies:    sessionCookie,
 			ConsentURL: cfg.OAuthConsentURL,
 		},
 		OAuthLogin: oauthloginhandler.Handler{

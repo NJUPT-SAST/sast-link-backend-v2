@@ -135,6 +135,27 @@ func (r *OAuthAuthorizationRepository) Consume(
 	return &authorization, userTokenVersion, nil
 }
 
+// FindGrantScopes returns the scopes of the user's standing consent with one
+// client. found is false when the user has never consented (or has revoked the
+// grant), which tells the caller to fall back to the consent page rather than
+// treat the pair as silently authorizable.
+func (r *OAuthAuthorizationRepository) FindGrantScopes(ctx context.Context, userID, clientID int64) (model.StringArray, bool, error) {
+	if userID <= 0 || clientID <= 0 {
+		return nil, false, fmt.Errorf("find grant scopes: %w", ErrInvalidArgument)
+	}
+	var grant model.OAuthGrant
+	err := r.database.WithContext(ctx).
+		Where("user_id = ? AND client_id = ?", userID, clientID).
+		First(&grant).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("find grant scopes: %w", err)
+	}
+	return grant.Scopes, true, nil
+}
+
 // OAuthGrant is one application a user has authorized via the consent screen,
 // with the client's display fields and the most recent authorization's scopes.
 // RedirectURIs and Scopes are model.StringArray because the columns are

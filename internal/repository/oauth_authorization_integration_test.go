@@ -312,6 +312,58 @@ func TestOAuthAuthorizationRepositoryListGrantsScansTextArraysAndJoinsClient(t *
 	}
 }
 
+// FindGrantScopes answers the silent-authorize question "does this user's
+// standing consent with this client cover the request?": the grant row's own
+// scopes come back, another user's identical grant does not satisfy the lookup,
+// and a revoked (deleted) grant reads as absent.
+func TestOAuthAuthorizationRepositoryFindGrantScopes(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "grant-find@njupt.edu.cn")
+	otherUser := createUserWithProfile(t, repository.NewUser(database), "grant-find-2@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	authorizations := repository.NewOAuthAuthorization(database)
+
+	seed := &model.OAuthGrant{
+		UserID:    user.ID,
+		ClientID:  client.ID,
+		Scopes:    model.StringArray{"openid", "profile"},
+		GrantedAt: time.Now().Truncate(time.Microsecond),
+	}
+	if err := database.Create(seed).Error; err != nil {
+		t.Fatalf("Create(grant) error = %v", err)
+	}
+
+	scopes, found, err := authorizations.FindGrantScopes(context.Background(), user.ID, client.ID)
+	if err != nil {
+		t.Fatalf("FindGrantScopes() error = %v", err)
+	}
+	if !found || len(scopes) != 2 || scopes[0] != "openid" || scopes[1] != "profile" {
+		t.Fatalf("scopes = %v found = %v, want the seeded granted set", scopes, found)
+	}
+
+	// Another user's grant with the same client is not this user's consent.
+	if _, found, err := authorizations.FindGrantScopes(context.Background(), otherUser.ID, client.ID); err != nil {
+		t.Fatalf("FindGrantScopes(other user) error = %v", err)
+	} else if found {
+		t.Fatal("found a grant for a user who never consented")
+	}
+
+	// A revoked grant is deleted from oauth_grants, so it must read as absent.
+	if err := authorizations.DeleteByUserClient(context.Background(), user.ID, client.ID); err != nil {
+		t.Fatalf("DeleteByUserClient() error = %v", err)
+	}
+	if _, found, err := authorizations.FindGrantScopes(context.Background(), user.ID, client.ID); err != nil {
+		t.Fatalf("FindGrantScopes(after revoke) error = %v", err)
+	} else if found {
+		t.Fatal("found a revoked grant")
+	}
+
+	// Invalid keys are argument errors, not database round trips.
+	if _, _, err := authorizations.FindGrantScopes(context.Background(), 0, client.ID); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("FindGrantScopes(0, client) error = %v, want ErrInvalidArgument", err)
+	}
+}
+
 // CreateWithGrant persists the code and the consent grant in one transaction.
 // Re-consenting the same client upserts the grant row rather than duplicating
 // it, so the authorized-apps list keeps exactly one entry per client, carrying

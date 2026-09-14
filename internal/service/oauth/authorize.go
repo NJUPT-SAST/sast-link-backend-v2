@@ -202,6 +202,22 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 		}, nil
 	}
 
+	return s.issueAuthorizationCode(ctx, input, payload, "granted")
+}
+
+// issueAuthorizationCode mints the code for an already-consumed stash.
+//
+// Shared by the interactive consent decision and the silent path, so both run
+// the identical post-consume re-verification: the live client registration
+// (redirect_uri, scopes) and the user's authorizability. The decision string
+// only names the audit row ("granted" vs "granted_silent"), never a behavioral
+// branch.
+func (s Service) issueAuthorizationCode(
+	ctx context.Context,
+	input ConsentInput,
+	payload AuthorizeRequestPayload,
+	decision string,
+) (*ConsentResult, error) {
 	client, err := s.Clients.FindActiveByClientID(ctx, payload.ClientID)
 	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
 		// The client was disabled between the two legs. The stash is already spent,
@@ -267,10 +283,87 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 		return nil, newError(ErrInternal, "创建授权码失败", err)
 	}
 
-	s.auditAuthorize(ctx, input, payload, &user.ID, true, 0, "granted")
+	s.auditAuthorize(ctx, input, payload, &user.ID, true, 0, decision)
 	return &ConsentResult{
 		RedirectURI: successRedirectURI(payload.RedirectURI, payload.State, code),
 	}, nil
+}
+
+// SilentConsent completes a pending authorization without the consent page when
+// the identified user already holds a grant with the client covering the
+// requested scopes. This is the SSO leg: a browser signed in to link that a
+// client bounces through /oauth/authorize receives its code in the same
+// top-level redirect — no page render, no click.
+//
+// The user's identity arrives from the HTTP layer (a verified link session) and
+// is never request-supplied. The stash is consumed only after the grant check
+// passes, so every silent failure — no grant, narrower grant scopes, dead or
+// unknown stash, disabled client, throttled user — leaves the request intact
+// for the interactive consent page the caller falls back to. The revocation
+// TOCTOU between the peek and the consume is the same one the manual consent
+// carries, and its worst case is a code whose scopes the user did consent to.
+func (s Service) SilentConsent(ctx context.Context, input SilentConsentInput) (*ConsentResult, error) {
+	if input.UserID <= 0 {
+		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
+	}
+	requestID := strings.TrimSpace(input.RequestID)
+	if requestID == "" {
+		return nil, newError(ErrInvalidRequest, "request_id 不能为空", nil)
+	}
+	// The same per-user budget as the interactive submission: this path mints
+	// codes too, so it may not sit outside the throttle.
+	if err := s.checkConsentLimit(ctx, input.UserID); err != nil {
+		return nil, err
+	}
+
+	payload, _, found, err := s.Requests.PeekAuthorizeRequest(ctx, requestID)
+	if err != nil {
+		return nil, newError(ErrDependencyUnavailable, "读取授权请求失败，请重试", err)
+	}
+	if !found {
+		return nil, newError(ErrInvalidRequest, "授权请求无效或已过期，请重新发起授权", nil)
+	}
+
+	// Resolving the client doubles as half of the live re-verification: a disabled
+	// client must not receive a silent code even though the grant row survives it.
+	client, err := s.Clients.FindActiveByClientID(ctx, payload.ClientID)
+	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
+		return nil, newError(ErrInvalidClient, "客户端已停用，请重新发起授权", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+
+	grantScopes, found, err := s.Authorizations.FindGrantScopes(ctx, input.UserID, client.ID)
+	if err != nil {
+		return nil, newError(ErrInternal, "查询授权记录失败", err)
+	}
+	if !found {
+		return nil, newError(ErrInvalidScope, "尚未授权该应用，请在授权页确认", nil)
+	}
+	covered, err := scope.ContainsAll([]string(grantScopes), payload.Scopes)
+	if err != nil {
+		return nil, newError(ErrInvalidScope, "授权记录 scope 无效", err)
+	}
+	if !covered {
+		return nil, newError(ErrInvalidScope, "请求的 scope 超出既有授权范围，请在授权页确认", nil)
+	}
+
+	consumed, found, err := s.Requests.ConsumeAuthorizeRequest(ctx, requestID)
+	if err != nil {
+		return nil, newError(ErrDependencyUnavailable, "读取授权请求失败，请重试", err)
+	}
+	if !found {
+		// Lost a race with an interactive submission on the same stash; the winner
+		// minted the code, so the fallback consent page reports the spent request.
+		return nil, newError(ErrInvalidRequest, "授权请求无效或已过期，请重新发起授权", nil)
+	}
+	return s.issueAuthorizationCode(ctx, ConsentInput{
+		RequestID: requestID,
+		UserID:    input.UserID,
+		ClientIP:  input.ClientIP,
+		UserAgent: input.UserAgent,
+	}, consumed, "granted_silent")
 }
 
 // ConsentInfo returns the verified client metadata for a pending authorization

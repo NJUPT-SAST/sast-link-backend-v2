@@ -354,6 +354,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	// no-ops on an empty ID (a live-record touch that evicted nothing).
 	s.revokeEvictedDevice(ctx, current.UserID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	return &RefreshResult{
+		UserID:           current.UserID,
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
 		TokenType:        BearerTokenType,

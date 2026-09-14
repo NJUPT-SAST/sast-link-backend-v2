@@ -63,13 +63,22 @@ type fakeAuthorizations struct {
 	createErr          error
 	consumeAs          error
 	consumeUserVersion int64
+	// grantScopes mirrors oauth_grants: upserted by CreateWithGrant exactly like
+	// the repository's transaction, so a silent-consent test can build a standing
+	// grant by running one interactive consent first.
+	grantScopes  map[[2]int64]model.StringArray
+	findGrantErr error
 }
 
 func newFakeAuthorizations() *fakeAuthorizations {
 	// consumeUserVersion defaults to activeUser().TokenVersion (2) so the
 	// redemption's snapshot check passes for the stock user; tests that drive a
 	// mismatch set consumeUserVersion explicitly.
-	return &fakeAuthorizations{byCode: map[string]*model.OAuthAuthorization{}, consumeUserVersion: 2}
+	return &fakeAuthorizations{
+		byCode:             map[string]*model.OAuthAuthorization{},
+		grantScopes:        map[[2]int64]model.StringArray{},
+		consumeUserVersion: 2,
+	}
 }
 
 func (f *fakeAuthorizations) CreateWithGrant(_ context.Context, authorization *model.OAuthAuthorization) error {
@@ -81,7 +90,19 @@ func (f *fakeAuthorizations) CreateWithGrant(_ context.Context, authorization *m
 	stored := *authorization
 	f.byCode[authorization.Code] = &stored
 	f.created = append(f.created, authorization)
+	key := [2]int64{authorization.UserID, authorization.ClientID}
+	f.grantScopes[key] = authorization.Scopes
 	return nil
+}
+
+func (f *fakeAuthorizations) FindGrantScopes(_ context.Context, userID, clientID int64) (model.StringArray, bool, error) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	if f.findGrantErr != nil {
+		return nil, false, f.findGrantErr
+	}
+	scopes, ok := f.grantScopes[[2]int64{userID, clientID}]
+	return scopes, ok, nil
 }
 
 // Consume mirrors the repository's single-use contract, including returning the
