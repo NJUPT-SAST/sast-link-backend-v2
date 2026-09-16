@@ -846,3 +846,60 @@ func TestUpdateClientAuditsConcurrentDelete(t *testing.T) {
 		t.Fatalf("audit entries = %+v, want one failed update row", h.audit.entries)
 	}
 }
+
+// A registration that moved between the read the guards used and the write is
+// reported as a conflict, not retried: re-deciding against the new row would
+// apply a verdict the operator never made. The audit row keeps the rejection so
+// a reviewer can see which request lost the race.
+func TestUpdateClientReportsAConcurrentChange(t *testing.T) {
+	h := newHarness(t)
+	h.clients.findResult = activeClient(5)
+	h.clients.updateErr = repository.ErrStateConflict
+
+	_, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 5, AdminUserID: 99, ActorClientID: "ops-tool-delegate",
+		ClientName: func() *string { name := "renamed"; return &name }(),
+	})
+
+	assertKind(t, err, KindStateConflict)
+	if len(h.audit.entries) != 1 || h.audit.entries[0].Success == nil || *h.audit.entries[0].Success {
+		t.Fatalf("audit entries = %+v, want one failed update row", h.audit.entries)
+	}
+}
+
+// The version the guards were evaluated against must reach the repository, or
+// the CAS is bypassed by the one caller that needs it.
+func TestUpdateClientPassesTheVersionItDecidedOn(t *testing.T) {
+	h := newHarness(t)
+	client := activeClient(5)
+	h.clients.findResult = client
+
+	if _, err := h.service.UpdateClient(context.Background(), UpdateClientInput{
+		ClientPK: 5, AdminUserID: 99, ClientName: func() *string { name := "renamed"; return &name }(),
+	}); err != nil {
+		t.Fatalf("UpdateClient() error = %v", err)
+	}
+
+	if !h.clients.updateExpectedUpdatedAt.Equal(client.UpdatedAt) {
+		t.Fatalf("expected updated_at = %v, want the row's %v: the guards and the write must see the same version",
+			h.clients.updateExpectedUpdatedAt, client.UpdatedAt)
+	}
+}
+
+// A rotation decided against an old registration must not silently overwrite a
+// concurrent edit either.
+func TestRotateClientSecretReportsAConcurrentChange(t *testing.T) {
+	h := newHarness(t)
+	secret := "sha256-v1$old"
+	client := activeClient(5)
+	client.ClientSecretHash = &secret
+	client.ClientID = testProtectedClientID
+	h.clients.findResult = client
+	h.clients.updateErr = repository.ErrStateConflict
+
+	_, err := h.service.RotateClientSecret(context.Background(), RotateClientSecretInput{
+		ClientPK: 5, AdminUserID: 99, ActorClientID: testProtectedClientID,
+	})
+
+	assertKind(t, err, KindStateConflict)
+}

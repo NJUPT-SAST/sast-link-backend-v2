@@ -160,3 +160,15 @@ func TestListUsersRejectsAnOverlongKeyword(t *testing.T) {
 		t.Fatal("the query ran despite the keyword being rejected")
 	}
 }
+
+// The console overview must not report a zeroed aggregate for a service that
+// cannot read the table: "no accounts" and "the query did not run" look the same
+// to an operator, and only one of them is true.
+func TestStatsSurfacesAMissingRepository(t *testing.T) {
+	h := newHarness(t)
+	h.service.Users = nil
+
+	_, err := h.service.Stats(context.Background())
+
+	assertKind(t, err, KindInternal)
+}

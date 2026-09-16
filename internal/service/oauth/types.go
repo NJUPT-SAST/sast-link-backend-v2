@@ -148,6 +148,12 @@ type TokenRepository interface {
 	// client must re-authorize. Zero disables the cap.
 	RotateRefreshTokenWithAuditCapped(ctx context.Context, familyID string, currentRefreshTokenHash string, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog, maxLifetime time.Duration) (time.Time, error)
 	FindRefreshToken(ctx context.Context, tokenHash string) (*model.OAuthRefreshToken, error)
+	// FamilyOriginCreatedAt returns the created_at of the family's origin row
+	// (the lowest sequence), the instant a capability family's lifetime cap is
+	// measured from. The origin row is never rewritten, so reading it outside
+	// the rotation transaction still describes the boundary that transaction
+	// enforces.
+	FamilyOriginCreatedAt(ctx context.Context, familyID string) (time.Time, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
 	// RevokeUserClientTokens revokes every live token a user holds with one

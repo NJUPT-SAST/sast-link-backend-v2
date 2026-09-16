@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -65,7 +66,8 @@ func TestOAuthClientRepositoryFindByIDIgnoresActiveState(t *testing.T) {
 	client := createOAuthClient(t, database)
 
 	if _, _, err := clients.UpdateAndRevoke(context.Background(), client.ID,
-		map[string]any{"is_active": false}, false, time.Now()); err != nil {
+		map[string]any{"is_active": false}, false, time.Now(),
+		currentClientVersion(t, database, client.ID)); err != nil {
 		t.Fatalf("UpdateAndRevoke(deactivate) error = %v", err)
 	}
 	found, err := clients.FindByID(context.Background(), client.ID)
@@ -105,7 +107,8 @@ func TestOAuthClientRepositoryListAndCreate(t *testing.T) {
 	// Deactivated clients must still be listed, or the console could not re-enable
 	// one it had just disabled.
 	if _, _, err := clients.UpdateAndRevoke(context.Background(), created.ID,
-		map[string]any{"is_active": false}, false, time.Now()); err != nil {
+		map[string]any{"is_active": false}, false, time.Now(),
+		currentClientVersion(t, database, created.ID)); err != nil {
 		t.Fatalf("UpdateAndRevoke(deactivate) error = %v", err)
 	}
 	listed, err := clients.List(context.Background())
@@ -125,7 +128,8 @@ func TestOAuthClientRepositoryListAndCreate(t *testing.T) {
 		t.Fatalf("List() = %d clients, want the built-in and the disabled one", len(listed))
 	}
 	if _, _, err := clients.UpdateAndRevoke(context.Background(), 999999,
-		map[string]any{"client_name": "x"}, false, time.Now()); !errors.Is(err, repository.ErrNotFound) {
+		map[string]any{"client_name": "x"}, false, time.Now(),
+		time.Now()); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("UpdateAndRevoke(missing) error = %v, want ErrNotFound", err)
 	}
 }
@@ -158,7 +162,8 @@ func TestOAuthClientRepositoryUpdateAndRevokeIsScopedToOneClient(t *testing.T) {
 
 	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
 	entries, _, err := clients.UpdateAndRevoke(context.Background(), target.ID,
-		map[string]any{"is_active": false}, true, revokedAt)
+		map[string]any{"is_active": false}, true, revokedAt,
+		currentClientVersion(t, database, target.ID))
 	if err != nil {
 		t.Fatalf("UpdateAndRevoke(disable) error = %v", err)
 	}
@@ -196,7 +201,8 @@ func TestOAuthClientRepositoryUpdateWithoutRevokeLeavesTokensAlone(t *testing.T)
 	createTokenPair(t, tokens, "kept", "family-kept", 0, client.ID, user.ID)
 
 	entries, _, err := clients.UpdateAndRevoke(context.Background(), client.ID,
-		map[string]any{"client_name": "Renamed"}, false, time.Now())
+		map[string]any{"client_name": "Renamed"}, false, time.Now(),
+		currentClientVersion(t, database, client.ID))
 	if err != nil {
 		t.Fatalf("UpdateAndRevoke(rename) error = %v", err)
 	}
@@ -365,5 +371,88 @@ func TestOAuthClientRepositoryDeleteAndRevokeReportsRefreshOnlySession(t *testin
 	}
 	if revokedRefresh != 1 {
 		t.Fatalf("revokedRefresh = %d, want 1 (the live refresh session)", revokedRefresh)
+	}
+}
+
+// A write whose guards were evaluated against a row that has since moved must be
+// refused, not applied. Without this the update path's every decision — protected
+// client rules, capability-scope grant, the revocation decision — is a verdict on
+// a row that may no longer exist, and a delegated token can repoint the
+// redirect_uris of a client the console granted admin:read to in the gap.
+func TestOAuthClientRepositoryUpdateRefusesAStaleVersion(t *testing.T) {
+	database := setupDatabase(t)
+	clients := repository.NewOAuthClient(database)
+	client := createOAuthClient(t, database)
+
+	// What the caller read before deciding.
+	stale := currentClientVersion(t, database, client.ID)
+
+	// A concurrent console edit lands. The trigger moves updated_at, so the
+	// caller's version is now provably old.
+	concurrent, err := clients.FindByID(context.Background(), client.ID)
+	if err != nil {
+		t.Fatalf("FindByID error = %v", err)
+	}
+	if _, _, grantErr := clients.UpdateAndRevoke(context.Background(), client.ID,
+		map[string]any{"scopes": model.StringArray{"openid", "admin:read"}}, false,
+		time.Now(), concurrent.UpdatedAt); grantErr != nil {
+		t.Fatalf("concurrent grant error = %v", grantErr)
+	}
+
+	// The stale write is refused, and it names the conflict rather than the row as
+	// missing: the row is there, it is simply not the one that was decided on.
+	_, _, staleErr := clients.UpdateAndRevoke(context.Background(), client.ID,
+		map[string]any{"redirect_uris": model.StringArray{"https://attacker.test/callback"}},
+		false, time.Now(), stale)
+	if !errors.Is(staleErr, repository.ErrStateConflict) {
+		t.Fatalf("stale update error = %v, want ErrStateConflict", staleErr)
+	}
+
+	// Nothing was written: the callbacks still point where they did, and the scope
+	// the concurrent request granted is the one on the row.
+	after, err := clients.FindByID(context.Background(), client.ID)
+	if err != nil {
+		t.Fatalf("FindByID(after) error = %v", err)
+	}
+	if !reflect.DeepEqual(after.RedirectURIs, client.RedirectURIs) {
+		t.Fatalf("redirect_uris = %v, want the refused write to have left them unchanged", after.RedirectURIs)
+	}
+	if !slices.Contains([]string(after.Scopes), "admin:read") {
+		t.Fatalf("scopes = %v, want the concurrent grant to stand", after.Scopes)
+	}
+}
+
+// The version is required, not optional: an omitted one would make the guard
+// skippable by the caller that most needs it.
+func TestOAuthClientRepositoryUpdateRequiresAVersion(t *testing.T) {
+	database := setupDatabase(t)
+	clients := repository.NewOAuthClient(database)
+	client := createOAuthClient(t, database)
+
+	_, _, err := clients.UpdateAndRevoke(context.Background(), client.ID,
+		map[string]any{"client_name": "Renamed"}, false, time.Now(), time.Time{})
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("zero-version update error = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// A version that matches still writes: the guard must not turn every update into
+// a conflict.
+func TestOAuthClientRepositoryUpdateAcceptsTheCurrentVersion(t *testing.T) {
+	database := setupDatabase(t)
+	clients := repository.NewOAuthClient(database)
+	client := createOAuthClient(t, database)
+
+	if _, _, err := clients.UpdateAndRevoke(context.Background(), client.ID,
+		map[string]any{"client_name": "Renamed"}, false, time.Now(),
+		currentClientVersion(t, database, client.ID)); err != nil {
+		t.Fatalf("UpdateAndRevoke(rename) error = %v", err)
+	}
+	after, err := clients.FindByID(context.Background(), client.ID)
+	if err != nil {
+		t.Fatalf("FindByID error = %v", err)
+	}
+	if after.ClientName != "Renamed" {
+		t.Fatalf("client_name = %q, want the write to have landed", after.ClientName)
 	}
 }

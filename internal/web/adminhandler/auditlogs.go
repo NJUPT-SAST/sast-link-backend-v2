@@ -10,6 +10,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/webutil"
 )
 
 // ListAuditLogs returns a filtered page of audit entries.
@@ -24,7 +25,7 @@ func (h Handler) ListAuditLogs(c *gin.Context) {
 		response.Error(c, badRequest())
 		return
 	}
-	success, err := parseOptionalBool(c.Query("success"))
+	success, err := webutil.ParseOptionalBool(c.Query("success"))
 	if err != nil {
 		response.Error(c, badRequest())
 		return
@@ -65,23 +66,6 @@ func (h Handler) ListAuditLogs(c *gin.Context) {
 		Page:     result.Page,
 		PageSize: result.PageSize,
 	})
-}
-
-// parseOptionalBool accepts only "true" and "false"; strconv.ParseBool would
-// also take "1", "t" and "T", which the contract does not document.
-func parseOptionalBool(raw string) (*bool, error) {
-	switch strings.TrimSpace(raw) {
-	case "":
-		return nil, nil
-	case "true":
-		value := true
-		return &value, nil
-	case "false":
-		value := false
-		return &value, nil
-	default:
-		return nil, errInvalidQueryParameter
-	}
 }
 
 func parseOptionalInt64(raw string) (*int64, error) {

@@ -103,6 +103,8 @@ CI 中所有测试均携带：
 
 本地执行 `-race` 需要启用 CGO 并安装可用的 C compiler；完整 integration tests 还要求 Docker provider 健康。Windows 环境不满足这些前置条件时，可在具备 Docker socket 与 C toolchain 的 Linux/WSL 环境执行，但不能用非 race 测试代替合入验证。
 
+**Docker 不可用时集成测试是失败而非跳过。** 需要容器的包（`internal/repository`、`internal/migration`、`internal/model`、`internal/redis`、`internal/adapter/redis/*`、`internal/web/*` 的 e2e）通过 `testutil.RequireProvider` 启动容器；provider 不健康时它 `t.Fatalf`，不会静默跳过。这类包的测试覆盖面就是本仓库的全部数据库断言（家族撤销、并发 refresh、迁移 down、占用检查的大小写折叠），跳过会让 `go test ./...` 在一堆从未执行的断言上报绿。确实要在无 Docker 环境跑其余测试时，显式设 `SKIP_INTEGRATION_TESTS=1` 跳过——跳过必须是一个被做出的决定，而不是静默发生的默认。
+
 ### 测试要求
 
 - 新功能必须包含 Happy Path 和至少一个错误/边界用例的测试。

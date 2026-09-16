@@ -22,12 +22,13 @@ type fakeClients struct {
 	findResult *model.OAuthClient
 	findErr    error
 
-	updateFields  map[string]any
-	updateRevoked bool
-	updateEntries []model.BlacklistEntry
-	updateRefresh int64
-	updateErr     error
-	updateCalls   int
+	updateFields            map[string]any
+	updateRevoked           bool
+	updateEntries           []model.BlacklistEntry
+	updateRefresh           int64
+	updateErr               error
+	updateCalls             int
+	updateExpectedUpdatedAt time.Time
 
 	deleteEntries []model.BlacklistEntry
 	deleteRefresh int64
@@ -71,10 +72,12 @@ func (f *fakeClients) UpdateAndRevoke(
 	fields map[string]any,
 	revokeTokens bool,
 	_ time.Time,
+	expectedUpdatedAt time.Time,
 ) ([]model.BlacklistEntry, int64, error) {
 	f.updateCalls++
 	f.updateFields = fields
 	f.updateRevoked = revokeTokens
+	f.updateExpectedUpdatedAt = expectedUpdatedAt
 	if f.updateErr != nil {
 		return nil, 0, f.updateErr
 	}

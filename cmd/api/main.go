@@ -84,8 +84,12 @@ func run() error {
 	// registry. Like /health it is an anonymous scrape surface, deliberately
 	// outside every auth gate.
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
-	// pprof is fail-closed: only an explicit development environment or PPROF_ENABLED enables it.
-	if cfg.AppEnv == "development" || cfg.EnablePprof {
+	// pprof is fail-closed: PPROF_ENABLED is the only switch. APP_ENV no longer
+	// turns it on implicitly, because the failure mode of that default is a missing
+	// variable exposing an unauthenticated debug surface on a production host —
+	// /debug/pprof drives CPU sampling and dumps goroutine/heap state, and a
+	// deployment that forgot APP_ENV=production would never know it was on.
+	if cfg.EnablePprof {
 		registerProfiling(router)
 	}
 	health.New(map[string]func() error{

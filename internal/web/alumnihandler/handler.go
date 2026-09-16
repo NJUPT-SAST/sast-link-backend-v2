@@ -7,7 +7,6 @@ package alumnihandler
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -140,7 +139,7 @@ func (h Handler) Submit(c *gin.Context) {
 
 // List returns the reviewer's queue.
 func (h Handler) List(c *gin.Context) {
-	notified, err := parseOptionalBool(c.Query("notified"))
+	notified, err := webutil.ParseOptionalBool(c.Query("notified"))
 	if err != nil {
 		response.Error(c, badRequest())
 		return
@@ -318,26 +317,6 @@ func parseID(c *gin.Context) (int64, bool) {
 	// Delegate to web.ParsePositiveID rather than reimplementing it: it rejects
 	// non-digits (including a "+" prefix) and values <= 0 in a single rule.
 	return web.ParsePositiveID(c.Param("id"))
-}
-
-// parseOptionalBool accepts only "true" and "false".
-//
-// strconv.ParseBool would also take "1", "t" and "T", which the contract
-// does not document; an unrecognized value is an error rather than a silent
-// false, so a mistyped notified=ture returns the opposite of what was asked.
-func parseOptionalBool(raw string) (*bool, error) {
-	switch strings.TrimSpace(raw) {
-	case "":
-		return nil, nil
-	case "true":
-		value := true
-		return &value, nil
-	case "false":
-		value := false
-		return &value, nil
-	default:
-		return nil, errors.New("alumnihandler: notified must be true or false")
-	}
 }
 
 func internalError() error {
