@@ -202,8 +202,9 @@ func TestSilentConsentRejectsUnknownStashAndBadPrincipal(t *testing.T) {
 	}
 }
 
-// The silent mint shares the consent submission's per-user budget: it issues
-// codes, so it may not sit outside the throttle.
+// The silent mint is throttled too — it issues codes, so it may not sit outside
+// the limiter — but on its own scope, so the refusals it pays for cannot be
+// charged against the allowance the consent page needs to submit.
 func TestSilentConsentThrottlesByUser(t *testing.T) {
 	h := newHarness(t)
 	h.authorizations.grantScopes[[2]int64{1, 10}] = model.StringArray{"openid", "profile", "email"}
@@ -224,6 +225,45 @@ func TestSilentConsentThrottlesByUser(t *testing.T) {
 	}
 	if len(h.authorizations.created) != 0 {
 		t.Fatal("a throttled silent mint issued a code")
+	}
+	if calls := h.limiter.callsSnapshot(); len(calls) == 0 || calls[len(calls)-1] != "oauth_consent_silent:user:1" {
+		t.Fatalf("limiter calls = %v, want the silent mint charged to its own bucket", calls)
+	}
+}
+
+// The bucket split in both directions: a silent attempt must not spend the
+// interactive consent allowance, and an interactive approval must not spend the
+// silent one. A client bouncing the browser through /oauth/authorize often
+// enough would otherwise leave the user unable to submit the page it fell back
+// to, which is the one page that can still finish the authorization.
+func TestSilentConsentAndInteractiveConsentKeepSeparateBudgets(t *testing.T) {
+	h := newHarness(t)
+	// No grant, so the silent attempt pays its own bucket and falls through to
+	// the consent page without spending the stash.
+	authorized, err := h.service.Authorize(context.Background(), validAuthorizeInput(t))
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	if _, err := h.service.SilentConsent(context.Background(), SilentConsentInput{
+		RequestID: authorized.RequestID,
+		UserID:    1,
+	}); err == nil {
+		t.Fatal("a silent attempt with no grant succeeded")
+	}
+	// The user then approves on the page they fell back to, and must not be
+	// throttled by what the silent attempt just paid.
+	if _, err := h.service.Consent(context.Background(), ConsentInput{
+		RequestID: authorized.RequestID, UserID: 1, Approve: true,
+	}); err != nil {
+		t.Fatalf("Consent() error = %v, want the silent charge not to starve the interactive decision", err)
+	}
+
+	seen := map[string]bool{}
+	for _, call := range h.limiter.callsSnapshot() {
+		seen[strings.SplitN(call, ":", 2)[0]] = true
+	}
+	if !seen["oauth_consent"] || !seen["oauth_consent_silent"] {
+		t.Fatalf("limiter calls = %v, want one charge to each bucket", h.limiter.callsSnapshot())
 	}
 }
 
@@ -267,5 +307,126 @@ func TestSilentConsentConsumesStashExactlyOnce(t *testing.T) {
 	}
 	if len(h.authorizations.created) != 1 {
 		t.Fatalf("created authorizations = %d, want 1", len(h.authorizations.created))
+	}
+}
+
+// prompt=login and prompt=consent ask for a fresh user gesture. Before the
+// silent path existed every authorization rendered the consent page, so these
+// were honored by accident; the silent leg has to honor them on purpose or it
+// hands an RP the one thing the parameter exists to prevent.
+func TestSilentConsentDefersToPromptForcingInteraction(t *testing.T) {
+	for _, prompt := range []string{"consent", "login", "login consent", "select_account consent"} {
+		t.Run("vetoes "+prompt, func(t *testing.T) {
+			h := newHarness(t)
+			h.authorizations.grantScopes[[2]int64{1, 10}] = model.StringArray{"openid", "profile", "email"}
+			input := validAuthorizeInput(t)
+			input.Prompt = prompt
+			authorized, err := h.service.Authorize(context.Background(), input)
+			if err != nil {
+				t.Fatalf("Authorize() error = %v", err)
+			}
+
+			_, err = h.service.SilentConsent(context.Background(), SilentConsentInput{
+				RequestID: authorized.RequestID,
+				UserID:    1,
+			})
+			oauthErr := oauthError(t, err, ErrorInvalidRequest)
+			if oauthErr.StashSpent {
+				t.Fatal("a prompt veto spent the stash, want the consent page to still load it")
+			}
+			if len(h.authorizations.created) != 0 {
+				t.Fatal("a prompt veto minted a code anyway")
+			}
+			// The page the browser is sent to can still complete the request.
+			if _, err := h.service.Consent(context.Background(), ConsentInput{
+				RequestID: authorized.RequestID, UserID: 1, Approve: true,
+			}); err != nil {
+				t.Fatalf("Consent() after a prompt veto error = %v", err)
+			}
+		})
+	}
+
+	// Values that do not demand a gesture must not veto: prompt=none asks for the
+	// opposite, and an unknown value is better ignored than misread as its
+	// opposite.
+	for _, prompt := range []string{"", "none", "select_account"} {
+		name := prompt
+		if name == "" {
+			name = "empty"
+		}
+		t.Run("ignores "+name, func(t *testing.T) {
+			h := newHarness(t)
+			h.authorizations.grantScopes[[2]int64{1, 10}] = model.StringArray{"openid", "profile", "email"}
+			input := validAuthorizeInput(t)
+			input.Prompt = prompt
+			authorized, err := h.service.Authorize(context.Background(), input)
+			if err != nil {
+				t.Fatalf("Authorize() error = %v", err)
+			}
+
+			if _, err := h.service.SilentConsent(context.Background(), SilentConsentInput{
+				RequestID: authorized.RequestID,
+				UserID:    1,
+			}); err != nil {
+				t.Fatalf("SilentConsent() error = %v, want prompt %q not to veto the silent path", err, prompt)
+			}
+		})
+	}
+}
+
+// The revoke that lands between the silent path's grant check and its write is
+// the one the update-only writer exists for. CreateWithGrant would upsert the
+// pair and put the deleted grant straight back, so the app would reappear in the
+// authorized-apps list and the client would hold a live code — the user's revoke
+// silently undone. The write must instead find nothing, roll the code back with
+// it, and leave the caller knowing it has to start over.
+func TestSilentConsentRefusesWhenTheGrantVanishesBeforeTheWrite(t *testing.T) {
+	h := newHarness(t)
+	h.authorizations.grantScopes[[2]int64{1, 10}] = model.StringArray{"openid", "profile", "email"}
+	authorized, err := h.service.Authorize(context.Background(), validAuthorizeInput(t))
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	// The revoke commits after the grant check read the row and before the mint
+	// writes. The revoke does not touch the Redis stash, so the mint still runs.
+	h.authorizations.deleteGrantsOnCreate = true
+
+	_, err = h.service.SilentConsent(context.Background(), SilentConsentInput{
+		RequestID: authorized.RequestID,
+		UserID:    1,
+	})
+	oauthErr := oauthError(t, err, ErrorInvalidGrant)
+	if !oauthErr.StashSpent {
+		t.Fatal("the failed mint still reported the stash as reloadable, want a restart")
+	}
+	if len(h.authorizations.created) != 0 {
+		t.Fatal("minted a code against a grant that had been revoked")
+	}
+	if _, found, err := h.authorizations.FindGrantScopes(context.Background(), 1, 10); err != nil {
+		t.Fatalf("FindGrantScopes() error = %v", err)
+	} else if found {
+		t.Fatal("the revoked grant was recreated, want a silent mint never to create one")
+	}
+}
+
+// A successful silent mint still refreshes the grant, so the authorized-apps
+// list keeps showing the application the user consented to.
+func TestSilentConsentRefreshesTheStandingGrant(t *testing.T) {
+	h := newHarness(t)
+	h.authorizations.grantScopes[[2]int64{1, 10}] = model.StringArray{"openid", "profile", "email"}
+	authorized, err := h.service.Authorize(context.Background(), validAuthorizeInput(t))
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	if _, err := h.service.SilentConsent(context.Background(), SilentConsentInput{
+		RequestID: authorized.RequestID,
+		UserID:    1,
+	}); err != nil {
+		t.Fatalf("SilentConsent() error = %v", err)
+	}
+	if _, found, err := h.authorizations.FindGrantScopes(context.Background(), 1, 10); err != nil {
+		t.Fatalf("FindGrantScopes() error = %v", err)
+	} else if !found {
+		t.Fatal("the standing grant disappeared after a silent mint")
 	}
 }

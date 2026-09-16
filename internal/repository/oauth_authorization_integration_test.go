@@ -474,12 +474,98 @@ func TestOAuthAuthorizationRepositoryConsumeUnknownCode(t *testing.T) {
 	}
 }
 
+// CreateWithExistingGrant is the silent path's writer, and its contract is
+// narrower than CreateWithGrant's by exactly one promise: it may never create a
+// grant. Without that, a silent mint racing the user's revoke would upsert the
+// pair back and undo the revoke — the app returns to the authorized-apps list
+// and the client holds a live code.
+func TestOAuthAuthorizationRepositoryCreateWithExistingGrant(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "authz-existing-grant@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	authorizations := repository.NewOAuthAuthorization(database)
+
+	// No consent yet: the write must change nothing at all, code included.
+	orphan := testAuthorization("code-orphan", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	if err := authorizations.CreateWithExistingGrant(context.Background(), orphan); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("CreateWithExistingGrant(no grant) error = %v, want ErrNotFound", err)
+	}
+	var codeCount int64
+	if err := database.Model(&model.OAuthAuthorization{}).Where("code = ?", orphan.Code).Count(&codeCount).Error; err != nil {
+		t.Fatalf("count authorizations: %v", err)
+	}
+	if codeCount != 0 {
+		t.Fatal("a refused write left an authorization code behind, want the transaction rolled back with it")
+	}
+	var grantCount int64
+	if err := database.Model(&model.OAuthGrant{}).
+		Where("user_id = ? AND client_id = ?", user.ID, client.ID).Count(&grantCount).Error; err != nil {
+		t.Fatalf("count grants: %v", err)
+	}
+	if grantCount != 0 {
+		t.Fatal("a refused write created the grant it was supposed to require")
+	}
+
+	// A standing grant: the write lands, and it refreshes the row rather than
+	// duplicating it.
+	seeded := &model.OAuthGrant{
+		UserID:    user.ID,
+		ClientID:  client.ID,
+		Scopes:    model.StringArray{"openid", "profile", "email"},
+		GrantedAt: time.Now().Truncate(time.Microsecond),
+	}
+	if err := database.Create(seeded).Error; err != nil {
+		t.Fatalf("Create(grant) error = %v", err)
+	}
+	narrowed := testAuthorization("code-existing", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	narrowed.Scopes = model.StringArray{"openid"}
+	if err := authorizations.CreateWithExistingGrant(context.Background(), narrowed); err != nil {
+		t.Fatalf("CreateWithExistingGrant(standing grant) error = %v", err)
+	}
+	if err := database.Model(&model.OAuthAuthorization{}).Where("code = ?", narrowed.Code).Count(&codeCount).Error; err != nil {
+		t.Fatalf("count authorizations: %v", err)
+	}
+	if codeCount != 1 {
+		t.Fatalf("authorization codes = %d, want the mint to have landed", codeCount)
+	}
+	if err := database.Model(&model.OAuthGrant{}).
+		Where("user_id = ? AND client_id = ?", user.ID, client.ID).Count(&grantCount).Error; err != nil {
+		t.Fatalf("count grants: %v", err)
+	}
+	if grantCount != 1 {
+		t.Fatalf("grants = %d, want the pair updated in place", grantCount)
+	}
+
+	// And the revoke that commits first wins: the row the update needs is gone,
+	// so the mint fails instead of putting it back.
+	if err := authorizations.DeleteByUserClient(context.Background(), user.ID, client.ID); err != nil {
+		t.Fatalf("DeleteByUserClient() error = %v", err)
+	}
+	afterRevoke := testAuthorization("code-after-revoke", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	if err := authorizations.CreateWithExistingGrant(context.Background(), afterRevoke); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("CreateWithExistingGrant(revoked) error = %v, want ErrNotFound", err)
+	}
+	if err := database.Model(&model.OAuthGrant{}).
+		Where("user_id = ? AND client_id = ?", user.ID, client.ID).Count(&grantCount).Error; err != nil {
+		t.Fatalf("count grants: %v", err)
+	}
+	if grantCount != 0 {
+		t.Fatal("the revoke was undone, want a mint to never recreate a deleted grant")
+	}
+}
+
 func TestOAuthAuthorizationRepositoryRejectsInvalidArguments(t *testing.T) {
 	database := setupDatabase(t)
 	authorizations := repository.NewOAuthAuthorization(database)
 
 	if err := authorizations.CreateWithGrant(context.Background(), nil); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("CreateWithGrant(nil) error = %v, want ErrInvalidArgument", err)
+	}
+	if err := authorizations.CreateWithExistingGrant(context.Background(), nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("CreateWithExistingGrant(nil) error = %v, want ErrInvalidArgument", err)
+	}
+	if err := authorizations.CreateWithExistingGrant(context.Background(), &model.OAuthAuthorization{}); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("CreateWithExistingGrant(empty) error = %v, want ErrInvalidArgument", err)
 	}
 	if err := authorizations.CreateWithGrant(context.Background(), &model.OAuthAuthorization{}); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("CreateWithGrant(empty) error = %v, want ErrInvalidArgument", err)

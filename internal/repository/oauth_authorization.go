@@ -36,9 +36,8 @@ func NewOAuthAuthorization(database *gorm.DB) *OAuthAuthorizationRepository {
 // live code without appearing in the authorized-apps list. oauth_grants is
 // keyed by (user_id, client_id), so a repeated consent upserts the pair.
 func (r *OAuthAuthorizationRepository) CreateWithGrant(ctx context.Context, authorization *model.OAuthAuthorization) error {
-	if authorization == nil || strings.TrimSpace(authorization.Code) == "" ||
-		authorization.ClientID <= 0 || authorization.UserID <= 0 {
-		return fmt.Errorf("create authorization with grant: %w", ErrInvalidArgument)
+	if err := validateNewAuthorization(authorization); err != nil {
+		return fmt.Errorf("create authorization with grant: %w", err)
 	}
 	grant := &model.OAuthGrant{
 		UserID:    authorization.UserID,
@@ -57,6 +56,60 @@ func (r *OAuthAuthorizationRepository) CreateWithGrant(ctx context.Context, auth
 	})
 	if err != nil {
 		return fmt.Errorf("create authorization with grant: %w", err)
+	}
+	return nil
+}
+
+// CreateWithExistingGrant persists a new authorization code against a consent
+// grant that must already exist, in one transaction.
+//
+// This is the silent-authorize path's writer, and the difference from
+// CreateWithGrant is deliberately narrow: a silent code is minted on the
+// strength of a standing grant, so it must never be the thing that creates that
+// grant. CreateWithGrant upserts the pair, which means an in-flight silent mint
+// could resurrect a grant the user revoked a millisecond earlier — the app
+// reappears in the authorized-apps list and the client holds a live code, so the
+// revoke's promise ("the client must consent again") is silently undone.
+// DeleteByUserClient deletes the grants and codes that exist when it runs, and
+// cannot delete a row a later transaction re-inserts.
+//
+// Ordering the grant write first, as an UPDATE, closes that: the row lock
+// serializes this transaction against the revoking DELETE, and if the delete
+// committed first there is nothing to update, RowsAffected is 0, and returning
+// ErrNotFound rolls back the code insert with the rest of the transaction. No
+// grant row, no code. (PostgreSQL counts rows matched by the UPDATE, not rows
+// whose values changed, so 0 rows reliably means "the row is gone".)
+func (r *OAuthAuthorizationRepository) CreateWithExistingGrant(ctx context.Context, authorization *model.OAuthAuthorization) error {
+	if err := validateNewAuthorization(authorization); err != nil {
+		return fmt.Errorf("create authorization with existing grant: %w", err)
+	}
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		updated := transaction.Model(&model.OAuthGrant{}).
+			Where("user_id = ? AND client_id = ?", authorization.UserID, authorization.ClientID).
+			Updates(map[string]any{
+				"scopes":     authorization.Scopes,
+				"granted_at": authorization.CreatedAt,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return transaction.Create(authorization).Error
+	})
+	if err != nil {
+		return fmt.Errorf("create authorization with existing grant: %w", err)
+	}
+	return nil
+}
+
+// validateNewAuthorization rejects an authorization that cannot be persisted,
+// shared by both writers so the two cannot drift on what a usable record is.
+func validateNewAuthorization(authorization *model.OAuthAuthorization) error {
+	if authorization == nil || strings.TrimSpace(authorization.Code) == "" ||
+		authorization.ClientID <= 0 || authorization.UserID <= 0 {
+		return ErrInvalidArgument
 	}
 	return nil
 }

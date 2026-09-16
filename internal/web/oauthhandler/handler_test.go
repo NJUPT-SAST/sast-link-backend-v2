@@ -16,7 +16,6 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 )
 
@@ -144,18 +143,20 @@ func (a *fakeAuthenticator) Authenticate(_ context.Context, header string) (midd
 	return a.internalPrincipal, nil
 }
 
-// fakeSessionRefresher backs the silent path's cookie leg.
-type fakeSessionRefresher struct {
+// fakeSessionIdentifier backs the silent path's cookie leg. It records what it
+// was handed and answers with a subject or a refusal; nothing about it writes,
+// mirroring the read-only contract the handler depends on.
+type fakeSessionIdentifier struct {
 	calls  int
-	input  session.RefreshInput
-	result *session.RefreshResult
+	token  string
+	userID int64
 	err    error
 }
 
-func (f *fakeSessionRefresher) Refresh(_ context.Context, input session.RefreshInput) (*session.RefreshResult, error) {
+func (f *fakeSessionIdentifier) IdentifyByRefreshToken(_ context.Context, token string) (int64, error) {
 	f.calls++
-	f.input = input
-	return f.result, f.err
+	f.token = token
+	return f.userID, f.err
 }
 
 func newRouter(t *testing.T, service Service, auth Authenticator) *gin.Engine {
@@ -317,7 +318,7 @@ func TestAuthorizeSilentConsent(t *testing.T) {
 		"&scope=openid&state=xyz&code_challenge=chal&code_challenge_method=S256"
 	const clientRedirect = "https://app.test/cb?code=ac_1&state=xyz"
 
-	newSilentRouter := func(t *testing.T, service *fakeService, auth Authenticator, sessions SessionRefresher, cookies *middleware.SessionCookie) *gin.Engine {
+	newSilentRouter := func(t *testing.T, service *fakeService, auth Authenticator, sessions SessionIdentifier, cookies *middleware.SessionCookie) *gin.Engine {
 		t.Helper()
 		gin.SetMode(gin.TestMode)
 		router := gin.New()
@@ -371,16 +372,15 @@ func TestAuthorizeSilentConsent(t *testing.T) {
 		}
 	})
 
-	t.Run("session cookie refreshes, rotates the cookie, and drives the mint", func(t *testing.T) {
+	// The cookie leg identifies without touching anything: this endpoint is an
+	// unauthenticated, cross-site-reachable navigation, and a rotation here would
+	// let a plain navigation rewrite the victim's session.
+	t.Run("session cookie identifies the browser and writes nothing back", func(t *testing.T) {
 		service := &fakeService{
 			authorizeResult:     &oauth.AuthorizeResult{RequestID: "ar_abc", ClientName: "App", Scopes: []string{"openid"}},
 			silentConsentResult: &oauth.ConsentResult{RedirectURI: clientRedirect},
 		}
-		sessions := &fakeSessionRefresher{result: &session.RefreshResult{
-			UserID:           9,
-			RefreshToken:     "rotated-refresh",
-			RefreshExpiresAt: time.Now().Add(24 * time.Hour),
-		}}
+		sessions := &fakeSessionIdentifier{userID: 9}
 		cookies := &middleware.SessionCookie{Name: "sl_session", Path: "/v2", SameSite: http.SameSiteLaxMode}
 		router := newSilentRouter(t, service, &fakeAuthenticator{}, sessions, cookies)
 
@@ -392,14 +392,27 @@ func TestAuthorizeSilentConsent(t *testing.T) {
 		if got := recorder.Header().Get("Location"); got != clientRedirect {
 			t.Fatalf("Location = %q, want the client redirect %q", got, clientRedirect)
 		}
-		if sessions.calls != 1 || sessions.input.RefreshToken != "old-refresh" {
-			t.Fatalf("refresh calls = %d input = %+v, want one rotation of the cookie token", sessions.calls, sessions.input)
+		if sessions.calls != 1 || sessions.token != "old-refresh" {
+			t.Fatalf("identify calls = %d token = %q, want one read of the cookie token", sessions.calls, sessions.token)
 		}
-		if !strings.Contains(recorder.Header().Get("Set-Cookie"), "sl_session=rotated-refresh") {
-			t.Fatalf("Set-Cookie = %q, want the rotated refresh token written back", recorder.Header().Get("Set-Cookie"))
+		if setCookie := recorder.Header().Get("Set-Cookie"); setCookie != "" {
+			t.Fatalf("Set-Cookie = %q, want nothing written back", setCookie)
 		}
 		if service.silentConsentInput.UserID != 9 {
-			t.Fatalf("silent user = %d, want the refreshed session's subject 9", service.silentConsentInput.UserID)
+			t.Fatalf("silent user = %d, want the session's subject 9", service.silentConsentInput.UserID)
+		}
+	})
+
+	t.Run("the prompt parameter reaches the service", func(t *testing.T) {
+		service := &fakeService{
+			authorizeResult: &oauth.AuthorizeResult{RequestID: "ar_abc", ClientName: "App", Scopes: []string{"openid"}},
+		}
+		router := newSilentRouter(t, service, &fakeAuthenticator{}, nil, nil)
+
+		doGet(t, router, authorizeQuery+"&prompt=consent", nil, nil)
+
+		if service.authorizeInput.Prompt != "consent" {
+			t.Fatalf("authorize prompt = %q, want the query value carried to the service", service.authorizeInput.Prompt)
 		}
 	})
 
@@ -446,7 +459,7 @@ func TestAuthorizeSilentConsent(t *testing.T) {
 		service := &fakeService{
 			authorizeResult: &oauth.AuthorizeResult{RequestID: "ar_abc", ClientName: "App", Scopes: []string{"openid"}},
 		}
-		sessions := &fakeSessionRefresher{err: errors.New("refresh token invalid")}
+		sessions := &fakeSessionIdentifier{err: errors.New("refresh token invalid")}
 		cookies := &middleware.SessionCookie{Name: "sl_session", Path: "/v2"}
 		router := newSilentRouter(t, service, &fakeAuthenticator{}, sessions, cookies)
 
@@ -461,6 +474,41 @@ func TestAuthorizeSilentConsent(t *testing.T) {
 		}
 		if service.silentConsentCalls != 0 {
 			t.Fatalf("silent consent calls = %d, want 0 without a live session", service.silentConsentCalls)
+		}
+	})
+
+	// The stash is what the consent page loads. A silent attempt that failed
+	// after spending it cannot hand the browser back to that page: it would
+	// answer the same failure the browser just hit, as a bare 400 with no way
+	// forward. The error form is the one destination that explains and restarts.
+	t.Run("a failure after the stash was spent goes to the error form", func(t *testing.T) {
+		service := &fakeService{
+			authorizeResult: &oauth.AuthorizeResult{RequestID: "ar_abc", ClientName: "App", Scopes: []string{"openid"}},
+			silentConsentErr: &oauth.Error{
+				Kind: oauth.KindInvalidGrant, Code: oauth.ErrorInvalidGrant,
+				Description: "授权已被撤销，请重新发起授权", StashSpent: true,
+			},
+		}
+		auth := &fakeAuthenticator{internalPrincipal: middleware.Principal{UserID: 7}}
+		router := newSilentRouter(t, service, auth, nil, nil)
+
+		recorder := doGet(t, router, authorizeQuery, map[string]string{"Authorization": "Bearer internal-token"}, nil)
+
+		if recorder.Code != http.StatusFound {
+			t.Fatalf("status = %d, want 302", recorder.Code)
+		}
+		base, query := redirectQuery(t, recorder)
+		if base != testConsentURL {
+			t.Fatalf("redirect base = %q, want the consent page's error form", base)
+		}
+		if query.Get("request_id") != "" {
+			t.Fatalf("redirect carried request_id %q, want none: the stash it names is gone", query.Get("request_id"))
+		}
+		if query.Get("error") != oauth.ErrorInvalidRequest {
+			t.Fatalf("error = %q, want %q", query.Get("error"), oauth.ErrorInvalidRequest)
+		}
+		if query.Get("error_description") == "" {
+			t.Fatal("error_description is empty, want a reason the user can act on")
 		}
 	})
 }

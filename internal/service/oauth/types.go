@@ -52,6 +52,11 @@ type AuthorizeRequestPayload struct {
 	CodeChallenge       string   `json:"code_challenge"`
 	CodeChallengeMethod string   `json:"code_challenge_method"`
 	Nonce               string   `json:"nonce,omitempty"`
+	// Prompt is carried into the stash because the silent path runs after
+	// Authorize with only the stashed payload in hand, so the stash is the only
+	// place it can read the veto from. omitempty keeps the tag compatible with
+	// stashes written before it existed.
+	Prompt string `json:"prompt,omitempty"`
 }
 
 // AuthorizeRequestStore holds validated authorize requests between the two legs
@@ -89,8 +94,14 @@ type ClientRepository interface {
 type AuthorizationRepository interface {
 	// CreateWithGrant persists a new authorization code and records the user's
 	// consent for the client in oauth_grants, in one transaction. Consent is the
-	// only code-minting path.
+	// only code-minting path that may create a grant.
 	CreateWithGrant(ctx context.Context, authorization *model.OAuthAuthorization) error
+	// CreateWithExistingGrant persists a new authorization code only if the
+	// user's consent grant with the client still exists, in one transaction; a
+	// missing grant returns repository.ErrNotFound and writes no code. The silent
+	// path uses it so a mint in flight cannot resurrect a grant the user has just
+	// revoked.
+	CreateWithExistingGrant(ctx context.Context, authorization *model.OAuthAuthorization) error
 	// Consume marks a code used under a row lock. On replay it returns
 	// repository.ErrAuthorizationReplayed together with the record, whose family
 	// the caller must revoke. The second return is the owning user's token_version
@@ -164,8 +175,12 @@ type AuthorizeInput struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	Nonce               string
-	ClientIP            string
-	UserAgent           string
+	// Prompt is the OIDC prompt parameter. Only its interaction-forcing values
+	// (login, consent) are acted on: they veto the silent authorize path. The
+	// parameter is otherwise ignored, so prompt=none is not supported.
+	Prompt    string
+	ClientIP  string
+	UserAgent string
 }
 
 // AuthorizeResult tells the handler where to send the browser.

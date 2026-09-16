@@ -68,6 +68,10 @@ type fakeAuthorizations struct {
 	// grant by running one interactive consent first.
 	grantScopes  map[[2]int64]model.StringArray
 	findGrantErr error
+	// deleteGrantsOnCreate mimics a revoke committing between the silent path's
+	// grant check and its write, which is what the update-only writer exists to
+	// survive: the next CreateWithExistingGrant finds nothing and mints nothing.
+	deleteGrantsOnCreate bool
 }
 
 func newFakeAuthorizations() *fakeAuthorizations {
@@ -92,6 +96,30 @@ func (f *fakeAuthorizations) CreateWithGrant(_ context.Context, authorization *m
 	f.created = append(f.created, authorization)
 	key := [2]int64{authorization.UserID, authorization.ClientID}
 	f.grantScopes[key] = authorization.Scopes
+	return nil
+}
+
+// CreateWithExistingGrant mirrors the repository's update-only writer: it
+// refreshes an existing grant and stores the code, and reports ErrNotFound
+// without storing anything when there is no grant to update.
+func (f *fakeAuthorizations) CreateWithExistingGrant(_ context.Context, authorization *model.OAuthAuthorization) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	key := [2]int64{authorization.UserID, authorization.ClientID}
+	if f.deleteGrantsOnCreate {
+		delete(f.grantScopes, key)
+		f.deleteGrantsOnCreate = false
+	}
+	if _, ok := f.grantScopes[key]; !ok {
+		return repository.ErrNotFound
+	}
+	f.grantScopes[key] = authorization.Scopes
+	stored := *authorization
+	f.byCode[authorization.Code] = &stored
+	f.created = append(f.created, authorization)
 	return nil
 }
 

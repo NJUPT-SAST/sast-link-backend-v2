@@ -162,6 +162,22 @@ func (s Service) checkConsentLimit(ctx context.Context, userID int64) error {
 	return s.checkLimit(ctx, s.ConsentLimiter, "oauth_consent", "user:"+strconv.FormatInt(userID, 10))
 }
 
+// checkSilentConsentLimit throttles the silent authorize mint per user, on its
+// own scope of the same limiter rather than a second limiter: the scope is part
+// of the Redis key (redis.Keys.RateLimit), so a separate scope is a separate
+// bucket at the same configured rate with nothing to wire.
+//
+// Separate from the interactive budget because the two would otherwise be spent
+// by different parties. A silent attempt that ends on the consent page costs the
+// user nothing but still charges whatever bucket it used, and the page it fell
+// back to needs that same bucket to submit — so one client redirecting the
+// browser through /oauth/authorize often enough would leave the user staring at
+// a consent page that refuses their own click. The grants list and its revoke
+// are split for the same reason.
+func (s Service) checkSilentConsentLimit(ctx context.Context, userID int64) error {
+	return s.checkLimit(ctx, s.ConsentLimiter, "oauth_consent_silent", "user:"+strconv.FormatInt(userID, 10))
+}
+
 // checkGrantsListLimit throttles the authorized-apps list per user, for the same
 // NAT reason as the consent endpoints: campus egress shares one IP.
 func (s Service) checkGrantsListLimit(ctx context.Context, userID int64) error {

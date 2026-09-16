@@ -354,7 +354,6 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	// no-ops on an empty ID (a live-record touch that evicted nothing).
 	s.revokeEvictedDevice(ctx, current.UserID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	return &RefreshResult{
-		UserID:           current.UserID,
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
 		TokenType:        BearerTokenType,
@@ -362,6 +361,63 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		AccessExpiresAt:  pair.access.ExpiresAt,
 		RefreshExpiresAt: pair.refresh.ExpiresAt,
 	}, nil
+}
+
+// IdentifyByRefreshToken resolves a refresh token to its subject without
+// rotating anything, for callers that need to know who a browser's cookie
+// belongs to and nothing more.
+//
+// It validates exactly what Refresh validates — the token is the live one for
+// its family, unexpired, issued to the internal client, and its owner still
+// exists and is not deleted — and writes nothing: no rotation, no access token,
+// no audit row, no device touch. That is the point. The caller is
+// GET /oauth/authorize, an unauthenticated, cross-site-reachable, top-level
+// navigation; a full Refresh there would let a plain navigation rotate a
+// victim's session, sign an access token nobody reads, and displace a device
+// record (evicting the family behind it) before it had even decided whether the
+// request could be served silently.
+//
+// A revoked token is rejected outright rather than run through Refresh's grace
+// window: within the grace period the presented token is the loser of a race,
+// not the live credential, and identity is not worth a second copy of that rule.
+// The caller answers a rejection by treating the browser as unauthenticated,
+// which is the same outcome as not having the cookie at all.
+func (s Service) IdentifyByRefreshToken(ctx context.Context, token string) (int64, error) {
+	if strings.TrimSpace(token) == "" {
+		return 0, newError(ErrInvalidInput, "刷新参数无效", nil)
+	}
+	tokenHash, err := s.RefreshTokens.HashRefreshToken(token)
+	if err != nil {
+		return 0, s.hashError(ctx, err)
+	}
+	current, err := s.Tokens.FindRefreshToken(ctx, tokenHash)
+	if errors.Is(err, repository.ErrNotFound) {
+		return 0, newError(ErrInvalidToken, "Refresh Token 无效", nil)
+	}
+	if err != nil {
+		return 0, newError(ErrInternal, "查询 Refresh Token 失败", err)
+	}
+	if current.RevokedAt != nil || !current.ExpiresAt.After(s.now()) {
+		return 0, newError(ErrInvalidToken, "Refresh Token 无效", nil)
+	}
+	client, err := s.findInternalClient(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if current.ClientID != client.ID {
+		return 0, newError(ErrInvalidToken, "Refresh Token 与客户端不匹配", nil)
+	}
+	user, err := s.Users.FindAuthUserByID(ctx, current.UserID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return 0, newError(ErrInvalidToken, "Refresh Token 所属用户无效", nil)
+	}
+	if err != nil {
+		return 0, newError(ErrInternal, "查询 Refresh Token 所属用户失败", err)
+	}
+	if user.State == model.UserStateDeleted {
+		return 0, newError(ErrUserDeleted, "用户已注销", nil)
+	}
+	return current.UserID, nil
 }
 
 func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, error) {
