@@ -2,6 +2,8 @@ package oauthhandler
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,6 +27,9 @@ const maxOAuthBodyBytes int64 = 8 << 10
 type Service interface {
 	Authorize(ctx context.Context, input oauth.AuthorizeInput) (*oauth.AuthorizeResult, error)
 	Consent(ctx context.Context, input oauth.ConsentInput) (*oauth.ConsentResult, error)
+	// SilentConsent completes a pending authorization from an identified link
+	// session when the user's standing grant already covers the scopes.
+	SilentConsent(ctx context.Context, input oauth.SilentConsentInput) (*oauth.ConsentResult, error)
 	ConsentInfo(ctx context.Context, input oauth.ConsentInfoInput) (*oauth.ConsentInfoResult, error)
 	Token(ctx context.Context, input oauth.TokenInput) (*oauth.TokenResult, error)
 	Revoke(ctx context.Context, input oauth.RevokeInput) error
@@ -44,6 +49,22 @@ type Service interface {
 // middleware.Authenticate instead, which rejects third-party tokens.
 type Authenticator interface {
 	AuthenticateAnyClient(ctx context.Context, header string) (middleware.Principal, error)
+	// Authenticate admits only the internal client's session tokens. It backs the
+	// silent authorize path, where a third-party application's own token must not
+	// be able to vouch for the browser's link session.
+	Authenticate(ctx context.Context, header string) (middleware.Principal, error)
+}
+
+// SessionIdentifier resolves a session cookie's refresh credential to a user ID.
+//
+// Read-only on purpose. The silent path runs on GET /oauth/authorize, an
+// unauthenticated navigation any page can aim a browser at; a session refresh
+// there would rotate the victim's family, sign an access token nobody reads and
+// touch the device record — which can displace the oldest device and revoke the
+// family behind it — all before the request is even known to be servable. The
+// caller learns who the browser is, and nothing happens when it is nobody.
+type SessionIdentifier interface {
+	IdentifyByRefreshToken(ctx context.Context, token string) (int64, error)
 }
 
 // Handler serves the OAuth 2.1 and OIDC endpoints.
@@ -52,6 +73,11 @@ type Handler struct {
 	// Auth backs /userinfo, which authenticates itself rather than sitting behind
 	// the JWT middleware so it can answer in RFC 6750 form.
 	Auth Authenticator
+	// Sessions and Cookies back the silent authorize path's cookie leg: a
+	// top-level navigation carries no Authorization header, only the httpOnly
+	// session cookie, and identifying its owner is the whole of the interaction.
+	Sessions SessionIdentifier
+	Cookies  *middleware.SessionCookie
 	// ConsentURL is the front-end page that collects the user's decision.
 	ConsentURL string
 }
@@ -80,7 +106,10 @@ func RegisterRoutes(r gin.IRouter, h Handler, authMiddleware gin.HandlerFunc) {
 	consent.DELETE("/oauth/grants/:client_id", h.RevokeGrant)
 }
 
-// Authorize validates an authorization request and redirects to the consent page.
+// Authorize validates an authorization request and sends the browser on: either
+// straight back to the client with a code (the silent SSO path, when the browser
+// already holds a covering grant) or to the consent page, which either renders
+// the request or, for a request that no longer exists, its error form.
 //
 // Errors take one of two routes. A request whose client_id or redirect_uri could
 // not be verified is sent to the consent page rather than redirected to the
@@ -96,12 +125,33 @@ func (h Handler) Authorize(c *gin.Context) {
 		CodeChallenge:       c.Query("code_challenge"),
 		CodeChallengeMethod: c.Query("code_challenge_method"),
 		Nonce:               c.Query("nonce"),
+		Prompt:              c.Query("prompt"),
 		ClientIP:            c.ClientIP(),
 		UserAgent:           c.Request.UserAgent(),
 	}
 	result, err := h.Service.Authorize(c.Request.Context(), input)
 	if err != nil {
 		h.redirectAuthorizeError(c, input, err)
+		return
+	}
+	// SSO fast path: when the browser carries a link session whose grant with
+	// this client already covers the requested scopes, the code is minted here
+	// and the browser goes straight back to the client — the consent page only
+	// renders for a first authorization, a broader scope set, prompt=login or
+	// prompt=consent, or no session.
+	redirect, fallback := h.trySilentConsent(c, result.RequestID, input.ClientIP)
+	if redirect != "" {
+		c.Redirect(http.StatusFound, redirect)
+		return
+	}
+	if !fallback {
+		// The silent attempt spent the request before failing, so the consent page
+		// has nothing to load and would answer with the same 400 the browser just
+		// hit. Send it to the error form instead, which names the one action left.
+		c.Redirect(http.StatusFound, h.consentPageURL(map[string]string{
+			"error":             oauth.ErrorInvalidRequest,
+			"error_description": "授权请求已失效，请重新发起授权",
+		}))
 		return
 	}
 	c.Redirect(http.StatusFound, h.consentPageURL(map[string]string{
@@ -112,6 +162,80 @@ func (h Handler) Authorize(c *gin.Context) {
 		// submitting into a 400 with no warning.
 		"expires_in": strconv.Itoa(result.ExpiresIn),
 	}))
+}
+
+// trySilentConsent attempts to complete a stashed authorization without the
+// consent page. It returns the client redirect on success, or an empty redirect
+// plus whether the caller may fall back to the consent page.
+//
+// Falling back is only correct while the stash is still intact: the consent page
+// loads the request, so it can only render one that has not been spent. Every
+// refusal before the silent path consumes the stash — no recognizable session,
+// no covering grant, a throttle, an RP asking for prompt=login — is a normal
+// fallback. A failure after the consume is not, and the service says so.
+//
+// Faults are logged. A refusal is routine and stays quiet, but a Redis outage
+// that quietly downgrades every signed-in user to a consent page they also
+// cannot load looks exactly like "this user has no grant" in the logs otherwise.
+func (h Handler) trySilentConsent(c *gin.Context, requestID, clientIP string) (redirect string, fallback bool) {
+	userID, ok := h.identifyUser(c)
+	if !ok {
+		return "", true
+	}
+	result, err := h.Service.SilentConsent(c.Request.Context(), oauth.SilentConsentInput{
+		RequestID: requestID,
+		UserID:    userID,
+		ClientIP:  clientIP,
+		UserAgent: c.Request.UserAgent(),
+	})
+	if err != nil || result == nil {
+		var oauthErr *oauth.Error
+		if errors.As(err, &oauthErr) {
+			if oauthErr.Kind == oauth.KindInternal || oauthErr.Kind == oauth.KindDependencyUnavailable {
+				slog.WarnContext(c.Request.Context(), "silent authorize unavailable",
+					"kind", oauthErr.Kind, "error", err)
+			}
+			return "", !oauthErr.StashSpent
+		}
+		if err != nil {
+			slog.WarnContext(c.Request.Context(), "silent authorize failed", "error", err)
+		}
+		return "", true
+	}
+	return result.RedirectURI, true
+}
+
+// identifyUser resolves the browser's link session to a user ID for the silent
+// authorize path, without which that path is skipped entirely. Nothing is
+// written on the way: a browser that turns out to be nobody leaves no trace, and
+// one that turns out to be somebody is left exactly as it was.
+//
+// A Bearer header is tried first and must be an internal-client session token
+// (middleware.Authenticate): a third-party token belongs to the application
+// holding it, not to the browser's link session. Otherwise the httpOnly session
+// cookie is resolved read-only — the only other way a signed-in browser proves
+// itself on a top-level navigation. A stale or unreadable cookie clears nothing:
+// the standard refresh endpoint owns that decision, so a cross-site stray or a
+// grace-window race degrades to the consent page instead of destroying a live
+// cookie.
+func (h Handler) identifyUser(c *gin.Context) (int64, bool) {
+	if h.Auth != nil {
+		if principal, err := h.Auth.Authenticate(c.Request.Context(), c.GetHeader("Authorization")); err == nil && principal.UserID > 0 {
+			return principal.UserID, true
+		}
+	}
+	if h.Sessions == nil || h.Cookies == nil {
+		return 0, false
+	}
+	token := h.Cookies.Read(c)
+	if token == "" {
+		return 0, false
+	}
+	userID, err := h.Sessions.IdentifyByRefreshToken(c.Request.Context(), token)
+	if err != nil || userID <= 0 {
+		return 0, false
+	}
+	return userID, true
 }
 
 // Consent records the user's decision and redirects to the client.

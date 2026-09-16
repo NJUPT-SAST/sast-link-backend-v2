@@ -63,13 +63,26 @@ type fakeAuthorizations struct {
 	createErr          error
 	consumeAs          error
 	consumeUserVersion int64
+	// grantScopes mirrors oauth_grants: upserted by CreateWithGrant exactly like
+	// the repository's transaction, so a silent-consent test can build a standing
+	// grant by running one interactive consent first.
+	grantScopes  map[[2]int64]model.StringArray
+	findGrantErr error
+	// deleteGrantsOnCreate mimics a revoke committing between the silent path's
+	// grant check and its write, which is what the update-only writer exists to
+	// survive: the next CreateWithExistingGrant finds nothing and mints nothing.
+	deleteGrantsOnCreate bool
 }
 
 func newFakeAuthorizations() *fakeAuthorizations {
 	// consumeUserVersion defaults to activeUser().TokenVersion (2) so the
 	// redemption's snapshot check passes for the stock user; tests that drive a
 	// mismatch set consumeUserVersion explicitly.
-	return &fakeAuthorizations{byCode: map[string]*model.OAuthAuthorization{}, consumeUserVersion: 2}
+	return &fakeAuthorizations{
+		byCode:             map[string]*model.OAuthAuthorization{},
+		grantScopes:        map[[2]int64]model.StringArray{},
+		consumeUserVersion: 2,
+	}
 }
 
 func (f *fakeAuthorizations) CreateWithGrant(_ context.Context, authorization *model.OAuthAuthorization) error {
@@ -81,7 +94,43 @@ func (f *fakeAuthorizations) CreateWithGrant(_ context.Context, authorization *m
 	stored := *authorization
 	f.byCode[authorization.Code] = &stored
 	f.created = append(f.created, authorization)
+	key := [2]int64{authorization.UserID, authorization.ClientID}
+	f.grantScopes[key] = authorization.Scopes
 	return nil
+}
+
+// CreateWithExistingGrant mirrors the repository's update-only writer: it
+// refreshes an existing grant and stores the code, and reports ErrNotFound
+// without storing anything when there is no grant to update.
+func (f *fakeAuthorizations) CreateWithExistingGrant(_ context.Context, authorization *model.OAuthAuthorization) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	key := [2]int64{authorization.UserID, authorization.ClientID}
+	if f.deleteGrantsOnCreate {
+		delete(f.grantScopes, key)
+		f.deleteGrantsOnCreate = false
+	}
+	if _, ok := f.grantScopes[key]; !ok {
+		return repository.ErrNotFound
+	}
+	f.grantScopes[key] = authorization.Scopes
+	stored := *authorization
+	f.byCode[authorization.Code] = &stored
+	f.created = append(f.created, authorization)
+	return nil
+}
+
+func (f *fakeAuthorizations) FindGrantScopes(_ context.Context, userID, clientID int64) (model.StringArray, bool, error) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	if f.findGrantErr != nil {
+		return nil, false, f.findGrantErr
+	}
+	scopes, ok := f.grantScopes[[2]int64{userID, clientID}]
+	return scopes, ok, nil
 }
 
 // Consume mirrors the repository's single-use contract, including returning the
