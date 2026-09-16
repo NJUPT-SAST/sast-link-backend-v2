@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -123,5 +124,29 @@ func NotFound(code int, message string) error {
 		HTTPStatus: http.StatusNotFound,
 		Code:       code,
 		Message:    message,
+	}
+}
+
+// ErrInvalidQueryParameter reports a query parameter that is present but not one
+// of its accepted values. Callers answer 400; the accepted set differs per
+// endpoint, so the error names no specific parameter.
+var ErrInvalidQueryParameter = errors.New("query parameter value is not valid")
+
+// ParseOptionalBool reads a tri-state boolean query parameter: absent (nil),
+// "true", or "false". Anything else is ErrInvalidQueryParameter — a typo such as
+// "ture" must not be read as false, which would answer the opposite of the filter
+// that was asked for.
+func ParseOptionalBool(raw string) (*bool, error) {
+	switch strings.TrimSpace(raw) {
+	case "":
+		return nil, nil
+	case "true":
+		value := true
+		return &value, nil
+	case "false":
+		value := false
+		return &value, nil
+	default:
+		return nil, ErrInvalidQueryParameter
 	}
 }

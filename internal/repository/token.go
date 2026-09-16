@@ -580,6 +580,26 @@ func (r *TokenRepository) FindRefreshToken(
 	return nil, fmt.Errorf("find refresh token: %w", err)
 }
 
+// FamilyOriginCreatedAt returns the created_at of the family's origin row (the
+// lowest sequence), which a capability family's lifetime cap is measured from.
+// The origin row is never rewritten, so reading it outside the rotation
+// transaction still describes the boundary that transaction enforces.
+func (r *TokenRepository) FamilyOriginCreatedAt(ctx context.Context, familyID string) (time.Time, error) {
+	var origin model.OAuthRefreshToken
+	err := r.database.WithContext(ctx).
+		Select("created_at").
+		Where("family_id = ?", familyID).
+		Order("sequence ASC").
+		First(&origin).Error
+	if err == nil {
+		return origin.CreatedAt, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return time.Time{}, ErrNotFound
+	}
+	return time.Time{}, fmt.Errorf("find token family origin: %w", err)
+}
+
 // FindAccessAuthStateByJTI reads the DB-authoritative state for one access JTI,
 // including the token record and its associated user state in a single query.
 func (r *TokenRepository) FindAccessAuthStateByJTI(ctx context.Context, jti string) (*AccessAuthState, error) {

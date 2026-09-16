@@ -74,3 +74,30 @@ func TestDecodeStrictJSONBytesRejectsTrailing(t *testing.T) {
 		t.Fatalf("trailing junk error = %v, want ErrTrailingJSONValue", err)
 	}
 }
+
+// A mistyped tri-state filter must be an error rather than a silent false: on
+// needs_completion, reading "ture" as false would return exactly the accounts the
+// caller asked to exclude, and the response would look like it worked.
+func TestParseOptionalBoolRejectsUnrecognizedValues(t *testing.T) {
+	for _, raw := range []string{"ture", "1", "t", "T", "F", "yes", "TRUE"} {
+		if _, err := ParseOptionalBool(raw); !errors.Is(err, ErrInvalidQueryParameter) {
+			t.Errorf("ParseOptionalBool(%q) error = %v, want ErrInvalidQueryParameter", raw, err)
+		}
+	}
+}
+
+func TestParseOptionalBoolReadsTriState(t *testing.T) {
+	absent, err := ParseOptionalBool("")
+	if err != nil || absent != nil {
+		t.Fatalf("ParseOptionalBool(\"\") = %v, %v, want nil, nil so an absent filter stays unset", absent, err)
+	}
+	// Surrounding whitespace is a transport artifact, not a different value.
+	trueValue, err := ParseOptionalBool(" true ")
+	if err != nil || trueValue == nil || !*trueValue {
+		t.Fatalf("ParseOptionalBool(\" true \") = %v, %v, want true", trueValue, err)
+	}
+	falseValue, err := ParseOptionalBool("false")
+	if err != nil || falseValue == nil || *falseValue {
+		t.Fatalf("ParseOptionalBool(\"false\") = %v, %v, want false", falseValue, err)
+	}
+}

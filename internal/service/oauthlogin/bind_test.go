@@ -3,6 +3,7 @@ package oauthlogin
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
@@ -215,5 +216,31 @@ func TestBindDoesNotConsumeAnyOAuthState(t *testing.T) {
 	}
 	if _, ok := doubles.Registration.states["rs_untouched"]; !ok {
 		t.Fatal("Bind consumed a registration state")
+	}
+}
+
+// Each accepted call spends one provider code exchange against GitHub or Lark, so
+// the cap has to sit in front of that work. Keyed on the user: the endpoint is
+// authenticated, so the subject is known, and an IP key would let one shared
+// campus egress bucket throttle everyone behind it.
+func TestBindThrottlesPerUser(t *testing.T) {
+	service, doubles := newTestService(t)
+	limiter := &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: 20 * time.Second}}
+	service.BindLimiter = limiter
+	doubles.Users.byID[42] = activeUser(42)
+
+	_, err := service.Bind(context.Background(), BindInput{
+		UserID:   42,
+		Provider: model.LoginMethodGitHub,
+		Code:     "provider-code",
+	})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+	if len(limiter.calls) != 1 || limiter.calls[0] != "oauth_bind:user:42" {
+		t.Fatalf("limiter calls = %v, want one bucket keyed by user", limiter.calls)
+	}
+	// The throttle runs before the provider is consulted, so a rejected call spends
+	// no code.
+	if doubles.GitHub.calls != 0 {
+		t.Fatalf("provider exchanges = %d, want 0 for a throttled bind", doubles.GitHub.calls)
 	}
 }

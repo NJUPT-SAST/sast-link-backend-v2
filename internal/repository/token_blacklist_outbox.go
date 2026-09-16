@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -153,8 +154,21 @@ func newOutboxClaimToken() (string, error) {
 
 func truncateOutboxDeliveryError(value string) string {
 	value = strings.TrimSpace(value)
+	// A provider or driver can hand back bytes that are not valid UTF-8 at all;
+	// replacing them keeps the text instead of dropping everything after the
+	// first invalid byte, which on garbage-heavy payloads would leave the column
+	// nearly empty for no diagnostic gain.
+	value = strings.ToValidUTF8(value, string(utf8.RuneError))
 	if len(value) <= maxOutboxDeliveryErrorLength {
 		return value
 	}
-	return value[:maxOutboxDeliveryErrorLength]
+	// Truncate on a rune boundary, not a byte index: a cut inside a multi-byte
+	// sequence leaves invalid UTF-8, which PostgreSQL rejects with "invalid byte
+	// sequence for encoding", so recording the failure would itself fail and the
+	// row would sit in its lease until it expired.
+	limit := maxOutboxDeliveryErrorLength
+	for limit > 0 && !utf8.ValidString(value[:limit]) {
+		limit--
+	}
+	return value[:limit]
 }

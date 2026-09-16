@@ -7,6 +7,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
@@ -202,7 +203,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if authorization.Nonce != nil {
 		nonce = *authorization.Nonce
 	}
-	idToken, err := s.signIDToken(ctx, user, client, scopes, nonce)
+	idToken, err := s.signIDToken(ctx, user, client, scopes, nonce, accessTTL)
 	if err != nil {
 		// The pair is already persisted, so a signing failure must not leave a live
 		// session the client never learned about.
@@ -292,13 +293,37 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 	if scopeErr := checkScopeForClient(client, scopes); scopeErr != nil {
 		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
+	// A capability family's refresh token is already clamped to origin+cap, so its
+	// own expiry is the delegation boundary. Clamping the signed access TTL to it
+	// keeps the JWT exp, the persisted row and the reported expires_in inside the
+	// same boundary; the rotation transaction repeats the clamp as a backstop.
+	accessTTL := s.accessTTL()
+	if lifetime := s.capabilityRefreshLifetime(scopes); lifetime > 0 {
+		// The delegation boundary is the family's origin+lifetime, not the
+		// presented token's own expiry: a row issued under a longer cap (or before
+		// the cap existed) would otherwise leave the signed JWT past the deadline
+		// the rotation transaction clamps the row to. The origin row is
+		// append-only, so reading it outside that transaction still describes the
+		// boundary it enforces.
+		originCreatedAt, originErr := s.Tokens.FamilyOriginCreatedAt(ctx, current.FamilyID)
+		if originErr != nil {
+			return nil, newError(ErrInternal, "读取 token family 起始时间失败", originErr)
+		}
+		boundary := current.ExpiresAt
+		if deadline := originCreatedAt.Add(lifetime); deadline.Before(boundary) {
+			boundary = deadline
+		}
+		if remaining := boundary.Sub(s.now()); remaining > 0 && remaining < accessTTL {
+			accessTTL = remaining
+		}
+	}
 	pair, err := s.issuer().Issue(tokenissue.Request{
 		User:       user,
 		Client:     client,
 		Sequence:   current.Sequence + 1,
 		FamilyID:   current.FamilyID,
 		Scopes:     scopes,
-		AccessTTL:  s.accessTTL(),
+		AccessTTL:  accessTTL,
 		RefreshTTL: s.refreshTTL(),
 	})
 	if err != nil {
@@ -349,7 +374,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		}
 		return nil, newError(ErrInternal, "轮换 refresh_token 失败", rotateErr)
 	}
-	idToken, err := s.signIDToken(ctx, user, client, scopes, "")
+	idToken, err := s.signIDToken(ctx, user, client, scopes, "", accessTTL)
 	if err != nil {
 		s.revokeFamily(ctx, pair.FamilyID)
 		return nil, err
@@ -428,6 +453,7 @@ func (s Service) signIDToken(
 	client *model.OAuthClient,
 	scopes []string,
 	nonce string,
+	ttl time.Duration,
 ) (string, error) {
 	claims, err := s.idTokenClaims(ctx, user, scopes)
 	if err != nil {
@@ -438,8 +464,12 @@ func (s Service) signIDToken(
 		ClientID: client.ClientID,
 		Scopes:   scopes,
 		Nonce:    nonce,
-		TTL:      s.accessTTL(),
-		Claims:   claims,
+		// The TTL comes from the caller so the id_token expires inside the same
+		// boundary the access token was clamped to: OIDC clients build sessions on
+		// its exp, so a full configured TTL here would outlive a capability
+		// delegation the access token already respects.
+		TTL:    ttl,
+		Claims: claims,
 	})
 	if err != nil {
 		return "", newError(ErrInternal, "签发 ID Token 失败", err)
@@ -448,11 +478,15 @@ func (s Service) signIDToken(
 }
 
 func (s Service) tokenResult(pair *tokenissue.Pair, idToken string) *TokenResult {
+	expiresIn := int(math.Ceil(pair.Access.ExpiresAt.Sub(s.now()).Seconds()))
+	if expiresIn < 0 {
+		expiresIn = 0
+	}
 	return &TokenResult{
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,
 		TokenType:    BearerTokenType,
-		ExpiresIn:    int(math.Ceil(s.accessTTL().Seconds())),
+		ExpiresIn:    expiresIn,
 		Scope:        pair.ScopeClaim,
 		IDToken:      idToken,
 	}

@@ -1710,6 +1710,16 @@ func TestFailClosedStoresReturnDependencyUnavailable(t *testing.T) {
 		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
 	})
 
+	// The Bind-Ticket write is the second fail-closed store this endpoint touches,
+	// and it runs after the code write; a Redis outage there must answer the same
+	// 503 rather than a 500 that reads as a server bug.
+	t.Run("save bind ticket", func(t *testing.T) {
+		service := newRegisterService(t)
+		service.BindTicket = &fakeBindTicketStore{err: redisDown}
+		_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "extra@gmail.com"})
+		assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+	})
+
 	t.Run("peek bind ticket", func(t *testing.T) {
 		service := newRegisterService(t)
 		service.BindTicket = &fakeBindTicketStore{err: redisDown}

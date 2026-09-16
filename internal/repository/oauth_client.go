@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 )
@@ -114,13 +115,26 @@ func (r *OAuthClientRepository) Create(ctx context.Context, client *model.OAuthC
 // JTIs needing revocation delivery (their durable outbox rows are written
 // here), and revokedRefresh counts the unrevoked refresh tokens cut.
 //
-// Returns ErrNotFound when the client does not exist.
+// expectedUpdatedAt is the updated_at of the row the caller's guards were
+// evaluated against, and it is required: every decision on this path (protected
+// client rules, capability-scope grant, the revocation decision itself) is
+// computed from a row read before this transaction opened, so the write has to
+// prove that row is still the current one. trg_oauth_clients_updated_at bumps
+// updated_at on every update, which makes it the version token. A mismatch
+// returns ErrStateConflict rather than retrying: the caller's guards described a
+// row that no longer exists, so re-deciding here would apply a verdict the
+// operator never made.
+//
+// Returns ErrNotFound when the client does not exist, ErrStateConflict when the
+// row changed since it was read, and ErrInvalidArgument when expectedUpdatedAt
+// is the zero time.
 func (r *OAuthClientRepository) UpdateAndRevoke(
 	ctx context.Context,
 	id int64,
 	fields map[string]any,
 	revokeTokens bool,
 	revokedAt time.Time,
+	expectedUpdatedAt time.Time,
 ) ([]model.BlacklistEntry, int64, error) {
 	if id <= 0 {
 		return nil, 0, fmt.Errorf("%w: client ID must be positive", ErrInvalidArgument)
@@ -128,15 +142,36 @@ func (r *OAuthClientRepository) UpdateAndRevoke(
 	if len(fields) == 0 {
 		return nil, 0, fmt.Errorf("%w: no fields to update", ErrInvalidArgument)
 	}
+	if expectedUpdatedAt.IsZero() {
+		return nil, 0, fmt.Errorf("%w: expected updated_at is required", ErrInvalidArgument)
+	}
 	var entries []model.BlacklistEntry
 	var revokedRefresh int64
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		result := transaction.Model(&model.OAuthClient{}).Where("id = ?", id).Updates(fields)
-		if result.Error != nil {
-			return fmt.Errorf("update OAuth client: %w", result.Error)
-		}
-		if result.RowsAffected == 0 {
+		// Re-read the row under a lock before writing. A guard evaluated against a
+		// stale row is worth nothing: a delegated token could repoint the
+		// redirect_uris of a client that a concurrent console request granted
+		// admin:read to in the gap, and that client's authorization codes would then
+		// carry a capability scope to a host of the caller's choosing.
+		var locked model.OAuthClient
+		lockErr := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", id).
+			Take(&locked).Error
+		if errors.Is(lockErr, gorm.ErrRecordNotFound) {
 			return ErrNotFound
+		}
+		if lockErr != nil {
+			return fmt.Errorf("lock OAuth client: %w", lockErr)
+		}
+		if !locked.UpdatedAt.Equal(expectedUpdatedAt) {
+			return ErrStateConflict
+		}
+		// The row is locked and verified, so the update cannot miss: no RowsAffected
+		// check is needed, and treating a zero there as ErrNotFound would report the
+		// wrong reason for a row this transaction holds.
+		if err := transaction.Model(&model.OAuthClient{}).Where("id = ?", id).
+			Updates(fields).Error; err != nil {
+			return fmt.Errorf("update OAuth client: %w", err)
 		}
 		if !revokeTokens {
 			return nil

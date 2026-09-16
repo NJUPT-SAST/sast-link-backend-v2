@@ -4,6 +4,7 @@ package oauthredis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
@@ -71,7 +72,15 @@ func (s AuthorizeRequestStore) PeekAuthorizeRequest(
 	}
 	// PeekOneTime succeeded, so the key exists; guard the TTL edge where it
 	// expired between the GET and the PTTL (PTTL returns a negative duration).
-	ttl := s.Store.Client.PTTL(ctx, s.Store.Keys.AuthorizeRequest(requestID)).Val()
+	//
+	// Result, not Val: Val reports the zero duration on a failed command, which
+	// this guard would read as "expired between the two calls" and turn into a
+	// 400 telling the user to restart a flow that is still perfectly valid. A
+	// Redis error here is a dependency fault and must stay one.
+	ttl, ttlErr := s.Store.Client.PTTL(ctx, s.Store.Keys.AuthorizeRequest(requestID)).Result()
+	if ttlErr != nil {
+		return oauth.AuthorizeRequestPayload{}, 0, false, fmt.Errorf("peek authorize request ttl: %w", ttlErr)
+	}
 	if ttl <= 0 {
 		return oauth.AuthorizeRequestPayload{}, 0, false, nil
 	}

@@ -155,8 +155,11 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 			StateCookie:   h.readStateCookie(c),
 		})
 		if err != nil {
-			// The state is consumed either way; the cookie pairing it is spent too.
-			if h.StateCookie != nil {
+			// The state is consumed either way; the cookie pairing it is spent too —
+			// except under the callback cap, which rejects before touching state:
+			// clearing the pairing there would break the in-flight login the caller
+			// is about to retry (shared-NAT neighbors can trip the cap).
+			if h.StateCookie != nil && !errors.Is(err, oauthlogin.ErrRateLimited) {
 				h.StateCookie.Clear(c)
 			}
 			h.redirectFailure(c, err)
