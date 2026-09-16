@@ -1,6 +1,20 @@
-# SAST Link v2 API 文档
+# SAST Link v2 API 文档（兼容入口）
 
-## 概述
+> 本文件保留用于兼容历史链接。新的 API 正文按调用场景拆分在 [`docs/api/`](api/README.md)，机器可读契约仍在 [`docs/openapi.yaml`](openapi.yaml)。
+>
+> 详细正文迁移地图：
+>
+> - 通用约定：[`api/conventions.md`](api/conventions.md)
+> - 认证与密码：[`api/auth.md`](api/auth.md)
+> - 用户、资料与设备：[`api/user.md`](api/user.md)
+> - 身份绑定：[`api/identities.md`](api/identities.md)
+> - OAuth/OIDC Provider：[`api/oauth-provider.md`](api/oauth-provider.md)
+> - GitHub/Lark 登录：[`api/third-party-login.md`](api/third-party-login.md)
+> - 管理后台：[`api/admin.md`](api/admin.md)
+> - 校友申请：[`api/alumni.md`](api/alumni.md)
+> - 健康检查：[`api/health.md`](api/health.md)
+>
+> 历史章节正文暂保留在 git 历史中。新增或修改接口时，应同时更新人类可读文档、OpenAPI 和相关测试。
 
 - **Base URL**: `https://link.sast.fun/v2`
 - **认证方式**: JWT Bearer Token（`Authorization: Bearer <access_token>`）
@@ -47,7 +61,7 @@
 
 **直出响应例外**：
 
-- `/oauth/authorize`：成功重定向至前端授权页（携带 `request_id`）；错误按可重定向性重定向至授权页或客户端 `redirect_uri`（携带 `error` / `error_description`）。授权码在第二段 `/oauth/authorize/consent` 才签发，详见 §5.1。
+- `/oauth/authorize`：有三种出口，取决于浏览器是否已持有覆盖请求 scope 的 link session 授权：静默发码后直接 302 至客户端 `redirect_uri`（携带 `code` 与 `state`），或重定向至前端授权页（携带 `request_id`），或对已失效的请求重定向至授权页**错误形态**（携带 `error` / `error_description`，不带 `request_id`）。错误按可重定向性重定向至授权页或客户端 `redirect_uri`。详见 §5.1。
 - `/oauth/token`：请求体为 `application/x-www-form-urlencoded`；成功和错误均使用 OAuth JSON 格式（RFC 6749），字段名使用 `scope`（单数）。
 - `/oauth/revoke`：请求体为 `application/x-www-form-urlencoded`；遵循 RFC 7009，成功固定 `200 OK` 且响应体为空，错误使用 OAuth JSON 格式。
 - `/userinfo`：成功直出 OIDC UserInfo claims；错误遵循 RFC 6750 Bearer Token 错误格式。
@@ -1198,26 +1212,48 @@ GET /oauth/authorize
 | `code_challenge` | 是 | PKCE challenge，固定 43 字符 base64url（`BASE64URL(SHA256(verifier))` 的长度）；其他长度返回 `invalid_request` |
 | `code_challenge_method` | 是 | 固定 `S256`；不接受 `plain` |
 | `nonce` | 否 | OIDC nonce，最长 255 字符 |
+| `prompt` | 否 | OIDC prompt，空格分隔。本服务只识别 `login` 与 `consent` 两个值，二者**否决静默发码**、强制回到授权页；其余取值（含 `none`）一律忽略，`prompt=none` 不受支持 |
 
 `code_challenge` 与 `nonce` 的长度上限对应 `oauth_authorizations` 表中这两列的 `VARCHAR(255)` 宽度。校验放在第一段而非第二段，是因为超长值若拖到写库时才失败，用户会拿到一个不可重试的 `500`——此时一次性暂存已被消费，只能从头再来；在第一段拒绝则是客户端可以直接修正的可重定向 `invalid_request`。
 
-**行为**: 授权分两段完成。本端点**不需要认证**——从第三方跳转来的浏览器不会携带 `Authorization` header。
+**行为**: 本端点**不需要认证**——从第三方跳转来的浏览器不会携带 `Authorization` header。校验并暂存请求后，它按浏览器携带的凭证分三种出口。
 
 ```
 第三方 app
   └─> GET /oauth/authorize?client_id=..&redirect_uri=..&code_challenge=..
         校验参数 → 暂存请求（20min，`OAUTH_AUTHORIZE_REQUEST_TTL`）→ 302
-  └─> {OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..&expires_in=1200
-        前端展示授权页，读取本地 access_token
-        expires_in 为暂存剩余秒数，供页面显示截止时间并在超时后
-        阻止提交（否则用户会提交进一个没有预告的 400）
-  └─> POST /oauth/authorize/consent   （见 §5.2）
-        Authorization: Bearer <access_token>
-        → 200 { redirect_uri }
-  └─> 前端 navigate 至 redirect_uri（携带 code 与 state）
+        │
+        ├─ (A) 静默发码：浏览器带 link session（`Authorization` header 或
+        │      httpOnly `sl_session` cookie），且该用户对该 client 的既有
+        │      grant 覆盖本次请求的 scope，且未出现 prompt=login/consent
+        │      → 302 直接回 redirect_uri（携带 code 与 state），不渲染授权页
+        │      已授权过 + scope 未扩张的再次授权走这条路
+        │
+        ├─ (B) 授权页：无可用 session，或没有 grant / scope 超出既有 grant /
+        │      prompt 要求重新确认
+        │      → {OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..&expires_in=1200
+        │      前端展示授权页，读取本地 access_token
+        │      expires_in 为暂存剩余秒数，供页面显示截止时间并在超时后
+        │      阻止提交（否则用户会提交进一个没有预告的 400）
+        │      └─> POST /oauth/authorize/consent   （见 §5.2）
+        │            Authorization: Bearer <access_token>
+        │            → 200 { redirect_uri }
+        │      └─> 前端 navigate 至 redirect_uri（携带 code 与 state）
+        │
+        └─ (C) 错误形态：静默尝试已经消费了暂存、随后失败（客户端被停用、
+               回调被摘除、scope 被收窄、账号注销、写库失败）
+               → 302 至 {OAUTH_CONSENT_URL}，携带 error / error_description，
+                 **不带 request_id**——那份请求已经不存在，授权页也加载不了它
+
+  说明：走 (B) 时若用户此前**没有** grant，那正是首次授权；静默路径只在
+        既有 grant 覆盖请求范围时才介入，因此授权页始终是首次授权的必经之路。
 ```
 
-采用两段式而非 cookie session，是为了保持 PRD §7.1「JWT 不存 cookie，不存在 CSRF 攻击面」；保留标准的 `GET /oauth/authorize` 入口 URL，则是为了让第三方 OAuth 库无需特殊适配。
+**(A) 静默发码**是 SSO 路径：浏览器已经登录过 link，客户端把浏览器弹到本端点即可拿到授权码，用户看不到任何页面。它不读取任何请求方提供的身份——会话来自 `Authorization` header（且必须由内网 client 签发，第三方 token 不能替浏览器作证）或 httpOnly `sl_session` cookie，两者都只做**只读校验**，不轮换、不发 access token、不写审计行。
+
+这里确实是本服务唯一读取 cookie 的对外端点，与 PRD §7.1「JWT 不存 cookie」的边界需要说清：cookie 里存的是 refresh token 而非 JWT，`sl_session` 是 `SameSite=Lax` 且 httpOnly，跨站子资源请求不会携带它；能被跨站触发的只有顶层导航，而它最多让浏览器拿一个**签给会话主体本人**的授权码，redirect_uri 精确匹配 + PKCE 双重约束下攻击者既截不到码也无法兑换。所以该路径既不扩大凭据暴露面，也不构成写入面——识别失败一律静默回落到 (B)。保留标准的 `GET /oauth/authorize` 入口 URL，则是为了让第三方 OAuth 库无需特殊适配。
+
+授权码始终由本端点的 (A) 或 `/oauth/authorize/consent`（§5.2）签发，两处共用同一套消费后复核（活注册的 `redirect_uri` 与 scope、用户可授权性），差别仅在写库方式：静默路径只更新既有 grant、绝不创建 grant，因此用户在控制台点「撤销」与一次在途静默发码相撞时，撤销先提交则发码失败回滚，不会被反过来复活。
 
 **错误重定向规则**：错误分两条路径，取决于 `redirect_uri` 是否已通过校验。
 
