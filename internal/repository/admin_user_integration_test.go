@@ -167,6 +167,19 @@ func TestListAdminUsersFiltersAndPages(t *testing.T) {
 		}
 	})
 
+	t.Run("keyword matches pinyin initials", func(t *testing.T) {
+		for _, keyword := range []string{"zs", "ZS"} {
+			rows, _, err := users.ListAdminUsers(context.Background(),
+				repository.AdminUserFilter{Keyword: keyword, Limit: 10})
+			if err != nil {
+				t.Fatalf("ListAdminUsers(%q): %v", keyword, err)
+			}
+			if len(rows) != 1 || rows[0].Name != "张三" {
+				t.Fatalf("keyword %q rows = %+v, want 张三 only", keyword, rows)
+			}
+		}
+	})
+
 	t.Run("paging does not overlap or skip", func(t *testing.T) {
 		seen := make(map[int64]bool)
 		for offset := 0; offset < 4; offset += 2 {
@@ -316,6 +329,62 @@ func TestListAdminUsersEscapesKeywordWildcards(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The name_initials generated column (V017) makes pinyin initials searchable:
+// 'lhq' finds 刘华强 without the console knowing any hanzi. Non-Han debris
+// names lower into searchable initials ('John' -> 'john'), the interpunct is
+// stripped (阿依古丽·买买提 -> ayglmmt), and a rename recomputes the column
+// because it is generated, not written by hand.
+func TestListAdminUsersKeywordNameInitials(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	liu := adminSeed(t, database, "b120@njupt.edu.cn", "刘华强", model.UserRoleMember, model.UserStateOnSAST, nil)
+	adminSeed(t, database, "b121@njupt.edu.cn", "阿依古丽·买买提", model.UserRoleMember, model.UserStateOnSAST, nil)
+
+	t.Run("initials keyword", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: "lhq", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 1 || rows[0].ID != liu.ID {
+			t.Fatalf("rows = %+v, want only 刘华强", rows)
+		}
+	})
+
+	t.Run("interpunct stripped from initials", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: "ayglmmt", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Name != "阿依古丽·买买提" {
+			t.Fatalf("rows = %+v, want only the interpunct name", rows)
+		}
+	})
+
+	t.Run("rename recomputes initials", func(t *testing.T) {
+		newName := "李雷"
+		if _, err := users.UpdateProfile(context.Background(), liu.ID,
+			repository.ProfileUpdate{Name: &newName}); err != nil {
+			t.Fatalf("UpdateProfile: %v", err)
+		}
+		for _, keyword := range []string{"lhq", "ll"} {
+			rows, _, err := users.ListAdminUsers(context.Background(),
+				repository.AdminUserFilter{Keyword: keyword, Limit: 10})
+			if err != nil {
+				t.Fatalf("ListAdminUsers(%q): %v", keyword, err)
+			}
+			want := 0
+			if keyword == "ll" {
+				want = 1
+			}
+			if len(rows) != want {
+				t.Fatalf("keyword %q matched %d rows, want %d", keyword, len(rows), want)
+			}
+		}
+	})
 }
 
 // A role change must increment token_version and revoke every live token in the

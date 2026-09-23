@@ -40,7 +40,8 @@ type AdminUserFilter struct {
 	Department *model.Department
 	StudentID  string
 	// Keyword matches name, student_id, login_email, qq_number, nickname,
-	// blog_url or github_url case-insensitively. phone_number joins the match
+	// blog_url, github_url or the name's pinyin initials (name_initials, e.g.
+	// 'lhq' matches '刘华强') case-insensitively. phone_number joins the match
 	// only when IncludePhoneColumn is set, below.
 	Keyword string
 	// IncludePhoneColumn admits phone_number into the keyword predicate.
@@ -280,8 +281,9 @@ func (r *UserRepository) adminUserQuery(ctx context.Context, filter AdminUserFil
 		cols := `("user".name ILIKE ? ESCAPE '\' OR "user".student_id ILIKE ? ESCAPE '\'` +
 			` OR "user".login_email ILIKE ? ESCAPE '\' OR "user".qq_number ILIKE ? ESCAPE '\'` +
 			` OR profile.nickname ILIKE ? ESCAPE '\' OR profile.blog_url ILIKE ? ESCAPE '\'` +
-			` OR profile.github_url ILIKE ? ESCAPE '\'`
-		args := []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern}
+			` OR profile.github_url ILIKE ? ESCAPE '\'
+			OR "user".name_initials ILIKE ? ESCAPE '\'`
+		args := []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern}
 		if filter.IncludePhoneColumn {
 			cols += ` OR "user".phone_number ILIKE ? ESCAPE '\'`
 			args = append(args, pattern)
