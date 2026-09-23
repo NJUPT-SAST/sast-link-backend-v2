@@ -114,7 +114,9 @@ CREATE TABLE "user" (
         OR sl_has_control_character(btrim(major))
         OR sl_name_invalid(btrim(name))
         OR lower(btrim(name)) = lower(btrim(student_id))
-    ) STORED
+    ) STORED,
+    -- V017，生成列：拼音首字母，供 /admin/users keyword 首拼检索
+    name_initials VARCHAR(255) GENERATED ALWAYS AS (sl_name_initials(name)) STORED
 );
 ```
 
@@ -138,6 +140,7 @@ CREATE TABLE "user" (
 |college|学院，见 `college_enum`|
 |major|专业|
 |profile_needs_completion|V016 生成列（V010 初建 / V015 重建）。旧库迁移账号的资料补全标志，详见下方说明|
+|name_initials|V017 生成列。`name` 的拼音首字母（默认读音，如 `刘华强→lhq`），仅供 `/admin/users` 的 `keyword` 首拼检索。详见下方说明|
 
 ### profile_needs_completion（V010 初建，V015 / V016 两次重建）
 
@@ -198,6 +201,34 @@ PostgreSQL 正则不支持 `\p{Script=Han}`，两侧都把汉字区逐块列出�
 
 配套 `idx_user_profile_needs_completion`（部分索引，`WHERE profile_needs_completion`）支撑管理台
 按 `?needs_completion=true` 列出待补全账号。
+
+### name_initials（V017）
+
+管理台 `GET /admin/users?keyword=` 此前只在七个列上做 `ILIKE '%kw%'`，汉字 `name` 对拼音串永远
+不匹配——输入 `lhq` 搜不到 `刘华强`。该列把 `name` 的拼音首字母存下来，keyword 谓词多一个
+`OR name_initials ILIKE ?`（同一 `escapeLikePattern` 产物，`%`/`_`/`\` 仍按字面量处理）。
+
+**为什么是 SQL 生成列而不是应用层写入**：与 `email_type` / `auto_set_email_type` 同一选型。
+`name` 的写入点有六处（密码与 OAuth 注册、管理员建号与校友审批共用的建号事务、
+自助改资料、管理员单个与批量修改），任何一处漏算就会产生空/陈旧首拼；生成列是本行值的
+纯函数，PostgreSQL 拒绝直接写入，不存在绕过。与 `profile_needs_completion` 一致，
+没有任何认证或鉴权路径读取它。
+
+**映射怎么来的**：`scripts/gen_pinyin_initials`（独立嵌套 module，运行时主 module 不依赖
+go-pinyin）用 go-pinyin 枚举其单字表（扩展 A + 基本区 + 兼容区，26704 字）生成一次
+`translate()` 调用的等长 `from`/`to` 字符串，直接产出 V017 迁移文件，改映射只能重跑
+generator 重新发一版迁移，不能手改 SQL。
+
+**多音字取默认读音**：`曾→c`、`单→d`、`仇→c`——姓氏异读搜不到时退回汉字搜，
+管理台用户本就知道确切汉字。静态 translate 无法按位置取读音，而姓氏覆盖表会误伤
+名位用字（如「李单」）。表外字符（扩展 B 及以外的生僻字）原样穿过，首拼里带原字，
+纯字母 keyword 匹配不到——只是降级为「首拼搜不到」，汉字 keyword 仍走 `name` 列命中；
+V016 名字规则**接受**这些区块，不会因此标记待补全。非汉字存量 debris（如 `John`）
+lower 后得 `john`，照样可拼命中。
+
+**间隔号变体与空格先剔除**：名字规则允许五个间隔号变体（U+00B7 / U+2027 / U+0387 /
+U+30FB / U+FF65，前端会归一化到 U+00B7 但存量行可能携带任意一种），全部剔除后再 translate，
+`阿依古丽·买买提 → ayglmmt`（不是 `ayg·mmt`，否则整串搜不中）。
 
 ## Profile 用户信息表
 
@@ -1084,6 +1115,8 @@ oauth_authorizations.family_id
 12.1 `sl_profile_is_blank()`（V010）、`sl_has_control_character()`（V015）、`sl_name_invalid()`（V016）三函数与 `"user".profile_needs_completion` 生成列（V010 初建 / V015、V016 重建，生成列依赖三函数，顺序不可反；`down` 时先删列再删函数，V015 / V016 的 `down` 仅删各自自建的函数）
 
 12.2 `alumni_requests` 表（V011，FK → user ×2，均 ON DELETE SET NULL；复用 V001 的 `update_updated_at_column()`，`down` 时不得 drop 该函数）
+
+12.3 `sl_name_initials()` 函数与 `"user".name_initials` 生成列（V017，生成列依赖函数，顺序不可反；`down` 时先删列再删函数）
 
 13. 所有索引
 
