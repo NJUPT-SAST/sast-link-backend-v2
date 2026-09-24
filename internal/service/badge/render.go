@@ -5,8 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"html/template"
+	"html"
 	"strings"
+	"text/template"
 )
 
 // Size identifies one badge canvas. Every badge of a given size renders at
@@ -153,8 +154,15 @@ type cardData struct {
 // svgTemplate renders one badge. The palette rides in through classes so the
 // auto theme can carry both palettes behind a media query; fixed themes emit
 // only theirs.
-var svgTemplate = template.Must(template.New("badge").Parse(`<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" viewBox="0 0 {{.Layout.Width}} {{.Layout.Height}}" role="img" aria-label="{{.Data.Nickname}} 的 SAST Link 徽标">
+var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
+	// esc escapes user-provided text for XML character data and attribute
+	// contexts. text/template performs no contextual escaping — the switch from
+	// html/template is deliberate: the latter escapes the XML declaration to
+	// &lt;?xml, and an <img> embed refuses to parse a body that does not start
+	// with a real '<'.
+	"esc": html.EscapeString,
+}).Parse(`<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" viewBox="0 0 {{.Layout.Width}} {{.Layout.Height}}" role="img" aria-label="{{esc .Data.Nickname}} 的 SAST Link 徽标">
 <style>
 .card-bg{fill:{{.Palette.Background}}}.card-fg{fill:{{.Palette.Foreground}}}.card-muted{fill:{{.Palette.Muted}}}.card-accent{fill:{{.Palette.Accent}}}
 {{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-fg{fill:{{.Dark.Foreground}}}.card-muted{fill:{{.Dark.Muted}}}.card-accent{fill:{{.Dark.Accent}}}}
@@ -162,13 +170,13 @@ var svgTemplate = template.Must(template.New("badge").Parse(`<?xml version="1.0"
 <rect x="0.5" y="0.5" width="{{.Layout.Width}}" fill="none" stroke="{{.Palette.Hairline}}" height="{{.DecHeight}}" rx="10" stroke-width="1"/>
 {{if .Data.AvatarDataURI}}<image x="{{.Layout.AvatarX}}" y="{{.Layout.AvatarY}}" width="{{.Layout.AvatarSize}}" height="{{.Layout.AvatarSize}}" href="{{.Data.AvatarDataURI}}" clip-path="inset(0 round {{.Layout.AvatarRadius}}px)" preserveAspectRatio="xMidYMid slice"/>
 {{else if .Data.AvatarInitial}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-muted"/>
-<text x="{{.DecAvatarCX}}" y="{{.DecAvatarTextY}}" text-anchor="middle" class="card-bg" font-size="{{.DecAvatarFontSize}}" font-family="{{.FontStack}}" font-weight="600">{{.Data.AvatarInitial}}</text>
+<text x="{{.DecAvatarCX}}" y="{{.DecAvatarTextY}}" text-anchor="middle" class="card-bg" font-size="{{.DecAvatarFontSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.AvatarInitial}}</text>
 {{else}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-bg" stroke="{{.Palette.Hairline}}" stroke-width="1"/>
 <circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.DecAvatarRadiusInner}}" class="card-accent" fill-opacity="0.25"/>
-{{end}}<text x="{{.Layout.NameX}}" y="{{.Layout.NameY}}" class="card-fg" font-size="{{.Layout.NameSize}}" font-family="{{.FontStack}}" font-weight="600">{{.Data.Nickname}}</text>
-{{if .Data.Department}}<text x="{{.Layout.DeptX}}" y="{{.Layout.DeptY}}" class="card-muted" font-size="{{.Layout.DeptSize}}" font-family="{{.FontStack}}">{{.Data.Department}}</text>
-{{end}}{{if .Data.Intro}}<text x="{{.Layout.IntroX}}" y="{{.Layout.IntroY}}" class="card-muted" font-size="{{.Layout.IntroSize}}" font-family="{{.FontStack}}">{{.Data.Intro}}</text>
-{{end}}{{if .Data.Links}}<text x="{{.Layout.LinksX}}" y="{{.Layout.LinksY}}" class="card-accent" font-size="{{.Layout.LinksSize}}" font-family="{{.FontStack}}">{{.Data.Links}}</text>
+{{end}}<text x="{{.Layout.NameX}}" y="{{.Layout.NameY}}" class="card-fg" font-size="{{.Layout.NameSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.Nickname}}</text>
+{{if .Data.Department}}<text x="{{.Layout.DeptX}}" y="{{.Layout.DeptY}}" class="card-muted" font-size="{{.Layout.DeptSize}}" font-family="{{.FontStack}}">{{esc .Data.Department}}</text>
+{{end}}{{if .Data.Intro}}<text x="{{.Layout.IntroX}}" y="{{.Layout.IntroY}}" class="card-muted" font-size="{{.Layout.IntroSize}}" font-family="{{.FontStack}}">{{esc .Data.Intro}}</text>
+{{end}}{{if .Data.Links}}<text x="{{.Layout.LinksX}}" y="{{.Layout.LinksY}}" class="card-accent" font-size="{{.Layout.LinksSize}}" font-family="{{.FontStack}}">{{esc .Data.Links}}</text>
 {{end}}<text x="{{.Layout.BrandX}}" y="{{.Layout.BrandY}}" text-anchor="end" class="card-muted" font-size="{{.Layout.BrandSize}}" font-family="{{.FontStack}}" letter-spacing="1">SAST Link</text>
 </svg>
 `))

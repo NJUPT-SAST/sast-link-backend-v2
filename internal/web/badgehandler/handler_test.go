@@ -298,3 +298,18 @@ func TestServeSVGConditionalRequestSavesBandwidth(t *testing.T) {
 		t.Fatalf("304 must carry no body, got %d bytes", recorder.Body.Len())
 	}
 }
+
+func TestServeSVGNarrowsCSPForInlineStyles(t *testing.T) {
+	// The badge's palette rides an inline <style>; the global default-src
+	// 'self' policy would block it and the image would render blank. The
+	// endpoint must ship the narrowed policy.
+	service := &fakeService{renderResult: &badge.RenderResult{SVG: []byte("<svg/>")}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/badge/k.svg", nil))
+
+	if got := recorder.Header().Get("Content-Security-Policy"); got != "default-src 'none'; style-src 'unsafe-inline'" {
+		t.Fatalf("CSP = %q, want the narrowed badge policy", got)
+	}
+}

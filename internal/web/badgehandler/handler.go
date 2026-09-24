@@ -126,6 +126,14 @@ func (h Handler) Disable(c *gin.Context) {
 // GitHub's camo proxy) may reuse the image this long before revalidating.
 const badgeCacheMaxAge = 300
 
+// badgeCSP narrows the global default-src 'self' policy for the SVG response.
+// The badge's palette rides an inline <style> element (the auto theme needs a
+// prefers-color-scheme media query, which only CSS can express), and the
+// global policy would block it, leaving a blank image. 'none' everywhere
+// else keeps the surface tighter than the API default: an SVG served as an
+// image has no scripts and loads nothing external by construction.
+const badgeCSP = "default-src 'none'; style-src 'unsafe-inline'"
+
 // ServeSVG answers GET /badge/:key(.svg) with the rendered badge. Unknown or
 // closed badges answer 404 with an SVG error card — an img embed must not
 // crack — and successful renders carry Cache-Control and a strong ETag so a
@@ -143,6 +151,8 @@ func (h Handler) ServeSVG(c *gin.Context) {
 		return
 	}
 
+	// Overwrite the security middleware's blanket policy for this image.
+	c.Header("Content-Security-Policy", badgeCSP)
 	c.Header("Cache-Control", fmt.Sprintf("public, max-age=%d", badgeCacheMaxAge))
 	if result.ETag != "" {
 		c.Header("ETag", result.ETag)

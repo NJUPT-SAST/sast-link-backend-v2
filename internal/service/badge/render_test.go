@@ -295,3 +295,22 @@ func TestDisablePurgesRenderCache(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderStartsWithXMLDeclaration pins the html/template regression: the
+// whole point of the text/template switch is that the body begins with a real
+// <?xml declaration — html/template escaped it to &lt;?xml, and an <img> embed
+// refuses to parse a body that does not start with '<'.
+func TestRenderStartsWithXMLDeclaration(t *testing.T) {
+	for _, size := range []Size{SizeSM, SizeMD, SizeLG} {
+		svg, err := renderCard(size, ThemeLight, cardData{Nickname: "张三"})
+		if err != nil {
+			t.Fatalf("render %s: %v", size, err)
+		}
+		if !strings.HasPrefix(string(svg), `<?xml version="1.0" encoding="UTF-8"?>`) {
+			t.Fatalf("%s body does not start with the XML declaration: %q", size, svg[:40])
+		}
+	}
+	if body := string(renderErrorCard()); !strings.HasPrefix(body, `<?xml version="1.0" encoding="UTF-8"?>`) {
+		t.Fatalf("error card does not start with the XML declaration: %q", body[:40])
+	}
+}
