@@ -828,6 +828,17 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
 	}
+	// The existence check sits behind the rate limiter: it is the disclosure
+	// this endpoint performs, so it must not be reachable unthrottled. The
+	// worker re-checks because the account can vanish between enqueue and
+	// delivery, and that race must stay silent rather than surface as a
+	// half-processed job.
+	if _, err := s.Users.FindAuthUserByLoginIdentifier(ctx, email); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, newError(ErrUnknownIdentifier, "邮箱不存在", nil)
+		}
+		return nil, newError(ErrInternal, "查询账号失败", err)
+	}
 	if s.ForgotPasswords == nil {
 		return nil, newError(ErrInternal, "忘记密码任务队列未配置", nil)
 	}

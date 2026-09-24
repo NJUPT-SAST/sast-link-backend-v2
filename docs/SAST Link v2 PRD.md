@@ -239,7 +239,7 @@ POST /auth/forgot-password/send-code  →  发送验证码到注册邮箱
 POST /auth/reset-password             →  校验验证码 + 新密码
 ```
 
-- `POST /auth/forgot-password/send-code`：对格式合法且未触发限流的邮箱统一返回“已受理”。请求进入有界内存队列，worker 再查账号并只向已注册邮箱发送验证码。响应不暴露账号是否存在，也不保证邮件已经送达；队列满或进程重启时任务可能丢失，用户可在限流窗口后重试
+- `POST /auth/forgot-password/send-code`：邮箱不存在时返回 `40106`（邮箱不存在），存在性检查位于限流之后；存在的账号进入有界内存队列异步发送验证码。响应只表示请求已入队，不保证邮件已经送达；队列满或进程重启时任务可能丢失，用户可在限流窗口后重试
 - `POST /auth/reset-password`：校验验证码 + 新密码；账号不存在同样返回 40106
 - 验证码正确后 `user.token_version` 递增，撤销所有 Token，设备记录清除
 - 登录失败计数器清零
@@ -810,5 +810,5 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 - [ ] 个人卡片端点（`GET /card/:id`）—— 曾实现后下线：顺序 ID 的公开 URL 可枚举全站成员名单。重开需 owner-only + 不可枚举标识（见 §4.14），handler / service / repository 代码保留待重设计
 - [x] 设备管理（`GET /user/devices` / `DELETE /user/devices/:id`；device_id 复用 token family_id；Redis ZSET + Hash，5 台淘汰、30d TTL；登录/注册登记、刷新 last_seen、登出删单台、改密/重置清空；设备读写 fail-open，登出指定设备归属校验 fail-closed；按用户限流；审计 `logout_device`）
 - [x] 迁移资料补全标志（V010 `profile_needs_completion` 生成列，软提示；登录/注册/第三方登录/资料响应带标志与待补全字段；管理台筛选跟进；SQL/Go 判定口径一致性测试）
-- [x] 管理员建号 `POST /admin/users`（严格新建，可选直绑 `other_mail` 个人邮箱为登录身份；系统生成一次性初始密码仅响应返回一次；审计 `admin_user_create`）与忘记/重置密码开放给已绑定个人邮箱（worker 与 reset 均按登录标识解析账号，验证码发到提交邮箱）
+- [x] 管理员建号 `POST /admin/users`（严格新建，可选直绑 `other_mail` 个人邮箱为登录身份；系统生成一次性初始密码仅响应返回一次；审计 `admin_user_create`）与忘记/重置密码开放给已绑定个人邮箱（请求路径、worker 与 reset 均按登录标识解析账号，验证码发到提交邮箱；不存在账号发送验证码时显式返回 40106）
 - [ ] 测试、联调、上线

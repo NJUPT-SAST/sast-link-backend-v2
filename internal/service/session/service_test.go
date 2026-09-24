@@ -1712,28 +1712,43 @@ func TestSendRegisterCodeRejectsHeaderInjectionPayload(t *testing.T) {
 	}
 }
 
-// The anonymous request path must be identical for known and unknown accounts:
-// both enqueue the same normalized job and neither performs SMTP or Redis work.
-func TestForgotPasswordSendCodeHidesAccountExistence(t *testing.T) {
-	for _, email := range []string{"nobody@njupt.edu.cn", "user@njupt.edu.cn"} {
-		t.Run(email, func(t *testing.T) {
-			service := newRegisterService(t)
-			dispatcher := service.ForgotPasswords.(*fakeForgotPasswordDispatcher)
-			result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: email, ClientIP: "127.0.0.1"})
-			if err != nil {
-				t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
-			}
-			if result.Email != email || result.ExpiresIn != 300 {
-				t.Fatalf("result = %+v, want uniform accepted shape", result)
-			}
-			if len(dispatcher.jobs) != 1 || dispatcher.jobs[0].Email != email {
-				t.Fatalf("jobs = %+v, want one normalized job", dispatcher.jobs)
-			}
-			if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
-				t.Fatalf("mailer sent=%d in request path, want 0", sent)
-			}
-		})
+// The send-code path answers account existence explicitly: an unknown
+// identifier is refused with 40106 before anything is enqueued, while a known
+// one is accepted with no SMTP work in the request path (delivery stays in the
+// worker).
+func TestForgotPasswordSendCodeAnswersAccountExistence(t *testing.T) {
+	service := newRegisterService(t)
+	dispatcher := service.ForgotPasswords.(*fakeForgotPasswordDispatcher)
+
+	result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
 	}
+	if result.Email != "user@njupt.edu.cn" || result.ExpiresIn != 300 {
+		t.Fatalf("result = %+v, want accepted shape", result)
+	}
+	if len(dispatcher.jobs) != 1 || dispatcher.jobs[0].Email != "user@njupt.edu.cn" {
+		t.Fatalf("jobs = %+v, want one normalized job", dispatcher.jobs)
+	}
+	if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
+		t.Fatalf("mailer sent=%d in request path, want 0", sent)
+	}
+
+	_, err = service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "nobody@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindUnknownIdentifier, errcode.CodeUnknownIdentifier)
+	if len(dispatcher.jobs) != 1 {
+		t.Fatalf("jobs = %+v, want unknown account to enqueue nothing", dispatcher.jobs)
+	}
+}
+
+// A lookup failure must surface as ErrInternal, not masquerade as "unknown
+// account": the distinction keeps a database outage from feeding the
+// enumeration signal this endpoint now answers.
+func TestForgotPasswordSendCodeLookupFailure(t *testing.T) {
+	service := newRegisterService(t)
+	service.Users.(*fakeUsers).err = errors.New("db down")
+	_, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
 }
 
 func TestForgotPasswordSendCodeReturnsAcceptedWhenQueueIsFull(t *testing.T) {
@@ -3390,7 +3405,6 @@ func TestRefreshSessionRevokedSkipsGraceWindow(t *testing.T) {
 		t.Fatalf("grace-window administrative revocation outcome = %q, want %q", got, refreshOutcomeSessionRevoked)
 	}
 }
-
 // A failed login records the attempted identifier in its audit detail: the
 // user_id column stays NULL on the identifier_unknown leg, so without the
 // detail field a reviewer cannot cluster attempts against one target — the
