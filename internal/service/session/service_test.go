@@ -3273,4 +3273,45 @@ func TestRefreshSessionRevokedSkipsGraceWindow(t *testing.T) {
 		t.Fatalf("grace-window administrative revocation outcome = %q, want %q", got, refreshOutcomeSessionRevoked)
 	}
 }
+// A failed login records the attempted identifier in its audit detail: the
+// user_id column stays NULL on the identifier_unknown leg, so without the
+// detail field a reviewer cannot cluster attempts against one target — the
+// difference between a typo and a directed probe is exactly that cluster. The
+// value is recorded in full, matching the email fields the other audit details
+// (register_send_code, reset_password, bind_email_send_code) already carry;
+// audit_logs is an admin-only surface on a 90-day retention.
+func TestLoginFailureAuditRecordsAttemptedIdentifier(t *testing.T) {
+	service, _, _, _, audit, _ := newTestService(t)
 
+	_, err := service.Login(context.Background(), LoginInput{Identifier: "target@njupt.edu.cn", Password: "wrong"})
+	if err == nil {
+		t.Fatal("Login succeeded with a wrong password")
+	}
+	_, err = service.Login(context.Background(), LoginInput{Identifier: "  Target@NJUPT.edu.cn  ", Password: "wrong"})
+	if err == nil {
+		t.Fatal("Login succeeded with a wrong password")
+	}
+
+	loginEntries := make([]model.AuditLog, 0, 2)
+	for _, entry := range audit.entries {
+		if entry.Action == "login" {
+			loginEntries = append(loginEntries, entry)
+		}
+	}
+	if len(loginEntries) != 2 {
+		t.Fatalf("login audit entries = %d, want 2", len(loginEntries))
+	}
+	for _, entry := range loginEntries {
+		var detail struct {
+			Method     string `json:"method"`
+			Reason     string `json:"reason"`
+			Identifier string `json:"identifier"`
+		}
+		if err := json.Unmarshal(entry.Detail, &detail); err != nil {
+			t.Fatalf("unmarshal audit detail %s: %v", entry.Detail, err)
+		}
+		if detail.Identifier != "target@njupt.edu.cn" {
+			t.Fatalf("identifier = %q, want the normalized target so attempts cluster", detail.Identifier)
+		}
+	}
+}

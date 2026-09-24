@@ -119,7 +119,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		// same body), so probing cannot tell "never registered" from "closed".
 		// The audit keeps the reason, but the attempt is not counted: an account
 		// that can never be used again needs no lockout budget.
-		if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, nil, false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier), "reason": "user_deleted"}); auditErr != nil {
+		if auditErr := s.audit(ctx, &user.ID, "login", "session", nil, nil, false, errcode.CodePasswordInvalid, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, identifier), "reason": "user_deleted", "identifier": identifier}); auditErr != nil {
 			slog.Error("audit deleted login failure", "user_id", user.ID, "error", auditErr)
 		}
 		return nil, newError(ErrLoginFailed, "邮箱或密码错误", nil)
@@ -1170,7 +1170,7 @@ func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInp
 			lockTTL = result.TTL
 		}
 	}
-	if err := s.audit(ctx, loginUserID(user), "login", "session", nil, nil, false, sentinel.Code, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, input.Identifier), "reason": reason}); err != nil {
+	if err := s.audit(ctx, loginUserID(user), "login", "session", nil, nil, false, sentinel.Code, input.ClientIP, input.UserAgent, map[string]any{"method": loginMethod(user, input.Identifier), "reason": reason, "identifier": normalizeIdentifier(input.Identifier)}); err != nil {
 		slog.Error("audit login failure", "error", err)
 	}
 	if locked {
