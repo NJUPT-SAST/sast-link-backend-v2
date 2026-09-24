@@ -3273,6 +3273,7 @@ func TestRefreshSessionRevokedSkipsGraceWindow(t *testing.T) {
 		t.Fatalf("grace-window administrative revocation outcome = %q, want %q", got, refreshOutcomeSessionRevoked)
 	}
 }
+
 // A failed login records the attempted identifier in its audit detail: the
 // user_id column stays NULL on the identifier_unknown leg, so without the
 // detail field a reviewer cannot cluster attempts against one target — the
