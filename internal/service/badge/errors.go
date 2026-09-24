@@ -6,6 +6,7 @@ package badge
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 )
@@ -15,10 +16,12 @@ import (
 type Kind string
 
 const (
-	KindInvalidInput Kind = "invalid_input"
-	KindNotFound     Kind = "not_found"
-	KindConflict     Kind = "conflict"
-	KindInternal     Kind = "internal"
+	KindInvalidInput     Kind = "invalid_input"
+	KindValidationFailed Kind = "validation_failed"
+	KindNotFound         Kind = "not_found"
+	KindConflict         Kind = "conflict"
+	KindRateLimited      Kind = "rate_limited"
+	KindInternal         Kind = "internal"
 )
 
 // Error is a typed service error. Kind selects the HTTP mapping; Code is the
@@ -30,7 +33,10 @@ type Error struct {
 	// Display marks Message as written for the end user, so the HTTP layer
 	// surfaces it instead of the generic per-Kind string.
 	Display bool
-	Err     error
+	// RetryAfter carries the limiter's remaining window so the HTTP layer can
+	// emit a Retry-After header.
+	RetryAfter time.Duration
+	Err        error
 }
 
 func (e *Error) Error() string {
@@ -71,8 +77,10 @@ var (
 	// ErrNicknameMissing is an enable call on a profile with no nickname: the
 	// nickname is the badge's identity anchor, so the enable is refused with a
 	// pointer at the profile edit instead of rendering a nameless card.
-	ErrNicknameMissing = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadgeNicknameMissing, Display: true}
-	ErrInternal        = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
+	ErrNicknameMissing = &Error{Kind: KindValidationFailed, Code: errcode.CodeBadgeNicknameMissing, Display: true}
+	// ErrRateLimited reports that the per-user badge toggle cap was exceeded.
+	ErrRateLimited = &Error{Kind: KindRateLimited, Code: errcode.CodeRateLimited}
+	ErrInternal    = &Error{Kind: KindInternal, Code: errcode.CodeInternal}
 )
 
 // newError returns a contextual error that matches its sentinel via Kind. The
@@ -81,4 +89,11 @@ var (
 // stays user-facing no matter which call site raises it.
 func newError(sentinel *Error, message string, cause error) *Error {
 	return &Error{Kind: sentinel.Kind, Code: sentinel.Code, Message: message, Display: sentinel.Display, Err: cause}
+}
+
+// withRetryAfter attaches the limiter's remaining window so the HTTP layer can
+// emit a Retry-After header.
+func withRetryAfter(err *Error, retryAfter time.Duration) *Error {
+	err.RetryAfter = retryAfter
+	return err
 }

@@ -30,6 +30,18 @@ type AuditRepository interface {
 	Create(ctx context.Context, entry *model.AuditLog) error
 }
 
+// LimitResult reports one limiter decision.
+type LimitResult struct {
+	Allowed    bool
+	RetryAfter time.Duration
+}
+
+// EndpointLimiter throttles one endpoint per subject, mirroring the same port
+// the session and oauthlogin services declare.
+type EndpointLimiter interface {
+	Allow(ctx context.Context, endpoint, subject string) (LimitResult, error)
+}
+
 // Status is the answer to GET /user/badge: the badge's sharing state. Key is
 // present only while the badge is enabled — the share URL is derived from it
 // by the client, which knows the public API base this deployment runs behind.

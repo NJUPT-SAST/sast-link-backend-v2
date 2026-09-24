@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -172,5 +173,53 @@ func TestStatusUnknownUserIsNotEnabled(t *testing.T) {
 	}
 	if status.Enabled {
 		t.Fatalf("Status(unknown) = %#v, want disabled", status)
+	}
+}
+
+// fakeLimiter records Allow calls and enforces a canned decision.
+type fakeLimiter struct {
+	calls   int
+	allowed bool
+	retry   time.Duration
+	failure error
+}
+
+func (f *fakeLimiter) Allow(context.Context, string, string) (LimitResult, error) {
+	f.calls++
+	return LimitResult{Allowed: f.allowed, RetryAfter: f.retry}, f.failure
+}
+
+func TestEnableHonorsToggleLimiter(t *testing.T) {
+	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{7: nicknameCard("张三")}}
+	limiter := &fakeLimiter{allowed: false, retry: 30 * time.Second}
+	service := newTestService(users, newFakeBadgeRepository(), &fakeAuditRepository{})
+	service.ToggleLimiter = limiter
+
+	_, err := service.Enable(context.Background(), EnableInput{UserID: 7})
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("Enable error = %v, want ErrRateLimited", err)
+	}
+	var typed *Error
+	if !errors.As(err, &typed) || typed.RetryAfter != 30*time.Second {
+		t.Fatalf("RetryAfter = %v, want 30s", typed.RetryAfter)
+	}
+	if limiter.calls != 1 {
+		t.Fatalf("limiter calls = %d, want 1", limiter.calls)
+	}
+	// The cap fires before any repository write.
+	if status, _ := service.Status(context.Background(), 7); status.Enabled {
+		t.Fatalf("badge enabled despite the limiter refusal")
+	}
+}
+
+func TestToggleLimiterFailureFailsOpen(t *testing.T) {
+	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{7: nicknameCard("张三")}}
+	limiter := &fakeLimiter{allowed: true, failure: errors.New("redis down")}
+	service := newTestService(users, newFakeBadgeRepository(), &fakeAuditRepository{})
+	service.ToggleLimiter = limiter
+
+	status, err := service.Enable(context.Background(), EnableInput{UserID: 7})
+	if err != nil || !status.Enabled {
+		t.Fatalf("Enable with a broken limiter = (%v, %v), want success", status, err)
 	}
 }

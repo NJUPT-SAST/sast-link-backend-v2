@@ -1,0 +1,112 @@
+// Package badgehandler serves the personal-badge management endpoints and the
+// public SVG rendering endpoint.
+package badgehandler
+
+import (
+	"context"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/badge"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
+)
+
+// Service is the use-case surface this handler drives.
+type Service interface {
+	Enable(ctx context.Context, input badge.EnableInput) (*badge.Status, error)
+	Disable(ctx context.Context, input badge.DisableInput) error
+	Status(ctx context.Context, userID int64) (*badge.Status, error)
+}
+
+// Handler serves the badge endpoints.
+type Handler struct {
+	Service Service
+}
+
+// Gates are the middleware the protected management routes are mounted behind.
+type Gates struct {
+	// RequireAuth authenticates the group (the JWT middleware).
+	RequireAuth gin.HandlerFunc
+	// RequireReadScope bounds what a scoped token may read; it is a no-op for
+	// an internal console token.
+	RequireReadScope gin.HandlerFunc
+	// RequireWriteScope bounds what a scoped token may change; it is a no-op
+	// for an internal console token.
+	RequireWriteScope gin.HandlerFunc
+}
+
+// ReadScopes is the scope a delegated token must hold to read the badge state,
+// matching the other /user read routes.
+var ReadScopes = []string{scope.UserRead}
+
+// WriteScopes is the scope a delegated token must hold to toggle the badge,
+// matching the other /user write routes.
+var WriteScopes = []string{scope.UserWrite}
+
+func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
+	// Panic at boot rather than serve an ungated route: gin would mount a nil
+	// middleware and panic on the first request instead.
+	if g.RequireAuth == nil || g.RequireReadScope == nil || g.RequireWriteScope == nil {
+		panic("badgehandler: every gate in Gates must be set")
+	}
+
+	// Every route names a scope gate explicitly so a new route that names none
+	// has no scoped-client permission rather than inheriting one.
+	protected := r.Group("")
+	protected.Use(g.RequireAuth)
+	protected.GET("/user/badge", g.RequireReadScope, h.Status)
+	protected.POST("/user/badge", g.RequireWriteScope, h.Enable)
+	protected.DELETE("/user/badge", g.RequireWriteScope, h.Disable)
+}
+
+// Status answers GET /user/badge with the caller's sharing state.
+func (h Handler) Status(c *gin.Context) {
+	principal, ok := middleware.PrincipalFrom(c)
+	if !ok {
+		response.Error(c, internalError())
+		return
+	}
+	status, err := h.Service.Status(c.Request.Context(), principal.UserID)
+	if err != nil {
+		response.Error(c, mapServiceError(err))
+		return
+	}
+	response.Ok(c, status)
+}
+
+// Enable answers POST /user/badge: opt in (or, once rotation exists, rotate).
+func (h Handler) Enable(c *gin.Context) {
+	principal, ok := middleware.PrincipalFrom(c)
+	if !ok {
+		response.Error(c, internalError())
+		return
+	}
+	status, err := h.Service.Enable(c.Request.Context(), badge.EnableInput{
+		UserID:        principal.UserID,
+		ActorClientID: principal.ClientID,
+	})
+	if err != nil {
+		response.Error(c, mapServiceError(err))
+		return
+	}
+	response.Created(c, status)
+}
+
+// Disable answers DELETE /user/badge: opt out. Idempotent.
+func (h Handler) Disable(c *gin.Context) {
+	principal, ok := middleware.PrincipalFrom(c)
+	if !ok {
+		response.Error(c, internalError())
+		return
+	}
+	if err := h.Service.Disable(c.Request.Context(), badge.DisableInput{
+		UserID:        principal.UserID,
+		ActorClientID: principal.ClientID,
+	}); err != nil {
+		response.Error(c, mapServiceError(err))
+		return
+	}
+	response.Ok(c, gin.H{"message": "徽标已关闭"})
+}

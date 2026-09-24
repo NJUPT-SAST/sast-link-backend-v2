@@ -12,6 +12,7 @@ import (
 
 	cosadapter "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/cos"
 	alumniredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/alumni"
+	badgeredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/badge"
 	oauthredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/oauth"
 	oauthloginredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/oauthlogin"
 	sessionredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/redis/session"
@@ -29,6 +30,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest"
 	alumnirequestworker "github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/alumnirequest/worker"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/badge"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauthlogin"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
@@ -36,6 +38,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/alumnihandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/badgehandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
@@ -49,6 +52,7 @@ type sessionRuntime struct {
 	OAuthLogin oauthloginhandler.Handler
 	Admin      adminhandler.Handler
 	Alumni     alumnihandler.Handler
+	Badge      badgehandler.Handler
 	Auth       middleware.Authenticator
 	Workers    []backgroundWorker
 }
@@ -125,6 +129,17 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	refreshLimiter := newSessionLimiter(cfg.RateLimitRefreshRPM, cfg.RateLimitRefreshWindow)
 	avatarLimiter := newSessionLimiter(cfg.RateLimitUploadAvatarRPM, cfg.RateLimitUploadAvatarWindow)
 	deviceLimiter := newSessionLimiter(cfg.RateLimitDeviceRPM, cfg.RateLimitDeviceWindow)
+	badgeToggleLimiter := badgeredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{Client: rdb, Keys: keys, Limit: cfg.RateLimitBadgeToggleRPM, Window: cfg.RateLimitBadgeToggleWindow},
+	}
+	badgeService := badge.Service{
+		Users:            users,
+		Badges:           repository.NewBadge(database),
+		Audits:           audit,
+		Clock:            auth.SystemClock,
+		InternalClientID: cfg.InternalOAuthClientID,
+		ToggleLimiter:    badgeToggleLimiter,
+	}
 	// Object storage is optional: unconfigured, PUT /user/avatar answers 50002;
 	// when configured the COS client also carries fail-closed image review.
 	var avatarStore objectstore.ObjectStore
@@ -395,7 +410,10 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 			AuditLogs: adminUserService,
 		},
 		Alumni: alumnihandler.Handler{Requests: alumniService},
-		Auth:   authenticator,
+		Badge: badgehandler.Handler{
+			Service: &badgeService,
+		},
+		Auth: authenticator,
 		Workers: []backgroundWorker{
 			sessionworker.TokenBlacklist{Outbox: outbox, AuthState: blacklist},
 			forgotPasswords,

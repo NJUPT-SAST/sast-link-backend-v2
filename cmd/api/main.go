@@ -23,6 +23,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/alumnihandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/badgehandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
@@ -127,6 +128,11 @@ func run() error {
 		RequireReadScope:  runtime.Auth.RequireDelegatedScope(alumnihandler.ReadScopes...),
 		RequireWriteScope: runtime.Auth.RequireDelegatedScope(alumnihandler.WriteScopes...),
 		RequireAdmin:      runtime.Auth.RequireRole(alumnihandler.AdminRole),
+	})
+	badgehandler.RegisterRoutes(router, runtime.Badge, badgehandler.Gates{
+		RequireAuth:       runtime.Auth.RequireUserAuth(),
+		RequireReadScope:  runtime.Auth.RequireDelegatedScope(badgehandler.ReadScopes...),
+		RequireWriteScope: runtime.Auth.RequireDelegatedScope(badgehandler.WriteScopes...),
 	})
 
 	slog.Info("server starting", slog.String("port", cfg.AppPort))

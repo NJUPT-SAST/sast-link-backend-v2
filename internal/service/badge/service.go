@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
@@ -32,6 +33,11 @@ type Service struct {
 	// console-issued sessions; an empty ActorClientID on an input resolves to
 	// it at audit time, mirroring the session service.
 	InternalClientID string
+	// ToggleLimiter throttles the enable/disable endpoints per user, keying on
+	// the authenticated subject rather than the IP: every accepted toggle
+	// writes an audit row, so the cap bounds audit spam. Nil disables the
+	// check (tests).
+	ToggleLimiter EndpointLimiter
 }
 
 // EnableInput carries the enable call's subject and authorizer.
@@ -56,6 +62,9 @@ type DisableInput struct {
 func (s *Service) Enable(ctx context.Context, input EnableInput) (*Status, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrUserNotFound, "enable badge: non-positive user id", nil)
+	}
+	if err := s.checkLimit(ctx, "badge_toggle", input.UserID); err != nil {
+		return nil, err
 	}
 
 	card, err := s.Users.FindPublicCardByUserID(ctx, input.UserID)
@@ -93,6 +102,9 @@ func (s *Service) Disable(ctx context.Context, input DisableInput) error {
 	if input.UserID <= 0 {
 		return newError(ErrUserNotFound, "disable badge: non-positive user id", nil)
 	}
+	if err := s.checkLimit(ctx, "badge_toggle", input.UserID); err != nil {
+		return err
+	}
 
 	removed, err := s.Badges.DeleteByUserID(ctx, input.UserID)
 	if err != nil {
@@ -121,6 +133,24 @@ func (s *Service) Status(ctx context.Context, userID int64) (*Status, error) {
 		return nil, newError(ErrInternal, "badge status: find row", err)
 	}
 	return &Status{Enabled: true, Key: badge.BadgeKey, EnabledAt: badge.EnabledAt}, nil
+}
+
+// checkLimit applies the per-user toggle cap. A limiter failure is logged and
+// the request allowed: the badge endpoints are self-service surface, and a
+// Redis blip must not lock users out of their own settings.
+func (s *Service) checkLimit(ctx context.Context, endpoint string, userID int64) error {
+	if s.ToggleLimiter == nil {
+		return nil
+	}
+	result, err := s.ToggleLimiter.Allow(ctx, endpoint, strconv.FormatInt(userID, 10))
+	if err != nil {
+		slog.WarnContext(ctx, "badge limiter unavailable, allowing request", "error", err)
+		return nil
+	}
+	if !result.Allowed {
+		return withRetryAfter(newError(ErrRateLimited, "badge toggle rate limited", nil), result.RetryAfter)
+	}
+	return nil
 }
 
 // generateBadgeKey returns a fresh 43-character base64url capability key.
