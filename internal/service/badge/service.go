@@ -100,18 +100,26 @@ func (s *Service) Enable(ctx context.Context, input EnableInput) (*Status, error
 	}
 
 	s.audit(ctx, input.UserID, input.ActorClientID, "badge_enable", key, true, 0)
-	return &Status{Enabled: true, Key: key, EnabledAt: enabledAt}, nil
+	return &Status{Enabled: true, Key: key, EnabledAt: &enabledAt}, nil
 }
 
 // Disable removes the caller's badge row. Disabling a badge that is not
 // enabled is a success — the observable end state is the same — but no audit
-// row is written when nothing was removed.
+// row is written when nothing was removed. A real removal also purges the
+// render cache for that key: without the purge, every embed keeps serving
+// the cached SVG until the TTL expires, and "关闭后链接立即失效" would be a
+// lie for up to five minutes.
 func (s *Service) Disable(ctx context.Context, input DisableInput) error {
 	if input.UserID <= 0 {
 		return newError(ErrUserNotFound, "disable badge: non-positive user id", nil)
 	}
 	if err := s.checkLimit(ctx, "badge_toggle", input.UserID); err != nil {
 		return err
+	}
+
+	existing, findErr := s.Badges.FindByUserID(ctx, input.UserID)
+	if findErr != nil && !errors.Is(findErr, repository.ErrNotFound) {
+		return newError(ErrInternal, "disable badge: find row", findErr)
 	}
 
 	removed, err := s.Badges.DeleteByUserID(ctx, input.UserID)
@@ -122,6 +130,9 @@ func (s *Service) Disable(ctx context.Context, input DisableInput) error {
 		return nil
 	}
 
+	if findErr == nil && existing != nil {
+		s.purgeRenderCache(existing.BadgeKey)
+	}
 	s.audit(ctx, input.UserID, input.ActorClientID, "badge_disable", "", true, 0)
 	return nil
 }
@@ -140,7 +151,19 @@ func (s *Service) Status(ctx context.Context, userID int64) (*Status, error) {
 		}
 		return nil, newError(ErrInternal, "badge status: find row", err)
 	}
-	return &Status{Enabled: true, Key: badge.BadgeKey, EnabledAt: badge.EnabledAt}, nil
+	enabledAt := badge.EnabledAt
+	return &Status{Enabled: true, Key: badge.BadgeKey, EnabledAt: &enabledAt}, nil
+}
+
+// purgeRenderCache lazily initializes and clears the render cache for one
+// badge key.
+func (s *Service) purgeRenderCache(badgeKey string) {
+	s.renderCacheOnce.Do(func() {
+		if s.renderCache == nil {
+			s.renderCache = newRenderCache()
+		}
+	})
+	s.renderCache.purge(badgeKey)
 }
 
 // checkLimit applies the per-user toggle cap. A limiter failure is logged and

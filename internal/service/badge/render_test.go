@@ -257,3 +257,41 @@ func TestRenderInvalidParamsFallBackToDefaults(t *testing.T) {
 		t.Fatalf("fallback theme should be auto")
 	}
 }
+
+func TestDisablePurgesRenderCache(t *testing.T) {
+	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{7: {Nickname: strPtr("张三")}}}
+	badges := newFakeBadgeRepository()
+	if err := badges.Create(context.Background(), &model.Badge{UserID: 7, BadgeKey: "purge-key"}); err != nil {
+		t.Fatalf("seed badge error = %v", err)
+	}
+	service := newTestService(users, badges, &fakeAuditRepository{})
+
+	// Warm the cache with two variants.
+	for _, variant := range []RenderInput{
+		{Key: "purge-key", Size: "md", Theme: "auto"},
+		{Key: "purge-key", Size: "lg", Theme: "dark"},
+	} {
+		if _, err := service.Render(context.Background(), variant); err != nil {
+			t.Fatalf("warm render error = %v", err)
+		}
+	}
+
+	if err := service.Disable(context.Background(), DisableInput{UserID: 7}); err != nil {
+		t.Fatalf("Disable error = %v", err)
+	}
+
+	// Both variants must now answer the not-found card — the cache no longer
+	// serves the pre-disable render.
+	for _, variant := range []RenderInput{
+		{Key: "purge-key", Size: "md", Theme: "auto"},
+		{Key: "purge-key", Size: "lg", Theme: "dark"},
+	} {
+		result, err := service.Render(context.Background(), variant)
+		if err != nil {
+			t.Fatalf("post-disable render error = %v", err)
+		}
+		if !result.NotFound {
+			t.Fatalf("variant %+v served a cached render after disable", variant)
+		}
+	}
+}

@@ -43,11 +43,13 @@ type EndpointLimiter interface {
 	Allow(ctx context.Context, endpoint, subject string) (LimitResult, error)
 }
 
-// Status is the answer to GET /user/badge: the badge's sharing state. Key is
-// present only while the badge is enabled — the share URL is derived from it
-// by the client, which knows the public API base this deployment runs behind.
+// Status is the answer to GET /user/badge: the badge's sharing state. Key and
+// EnabledAt are pointers so a disabled badge omits both — a zero time.Time
+// would serialize as 0001-01-01, which reads as data where there is none. The
+// share URL is derived from the key by the client, which knows the public API
+// base this deployment runs behind.
 type Status struct {
-	Enabled   bool      `json:"enabled"`
-	Key       string    `json:"key,omitempty"`
-	EnabledAt time.Time `json:"enabled_at,omitempty"`
+	Enabled   bool       `json:"enabled"`
+	Key       string     `json:"key,omitempty"`
+	EnabledAt *time.Time `json:"enabled_at,omitempty"`
 }

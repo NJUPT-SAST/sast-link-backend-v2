@@ -57,6 +57,23 @@ func (c *renderCache) get(key string) (renderCacheEntry, bool) {
 	return entry, true
 }
 
+// purge drops every cached variant of one badge key (all size/theme
+// combinations). Called when a badge is disabled so the public endpoint
+// flips to the 404 error card immediately instead of after the TTL.
+func (c *renderCache) purge(badgeKey string) {
+	if badgeKey == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	suffix := "|" + badgeKey
+	for k := range c.entries {
+		if strings.HasSuffix(k, suffix) {
+			delete(c.entries, k)
+		}
+	}
+}
+
 func (c *renderCache) put(key string, entry renderCacheEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

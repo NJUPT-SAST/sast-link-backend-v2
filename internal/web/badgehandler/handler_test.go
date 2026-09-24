@@ -82,7 +82,7 @@ func decodeEnvelope(t *testing.T, body string) (int, string, map[string]any) {
 
 func TestStatusReturnsSharingState(t *testing.T) {
 	enabledAt := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
-	service := &fakeService{statusResult: &badge.Status{Enabled: true, Key: "k43chars", EnabledAt: enabledAt}}
+	service := &fakeService{statusResult: &badge.Status{Enabled: true, Key: "k43chars", EnabledAt: &enabledAt}}
 	router := newTestRouter(Handler{Service: service}, 7)
 
 	recorder := httptest.NewRecorder()
