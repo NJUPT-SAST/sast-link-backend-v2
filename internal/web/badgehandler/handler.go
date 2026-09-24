@@ -4,6 +4,9 @@ package badgehandler
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -18,6 +21,7 @@ type Service interface {
 	Enable(ctx context.Context, input badge.EnableInput) (*badge.Status, error)
 	Disable(ctx context.Context, input badge.DisableInput) error
 	Status(ctx context.Context, userID int64) (*badge.Status, error)
+	Render(ctx context.Context, input badge.RenderInput) (*badge.RenderResult, error)
 }
 
 // Handler serves the badge endpoints.
@@ -59,6 +63,13 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	protected.GET("/user/badge", g.RequireReadScope, h.Status)
 	protected.POST("/user/badge", g.RequireWriteScope, h.Enable)
 	protected.DELETE("/user/badge", g.RequireWriteScope, h.Disable)
+
+	// The public render endpoint: unauthenticated by design — the URL's
+	// capability key is the credential, and an img embed cannot carry one.
+	// A single :key segment carries the whole path; a trailing .svg is
+	// accepted (and stripped) so a shared link reads as an image on platforms
+	// that sniff by extension.
+	r.GET("/badge/:key", h.ServeSVG)
 }
 
 // Status answers GET /user/badge with the caller's sharing state.
@@ -109,4 +120,40 @@ func (h Handler) Disable(c *gin.Context) {
 		return
 	}
 	response.Ok(c, gin.H{"message": "徽标已关闭"})
+}
+
+// badgeCacheMaxAge matches the service's render-cache horizon: a viewer (or
+// GitHub's camo proxy) may reuse the image this long before revalidating.
+const badgeCacheMaxAge = 300
+
+// ServeSVG answers GET /badge/:key(.svg) with the rendered badge. Unknown or
+// closed badges answer 404 with an SVG error card — an img embed must not
+// crack — and successful renders carry Cache-Control and a strong ETag so a
+// conditional request round-trips without a re-render.
+func (h Handler) ServeSVG(c *gin.Context) {
+	key := strings.TrimSuffix(c.Param("key"), ".svg")
+	result, err := h.Service.Render(c.Request.Context(), badge.RenderInput{
+		Key:      key,
+		Size:     c.Query("size"),
+		Theme:    c.Query("theme"),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		response.Error(c, mapServiceError(err))
+		return
+	}
+
+	c.Header("Cache-Control", fmt.Sprintf("public, max-age=%d", badgeCacheMaxAge))
+	if result.ETag != "" {
+		c.Header("ETag", result.ETag)
+		if c.GetHeader("If-None-Match") == result.ETag {
+			c.Status(http.StatusNotModified)
+			return
+		}
+	}
+	status := http.StatusOK
+	if result.NotFound {
+		status = http.StatusNotFound
+	}
+	c.Data(status, "image/svg+xml; charset=utf-8", result.SVG)
 }

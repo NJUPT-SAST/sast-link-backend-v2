@@ -56,6 +56,18 @@ func (f *fakeBadgeRepository) FindByUserID(_ context.Context, userID int64) (*mo
 	return nil, repository.ErrNotFound
 }
 
+func (f *fakeBadgeRepository) FindBadgeTarget(_ context.Context, badgeKey string) (*model.Badge, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, row := range f.rows {
+		if row.BadgeKey == badgeKey {
+			stored := *row
+			return &stored, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
+
 func (f *fakeBadgeRepository) DeleteByUserID(_ context.Context, userID int64) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

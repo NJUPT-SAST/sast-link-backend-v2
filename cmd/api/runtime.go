@@ -132,6 +132,9 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	badgeToggleLimiter := badgeredis.EndpointLimiter{
 		Limiter: internalredis.FixedWindowLimiter{Client: rdb, Keys: keys, Limit: cfg.RateLimitBadgeToggleRPM, Window: cfg.RateLimitBadgeToggleWindow},
 	}
+	badgePublicLimiter := badgeredis.EndpointLimiter{
+		Limiter: internalredis.FixedWindowLimiter{Client: rdb, Keys: keys, Limit: cfg.RateLimitBadgePublicRPM, Window: cfg.RateLimitBadgePublicWindow},
+	}
 	badgeService := badge.Service{
 		Users:            users,
 		Badges:           repository.NewBadge(database),
@@ -139,6 +142,7 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Clock:            auth.SystemClock,
 		InternalClientID: cfg.InternalOAuthClientID,
 		ToggleLimiter:    badgeToggleLimiter,
+		PublicLimiter:    badgePublicLimiter,
 	}
 	// Object storage is optional: unconfigured, PUT /user/avatar answers 50002;
 	// when configured the COS client also carries fail-closed image review.

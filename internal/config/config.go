@@ -360,6 +360,12 @@ type Config struct {
 	// window is an hour, not a minute, because toggling is rare by design.
 	RateLimitBadgeToggleRPM    int           `env:"RATE_LIMIT_BADGE_TOGGLE_RPM" envDefault:"5"`
 	RateLimitBadgeToggleWindow time.Duration `env:"RATE_LIMIT_BADGE_TOGGLE_WINDOW" envDefault:"1h"`
+	// Badge public render throttling is per IP: the endpoint is unauthenticated
+	// (the capability key is the credential) and every miss costs a DB read, so
+	// the cap bounds probing. Sized for a friend-link wall loading dozens of
+	// badges from one viewer.
+	RateLimitBadgePublicRPM    int           `env:"RATE_LIMIT_BADGE_PUBLIC_RPM" envDefault:"120"`
+	RateLimitBadgePublicWindow time.Duration `env:"RATE_LIMIT_BADGE_PUBLIC_WINDOW" envDefault:"60s"`
 }
 
 // Load parses configuration from environment variables and validates required fields.
@@ -811,6 +817,10 @@ func (c *Config) validateBadgeToggle() error {
 		return fmt.Errorf("RATE_LIMIT_BADGE_TOGGLE_RPM must be positive")
 	case c.RateLimitBadgeToggleWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_BADGE_TOGGLE_WINDOW must be at least 1s")
+	case c.RateLimitBadgePublicRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_BADGE_PUBLIC_RPM must be positive")
+	case c.RateLimitBadgePublicWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_BADGE_PUBLIC_WINDOW must be at least 1s")
 	}
 	return nil
 }

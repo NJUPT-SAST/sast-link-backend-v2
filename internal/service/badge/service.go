@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
@@ -38,6 +39,13 @@ type Service struct {
 	// writes an audit row, so the cap bounds audit spam. Nil disables the
 	// check (tests).
 	ToggleLimiter EndpointLimiter
+	// PublicLimiter throttles the unauthenticated render endpoint per IP.
+	// Nil disables the check (tests).
+	PublicLimiter EndpointLimiter
+	// renderCache absorbs render bursts. Lazily initialized in Render so a
+	// service constructed without one (older tests) still works.
+	renderCacheOnce sync.Once
+	renderCache     *renderCache
 }
 
 // EnableInput carries the enable call's subject and authorizer.

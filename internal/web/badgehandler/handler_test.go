@@ -23,6 +23,9 @@ type fakeService struct {
 	enableInput  badge.EnableInput
 	disableInput badge.DisableInput
 	statusUserID int64
+	renderInput  badge.RenderInput
+	renderResult *badge.RenderResult
+	renderErr    error
 }
 
 func (s *fakeService) Enable(_ context.Context, input badge.EnableInput) (*badge.Status, error) {
@@ -38,6 +41,11 @@ func (s *fakeService) Disable(_ context.Context, input badge.DisableInput) error
 func (s *fakeService) Status(_ context.Context, userID int64) (*badge.Status, error) {
 	s.statusUserID = userID
 	return s.statusResult, s.statusErr
+}
+
+func (s *fakeService) Render(_ context.Context, input badge.RenderInput) (*badge.RenderResult, error) {
+	s.renderInput = input
+	return s.renderResult, s.renderErr
 }
 
 // newTestRouter mounts the handler with a middleware that injects a principal,
@@ -219,5 +227,74 @@ func TestRoutesRejectMissingPrincipal(t *testing.T) {
 		if recorder.Code != http.StatusInternalServerError {
 			t.Fatalf("GET %s without principal = %d, want 500", target, recorder.Code)
 		}
+	}
+}
+
+func TestServeSVGReturnsSVGWithCacheHeaders(t *testing.T) {
+	service := &fakeService{renderResult: &badge.RenderResult{
+		SVG:  []byte("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"),
+		ETag: `"abc123"`,
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/badge/somekey.svg?size=lg&theme=dark", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "image/svg+xml; charset=utf-8" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "public, max-age=300" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if got := recorder.Header().Get("ETag"); got != `"abc123"` {
+		t.Fatalf("ETag = %q", got)
+	}
+	if service.renderInput.Key != "somekey" || service.renderInput.Size != "lg" || service.renderInput.Theme != "dark" {
+		t.Fatalf("Render input = %#v", service.renderInput)
+	}
+}
+
+func TestServeSVGStripsSuffixAndAnswers404WithCard(t *testing.T) {
+	service := &fakeService{renderResult: &badge.RenderResult{
+		SVG:      []byte("<svg>missing</svg>"),
+		NotFound: true,
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	// The extensionless route must work too.
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/badge/plainkey", nil))
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "image/svg+xml; charset=utf-8" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if service.renderInput.Key != "plainkey" {
+		t.Fatalf("key = %q, want plainkey (suffix stripped)", service.renderInput.Key)
+	}
+}
+
+func TestServeSVGConditionalRequestSavesBandwidth(t *testing.T) {
+	service := &fakeService{renderResult: &badge.RenderResult{
+		SVG:  []byte("<svg></svg>"),
+		ETag: `"v1"`,
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/badge/k.svg", nil)
+	request.Header.Set("If-None-Match", `"v1"`)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304", recorder.Code)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("304 must carry no body, got %d bytes", recorder.Body.Len())
 	}
 }
