@@ -37,6 +37,24 @@ func assertPairRevokedAt(t *testing.T, database *gorm.DB, familyID string, want 
 	}
 }
 
+// assertPairRevokedReason pins the V018 revoked_reason on a family's refresh
+// row: the value the refresh leg reads to audit session_revoked instead of a
+// replay, so each revoking flow must record its own cause.
+func assertPairRevokedReason(t *testing.T, database *gorm.DB, familyID string, wantReason string) {
+	t.Helper()
+	var refresh model.OAuthRefreshToken
+	if err := database.Where("family_id = ?", familyID).First(&refresh).Error; err != nil {
+		t.Fatalf("read refresh token for %q: %v", familyID, err)
+	}
+	if refresh.RevokedReason == nil || *refresh.RevokedReason != wantReason {
+		got := "<nil>"
+		if refresh.RevokedReason != nil {
+			got = *refresh.RevokedReason
+		}
+		t.Fatalf("refresh token revoked_reason = %q, want %q", got, wantReason)
+	}
+}
+
 // adminSeed creates a user with explicit role, state and display name so the list
 // filters have something to discriminate on.
 func adminSeed(
@@ -415,6 +433,7 @@ func TestUpdateAdminUserRevokesSessionsAtomically(t *testing.T) {
 		t.Fatalf("entries = %+v, want the live access token returned for blacklisting", entries)
 	}
 	assertPairRevokedAt(t, database, familyID, revokedAt)
+	assertPairRevokedReason(t, database, familyID, repository.RevokeReasonAdminRoleChange)
 
 	var reloaded model.User
 	if err := database.First(&reloaded, user.ID).Error; err != nil {
@@ -567,6 +586,7 @@ func TestSoftDeleteAndRevokeSessions(t *testing.T) {
 		t.Fatalf("entries = %+v, want the live access token", entries)
 	}
 	assertPairRevokedAt(t, database, familyID, revokedAt)
+	assertPairRevokedReason(t, database, familyID, repository.RevokeReasonAccountClosed)
 
 	var reloaded model.User
 	if err := database.First(&reloaded, user.ID).Error; err != nil {

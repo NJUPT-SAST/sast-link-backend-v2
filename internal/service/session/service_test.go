@@ -74,7 +74,10 @@ type fakeUsers struct {
 	lookups []string
 	// tokens lets the fake mirror the repository's atomic
 	// password-update-plus-revocation transaction.
-	tokens            *fakeTokens
+	tokens *fakeTokens
+	// lastRevokeReason records the reason the service handed to
+	// UpdatePasswordAndRevokeSessions, so tests can pin the audit-side cause.
+	lastRevokeReason  string
 	updatePasswordErr error
 	passwordUpdates   []int64
 	// rehashUpdates records UpdatePasswordHash calls, which the repository makes
@@ -272,6 +275,7 @@ func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
 	userID int64,
 	passwordHash string,
 	revokedAt time.Time,
+	revokedReason string,
 ) ([]model.BlacklistEntry, error) {
 	if f.updatePasswordErr != nil {
 		return nil, f.updatePasswordErr
@@ -283,6 +287,7 @@ func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
 	user.PasswordHash = passwordHash
 	user.TokenVersion++
 	f.passwordUpdates = append(f.passwordUpdates, userID)
+	f.lastRevokeReason = revokedReason
 	if f.tokens == nil {
 		return nil, nil
 	}
@@ -2262,6 +2267,11 @@ func TestChangePasswordRotatesCredentialAndRevokesSessions(t *testing.T) {
 	if len(tokens.revokedUsers) != 1 || tokens.revokedUsers[0] != 42 {
 		t.Fatalf("revoked users = %#v, want all sessions of user 42 revoked", tokens.revokedUsers)
 	}
+	// The revocation carries the self-service-change reason, so the user's next
+	// refresh audits session_revoked/password_changed instead of a replay.
+	if users.lastRevokeReason != repository.RevokeReasonPasswordChanged {
+		t.Fatalf("revoke reason = %q, want %q", users.lastRevokeReason, repository.RevokeReasonPasswordChanged)
+	}
 }
 
 func TestChangePasswordRejectsWrongOldSameNewAndShortNew(t *testing.T) {
@@ -2299,6 +2309,11 @@ func TestResetPasswordConsumesCodeAndRevokesSessions(t *testing.T) {
 	}
 	if _, ok := codes.codes[codeKey(resetPurpose, "user@njupt.edu.cn")]; ok {
 		t.Fatal("verification code was not consumed")
+	}
+	// The revocation carries the reset reason, distinct from an authenticated
+	// change: the next refresh's session_revoked row names the exact flow.
+	if users.lastRevokeReason != repository.RevokeReasonPasswordReset {
+		t.Fatalf("revoke reason = %q, want %q", users.lastRevokeReason, repository.RevokeReasonPasswordReset)
 	}
 }
 
@@ -3178,3 +3193,84 @@ func TestRegisterRejectsUnparseableStudentIDWithoutSpendingCredentials(t *testin
 		t.Fatal("registration_state was consumed by an unreadable student ID: the applicant would have to re-authorize with GitHub")
 	}
 }
+
+// A token cut by a user-level bulk revocation (role change, account close,
+// password change/reset) must not read as a replay: before V018 the audit
+// outcome for the target user's next refresh was refresh_replayed (or
+// concurrent_refresh inside the grace window), which made every administrative
+// edit look like an attack. The token row's revoked_reason is what separates
+// the two, and it lands in the audit detail so "why was this session cut" is
+// answerable from the log alone.
+func TestRefreshAuditRecordsSessionRevokedOutcomeForAdministrativeRevocation(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if _, rotateErr := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); rotateErr != nil {
+		t.Fatalf("Refresh: %v", rotateErr)
+	}
+	// The bulk revocation shape: the still-presentable token carries both a
+	// revoked_at and a recorded reason.
+	reason := repository.RevokeReasonAdminRoleChange
+	for _, stored := range tokens.refreshByHash {
+		if stored.RevokedAt != nil {
+			stored.RevokedReason = &reason
+		}
+	}
+
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	if err == nil {
+		t.Fatal("Refresh accepted a revoked token")
+	}
+	entry := lastAuditAction(t, audit, "refresh")
+	if got := auditOutcome(t, entry); got != refreshOutcomeSessionRevoked {
+		t.Fatalf("administratively revoked outcome = %q, want %q", got, refreshOutcomeSessionRevoked)
+	}
+	var detail struct {
+		Outcome       string `json:"outcome"`
+		RevokedReason string `json:"revoked_reason"`
+	}
+	if unmarshalErr := json.Unmarshal(entry.Detail, &detail); unmarshalErr != nil {
+		t.Fatalf("unmarshal audit detail %s: %v", entry.Detail, unmarshalErr)
+	}
+	if detail.RevokedReason != repository.RevokeReasonAdminRoleChange {
+		t.Fatalf("revoked_reason = %q, want %q", detail.RevokedReason, repository.RevokeReasonAdminRoleChange)
+	}
+	// The client sees the same 40106 a dead token always produced — the
+	// distinction is for the audit trail, not a new client contract.
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+}
+
+// The grace window must not turn an administrative revocation into a retry
+// loop: within 30s of the cut the concurrent_refresh answer would keep the
+// client's cookie and have it retry against a family that can never rotate
+// again. A recorded reason answers 40106 immediately instead.
+func TestRefreshSessionRevokedSkipsGraceWindow(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if _, rotateErr := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); rotateErr != nil {
+		t.Fatalf("Refresh: %v", rotateErr)
+	}
+	// The revocation just happened — well inside the grace window.
+	reason := repository.RevokeReasonPasswordChanged
+	for _, stored := range tokens.refreshByHash {
+		if stored.RevokedAt != nil {
+			*stored.RevokedAt = service.now().Add(-time.Second)
+			stored.RevokedReason = &reason
+		}
+	}
+
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	if err == nil {
+		t.Fatal("Refresh accepted a revoked token")
+	}
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeSessionRevoked {
+		t.Fatalf("grace-window administrative revocation outcome = %q, want %q", got, refreshOutcomeSessionRevoked)
+	}
+}
+

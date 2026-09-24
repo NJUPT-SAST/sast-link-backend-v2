@@ -237,6 +237,17 @@ func assertTokenRevokedBetween(t *testing.T, database *gorm.DB, tokenID string, 
 
 func assertTokenRevokedAt(t *testing.T, database *gorm.DB, tokenID string, tokenHash string, want time.Time) {
 	t.Helper()
+	assertTokenRevokedAtWithReason(t, database, tokenID, tokenHash, want, "")
+}
+
+// assertTokenRevokedAtWithReason extends assertTokenRevokedAt: a non-empty
+// wantReason additionally requires the refresh row to carry that
+// revoked_reason (V018), the value the refresh leg reads to audit
+// session_revoked instead of a replay. An empty wantReason skips the reason
+// check — user-level revocations all write a reason, so most tests have
+// nothing to pin there.
+func assertTokenRevokedAtWithReason(t *testing.T, database *gorm.DB, tokenID string, tokenHash string, want time.Time, wantReason string) {
+	t.Helper()
 	var access model.OAuthAccessToken
 	if err := database.Where("token_id = ?", tokenID).First(&access).Error; err != nil {
 		t.Fatalf("read access token %q: %v", tokenID, err)
@@ -247,6 +258,16 @@ func assertTokenRevokedAt(t *testing.T, database *gorm.DB, tokenID string, token
 	}
 	if access.RevokedAt == nil || !access.RevokedAt.Equal(want) || refresh.RevokedAt == nil || !refresh.RevokedAt.Equal(want) {
 		t.Fatalf("revocations = %v / %v, want %v", access.RevokedAt, refresh.RevokedAt, want)
+	}
+	if wantReason == "" {
+		return
+	}
+	if refresh.RevokedReason == nil || *refresh.RevokedReason != wantReason {
+		got := "<nil>"
+		if refresh.RevokedReason != nil {
+			got = *refresh.RevokedReason
+		}
+		t.Fatalf("refresh %q revoked_reason = %q, want %q", tokenHash, got, wantReason)
 	}
 }
 

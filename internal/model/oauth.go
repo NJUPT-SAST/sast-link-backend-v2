@@ -80,16 +80,17 @@ func (OAuthAccessToken) TableName() string {
 
 // OAuthRefreshToken persists a rotated opaque refresh-token hash.
 type OAuthRefreshToken struct {
-	ID        int64
-	TokenHash string `json:"-"`
-	FamilyID  string
-	Sequence  int
-	ClientID  int64
-	UserID    int64
-	Scopes    StringArray `gorm:"type:text[]"`
-	RevokedAt *time.Time
-	ExpiresAt time.Time
-	CreatedAt time.Time
+	ID            int64
+	TokenHash     string `json:"-"`
+	FamilyID      string
+	Sequence      int
+	ClientID      int64
+	UserID        int64
+	Scopes        StringArray `gorm:"type:text[]"`
+	RevokedAt     *time.Time
+	RevokedReason *string
+	ExpiresAt     time.Time
+	CreatedAt     time.Time
 }
 
 // TableName returns the exact V001 table name for OAuthRefreshToken.

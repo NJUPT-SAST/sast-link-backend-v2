@@ -226,6 +226,20 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		return nil, newError(ErrInternal, "查询 Refresh Token 失败", err)
 	}
 	if current.RevokedAt != nil {
+		// A user-level bulk revocation (role change, account close, password
+		// change/reset) cut this family administratively: the presented token is
+		// dead, but its death was an operator's or the owner's decision, not a
+		// replay. Auditing it as session_revoked with the recorded reason keeps the
+		// replay signal clean — the two were indistinguishable before V018, which
+		// made every administrative edit read like an attack. No family revoke is
+		// needed (the bulk revocation already cut it), no device cleanup is needed
+		// (every revoking path clears the device set in the same flow), and the
+		// grace window is skipped: within it the client would otherwise answer
+		// 40108 and retry forever against a family that can never rotate again.
+		if current.RevokedReason != nil {
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeSessionRevoked, *current.RevokedReason, input)
+			return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
+		}
 		// Within the grace window this is a benign concurrent refresh (the winning
 		// rotation preserved the family) and must not be cut, or the winning tab
 		// would be logged out. Beyond it, a true replay — cut the family, which
@@ -244,13 +258,13 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 					slog.WarnContext(ctx, "remove device on replay revoke failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 				}
 			}
-			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, "", input)
 			return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 		}
 		// Benign concurrent refresh within the grace window: the family (and the
 		// winning tab's session) is preserved. Return a distinct outcome so the
 		// handler does not clear the cookie, which now holds the winner's token.
-		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeConcurrent, input)
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeConcurrent, "", input)
 		return nil, newError(ErrConcurrentRefresh, "刷新请求冲突，请重试", nil)
 	}
 	if !current.ExpiresAt.After(s.now()) {
@@ -262,7 +276,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 				slog.WarnContext(ctx, "remove device on expired refresh failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 			}
 		}
-		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeExpired, input)
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeExpired, "", input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 无效", nil)
 	}
 	client, err := s.findInternalClient(ctx)
@@ -270,7 +284,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		return nil, err
 	}
 	if current.ClientID != client.ID {
-		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeClientMismatch, input)
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeClientMismatch, "", input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 与客户端不匹配", nil)
 	}
 	user, err := s.Users.FindAuthUserByID(ctx, current.UserID)
@@ -327,7 +341,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			// is dead, but the device record belongs to the still-live family and
 			// must not be dropped, or the winning session becomes invisible in the
 			// device list.
-			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeConcurrent, input)
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeConcurrent, "", input)
 			return nil, newError(ErrConcurrentRefresh, "刷新请求冲突，请重试", rotateErr)
 		}
 		if errors.Is(rotateErr, repository.ErrTokenReplay) || errors.Is(rotateErr, repository.ErrTokenExpired) || errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) || errors.Is(rotateErr, repository.ErrNotFound) {
@@ -344,7 +358,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 					slog.WarnContext(ctx, "remove device on rotation failure failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 				}
 			}
-			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, input)
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeReplayed, "", input)
 			return nil, newError(ErrInvalidToken, "Refresh Token 无效", rotateErr)
 		}
 		return nil, newError(ErrInternal, "轮换 Refresh Token 失败", rotateErr)
@@ -809,7 +823,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	// The password rewrite and the session revocation share one transaction:
 	// reporting success while live refresh tokens survive would contradict the
 	// "请重新登录" contract, so a revocation failure fails the whole call.
-	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now)
+	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now, repository.RevokeReasonPasswordReset)
 	if err != nil {
 		return nil, newError(ErrInternal, "重置密码并撤销会话失败", err)
 	}
@@ -867,7 +881,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 		return nil, s.hashError(ctx, err)
 	}
 	now := s.now()
-	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now)
+	entries, err := s.Users.UpdatePasswordAndRevokeSessions(ctx, user.ID, passwordHash, now, repository.RevokeReasonPasswordChanged)
 	if err != nil {
 		return nil, newError(ErrInternal, "修改密码并撤销会话失败", err)
 	}
@@ -1183,6 +1197,12 @@ const (
 	// must be recorded for refresh_replayed to be meaningful: without the mundane
 	// outcomes, a replay row cannot be told apart from unrecorded failures.
 	refreshOutcomeExpired = "expired"
+	// refreshOutcomeSessionRevoked is a token cut by a user-level bulk revocation
+	// (role change, account close, password change/reset) rather than a replay:
+	// the family was killed administratively, and the token row's revoked_reason
+	// says which flow did it. Separated from refresh_replayed so an operator's
+	// edit stops reading as an attack in the audit trail and in alerts.
+	refreshOutcomeSessionRevoked = "session_revoked"
 	// refreshOutcomeClientMismatch is a token presented against a client other than
 	// the one it was issued to; not reachable through the first-party flow, so it
 	// means a misrouted client or a probed token.
@@ -1203,6 +1223,7 @@ func (s Service) auditRefresh(
 	familyID *string,
 	success bool,
 	outcome string,
+	revokedReason string,
 	input RefreshInput,
 ) {
 	errCode := 0
@@ -1215,6 +1236,12 @@ func (s Service) auditRefresh(
 		}
 	}
 	detail := map[string]any{"outcome": outcome}
+	if revokedReason != "" {
+		// The recorded cause of a user-level revocation (role change, account close,
+		// password change/reset), carried from the token row into the audit trail so
+		// "why was this session cut" is answerable from the log alone.
+		detail["revoked_reason"] = revokedReason
+	}
 	if auditErr := s.audit(ctx, &userID, "refresh", "session", familyID, nil, success, errCode, input.ClientIP, input.UserAgent, detail); auditErr != nil {
 		slog.Error("audit refresh", "family_id", familyID, "outcome", outcome, "error", auditErr)
 	}

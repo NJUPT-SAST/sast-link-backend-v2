@@ -412,6 +412,7 @@ POST /auth/refresh
 
 - Refresh Token 旋转机制 — 每次使用后旧 token 立即撤销，下发新 token；同时通过 `Set-Cookie` 更新 `sl_session` cookie，保持其与最新 refresh token 同步
 - `40108`（刷新请求冲突）出现在多 tab 并发冷启动：同一 cookie 的 refresh token 已被兄弟请求在 30s 宽限窗内轮换，家族保留。客户端应**重读当前 cookie 后重试一次**（此时 cookie 已携带赢家的新 token），不要拿同一枚旧 token 无限重试——超过 30s 宽限窗仍用旧 token 会按真重放处理并撤销整个家族（连带赢家会话）
+- 被用户级批量撤销（改密/重置、管理员改 role、账号注销）切断的会话**不走** `40108`/重放分支：token 行记录了撤销原因（V018 `revoked_reason`），下一次刷新直接返回 `40106`，审计记为 `refresh` / `session_revoked`（detail 带具体 `revoked_reason`）而非 `refresh_replayed`——管理员编辑不再伪装成重放攻击，告警而不再污染。30s 宽限窗对这类撤销同样不适用：家族已死，宽限窗内的 `40108` 重试只会无限循环
 - 账号已注销（`40301`）时，**cookie 来源**的刷新返回 `401`（错误码仍是 `40301`）而非 `403`：前端只在刷新以 401 结束时清会话并跳登录，已注销的账号必须让标签页脱离死会话壳。请求体携带 `refresh_token` 的调用保持 `403`——调用方已在带内认证，应当得到准确的账号状态
 - 此端点用于内部登录（密码/第三方）的 token 刷新；OAuth 客户端刷新请使用 `POST /oauth/token`（grant_type=refresh_token）
 

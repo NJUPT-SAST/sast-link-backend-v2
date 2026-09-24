@@ -208,6 +208,17 @@ func TestTokenRepositoryRotateRefreshToken(t *testing.T) {
 	assertAccessTokenUnrevoked(t, database, "rotate-current-access")
 	assertRefreshTokenRevokedBetween(t, database, "rotate-current-refresh", before, after)
 	assertTokenUnrevoked(t, database, "rotate-new-access", "rotate-new-refresh")
+	// Rotation revokes the presented token without a reason (V018): NULL keeps
+	// meaning "rotation-family revocation" on the refresh leg, so a later
+	// presentment is judged by the grace/replay rules rather than read as an
+	// administrative session_revoked.
+	var rotated model.OAuthRefreshToken
+	if err := database.Where("token_hash = ?", "rotate-current-refresh").First(&rotated).Error; err != nil {
+		t.Fatalf("read rotated refresh: %v", err)
+	}
+	if rotated.RevokedReason != nil {
+		t.Fatalf("rotated-out token revoked_reason = %q, want NULL (rotation never records one)", *rotated.RevokedReason)
+	}
 }
 
 // A capability family's total life is capped from its origin: a rotation with a

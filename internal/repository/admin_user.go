@@ -301,6 +301,27 @@ func escapeLikePattern(keyword string) string {
 	return strings.ReplaceAll(escaped, "_", `\_`)
 }
 
+// Revocation reasons recorded on oauth_refresh_tokens.revoked_reason by the
+// user-level bulk revocations. A non-NULL reason tells the next refresh the
+// family was cut administratively, so it is audited as session_revoked rather
+// than reading as a replay. Rotation-family revocations (rotate, RevokeFamily,
+// logout, eviction, replay defense) keep the column NULL and their existing
+// refresh outcomes. The wire value doubles as the audit detail's revoked_reason,
+// so the two can never drift apart.
+const (
+	// RevokeReasonAdminRoleChange: an administrator changed the user's role; the
+	// sessions of the old role must not keep minting access tokens.
+	RevokeReasonAdminRoleChange = "admin_role_change"
+	// RevokeReasonAccountClosed: the account was soft-deleted.
+	RevokeReasonAccountClosed = "account_closed"
+	// RevokeReasonPasswordChanged: the user changed their password from an
+	// authenticated session.
+	RevokeReasonPasswordChanged = "password_changed"
+	// RevokeReasonPasswordReset: the user reset their password through the
+	// verification-code flow.
+	RevokeReasonPasswordReset = "password_reset"
+)
+
 // AdminUserUpdate carries the administrative field changes for one user. A nil
 // pointer means "leave unchanged". token_version and password are deliberately
 // absent, so no request shape can rewrite a credential or forge a version bump.
@@ -490,7 +511,7 @@ func (r *UserRepository) UpdateAdminUser(
 			return nil
 		}
 		sessionsRevoked = true
-		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
+		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt, RevokeReasonAdminRoleChange)
 		if revokeErr != nil {
 			return revokeErr
 		}
@@ -537,7 +558,7 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 			// console can report "already deleted" instead of "no such user".
 			return classifyMissingUser(transaction, userID)
 		}
-		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
+		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt, RevokeReasonAccountClosed)
 		if revokeErr != nil {
 			return revokeErr
 		}

@@ -514,6 +514,7 @@ func TestOAuthAuthorizationRedemptionRefusesPairAfterBulkRevocation(t *testing.T
 	userRepository := repository.NewUser(database)
 	if _, revokeErr := userRepository.UpdatePasswordAndRevokeSessions(
 		context.Background(), user.ID, "new-argon2-hash", time.Now(),
+		repository.RevokeReasonPasswordChanged,
 	); revokeErr != nil {
 		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", revokeErr)
 	}
