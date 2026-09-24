@@ -30,6 +30,16 @@ Human verification is Cloudflare Turnstile (`internal/adapter/turnstile`, siteve
 
 It never performs DDL or schema migrations at startup. `cmd/migrate` is the only command that inspects or changes schema migration state.
 
+## Contribution Discipline
+
+Read `CONTRIBUTING.md` before making changes — it is the source of truth for environment setup, pre-commit hooks, commit convention, and the PR workflow. The rules below are non-negotiable:
+
+- **Never develop on `main`.** Every change — feature, fix, docs, or chore, however small — is made on a descriptive branch cut from `main` (e.g. `feat/oauth-pkce`, `fix/token-race`, `docs/runbook-refresh`) and lands exclusively through a pull request reviewed by at least one team member. Direct commits on `main` and direct pushes to `main` are forbidden.
+- **Every modification must be tested before it is considered done.** At minimum run `golangci-lint run ./...` and `go test -race -shuffle=on ./...` (integration tests provision PostgreSQL 16 / Redis via Testcontainers and require Docker). When changing runtime behavior, update or add the closest colocated test.
+- **Commits must be atomic.** One commit per logical change — a refactor, its tests, and its docs belong together, but two unrelated changes never share a commit. Fix an unpushed commit with rebase rather than appending fixup commits.
+- **Commit messages follow Conventional Commits** (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`, `perf:`, `ci:`), scoped when helpful, e.g. `fix(token): detect refresh token replay via family_id`.
+- **Keep `CHANGELOG.md` in sync.** User-visible changes (features, fixes, behavior changes) get a dated entry under `[Unreleased]` (add the PR number once known) in the same PR that introduces them.
+
 ## Current Commands
 
 The project targets Go `1.26.6`, Gin, GORM, PostgreSQL 16+, Redis 8+, and testcontainers-go. Full integration tests provision PostgreSQL 16 through Testcontainers and require Docker.
