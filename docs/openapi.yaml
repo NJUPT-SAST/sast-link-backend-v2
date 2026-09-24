@@ -1312,6 +1312,157 @@ paths:
           description: 设备服务暂不可用（50300，fail-closed：无法校验归属时不执行撤销）
       security:
         - bearerAuth: []
+  /user/badge:
+    get:
+      summary: 查询个人徽标状态
+      description: |
+        返回当前用户的徽标分享状态。未开启时 key 与 enabled_at 字段省略。
+        key 仅在开启状态下返回，客户端拼接 `{API_BASE}/badge/{key}.svg` 得到分享 URL。
+      operationId: getBadgeStatus
+      tags:
+        - Badge
+      responses:
+        "200":
+          description: 徽标状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BadgeStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+      security:
+        - bearerAuth: []
+    post:
+      summary: 开启个人徽标
+      description: |
+        创建徽标行并返回 capability key。昵称是徽标的身份锚点，未设置昵称时拒绝（42205）。
+        已开启时返回 40907，客户端应展示现有徽标而非重试。每用户限流 5 次/小时。
+      operationId: enableBadge
+      tags:
+        - Badge
+      responses:
+        "201":
+          description: 徽标已开启
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BadgeStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+          description: 用户不存在（40401）
+        "409":
+          $ref: "#/components/responses/Conflict"
+          description: 徽标已开启（40907）
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+          description: 请先设置昵称再开启徽标（42205）
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+          description: 开关过于频繁（42900），按用户限流，5 次/小时
+        "500":
+          $ref: "#/components/responses/InternalError"
+      security:
+        - bearerAuth: []
+    delete:
+      summary: 关闭个人徽标
+      description: |
+        删除徽标行。幂等：未开启时同样返回 200。关闭后所有已嵌入的链接立即失效
+        （渲染 404 错误卡片）。每用户限流 5 次/小时。
+      operationId: disableBadge
+      tags:
+        - Badge
+      responses:
+        "200":
+          description: 徽标已关闭
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - message
+                properties:
+                  message:
+                    type: string
+                    example: 徽标已关闭
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+          description: 开关过于频繁（42900），按用户限流，5 次/小时
+        "500":
+          $ref: "#/components/responses/InternalError"
+      security:
+        - bearerAuth: []
+  /badge/{key}:
+    get:
+      summary: 渲染个人徽标（公开）
+      description: |
+        无需认证——URL 的 capability key 就是凭证（256-bit 随机 base64url，不可枚举）。
+        返回固定画布的 SVG：同一尺寸画布恒定，空字段留空不重排；字段可见性由尺寸决定
+        （sm=头像+昵称+院系，md=+签名，lg=+社交域名）。头像从 COS 拉取并缩至 128px
+        后以 base64 data URI 内嵌，拉取失败降级为首字标记。
+        key 未知/已关闭/已轮换/用户已注销时返回 404 与「徽标不存在或已关闭」错误卡片
+        （保证 img 嵌入不裂图）。每 IP 限流 120 次/分钟。末尾可带 .svg 后缀（被剥离）。
+      operationId: renderBadge
+      tags:
+        - Badge
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: capability key（开启徽标时返回）
+          schema:
+            type: string
+            minLength: 43
+            maxLength: 43
+        - name: size
+          in: query
+          description: 画布尺寸
+          schema:
+            type: string
+            enum: [sm, md, lg]
+            default: md
+        - name: theme
+          in: query
+          description: |
+            调色板。auto 内嵌 prefers-color-scheme 双主题（浏览器实时切换，GitHub camo
+            需刷新）；light/dark 固定单一调色板。
+          schema:
+            type: string
+            enum: [auto, light, dark]
+            default: auto
+      responses:
+        "200":
+          description: 徽标 SVG
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+          headers:
+            Cache-Control:
+              description: public, max-age=300
+              schema:
+                type: string
+            ETag:
+              description: 强校验器，If-None-Match 命中返回 304
+              schema:
+                type: string
+        "404":
+          description: 错误卡片 SVG（key 未知/已关闭/已轮换/用户已注销）
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+        "429":
+          description: 每 IP 限流（42900）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /oauth/authorize:
     get:
       summary: 授权端点
@@ -3535,6 +3686,23 @@ paths:
       security: []
 components:
   schemas:
+    BadgeStatus:
+      type: object
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+          description: 徽标是否已开启
+        key:
+          type: string
+          minLength: 43
+          maxLength: 43
+          description: capability key，仅开启时返回；客户端拼接 {API_BASE}/badge/{key}.svg 得到分享 URL
+        enabled_at:
+          type: string
+          format: date-time
+          description: 开启时间，仅开启时返回
     UserRole:
       type: string
       enum:

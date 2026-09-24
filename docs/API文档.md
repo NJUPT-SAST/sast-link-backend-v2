@@ -132,6 +132,7 @@
 | `40904` | 该类型账号已绑定，不可重复绑定 |
 | `40905` | 第三方邮箱绑定数量已达上限（2 个） |
 | `40906` | 该学号已有待审的建号申请 |
+| `40907` | 徽标已开启（客户端应展示现有徽标而非重试） |
 
 #### 业务校验失败（422xx）
 
@@ -142,6 +143,7 @@
 | `42202` | 新旧密码不能相同 |
 | `42203` | 头像未通过内容审核 |
 | `42204` | 建号申请已被处理（不能重复审批） |
+| `42205` | 请先设置昵称再开启徽标 |
 
 #### 频率限制（429xx）
 
@@ -859,6 +861,8 @@ PUT /user/avatar
 ### 3.4 获取个人卡片（已移除）
 
 端点与代码均已删除：顺序 ID 的公开 URL 可枚举全站成员名单，隐私重设计中不再提供 `GET /card/:id`。公开资料中的 `picture`（头像）与 `preferred_username`（昵称）能力由 OIDC 的 `profile` scope 承载，经 `GET /userinfo` 与 ID Token 签出（见 §8.3 / §8.4）。
+
+公开个人卡片的可嵌入形态由个人徽标（§9）承载：能力 URL 随机 key，不可枚举，用户自主开关。
 
 ---
 
@@ -2834,6 +2838,104 @@ RP (Relying Party)          浏览器 / 前端授权页          SAST Link v2 (O
 ```
 
 时序图中 `code_verifier` 与 `code_challenge` 的关系：`code_challenge = BASE64URL(SHA256(code_verifier))`，RP 在发起授权时发送 challenge，兑换时发送原始 verifier。`nonce` 由服务端写入 ID Token 的 claim，RP 需自行比对——本服务不校验 nonce，它的用途正是让 RP 检测 ID Token 重放。
+
+---
+
+## 9. 个人徽标（Badge）
+
+用户自主开启的公开身份徽标：一枚可嵌入任意网页（GitHub README、友链列表等）的 SVG 卡片，展示头像、昵称、院系、签名与社交链接域名。查看无需任何认证——**URL 本身就是凭证**（capability URL）：`badge_key` 为 256-bit 随机 base64url，不可枚举（这正是被移除的 `GET /card/:id` 的教训，见 §3.4）。徽标行存在即开启；删除即关闭，重新开启产生新 key，旧链接永久失效。
+
+### 9.1 查询徽标状态
+
+```
+GET /user/badge
+```
+
+**Headers**: `Authorization: Bearer <access_token>`（需 `user:read` scope）
+
+**Response** `200`（已开启）:
+```json
+{
+  "enabled": true,
+  "key": "Ab3xK...9mQ",
+  "enabled_at": "2026-09-24T12:00:00Z"
+}
+```
+
+**Response** `200`（未开启）:
+```json
+{
+  "enabled": false
+}
+```
+
+未开启时 `key` 与 `enabled_at` 字段省略。
+
+### 9.2 开启徽标
+
+```
+POST /user/badge
+```
+
+**Headers**: `Authorization: Bearer <access_token>`（需 `user:write` scope）
+
+**Response** `201`:
+```json
+{
+  "enabled": true,
+  "key": "Ab3xK...9mQ",
+  "enabled_at": "2026-09-24T12:00:00Z"
+}
+```
+
+**说明**:
+- 昵称是徽标的身份锚点，未设置昵称时拒绝开启（422 / `42205`）
+- 已开启时返回 409 / `40907`，客户端应展示现有徽标而非重试
+- 每用户限流 5 次/小时（`RATE_LIMIT_BADGE_TOGGLE_*`），超限 429 / `42900` + `Retry-After`
+- key 明文仅在响应中返回；客户端自行拼接 `GET {API_BASE}/badge/{key}.svg` 得到分享 URL
+
+### 9.3 关闭徽标
+
+```
+DELETE /user/badge
+```
+
+**Headers**: `Authorization: Bearer <access_token>`（需 `user:write` scope）
+
+**Response** `200`:
+```json
+{
+  "message": "徽标已关闭"
+}
+```
+
+幂等：未开启时同样返回 200。关闭后所有已嵌入的链接立即失效（渲染 404 错误卡片）。
+
+### 9.4 渲染徽标（公开）
+
+```
+GET /badge/:key
+```
+
+无需认证。`key` 为 9.2 返回的 capability key，URL 末尾可带 `.svg` 后缀（会被剥离）。
+
+**Query Parameters**:
+
+| 参数 | 取值 | 默认 | 说明 |
+| ------ | ------ | ------ | ------ |
+| `size` | `sm` / `md` / `lg` | `md` | 画布 320×72 / 460×120 / 540×200；字段可见性由尺寸决定：sm=头像+昵称+院系，md=+签名，lg=+社交域名。同一尺寸画布恒定，空字段留空不重排 |
+| `theme` | `auto` / `light` / `dark` | `auto` | auto 内嵌 `prefers-color-scheme` 双调色板；light/dark 固定单一调色板 |
+
+**Response** `200` `image/svg+xml`:
+- `Cache-Control: public, max-age=300` + 强 `ETag`；`If-None-Match` 命中返回 304
+- 头像从 COS 拉取并缩至 128px 后以 base64 data URI 内嵌（GitHub camo 代理会剥离外部资源引用）；拉取失败降级为昵称首字标记
+- 文本按槽位截断（CJK 计 1 宽、拉丁计 0.55 宽）
+
+**Response** `404` `image/svg+xml`：key 未知 / 已关闭 / 已轮换 / 用户已注销时返回「徽标不存在或已关闭」错误卡片（保证 `<img>` 嵌入不裂图）。
+
+**Response** `429`：每 IP 限流（`RATE_LIMIT_BADGE_PUBLIC_*`，默认 120 次/分钟）。
+
+**审计**: `badge_enable` / `badge_disable`（resource: `badge`）。
 
 ---
 

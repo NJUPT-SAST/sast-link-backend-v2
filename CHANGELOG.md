@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **个人徽标**（feat/card-badge）：`GET`/`POST`/`DELETE /user/badge` 管理端点 + 公开渲染 `GET /badge/:key`。用户自主开启的可嵌入 SVG 身份卡片（头像/昵称/院系/签名/社交域名），查看无需认证——URL 本身是凭证：256-bit 随机 capability key，不可枚举（兼容 `/card/:id` 因枚举风险被移除的隐私决策）；行存在即开启，删除即关闭，重开换新 key。固定画布三尺寸（sm/md/lg，字段可见性由尺寸决定，空字段留空不重排）三主题（auto 内嵌 prefers-color-scheme 双调色板 / light / dark）；头像从 COS 拉取缩至 128px 后 base64 内嵌（camo 剥离外部引用）失败降级首字标记；未知/已关闭 key 返回 404 错误卡片保证 `<img>` 不裂图；`Cache-Control: max-age=300` + 强 ETag（304 协商）+ 每实例 TTL 缓存；管理端点每用户限流 5 次/小时，公开端点每 IP 120 次/分钟；审计 `badge_enable`/`badge_disable`；新业务码 40907（已开启）/42205（昵称未设置）。V017 badge 表。
+
+### Added
+
 - **工程基础设施**（2026-06-09 ~ 06-11）：仓库初始快照、PRD / API / OpenAPI / DB 设计文档交叉校验、CI 流水线、pre-commit、CONTRIBUTING、lint 配置、CI 最小权限。
 - **HTTP 骨架**（2026-07-05，[PR #18](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/18)）：Go module、环境配置加载器、golangci-lint v2、响应信封 `{code, message, data}`、请求日志、Gin router、PostgreSQL / Redis 连接包、`GET /health`、API entrypoint。
 - **数据基础 V001**（2026-07-19，[PR #20](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/20)）：V001 schema migrations 与 baseline guard、`cmd/migrate`（唯一 migration runner）、GORM 实体、Auth repository、Testcontainers（PostgreSQL 16）集成测试。
