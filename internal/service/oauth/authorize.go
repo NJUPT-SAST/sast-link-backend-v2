@@ -235,6 +235,15 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 	if user.State == model.UserStateDeleted {
 		return nil, newError(ErrAccessDenied, "账号已注销", nil)
 	}
+	// The user's live role bounds the admin scopes the same way the registration
+	// does: a code carrying an admin scope must never be minted for a user the
+	// /admin role gate would refuse, so a grant cannot outlive the role that
+	// justified it. Audited, like the scope re-check above it: a role change that
+	// kills an in-flight consent is an incident-review event.
+	if scopeErr := checkScopeForUser(user, payload.Scopes); scopeErr != nil {
+		s.auditAuthorize(ctx, input, payload, &user.ID, false, errcode.CodeForbidden, "scope_role_forbidden")
+		return nil, newError(ErrInvalidScope, "admin scope 不可授予当前用户角色，请重新发起授权", scopeErr)
+	}
 
 	code, err := newAuthorizationCode()
 	if err != nil {
@@ -307,6 +316,23 @@ func (s Service) ConsentInfo(ctx context.Context, input ConsentInfoInput) (*Cons
 	if scopeErr := checkScopeForClient(client, payload.Scopes); scopeErr != nil {
 		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
+	// The role gate mirrors the /admin endpoints: a member authorizing an admin
+	// scope produces a token the role gate rejects on every use, so the consent
+	// page for it must never render. Checking here (not only at Consent) is what
+	// stops the un-authorizable request from being shown to the user at all.
+	user, err := s.Users.FindAuthUserByID(ctx, input.UserID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询授权用户失败", err)
+	}
+	if user.State == model.UserStateDeleted {
+		return nil, newError(ErrAccessDenied, "账号已注销", nil)
+	}
+	if scopeErr := checkScopeForUser(user, payload.Scopes); scopeErr != nil {
+		return nil, newError(ErrInvalidScope, "admin scope 不可授予当前用户角色，请重新发起授权", scopeErr)
+	}
 	return &ConsentInfoResult{
 		ClientName: payload.ClientName,
 		Scopes:     payload.Scopes,
@@ -365,6 +391,25 @@ func checkScopeForClient(client *model.OAuthClient, requested []string) *Error {
 	}
 	if !granted {
 		return newError(ErrInvalidScope, "请求的 scope 超出客户端注册范围", nil)
+	}
+	return nil
+}
+
+// checkScopeForUser bounds the admin scopes by the authorizing user's live role,
+// mirroring the /admin role gates that will judge the resulting token: admin:read
+// matches the reader gate (admin or lecturer), admin:write the writer gate (admin
+// only). A member authorizing an admin scope would mint a token the role gate
+// rejects on every use — refusing here keeps the grant from being requested of,
+// or shown to, someone it can never apply to. The user scopes carry no role
+// constraint: /user operates on the token subject's own record regardless of role.
+func checkScopeForUser(user *model.User, requested []string) *Error {
+	if !scope.ContainsAdmin(requested) {
+		return nil
+	}
+	allowed := user.Role == model.UserRoleAdmin ||
+		(user.Role == model.UserRoleLecturer && !slices.Contains(requested, scope.AdminWrite))
+	if !allowed {
+		return newError(ErrInvalidScope, "admin scope 不可授予当前用户角色", nil)
 	}
 	return nil
 }

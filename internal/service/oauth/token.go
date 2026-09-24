@@ -140,6 +140,15 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if scopeErr := checkScopeForClient(client, []string(authorization.Scopes)); scopeErr != nil {
 		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
+	// The user's role is re-checked for the same reason, the user-side twin of the
+	// registration re-check: a code may outlive a demotion that did not move
+	// token_version (none exists today — a role change always bumps it — but the
+	// token_version guard and this predicate answer different questions), and a
+	// redemption that cannot pass the role gate should not mint the pair at all.
+	// Like the scope re-check, the consume above already burned the code.
+	if scopeErr := checkScopeForUser(user, []string(authorization.Scopes)); scopeErr != nil {
+		return nil, newError(ErrInvalidScope, "admin scope 不可授予当前用户角色，请重新发起授权", scopeErr)
+	}
 
 	scopes := []string(authorization.Scopes)
 	familyID := ""
