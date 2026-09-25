@@ -218,9 +218,6 @@ func buildCardData(card *repository.PublicCard) cardData {
 	}
 	data.AvatarInitial = firstRune(data.Nickname)
 
-	if card.Department != nil && *card.Department != "" {
-		data.Department = truncate(departmentLabel(string(*card.Department)), layouts[SizeLG].DeptMax)
-	}
 	if card.Intro != nil {
 		data.Intro = truncate(strings.TrimSpace(*card.Intro), layouts[SizeLG].IntroMax)
 	}

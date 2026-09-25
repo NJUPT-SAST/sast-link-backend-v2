@@ -11,8 +11,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
-func strPtr(v string) *string            { return &v }
-func deptPtr(v string) *model.Department { d := model.Department(v); return &d }
+func strPtr(v string) *string { return &v }
 
 func renderForTest(t *testing.T, size Size, theme Theme, data cardData) string {
 	t.Helper()
@@ -24,7 +23,7 @@ func renderForTest(t *testing.T, size Size, theme Theme, data cardData) string {
 }
 
 func TestRenderCardFixedCanvasPerSize(t *testing.T) {
-	data := cardData{Nickname: "张三", Department: "软件研发部", AvatarInitial: "张"}
+	data := cardData{Nickname: "张三", AvatarInitial: "张"}
 	for size, want := range map[Size][2]int{
 		SizeSM: {320, 72},
 		SizeMD: {460, 120},
@@ -42,14 +41,14 @@ func TestRenderCardEmptyFieldsKeepSlots(t *testing.T) {
 	// A card with only a nickname still renders the exact same canvas — the
 	// department and intro slots are simply empty.
 	full := renderForTest(t, SizeMD, ThemeLight, cardData{
-		Nickname: "张三", Department: "软件研发部", Intro: "全栈开发", Links: "example.com",
+		Nickname: "张三", Intro: "全栈开发", Links: "example.com",
 	})
 	minimal := renderForTest(t, SizeMD, ThemeLight, cardData{Nickname: "张三", AvatarInitial: "张"})
 
-	if !strings.Contains(full, "软件研发部") || !strings.Contains(full, "全栈开发") {
+	if !strings.Contains(full, "全栈开发") {
 		t.Fatalf("full card lost fields")
 	}
-	if strings.Contains(minimal, "软件研发部") || strings.Contains(minimal, "全栈开发") {
+	if strings.Contains(minimal, "全栈开发") {
 		t.Fatalf("minimal card shows absent fields")
 	}
 	// Both canvases are 460×120 — the fixed-grid contract.
@@ -60,7 +59,7 @@ func TestRenderCardEmptyFieldsKeepSlots(t *testing.T) {
 
 func TestRenderCardSizeDrivenFieldVisibility(t *testing.T) {
 	data := cardData{
-		Nickname: "张三", Department: "软件研发部", Intro: "全栈开发", Links: "blog.example.com",
+		Nickname: "张三", Intro: "全栈开发", Links: "blog.example.com",
 	}
 	sm := renderForTest(t, SizeSM, ThemeLight, data)
 	md := renderForTest(t, SizeMD, ThemeLight, data)
@@ -98,7 +97,7 @@ func TestRenderCardThemes(t *testing.T) {
 }
 
 func TestRenderCardEscapesUserText(t *testing.T) {
-	data := cardData{Nickname: `<b>&"x"</b>`, Department: "软件研发部"}
+	data := cardData{Nickname: `<b>&"x"</b>`}
 	svg := renderForTest(t, SizeMD, ThemeLight, data)
 	if strings.Contains(svg, "<b>") {
 		t.Fatalf("raw markup leaked into the SVG: %s", svg)
@@ -161,7 +160,7 @@ func TestRenderUnknownKeyAnswersErrorCard(t *testing.T) {
 
 func TestRenderKnownKeyProducesSVGWithCard(t *testing.T) {
 	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{
-		7: {Nickname: strPtr("张三"), Department: deptPtr("software"), Intro: strPtr("全栈开发")},
+		7: {Nickname: strPtr("张三"), Intro: strPtr("全栈开发")},
 	}}
 	badges := newFakeBadgeRepository()
 	if err := badges.Create(context.Background(), &model.Badge{UserID: 7, BadgeKey: "render-key"}); err != nil {
@@ -177,7 +176,7 @@ func TestRenderKnownKeyProducesSVGWithCard(t *testing.T) {
 		t.Fatalf("Render(known key) NotFound = true")
 	}
 	svg := string(result.SVG)
-	if !strings.Contains(svg, "张三") || !strings.Contains(svg, "软件研发部") || !strings.Contains(svg, "全栈开发") {
+	if !strings.Contains(svg, "张三") || !strings.Contains(svg, "全栈开发") {
 		t.Fatalf("rendered card lost fields: %s", svg)
 	}
 	if !strings.Contains(svg, "SAST Link") {

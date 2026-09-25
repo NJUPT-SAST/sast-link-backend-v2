@@ -15,7 +15,6 @@ func TestWritePreviewFiles(t *testing.T) {
 	}
 	data := cardData{
 		Nickname:      "张三",
-		Department:    "软件研发部",
 		Intro:         "Full-stack developer / 在写 Go 和 React",
 		Links:         "blog.example.com · github.com/zhangsan",
 		AvatarInitial: "张",

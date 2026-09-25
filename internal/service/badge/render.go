@@ -35,8 +35,8 @@ const (
 
 // layout carries every per-size geometry and truncation bound the template
 // consumes. Fixed canvas, fixed slots. Y values are text baselines; the
-// vertical divider and the department accent dot are only drawn when their
-// coordinates are non-zero.
+// vertical divider is only drawn when its X is non-zero. The department
+// was removed from the badge surface entirely; slots were re-spaced.
 type layout struct {
 	Width  int
 	Height int
@@ -50,14 +50,6 @@ type layout struct {
 	NameY    int
 	NameSize int
 	NameMax  int
-
-	DeptX     int
-	DeptY     int
-	DeptSize  int
-	DeptMax   int
-	DeptDotCX int
-	DeptDotCY int
-	DeptDotR  int
 
 	IntroX    int
 	IntroY    int
@@ -80,21 +72,19 @@ type layout struct {
 
 // layouts pins the three canvases.
 //
-// sm: avatar + name + department (accent dot), brand top-right — the
+// sm: avatar + name — the compact friend-link wall tile.
 // compact friend-link wall tile.
 //
-// md: avatar | vertical divider | name, department, quoted intro — the
+// md: avatar | vertical divider | name, quoted intro — the
 // README-sized introduction. Brand top-right.
 //
-// lg: everything, roomier: avatar | divider | name, department, quoted
+// lg: everything, roomier: avatar | divider | name, quoted
 // intro, social hosts in accent — brand bottom-right.
 var layouts = map[Size]layout{
 	SizeSM: {
 		Width: 320, Height: 72,
 		AvatarX: 8, AvatarY: 8, AvatarSize: 56, AvatarRadius: 28,
 		NameX: 78, NameY: 33, NameSize: 17, NameMax: 12,
-		DeptX: 90, DeptY: 54, DeptSize: 11, DeptMax: 18,
-		DeptDotCX: 82, DeptDotCY: 50, DeptDotR: 3,
 		BrandX: 312, BrandY: 16, BrandSize: 9,
 	},
 	SizeMD: {
@@ -102,8 +92,6 @@ var layouts = map[Size]layout{
 		AvatarX: 16, AvatarY: 16, AvatarSize: 88, AvatarRadius: 44,
 		DividerX: 118, DividerY1: 24, DividerY2: 96,
 		NameX: 134, NameY: 48, NameSize: 20, NameMax: 14,
-		DeptX: 147, DeptY: 75, DeptSize: 12, DeptMax: 24,
-		DeptDotCX: 138, DeptDotCY: 71, DeptDotR: 3,
 		IntroX: 134, IntroY: 100, IntroSize: 12, IntroMax: 24,
 		BrandX: 448, BrandY: 22, BrandSize: 9,
 	},
@@ -112,8 +100,6 @@ var layouts = map[Size]layout{
 		AvatarX: 28, AvatarY: 36, AvatarSize: 128, AvatarRadius: 64,
 		DividerX: 170, DividerY1: 56, DividerY2: 164,
 		NameX: 190, NameY: 84, NameSize: 24, NameMax: 16,
-		DeptX: 207, DeptY: 116, DeptSize: 14, DeptMax: 28,
-		DeptDotCX: 194, DeptDotCY: 111, DeptDotR: 3,
 		IntroX: 190, IntroY: 146, IntroSize: 14, IntroMax: 30,
 		LinksX: 190, LinksY: 176, LinksSize: 12, LinksMax: 44,
 		BrandX: 526, BrandY: 184, BrandSize: 9,
@@ -145,28 +131,11 @@ var darkPalette = palette{
 	Accent:     "#4db8f0",
 }
 
-// departmentLabels maps the department enum to its Chinese display name,
-// aligned with the frontend constants (lib/constants/admin.ts).
-var departmentLabels = map[string]string{
-	"software": "软件研发部",
-	"media":    "多媒体部",
-}
-
-// departmentLabel resolves a department value to its display name, falling
-// back to the raw value so an unknown enum never renders empty.
-func departmentLabel(value string) string {
-	if label, ok := departmentLabels[value]; ok {
-		return label
-	}
-	return value
-}
-
 // cardData is the resolved, truncated, display-ready projection of one badge.
 type cardData struct {
 	AvatarDataURI string // empty → placeholder mark
 	AvatarInitial string // first rune of the nickname, for the fallback
 	Nickname      string
-	Department    string
 	Intro         string
 	Links         string
 	Brand         string
@@ -202,8 +171,7 @@ var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
 <circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.DecAvatarRadiusInner}}" class="card-accent" fill-opacity="0.25"/>
 {{end}}{{if .Layout.DividerX}}<line x1="{{.Layout.DividerX}}" y1="{{.Layout.DividerY1}}" x2="{{.Layout.DividerX}}" y2="{{.Layout.DividerY2}}" class="card-line" stroke-width="1"/>
 {{end}}<text x="{{.Layout.NameX}}" y="{{.Layout.NameY}}" class="card-fg" font-size="{{.Layout.NameSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.Nickname}}</text>
-{{if .Data.Department}}{{if .Layout.DeptDotCX}}<circle cx="{{.Layout.DeptDotCX}}" cy="{{.Layout.DeptDotCY}}" r="{{.Layout.DeptDotR}}" class="card-accent"/>{{end}}<text x="{{.Layout.DeptX}}" y="{{.Layout.DeptY}}" class="card-muted" font-size="{{.Layout.DeptSize}}" font-family="{{.FontStack}}">{{esc .Data.Department}}</text>
-{{end}}{{if .Data.Intro}}<text x="{{.Layout.IntroX}}" y="{{.Layout.IntroY}}" class="card-muted" font-size="{{.Layout.IntroSize}}" font-family="{{.FontStack}}">「{{esc .Data.Intro}}」</text>
+{{if .Data.Intro}}<text x="{{.Layout.IntroX}}" y="{{.Layout.IntroY}}" class="card-muted" font-size="{{.Layout.IntroSize}}" font-family="{{.FontStack}}">「{{esc .Data.Intro}}」</text>
 {{end}}{{if .Data.Links}}<text x="{{.Layout.LinksX}}" y="{{.Layout.LinksY}}" class="card-accent" font-size="{{.Layout.LinksSize}}" font-family="{{.FontStack}}">{{esc .Data.Links}}</text>
 {{end}}<text x="{{.Layout.BrandX}}" y="{{.Layout.BrandY}}" text-anchor="end" class="card-muted" font-size="{{.Layout.BrandSize}}" font-family="{{.FontStack}}" letter-spacing="1">SAST Link</text>{{if .Data.LinkTarget}}</a>{{end}}
 </svg>
@@ -223,7 +191,7 @@ func renderCard(size Size, theme Theme, data cardData) ([]byte, error) {
 		return nil, fmt.Errorf("render badge: unknown size %q", size)
 	}
 
-	// Field visibility is size-driven: sm is name+department only, md adds
+	// Field visibility is size-driven: sm is the name only, md adds
 	// the intro, lg adds the social links. Empty fields already skip their
 	// slot; this clamp also hides fields a smaller canvas has no slot for.
 	if size == SizeSM {
