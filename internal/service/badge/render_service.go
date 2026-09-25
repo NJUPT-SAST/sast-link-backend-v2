@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"hash/maphash"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -18,6 +19,7 @@ const (
 	renderCacheTTL     = 5 * time.Minute
 	renderCacheMax     = 256
 	renderCacheEvict   = 64
+	renderFillLanes    = 8
 	renderAvatarBudget = avatarFetchTimeout + time.Second
 )
 
@@ -30,23 +32,44 @@ type RenderResult struct {
 
 // renderCache is a bounded TTL map. It absorbs friend-link wall bursts (many
 // distinct viewers, one origin) without a second cache tier; entries expire
-// with the same horizon as the response's max-age, so a profile edit lands
-// within the same window either way. Per-instance: each API replica warms
-// its own, which the hit pattern tolerates.
+// after five minutes so profile edits propagate within that window. Sharing
+// visibility is checked live for every response, independently of this cache.
 type renderCache struct {
 	mu      sync.Mutex
 	entries map[string]renderCacheEntry
+	seed    maphash.Seed
+	fills   [renderFillLanes]chan struct{}
 }
 
 type renderCacheEntry struct {
 	svg      []byte
 	etag     string
-	notFound bool
 	storedAt time.Time
 }
 
 func newRenderCache() *renderCache {
-	return &renderCache{entries: make(map[string]renderCacheEntry)}
+	c := &renderCache{entries: make(map[string]renderCacheEntry), seed: maphash.MakeSeed()}
+	for i := range c.fills {
+		c.fills[i] = make(chan struct{}, 1)
+	}
+	return c
+}
+
+// lockFill bounds expensive profile/avatar/render work to eight concurrent fills.
+// Fixed hash lanes avoid a map or goroutine per attacker-chosen key. Collisions
+// may queue unrelated cold badges, but never serialize the warm path. The
+// random seed prevents callers from deliberately selecting one busy lane.
+func (c *renderCache) lockFill(ctx context.Context, key string) (func(), error) {
+	lane := c.fills[maphash.String(c.seed, key)%uint64(len(c.fills))]
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case lane <- struct{}{}:
+		return func() { <-lane }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (c *renderCache) get(key string) (renderCacheEntry, bool) {
@@ -60,8 +83,8 @@ func (c *renderCache) get(key string) (renderCacheEntry, bool) {
 }
 
 // purge drops the cached render for one badge key. Called when a badge
-// is disabled so the public endpoint
-// flips to the 404 error card immediately instead of after the TTL.
+// changes sharing periods, so a resumed badge reloads its display data.
+// Privacy is enforced by live database checks, not local invalidation.
 func (c *renderCache) purge(badgeKey string) {
 	if badgeKey == "" {
 		return
@@ -149,7 +172,6 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			result := &RenderResult{SVG: renderErrorCard(), NotFound: true}
-			s.renderCache.put(cacheKey, renderCacheEntry{svg: result.SVG, notFound: true, storedAt: s.Clock.Now()})
 			return result, nil
 		}
 		return nil, newError(ErrInternal, "render badge: resolve key", err)
@@ -157,18 +179,48 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 
 	// Authorization is always live, including on a render-cache hit: another
 	// instance may have disabled sharing, or an admin may have closed the user.
-	if entry, ok := s.renderCache.get(cacheKey); ok && !entry.notFound {
+	if entry, ok := s.renderCache.get(cacheKey); ok {
 		return &RenderResult{SVG: entry.svg, ETag: entry.etag}, nil
 	}
 
-	card, err := s.Users.FindPublicCardByUserID(ctx, badge.UserID)
+	result, err := s.fillRenderCache(ctx, badge.UserID, theme, cacheKey)
+	if err != nil || result.NotFound {
+		return result, err
+	}
+	// Waiting and avatar fetching can take seconds. Visibility is individual
+	// to this request and must never be shared with the preceding fill.
+	if _, visibilityErr := s.Badges.FindBadgeTarget(ctx, input.Key); visibilityErr != nil {
+		if errors.Is(visibilityErr, repository.ErrNotFound) {
+			return &RenderResult{SVG: renderErrorCard(), NotFound: true}, nil
+		}
+		return nil, newError(ErrInternal, "render badge: final visibility", visibilityErr)
+	}
+	return result, nil
+}
+
+// Only display work holds the lane. Followers revalidate outside it, allowing
+// their database round trips to overlap. Deferred release also survives panic
+// recovery by the HTTP middleware.
+func (s *Service) fillRenderCache(ctx context.Context, userID int64, theme Theme, cacheKey string) (*RenderResult, error) {
+	unlock, err := s.renderCache.lockFill(ctx, cacheKey)
+	if err != nil {
+		return nil, newError(ErrInternal, "render badge: wait for fill", err)
+	}
+	defer unlock()
+	if entry, ok := s.renderCache.get(cacheKey); ok {
+		return &RenderResult{SVG: entry.svg, ETag: entry.etag}, nil
+	}
+	return s.renderCold(ctx, userID, theme, cacheKey)
+}
+
+func (s *Service) renderCold(ctx context.Context, userID int64, theme Theme, cacheKey string) (*RenderResult, error) {
+	card, err := s.Users.FindPublicCardByUserID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			// The badge row outlived the user's visibility (deleted between
 			// the two reads, or data drift); the error card is the honest
 			// answer.
 			result := &RenderResult{SVG: renderErrorCard(), NotFound: true}
-			s.renderCache.put(cacheKey, renderCacheEntry{svg: result.SVG, notFound: true, storedAt: s.Clock.Now()})
 			return result, nil
 		}
 		return nil, newError(ErrInternal, "render badge: load card", err)
@@ -184,7 +236,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 		// but the server-side fetch stays pinned to the configured storage
 		// origin. A non-allowlisted avatar renders the initial mark.
 		slog.WarnContext(ctx, "badge avatar origin not allowed, using initial mark",
-			"user_id", badge.UserID)
+			"user_id", userID)
 		avatarURL = ""
 	}
 	if avatarURL != "" {
@@ -198,7 +250,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 			// is logged for observability, not surfaced — the badge renders
 			// either way.
 			slog.WarnContext(ctx, "badge avatar fetch failed, using initial mark",
-				"user_id", badge.UserID, "error", fetchErr)
+				"user_id", userID, "error", fetchErr)
 		}
 	}
 
@@ -207,7 +259,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 		return nil, newError(ErrInternal, "render badge: render", err)
 	}
 	result := &RenderResult{SVG: svg, ETag: etag(svg)}
-	s.renderCache.put(cacheKey, renderCacheEntry{svg: svg, etag: result.ETag, storedAt: s.Clock.Now()})
+	s.renderCache.put(cacheKey, renderCacheEntry{svg: svg, etag: result.ETag, storedAt: time.Now()})
 	return result, nil
 }
 
@@ -227,10 +279,8 @@ func httpLinkTarget(raw string) bool {
 	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
-// buildCardData projects a public card into display-ready fields: department
-// gets its Chinese label, every text field is truncated to the largest
-// canvas's bounds (renderCard clamps further per size), and the social links
-// collapse into one display line.
+// buildCardData projects public profile fields onto the compact canvas and
+// selects a safe link target without exposing identity or department fields.
 func buildCardData(card *repository.PublicCard) cardData {
 	data := cardData{Brand: "SAST Link"}
 

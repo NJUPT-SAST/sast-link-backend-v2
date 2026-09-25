@@ -120,8 +120,7 @@ func (s *Service) Enable(ctx context.Context, input EnableInput) (*Status, error
 			// A concurrent enable won the resume; the badge is sharing now.
 			return nil, newError(ErrAlreadyEnabled, "enable badge: badge already enabled", nil)
 		}
-		// The cache may still hold the paused 404 card for this key — drop it
-		// so the badge recovers immediately.
+		// Resume with fresh display data for the new sharing period.
 		s.purgeRenderCache(existing.BadgeKey)
 		s.audit(ctx, input.UserID, input.ActorClientID, "badge_enable", existing.BadgeKey, true, 0)
 		return &Status{Enabled: true, Key: existing.BadgeKey, EnabledAt: &enabledAt}, nil
@@ -135,10 +134,8 @@ func (s *Service) Enable(ctx context.Context, input EnableInput) (*Status, error
 // URL starts rendering the neutral "closed" card and recovers as-is when
 // the owner switches back on. Disabling a badge that is already paused (or
 // absent) is a success — the observable end state is the same — but no audit
-// row is written when nothing changed. A real pause also purges the render
-// cache for that key: without the purge, every embed keeps serving the
-// cached SVG until the TTL expires, and “关闭后链接立即失效” would be a
-// lie for up to five minutes.
+// row is written when nothing changed. A real pause also purges the local
+// display cache; every instance enforces visibility through the live database.
 func (s *Service) Disable(ctx context.Context, input DisableInput) error {
 	if input.UserID <= 0 {
 		return newError(ErrUserNotFound, "disable badge: non-positive user id", nil)

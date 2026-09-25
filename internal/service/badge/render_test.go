@@ -371,8 +371,7 @@ func TestReEnabledKeyServesTheBadgeAgain(t *testing.T) {
 		t.Fatalf("paused badge must render the closed card")
 	}
 
-	// The resume must also clear the cached 404 — the same request then
-	// serves the badge again under the same key.
+	// Resume serves the badge again under the same key without negative caching.
 	_, resumeErr := service.Enable(context.Background(), EnableInput{UserID: 7})
 	if resumeErr != nil {
 		t.Fatalf("re-enable error = %v", resumeErr)
@@ -382,7 +381,7 @@ func TestReEnabledKeyServesTheBadgeAgain(t *testing.T) {
 		t.Fatalf("resumed Render error = %v", err)
 	}
 	if resumed.NotFound {
-		t.Fatalf("resumed badge still renders the closed card: cached 404 not purged")
+		t.Fatalf("resumed badge still renders the closed card")
 	}
 }
 
