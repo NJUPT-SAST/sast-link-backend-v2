@@ -2931,7 +2931,7 @@ GET /badge/:key
 - 头像从 COS 拉取并缩至 128px 后以 base64 data URI 内嵌（GitHub camo 代理会剥离外部资源引用）；拉取失败降级为昵称首字标记
 - 文本按槽位截断（CJK 计 1 宽、拉丁计 0.55 宽）
 
-**Response** `404` `image/svg+xml`：key 未知 / 已关闭 / 已轮换 / 用户已注销时返回「徽标不存在或已关闭」错误卡片（保证 `<img>` 嵌入不裂图）。
+**Response** `404` `image/svg+xml`：key 未知 / 已关闭 / 用户已注销时返回「徽标不存在或已关闭」错误卡片（保证 `<img>` 嵌入不裂图）。
 
 **Response** `429`：每 IP 限流（`RATE_LIMIT_BADGE_PUBLIC_*`，默认 120 次/分钟）。
 

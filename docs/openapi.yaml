@@ -1453,7 +1453,7 @@ paths:
               schema:
                 type: string
         "404":
-          description: 错误卡片 SVG（key 未知/已关闭/已轮换/用户已注销）
+          description: 错误卡片 SVG（key 未知/已关闭/用户已注销）
           content:
             image/svg+xml:
               schema:
