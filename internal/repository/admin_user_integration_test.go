@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -383,6 +385,70 @@ func TestListAdminUsersKeywordNameInitials(t *testing.T) {
 			if len(rows) != want {
 				t.Fatalf("keyword %q matched %d rows, want %d", keyword, len(rows), want)
 			}
+		}
+	})
+}
+
+// A numeric keyword matches the account id (as text): the console's jump-off
+// point for a user is often an audit row's resource_id, which is the id. The
+// seeded rows have every text column scrubbed of digits so a hit can only come
+// from the id arm, and the misses prove a digit-bearing keyword does not leak
+// into the text columns either.
+func TestListAdminUsersKeywordUserID(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	a := adminSeed(t, database, "alpha@njupt.edu.cn", "甲", model.UserRoleMember, model.UserStateOnSAST, nil)
+	b := adminSeed(t, database, "beta@njupt.edu.cn", "乙", model.UserRoleMember, model.UserStateOnSAST, nil)
+	// testUser defaults carry digit-bearing qq_number/phone_number; blank them
+	// so the only numeric column left is id.
+	for _, id := range []int64{a.ID, b.ID} {
+		if err := database.Model(&model.User{}).Where("id = ?", id).
+			Updates(map[string]any{"qq_number": "", "phone_number": ""}).Error; err != nil {
+			t.Fatalf("scrub contact columns for %d: %v", id, err)
+		}
+	}
+
+	t.Run("full id", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: strconv.FormatInt(a.ID, 10), Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 1 || rows[0].ID != a.ID {
+			t.Fatalf("rows = %+v, want only user %d", rows, a.ID)
+		}
+	})
+
+	t.Run("id substring", func(t *testing.T) {
+		// The substring semantics every other column uses apply to id as well:
+		// a keyword shorter than the id still matches it. The expected set is
+		// computed, not assumed, so the assertion holds whatever ids the
+		// sequence assigned.
+		prefix := strconv.FormatInt(a.ID, 10)[:1]
+		want := 0
+		for _, id := range []int64{a.ID, b.ID} {
+			if strings.Contains(strconv.FormatInt(id, 10), prefix) {
+				want++
+			}
+		}
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: prefix, Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != want {
+			t.Fatalf("keyword %q matched %d rows, want %d", prefix, len(rows), want)
+		}
+	})
+
+	t.Run("unknown id misses", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: "999", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 0 {
+			t.Fatalf("rows = %+v, want none", rows)
 		}
 	})
 }

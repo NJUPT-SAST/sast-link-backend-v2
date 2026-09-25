@@ -39,10 +39,11 @@ type AdminUserFilter struct {
 	State      *model.UserState
 	Department *model.Department
 	StudentID  string
-	// Keyword matches name, student_id, login_email, qq_number, nickname,
+	// Keyword matches the account id (as text, e.g. an audit log's
+	// resource_id), name, student_id, login_email, qq_number, nickname,
 	// blog_url, github_url or the name's pinyin initials (name_initials, e.g.
-	// 'lhq' matches '刘华强') case-insensitively. phone_number joins the match
-	// only when IncludePhoneColumn is set, below.
+	// 'lhq' matches '刘华强') case-insensitively as substrings. phone_number
+	// joins the match only when IncludePhoneColumn is set, below.
 	Keyword string
 	// IncludePhoneColumn admits phone_number into the keyword predicate.
 	// phone_number is the one field the admin-surface tightening hides from
@@ -278,12 +279,16 @@ func (r *UserRepository) adminUserQuery(ctx context.Context, filter AdminUserFil
 	}
 	if filter.Keyword != "" {
 		pattern := "%" + escapeLikePattern(filter.Keyword) + "%"
-		cols := `("user".name ILIKE ? ESCAPE '\' OR "user".student_id ILIKE ? ESCAPE '\'` +
-			` OR "user".login_email ILIKE ? ESCAPE '\' OR "user".qq_number ILIKE ? ESCAPE '\'` +
-			` OR profile.nickname ILIKE ? ESCAPE '\' OR profile.blog_url ILIKE ? ESCAPE '\'` +
-			` OR profile.github_url ILIKE ? ESCAPE '\'
+		// The id arm casts to text so a numeric keyword keeps the substring
+		// semantics every other column uses (the console pastes an id from an
+		// audit row) and a keyword bearing letters simply misses it, the same
+		// way it misses a column whose values are all numeric.
+		cols := `("user".id::text ILIKE ? ESCAPE '\' OR "user".name ILIKE ? ESCAPE '\'` +
+			` OR "user".student_id ILIKE ? ESCAPE '\' OR "user".login_email ILIKE ? ESCAPE '\'` +
+			` OR "user".qq_number ILIKE ? ESCAPE '\' OR profile.nickname ILIKE ? ESCAPE '\'` +
+			` OR profile.blog_url ILIKE ? ESCAPE '\' OR profile.github_url ILIKE ? ESCAPE '\'
 			OR "user".name_initials ILIKE ? ESCAPE '\'`
-		args := []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern}
+		args := []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern}
 		if filter.IncludePhoneColumn {
 			cols += ` OR "user".phone_number ILIKE ? ESCAPE '\'`
 			args = append(args, pattern)
