@@ -270,6 +270,57 @@ func TestBuildCardDataResolvesLinkTarget(t *testing.T) {
 	}
 }
 
+// TestBuildCardDataRefusesNonHTTPLinkTarget pins the anchor's scheme
+// whitelist. The profile's blog/github fields pass only length and
+// control-character checks at write time, so "javascript:" (and the
+// tab-smuggled variant, which URL parsing normalizes back to a javascript
+// scheme) must be dropped here rather than escaped — no escaper neuters a
+// scheme, and the SVG is inlined in contexts that do not carry this
+// response's CSP.
+func TestBuildCardDataRefusesNonHTTPLinkTarget(t *testing.T) {
+	refused := []string{
+		"javascript:alert(document.domain)",
+		"java\tscript:alert(1)",
+		" javascript:alert(1)",
+		"data:text/html,<script>alert(1)</script>",
+		"HTTPS://",           // scheme right, host empty
+		"https:///path",      // scheme right, host empty
+		"//evil.example.com", // protocol-relative needs a scheme here too
+		"not a url at all",
+		"",
+	}
+	for _, raw := range refused {
+		data := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &raw})
+		if data.LinkTarget != "" {
+			t.Fatalf("LinkTarget for blog %q = %q, want it dropped", raw, data.LinkTarget)
+		}
+	}
+	// A refused blog falls through to a usable github link.
+	js := "javascript:alert(1)"
+	github := "https://github.com/alice"
+	fallback := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &js, GitHubURL: &github})
+	if fallback.LinkTarget != github {
+		t.Fatalf("LinkTarget = %q, want the github fallback after the refused blog", fallback.LinkTarget)
+	}
+	// When both links are refused the rendered SVG carries no anchor at all.
+	jsGithub := "java\tscript:alert(1)"
+	svg, err := renderCard(ThemeLight, buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &js, GitHubURL: &jsGithub}))
+	if err != nil {
+		t.Fatalf("renderCard: %v", err)
+	}
+	if strings.Contains(string(svg), "<a ") {
+		t.Fatal("rendered SVG carries an anchor despite both links being refused")
+	}
+	// ...and the refused scheme never reaches the document in any form.
+	poison, err := renderCard(ThemeLight, buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &js}))
+	if err != nil {
+		t.Fatalf("renderCard: %v", err)
+	}
+	if strings.Contains(string(poison), "javascript") {
+		t.Fatal("rendered SVG contains a javascript: URL")
+	}
+}
+
 func TestDisablePurgesRenderCache(t *testing.T) {
 	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{7: {Nickname: strPtr("张三")}}}
 	badges := newFakeBadgeRepository()

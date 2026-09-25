@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -206,6 +207,22 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	return result, nil
 }
 
+// httpLinkTarget reports whether raw is an absolute http(s) URL — the only
+// schemes the rendered card's anchor may carry. The profile fields behind it
+// are length- and control-checked at write time but not scheme-checked, and
+// xml/html escaping cannot neuter a scheme: "javascript:" (and its
+// tab-smuggled "java\tscript:" cousin, which browsers' URL parsing strips
+// back to javascript) survives every escaper and executes wherever the SVG is
+// inlined without this response's CSP. A non-http target drops the link and
+// keeps the card.
+func httpLinkTarget(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+}
+
 // buildCardData projects a public card into display-ready fields: department
 // gets its Chinese label, every text field is truncated to the largest
 // canvas's bounds (renderCard clamps further per size), and the social links
@@ -238,10 +255,14 @@ func buildCardData(card *repository.PublicCard) cardData {
 		github = strings.TrimSpace(*card.GitHubURL)
 	}
 	// The card links to the member's own page — blog first, GitHub as the
-	// fallback, nothing when neither exists. The compact canvas has no
-	// social-host row, so the hosts are no longer displayed.
-	data.LinkTarget = blog
-	if data.LinkTarget == "" {
+	// fallback, nothing when neither exists — and only over http(s): a
+	// scheme an escaper cannot neuter (javascript:) must not reach the
+	// anchor. The compact canvas has no social-host row, so the hosts are no
+	// longer displayed.
+	data.LinkTarget = ""
+	if httpLinkTarget(blog) {
+		data.LinkTarget = blog
+	} else if httpLinkTarget(github) {
 		data.LinkTarget = github
 	}
 	return data
