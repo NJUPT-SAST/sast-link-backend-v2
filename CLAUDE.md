@@ -126,6 +126,19 @@ The core PostgreSQL tables are:
 
 The user state machine: `njupter` / `on_sast` / `retired_sast` are **derived**, not admin-maintained — the rule lives only in `internal/validate.DeriveState` (never copied into SQL or a repository): the student ID's first two digits are the enrollment year (format guaranteed), the academic year switches on 9/1 in China Standard Time (hardcoded `time.FixedZone`, never the container's `time.Local`), an enrollment year 4+ academic years old derives to `retired_sast` regardless of role, otherwise in-school `lecturer`/`admin` derive to `on_sast` and in-school `freshman`/`member` to `njupter`. `is_deleted` stays the manual independent channel. V014's `state_manual` is the manual pin, and it is readable wherever `state` is: the admin user list, detail and batch all carry it, because a reviewer who cannot tell a hand-decided state from a derived one cannot decide whether to un-pin. PUT with `state` writes the value **and** pins the row (write-side derivation and the retention-batch recompute both skip pinned rows), `state_auto=true` (mutually exclusive with `state`, 400 together) re-derives and unpins in the same transaction after locking the row, create defaults derive and an explicit create `state` pins, alumni-approval provision and registration derive instead of hardcoding, restore re-derives and unpins (the DELETE already overwrote any pinned value with `is_deleted`, so nothing is preserved — re-pin after restoring), and the retention worker's `RecomputeDerivedState` recalibrates unpinned live rows per tick (id-ordered keyset cursor; the `drain` "removed < batchSize" stop rule would loop forever over a stable candidate set, so the sweep advances by cursor instead). State is not an authorization input — every predicate is `state <> 'is_deleted'` — so derivation never bumps `token_version` and never revokes sessions; `incomplete_by_state` stays `njupter`-only on purpose, mirroring `incomplete_by_role`'s exclusion of staff: both dimensions apply the same judgement that organization members and retired accounts are not follow-up targets, so widening either one alone would leave the overview showing two unequal "未补全" numbers. One operational consequence of derivation: enrollment year + 4 moves an account off `njupter` on 9/1, so a held-over student disappears from that bucket unless their state is pinned.
 
+## Administrative Search Performance
+
+V017 also installs three `pg_trgm` GIN indexes: the public user fields (including
+`id::text` and initials), the profile fields, and phone separately. Search uses
+disjoint per-table `UNION ALL` branches with exact escaped `ILIKE` predicates.
+All filters apply before each branch's `offset + limit` bound, preserving stable
+pagination without materializing every broad match. One/two-character terms keep
+the scan path because they have no useful trigram. See
+`scripts/search-benchmark/README.md` for reproducible 10k/100k SQL measurements,
+write/index costs and the unmerged-V017 deployment restriction. The generator is
+the source of both migration files. `ANALYZE` after index creation is required for
+useful expression/new-column estimates before ordered queries.
+
 ## Redis Design Anchors
 
 Redis is used for short-lived and operational state, not durable source-of-truth data. The PRD defines keys for verification codes, rate limits, devices, auth-state cache, OAuth state, registration state, login codes, login failures, Register-Tickets, and Bind-Tickets. Most flows require one-time consumption via GetDel semantics. `token_version` is deliberately not cached in Redis: the auth middleware already reads it from the same DB query that fetches access-token revocation state.
