@@ -180,3 +180,5 @@ Only PostgreSQL is a required dependency. When Redis is unreachable the endpoint
 `.github/workflows/deploy.yml` deploys on pushes to `main` and by manual dispatch. Its `verify` job resolves the CI run for the deployed commit through the Actions API and blocks the deploy unless it concluded `success`, so the merge gate (required status checks) and the deploy gate are no longer independent; `allow_unverified` is the documented emergency override. Schema migrations run automatically in that workflow, before the API container is replaced — see `docs/runbooks/manual-migration.md` for the migration shapes that must not use the automatic path.
 
 `.github/dependabot.yml` opens weekly grouped updates for GitHub Actions, direct Go modules, and the Dockerfile base images.
+
+Deploy the V017 (name initials) and V018 (refresh revocation reason) predecessors before badge migration V019. Public renders check the database sharing/account state before cached SVG reuse; HTTP responses require revalidation with `Cache-Control: public, no-cache`.

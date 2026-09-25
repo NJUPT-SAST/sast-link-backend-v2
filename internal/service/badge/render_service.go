@@ -2,6 +2,7 @@ package badge
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/url"
@@ -125,7 +126,8 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 		theme = ThemeAuto
 	}
 
-	if input.Key == "" {
+	// Bound cache-key memory before any database lookup or cache insertion.
+	if input.Key == "" || len(input.Key) > base64.RawURLEncoding.EncodedLen(badgeKeyBytes) {
 		return &RenderResult{SVG: renderErrorCard(), NotFound: true}, nil
 	}
 	s.renderCacheOnce.Do(func() {
@@ -143,10 +145,6 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	}
 
 	cacheKey := renderCacheKey(input.Key, theme)
-	if entry, ok := s.renderCache.get(cacheKey); ok {
-		return &RenderResult{SVG: entry.svg, ETag: entry.etag, NotFound: entry.notFound}, nil
-	}
-
 	badge, err := s.Badges.FindBadgeTarget(ctx, input.Key)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
@@ -155,6 +153,12 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 			return result, nil
 		}
 		return nil, newError(ErrInternal, "render badge: resolve key", err)
+	}
+
+	// Authorization is always live, including on a render-cache hit: another
+	// instance may have disabled sharing, or an admin may have closed the user.
+	if entry, ok := s.renderCache.get(cacheKey); ok && !entry.notFound {
+		return &RenderResult{SVG: entry.svg, ETag: entry.etag}, nil
 	}
 
 	card, err := s.Users.FindPublicCardByUserID(ctx, badge.UserID)

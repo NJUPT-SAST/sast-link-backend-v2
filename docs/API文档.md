@@ -2927,7 +2927,7 @@ GET /badge/:key
 | `theme` | `auto` / `light` / `dark` | `auto` | auto 内嵌 `prefers-color-scheme` 双调色板；light/dark 固定单一调色板 |
 
 **Response** `200` `image/svg+xml`:
-- `Cache-Control: public, max-age=300` + 强 `ETag`；`If-None-Match` 命中返回 304
+- `Cache-Control: public, no-cache` + 强 `ETag`；`If-None-Match` 命中返回 304
 - 头像从 COS 拉取并缩至 128px 后以 base64 data URI 内嵌（GitHub camo 代理会剥离外部资源引用）；拉取失败降级为昵称首字标记
 - 文本按槽位截断（CJK 计 1 宽、拉丁计 0.55 宽）
 

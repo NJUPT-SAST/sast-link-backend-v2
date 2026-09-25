@@ -4,7 +4,6 @@ package badgehandler
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -43,7 +42,7 @@ type Gates struct {
 
 // ReadScopes is the scope a delegated token must hold to read the badge state,
 // matching the other /user read routes.
-var ReadScopes = []string{scope.UserRead}
+var ReadScopes = []string{scope.UserRead, scope.UserWrite}
 
 // WriteScopes is the scope a delegated token must hold to toggle the badge,
 // matching the other /user write routes.
@@ -122,10 +121,6 @@ func (h Handler) Disable(c *gin.Context) {
 	response.Ok(c, gin.H{"message": "徽标已关闭"})
 }
 
-// badgeCacheMaxAge matches the service's render-cache horizon: a viewer (or
-// GitHub's camo proxy) may reuse the image this long before revalidating.
-const badgeCacheMaxAge = 300
-
 // badgeCSP narrows the global default-src 'self' policy for the SVG response.
 // The badge's palette rides an inline <style> element (the auto theme needs a
 // prefers-color-scheme media query, which only CSS can express), and the
@@ -153,7 +148,8 @@ func (h Handler) ServeSVG(c *gin.Context) {
 
 	// Overwrite the security middleware's blanket policy for this image.
 	c.Header("Content-Security-Policy", badgeCSP)
-	c.Header("Cache-Control", fmt.Sprintf("public, max-age=%d", badgeCacheMaxAge))
+	// Revalidate every reuse so toggles and account closure reach all viewers.
+	c.Header("Cache-Control", "public, no-cache")
 	if result.ETag != "" {
 		c.Header("ETag", result.ETag)
 		if c.GetHeader("If-None-Match") == result.ETag {

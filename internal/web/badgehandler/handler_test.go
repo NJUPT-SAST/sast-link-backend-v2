@@ -246,7 +246,7 @@ func TestServeSVGReturnsSVGWithCacheHeaders(t *testing.T) {
 	if got := recorder.Header().Get("Content-Type"); got != "image/svg+xml; charset=utf-8" {
 		t.Fatalf("Content-Type = %q", got)
 	}
-	if got := recorder.Header().Get("Cache-Control"); got != "public, max-age=300" {
+	if got := recorder.Header().Get("Cache-Control"); got != "public, no-cache" {
 		t.Fatalf("Cache-Control = %q", got)
 	}
 	if got := recorder.Header().Get("ETag"); got != `"abc123"` {
@@ -325,5 +325,25 @@ func TestServeSVGAllowsDataImagesInCSP(t *testing.T) {
 
 	if got := recorder.Header().Get("Content-Security-Policy"); got != "default-src 'none'; style-src 'unsafe-inline'; img-src data:" {
 		t.Fatalf("CSP = %q, want the img-src data: allowance", got)
+	}
+}
+
+func TestBadgeWriteScopeCanReadStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{statusResult: &badge.Status{Enabled: false}}
+	router := gin.New()
+	auth := middleware.Authenticator{InternalClientID: "sast-link-web"}
+	RegisterRoutes(router, Handler{Service: service}, Gates{
+		RequireAuth: func(c *gin.Context) {
+			middleware.SetPrincipal(c, middleware.Principal{UserID: 7, ClientID: "delegated", Scopes: []string{"openid", "user:write"}})
+			c.Next()
+		},
+		RequireReadScope:  auth.RequireDelegatedScope(ReadScopes...),
+		RequireWriteScope: auth.RequireDelegatedScope(WriteScopes...),
+	})
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/user/badge", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("write-scoped GET status = %d, body %s", recorder.Code, recorder.Body.String())
 	}
 }

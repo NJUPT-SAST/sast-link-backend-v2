@@ -1445,7 +1445,7 @@ paths:
                 type: string
           headers:
             Cache-Control:
-              description: public, max-age=300
+              description: public, no-cache
               schema:
                 type: string
             ETag:

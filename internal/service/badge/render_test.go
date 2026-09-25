@@ -438,3 +438,40 @@ func TestRenderAvatarOriginAllowlist(t *testing.T) {
 		t.Fatalf("initial-mark fallback missing: %s", blocked.SVG)
 	}
 }
+
+func TestRenderRechecksSharingAcrossInstances(t *testing.T) {
+	ctx := context.Background()
+	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{7: {Nickname: strPtr("张三")}}}
+	badges := newFakeBadgeRepository()
+	first := newTestService(users, badges, &fakeAuditRepository{})
+	second := newTestService(users, badges, &fakeAuditRepository{})
+	status, err := first.Enable(ctx, EnableInput{UserID: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := RenderInput{Key: status.Key}
+	if result, err := first.Render(ctx, input); err != nil || result.NotFound {
+		t.Fatalf("warm render = %+v, %v", result, err)
+	}
+	if err := second.Disable(ctx, DisableInput{UserID: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := first.Render(ctx, input); err != nil || !result.NotFound {
+		t.Fatalf("disabled render = %+v, %v", result, err)
+	}
+	if _, err := second.Enable(ctx, EnableInput{UserID: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := first.Render(ctx, input); err != nil || result.NotFound {
+		t.Fatalf("resumed render = %+v, %v", result, err)
+	}
+}
+
+func TestRenderRejectsOversizedKeyBeforeDependencies(t *testing.T) {
+	// Invalid oversized keys must not reach the database or enter the cache.
+	service := &Service{}
+	result, err := service.Render(context.Background(), RenderInput{Key: strings.Repeat("a", 44)})
+	if err != nil || result == nil || !result.NotFound {
+		t.Fatalf("oversized key: error = %v", err)
+	}
+}

@@ -116,7 +116,7 @@ func newTestService(users *fakeUserRepository, badges *fakeBadgeRepository, audi
 		Users:            users,
 		Badges:           badges,
 		Audits:           audits,
-		Clock:            stubClock{fixed: time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)},
+		Clock:            stubClock{fixed: time.Now().UTC()},
 		InternalClientID: "sast-link-web",
 	}
 }
