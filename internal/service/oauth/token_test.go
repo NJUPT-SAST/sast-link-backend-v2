@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -1096,5 +1097,42 @@ func TestTokenAuthorizationCodeRefusesAdminScopeAfterDemotion(t *testing.T) {
 	// validated, so a rejection must not leave a replayable code behind.
 	if _, err := h.service.Token(context.Background(), input); err == nil {
 		t.Fatal("the code survived a rejected redemption and was redeemable again")
+	}
+}
+
+func TestTokenRefreshPreservesAdministrativeRevocation(t *testing.T) {
+	for _, stage := range []string{"pre_read_grace", "pre_read_old", "rotation"} {
+		t.Run(stage, func(t *testing.T) {
+			h := newHarness(t)
+			code := issueCode(t, h, testPublicClientID, "openid")
+			first, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+			if err != nil {
+				t.Fatal(err)
+			}
+			reason := "admin_role_change"
+			if stage == "rotation" {
+				h.tokens.rotateErr = &repository.SessionRevokedError{Reason: reason}
+			} else {
+				now := time.Now()
+				if stage == "pre_read_old" {
+					now = now.Add(-2 * repository.RefreshGracePeriod)
+				}
+				h.tokens.createdRefresh.RevokedAt = &now
+				h.tokens.createdRefresh.RevokedReason = &reason
+			}
+			_, err = h.service.Token(context.Background(), TokenInput{GrantType: grantTypeRefreshToken, RefreshToken: first.RefreshToken, ClientID: testPublicClientID})
+			requireOAuthError(t, err, ErrorInvalidGrant)
+			if len(h.tokens.revokedFamilies) != 0 {
+				t.Fatal("administrative revocation redundantly revoked family")
+			}
+			last := h.audit.entries[len(h.audit.entries)-1]
+			var detail map[string]any
+			if err := json.Unmarshal(last.Detail, &detail); err != nil {
+				t.Fatal(err)
+			}
+			if detail["outcome"] != "session_revoked" || detail["revoked_reason"] != reason {
+				t.Fatalf("detail = %v", detail)
+			}
+		})
 	}
 }

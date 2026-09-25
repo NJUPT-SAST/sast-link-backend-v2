@@ -262,6 +262,10 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 			errors.New("refresh token belongs to a different client"))
 	}
 	if current.RevokedAt != nil {
+		if current.RevokedReason != nil && *current.RevokedReason != "" {
+			s.auditSessionRevoked(ctx, current.UserID, client.ClientID, input, *current.RevokedReason)
+			return nil, newError(ErrInvalidGrant, "refresh_token 无效", nil)
+		}
 		// The token was rotated or cancelled by another request in this family: within
 		// the grace window that is a benign concurrent refresh that must not re-revoke,
 		// or it would log out the winner; beyond it, a true replay whose family is cut.
@@ -359,6 +363,11 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		s.capabilityRefreshLifetime(scopes),
 	)
 	if rotateErr != nil {
+		var revoked *repository.SessionRevokedError
+		if errors.As(rotateErr, &revoked) {
+			s.auditSessionRevoked(ctx, user.ID, client.ClientID, input, revoked.Reason)
+			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
+		}
 		if errors.Is(rotateErr, repository.ErrTokenReplayWithinGrace) {
 			// The rotation transaction preserved the family for a benign concurrent
 			// refresh; re-revoking would log out the winner. Audited as
@@ -515,5 +524,14 @@ func (s Service) auditToken(
 		"client_id":  clientID,
 		"grant_type": grantType,
 		"outcome":    outcome,
+	})
+}
+
+// auditSessionRevoked preserves the durable administrative cause across both
+// the pre-read and locked rotation paths without issuing another revocation.
+func (s Service) auditSessionRevoked(ctx context.Context, userID int64, clientID string, input TokenInput, reason string) {
+	s.audit(ctx, &userID, "oauth_token", &clientID, false, errcode.CodeAccessTokenInvalid, input.ClientIP, input.UserAgent, map[string]any{
+		"client_id": clientID, "grant_type": grantTypeRefreshToken,
+		"outcome": "session_revoked", "revoked_reason": reason,
 	})
 }
