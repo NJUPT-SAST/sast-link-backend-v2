@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
+	"unicode"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -39,9 +41,11 @@ type AdminUserFilter struct {
 	State      *model.UserState
 	Department *model.Department
 	StudentID  string
-	// Keyword matches name, student_id, login_email, qq_number, nickname,
-	// blog_url or github_url case-insensitively. phone_number joins the match
-	// only when IncludePhoneColumn is set, below.
+	// Keyword matches the account id (as text, e.g. an audit log's
+	// resource_id), name, student_id, login_email, qq_number, nickname,
+	// blog_url, github_url or the name's pinyin initials (name_initials, e.g.
+	// 'lhq' matches '刘华强') case-insensitively as substrings. phone_number
+	// joins the match only when IncludePhoneColumn is set, below.
 	Keyword string
 	// IncludePhoneColumn admits phone_number into the keyword predicate.
 	// phone_number is the one field the admin-surface tightening hides from
@@ -100,12 +104,13 @@ func (r *UserRepository) ListAdminUsers(
 		return nil, 0, fmt.Errorf("%w: limit must not exceed %d",
 			ErrInvalidArgument, validate.MaxPageSize)
 	}
-	if filter.Offset < 0 {
-		return nil, 0, fmt.Errorf("%w: offset must not be negative", ErrInvalidArgument)
+	if filter.Offset < 0 || filter.Offset > math.MaxInt-filter.Limit {
+		return nil, 0, fmt.Errorf("%w: offset must be non-negative and leave room for the page size", ErrInvalidArgument)
 	}
 
 	var total int64
-	if err := r.adminUserQuery(ctx, filter).Count(&total).Error; err != nil {
+	if err := r.database.WithContext(ctx).Table("(?) AS matches",
+		r.adminUserMatches(ctx, filter, false)).Count(&total).Error; err != nil {
 		return nil, 0, fmt.Errorf("count admin users: %w", err)
 	}
 	if total == 0 {
@@ -113,7 +118,9 @@ func (r *UserRepository) ListAdminUsers(
 	}
 
 	rows := make([]AdminUserRow, 0, filter.Limit)
-	err := r.adminUserQuery(ctx, filter).
+	err := r.database.WithContext(ctx).Model(&model.User{}).
+		Joins(`LEFT JOIN profile ON profile.user_id = "user".id`).
+		Where(`"user".id IN (?)`, r.adminUserMatches(ctx, filter, true)).
 		Select(`"user".id`, `"user".name`, `"user".student_id`, `"user".login_email`,
 			`"user".role`, `"user".state`, `"user".email_type`, `"user".phone_number`,
 			`"user".qq_number`, `"user".college`, `"user".major`,
@@ -275,21 +282,76 @@ func (r *UserRepository) adminUserQuery(ctx context.Context, filter AdminUserFil
 	if filter.NeedsCompletion != nil {
 		query = query.Where(`"user".profile_needs_completion = ?`, *filter.NeedsCompletion)
 	}
-	if filter.Keyword != "" {
-		pattern := "%" + escapeLikePattern(filter.Keyword) + "%"
-		cols := `("user".name ILIKE ? ESCAPE '\' OR "user".student_id ILIKE ? ESCAPE '\'` +
-			` OR "user".login_email ILIKE ? ESCAPE '\' OR "user".qq_number ILIKE ? ESCAPE '\'` +
-			` OR profile.nickname ILIKE ? ESCAPE '\' OR profile.blog_url ILIKE ? ESCAPE '\'` +
-			` OR profile.github_url ILIKE ? ESCAPE '\'`
-		args := []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern}
-		if filter.IncludePhoneColumn {
-			cols += ` OR "user".phone_number ILIKE ? ESCAPE '\'`
+
+	return query
+}
+
+// adminUserMatches lets each table use its own index instead of putting an OR
+// across a LEFT JOIN. Each branch retains literal per-column matching and
+// uses the corresponding multi-column GIN index from V017.
+// For pagination, each branch needs at most offset+limit ids. Bounding branches
+// before UNION ALL preserves the page. Branches exclude prior matches so
+// neither counting nor pagination needs a global deduplication aggregate.
+func (r *UserRepository) adminUserMatches(ctx context.Context, filter AdminUserFilter, page bool) *gorm.DB {
+	pattern := "%" + escapeLikePattern(filter.Keyword) + "%"
+	userColumns := []string{`"user".id::text`, `"user".name`, `"user".student_id`,
+		`"user".login_email`, `"user".qq_number`, `"user".name_initials`}
+	profileColumns := []string{"profile.nickname", "profile.blog_url", "profile.github_url"}
+	predicate := func(columns []string) (string, []any) {
+		clauses := make([]string, 0, len(columns))
+		args := make([]any, 0, len(columns))
+		for _, column := range columns {
+			clauses = append(clauses, column+` ILIKE ? ESCAPE '\'`)
 			args = append(args, pattern)
 		}
-		cols += `)`
-		query = query.Where(cols, args...)
+		return "(" + strings.Join(clauses, " OR ") + ")", args
 	}
-	return query
+	branch := func(columns, exclude []string) *gorm.DB {
+		q := r.adminUserQuery(ctx, filter).Select(`"user".id`)
+		if filter.Keyword != "" {
+			clause, args := predicate(columns)
+			q = q.Where(clause, args...)
+			if len(exclude) > 0 {
+				clause, args = predicate(exclude)
+				q = q.Where("NOT COALESCE("+clause+", false)", args...)
+			}
+		}
+		if page {
+			q = q.Order(`"user".id`).Limit(filter.Offset + filter.Limit)
+		}
+		return q
+	}
+	// pg_trgm cannot extract a useful trigram from a one/two-character search.
+	// Preserve the scan path for these terms instead of scanning a whole GIN index.
+	if !hasSearchTrigram(filter.Keyword) {
+		columns := append(userColumns, profileColumns...)
+		if filter.IncludePhoneColumn {
+			columns = append(columns, `"user".phone_number`)
+		}
+		return branch(columns, nil)
+	}
+	userMatches := branch(userColumns, nil)
+	profileMatches := branch(profileColumns, userColumns)
+	if filter.IncludePhoneColumn {
+		return r.database.WithContext(ctx).Raw("(?) UNION ALL (?) UNION ALL (?)", userMatches, profileMatches,
+			branch([]string{`"user".phone_number`}, append(userColumns, profileColumns...)))
+	}
+	return r.database.WithContext(ctx).Raw("(?) UNION ALL (?)", userMatches, profileMatches)
+}
+
+func hasSearchTrigram(keyword string) bool {
+	run := 0
+	for _, char := range keyword {
+		if unicode.IsLetter(char) || unicode.IsDigit(char) {
+			run++
+			if run == 3 {
+				return true
+			}
+		} else {
+			run = 0
+		}
+	}
+	return false
 }
 
 // escapeLikePattern neutralizes the LIKE metacharacters in a user-supplied keyword.

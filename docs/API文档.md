@@ -1640,7 +1640,7 @@ GET /admin/users
 | `state` | 筛选状态：on_sast / retired_sast / njupter / is_deleted |
 | `department` | 筛选部门：software / media |
 | `student_id` | 筛选学号 |
-| `keyword` | 搜索关键词（姓名/学号/邮箱/QQ/昵称/博客/仓库链接模糊匹配，大小写不敏感；手机号仅 admin 角色参与匹配；`%`、`_`、`\` 按字面量处理，不作通配符） |
+| `keyword` | 搜索关键词（账号 ID/姓名/学号/邮箱/QQ/昵称/博客/仓库链接模糊匹配，大小写不敏感；另匹配姓名拼音首字母，如 `lhq` 命中 `刘华强`（多音字取默认读音，姓氏异读请改用汉字搜）；手机号仅 admin 角色参与匹配；`%`、`_`、`\` 按字面量处理，不作通配符） |
 | `needs_completion` | 筛选资料待补全账号（§3.0）：`true` 只列出待补全的，`false` 只列出已完整的，不传则不筛选 |
 
 **说明**：
