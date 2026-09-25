@@ -70,8 +70,15 @@ type Error struct {
 	// Redirectable reports whether this error may be delivered to the client's
 	// redirect_uri instead of the consent page.
 	Redirectable bool
-	RetryAfter   time.Duration
-	Err          error
+	// StashSpent reports that the authorize request had already been consumed
+	// when this failure was raised, so the consent page cannot render it and a
+	// caller's fallback to that page would land on a spent request_id. It exists
+	// only on the silent path, where the decision to consume precedes failures
+	// the interactive path raises before its user has acted. Like Redirectable it
+	// is a routing hint, not a business outcome.
+	StashSpent bool
+	RetryAfter time.Duration
+	Err        error
 }
 
 func (e *Error) Error() string {

@@ -208,6 +208,10 @@ PostgreSQL 正则不支持 `\p{Script=Han}`，两侧都把汉字区逐块列出�
 不匹配——输入 `lhq` 搜不到 `刘华强`。该列把 `name` 的拼音首字母存下来，keyword 谓词多一个
 `OR name_initials ILIKE ?`（同一 `escapeLikePattern` 产物，`%`/`_`/`\` 仍按字面量处理）。
 
+谓词此后又补了一个 `"user".id::text ILIKE` 臂：纯数字 keyword 能按账号 ID 检索，控制台从
+审计日志的 `resource_id` 跳到用户列表时直接粘贴即命中。cast 成文本而非整数相等比较，
+与其它列共用同一子串语义；不是 schema 变化，不占迁移版本号。
+
 **为什么是 SQL 生成列而不是应用层写入**：与 `email_type` / `auto_set_email_type` 同一选型。
 `name` 的写入点有六处（密码与 OAuth 注册、管理员建号与校友审批共用的建号事务、
 自助改资料、管理员单个与批量修改），任何一处漏算就会产生空/陈旧首拼；生成列是本行值的

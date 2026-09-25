@@ -109,6 +109,10 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 		return nil, redirectableError(ErrInvalidRequest, "nonce 长度超出限制", nil)
 	}
 
+	if len(input.Prompt) > maxAuthorizeParameterLength {
+		return nil, redirectableError(ErrInvalidRequest, "prompt 长度超出限制", nil)
+	}
+
 	requested, err := parseRequestedScopes(input.Scope)
 	if err != nil {
 		return nil, redirectableError(ErrInvalidScope, "scope 无效：必须包含 openid，且仅支持受支持的取值", err)
@@ -130,6 +134,7 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 		CodeChallenge:       challenge,
 		CodeChallengeMethod: pkceMethodS256,
 		Nonce:               nonce,
+		Prompt:              strings.TrimSpace(input.Prompt),
 	}
 	ttl := s.requestTTL()
 	if err := s.Requests.SaveAuthorizeRequest(ctx, requestID, payload, ttl); err != nil {
@@ -202,6 +207,27 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 		}, nil
 	}
 
+	return s.issueAuthorizationCode(ctx, input, payload, "granted", s.Authorizations.CreateWithGrant)
+}
+
+// issueAuthorizationCode mints the code for an already-consumed stash.
+//
+// Shared by the interactive consent decision and the silent path, so both run
+// the identical post-consume re-verification: the live client registration
+// (redirect_uri, scopes) and the user's authorizability. The decision string
+// only names the audit row ("granted" vs "granted_silent"), never a behavioral
+// branch; the one genuine difference between the paths is the writer, which
+// arrives as persist rather than being inferred from anything else here.
+//
+// Every error this raises is post-consume by construction, which is why the
+// caller marks them spent (see spentStash).
+func (s Service) issueAuthorizationCode(
+	ctx context.Context,
+	input ConsentInput,
+	payload AuthorizeRequestPayload,
+	decision string,
+	persist func(context.Context, *model.OAuthAuthorization) error,
+) (*ConsentResult, error) {
 	client, err := s.Clients.FindActiveByClientID(ctx, payload.ClientID)
 	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
 		// The client was disabled between the two legs. The stash is already spent,
@@ -272,14 +298,146 @@ func (s Service) Consent(ctx context.Context, input ConsentInput) (*ConsentResul
 		ExpiresAt:           now.Add(s.codeTTL()),
 		CreatedAt:           now,
 	}
-	if err := s.Authorizations.CreateWithGrant(ctx, authorization); err != nil {
+	if err := persist(ctx, authorization); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			// Only the silent writer answers this: the user revoked the grant
+			// between the grant check and this write, and the transaction rolled
+			// the code back with it. No code was minted, so the client gets none.
+			return nil, newError(ErrInvalidGrant, "授权已被撤销，请重新发起授权", err)
+		}
 		return nil, newError(ErrInternal, "创建授权码失败", err)
 	}
 
-	s.auditAuthorize(ctx, input, payload, &user.ID, true, 0, "granted")
+	s.auditAuthorize(ctx, input, payload, &user.ID, true, 0, decision)
 	return &ConsentResult{
 		RedirectURI: successRedirectURI(payload.RedirectURI, payload.State, code),
 	}, nil
+}
+
+// SilentConsent completes a pending authorization without the consent page when
+// the identified user already holds a grant with the client covering the
+// requested scopes. This is the SSO leg: a browser signed in to link that a
+// client bounces through /oauth/authorize receives its code in the same
+// top-level redirect — no page render, no click.
+//
+// The user's identity arrives from the HTTP layer (a verified link session) and
+// is never request-supplied. The stash is consumed only after the grant check
+// passes, so every refusal up to that point — no grant, narrower grant scopes,
+// dead or unknown stash, disabled client, throttled user, an RP that asked for
+// prompt=login/consent — leaves the request intact for the interactive consent
+// page the caller falls back to.
+//
+// Nothing after the consume can leave it intact, so those failures carry
+// StashSpent and the caller must send the browser somewhere other than a
+// consent page that cannot load the request.
+//
+// The revocation race the manual consent also carries is narrower here and
+// handled differently: the silent path mints through
+// CreateWithExistingGrant, so a revoke that commits first makes the mint fail
+// instead of resurrecting the grant the revoke just deleted.
+func (s Service) SilentConsent(ctx context.Context, input SilentConsentInput) (*ConsentResult, error) {
+	if input.UserID <= 0 {
+		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
+	}
+	requestID := strings.TrimSpace(input.RequestID)
+	if requestID == "" {
+		return nil, newError(ErrInvalidRequest, "request_id 不能为空", nil)
+	}
+	// This path mints codes, so it may not sit outside the throttle — but on its
+	// own budget: every silent attempt that ends up on the consent page would
+	// otherwise be paid for out of the allowance the user is about to need to
+	// submit that page.
+	if err := s.checkSilentConsentLimit(ctx, input.UserID); err != nil {
+		return nil, err
+	}
+
+	payload, _, found, err := s.Requests.PeekAuthorizeRequest(ctx, requestID)
+	if err != nil {
+		return nil, newError(ErrDependencyUnavailable, "读取授权请求失败，请重试", err)
+	}
+	if !found {
+		return nil, newError(ErrInvalidRequest, "授权请求无效或已过期，请重新发起授权", nil)
+	}
+	// An RP that demands a fresh gesture gets one. Before the silent path existed
+	// every authorization rendered the consent page, so these values were honored
+	// by accident; dropping them now would hand prompt=consent a code with no
+	// consent, which is the one thing the parameter exists to prevent.
+	if promptForcesInteraction(payload.Prompt) {
+		return nil, newError(ErrInvalidRequest, "客户端要求重新确认授权，请在授权页确认", nil)
+	}
+
+	// Resolving the client doubles as half of the live re-verification: a disabled
+	// client must not receive a silent code even though the grant row survives it.
+	client, err := s.Clients.FindActiveByClientID(ctx, payload.ClientID)
+	if errors.Is(err, repository.ErrNotFound) || errors.Is(err, repository.ErrInvalidArgument) {
+		return nil, newError(ErrInvalidClient, "客户端已停用，请重新发起授权", nil)
+	}
+	if err != nil {
+		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
+	}
+
+	grantScopes, found, err := s.Authorizations.FindGrantScopes(ctx, input.UserID, client.ID)
+	if err != nil {
+		return nil, newError(ErrInternal, "查询授权记录失败", err)
+	}
+	if !found {
+		return nil, newError(ErrInvalidScope, "尚未授权该应用，请在授权页确认", nil)
+	}
+	covered, err := scope.ContainsAll([]string(grantScopes), payload.Scopes)
+	if err != nil {
+		return nil, newError(ErrInvalidScope, "授权记录 scope 无效", err)
+	}
+	if !covered {
+		return nil, newError(ErrInvalidScope, "请求的 scope 超出既有授权范围，请在授权页确认", nil)
+	}
+
+	consumed, found, err := s.Requests.ConsumeAuthorizeRequest(ctx, requestID)
+	if err != nil {
+		return nil, newError(ErrDependencyUnavailable, "读取授权请求失败，请重试", err)
+	}
+	if !found {
+		// Lost a race with an interactive submission on the same stash. The
+		// winner minted the code, so the request really is gone: spentStash below
+		// sends the browser to the error page rather than back to a consent page
+		// that would answer the same 400.
+		return nil, spentStash(newError(ErrInvalidRequest, "授权请求无效或已过期，请重新发起授权", nil))
+	}
+	result, err := s.issueAuthorizationCode(ctx, ConsentInput{
+		RequestID: requestID,
+		UserID:    input.UserID,
+		ClientIP:  input.ClientIP,
+		UserAgent: input.UserAgent,
+	}, consumed, "granted_silent", s.Authorizations.CreateWithExistingGrant)
+	if err != nil {
+		return nil, spentStash(err)
+	}
+	return result, nil
+}
+
+// spentStash marks an error raised after the authorize stash was consumed, which
+// is what tells the HTTP layer that falling back to the consent page would land
+// the browser on a request_id that no longer resolves. Errors from this package
+// are freshly built per call, never shared sentinels, so mutating one is safe.
+func spentStash(err error) error {
+	var oauthErr *Error
+	if errors.As(err, &oauthErr) {
+		oauthErr.StashSpent = true
+	}
+	return err
+}
+
+// promptForcesInteraction reports whether an OIDC prompt value requires the
+// consent page. OIDC Core §3.1.2.1 treats prompt as a space-delimited list, and
+// `none` is not included: it asks for the opposite of interaction and is
+// unsupported here (the silent path is the closest thing this provider has to
+// it, and an unsupported value is better ignored than misread as its opposite).
+func promptForcesInteraction(prompt string) bool {
+	for _, value := range strings.Fields(prompt) {
+		if value == "login" || value == "consent" {
+			return true
+		}
+	}
+	return false
 }
 
 // ConsentInfo returns the verified client metadata for a pending authorization

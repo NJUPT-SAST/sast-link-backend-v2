@@ -1064,3 +1064,11 @@ func TestConsentLecturerReadAllowedWriteRefused(t *testing.T) {
 	})
 	requireOAuthError(t, err, ErrorInvalidScope)
 }
+func TestAuthorizeRejectsOversizedPrompt(t *testing.T) {
+	h := newHarness(t)
+	input := validAuthorizeInput(t)
+	input.Prompt = strings.Repeat("x", maxAuthorizeParameterLength+1)
+	if _, err := h.service.Authorize(context.Background(), input); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Authorize(oversized prompt) = %v, want ErrInvalidRequest", err)
+	}
+}

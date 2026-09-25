@@ -87,12 +87,29 @@ CREATE FUNCTION sl_name_initials(p_name text) RETURNS text
 
 ALTER TABLE "user" ADD COLUMN name_initials VARCHAR(255)
     GENERATED ALWAYS AS (sl_name_initials(name)) STORED;
+
+-- Index candidates per table, retaining per-column checks in the repository.
+-- Phone is separate because non-admin searches must never consult it.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_user_search ON "user" USING gin (
+    (id::text) gin_trgm_ops, name gin_trgm_ops, student_id gin_trgm_ops,
+    login_email gin_trgm_ops, qq_number gin_trgm_ops, name_initials gin_trgm_ops);
+CREATE INDEX idx_profile_search ON profile USING gin (
+    nickname gin_trgm_ops, blog_url gin_trgm_ops, github_url gin_trgm_ops);
+CREATE INDEX idx_user_phone_search ON "user" USING gin (phone_number gin_trgm_ops);
+-- Populate expression/new-column statistics before the first ordered search.
+ANALYZE "user";
+ANALYZE profile;
 `, to.Len(), from.String(), to.String())
 
 	down := `-- V017 down: drop the initials column first, then the function once no
 -- column references it anymore. The stored data is fully derived from name,
 -- so nothing is lost.
 
+DROP INDEX idx_user_phone_search;
+DROP INDEX idx_profile_search;
+DROP INDEX idx_user_search;
+-- Keep pg_trgm: it may predate this migration or have other consumers.
 ALTER TABLE "user" DROP COLUMN name_initials;
 
 DROP FUNCTION sl_name_initials(text);

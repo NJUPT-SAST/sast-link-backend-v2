@@ -606,14 +606,14 @@ func TestUserRepositoryUpdatePasswordBurnsAuthorizationCodes(t *testing.T) {
 
 	// The victim's code is spent, so redeeming it now reports a replay rather than
 	// minting a post-reset session.
-	if _, _, err := authorizations.Consume(context.Background(), "code-live", revokedAt); !errors.Is(
+	if _, _, err := authorizations.Consume(context.Background(), "code-live", revokedAt, client.ID); !errors.Is(
 		err, repository.ErrAuthorizationReplayed,
 	) {
 		t.Fatalf("Consume(code-live) error = %v, want ErrAuthorizationReplayed", err)
 	}
 	// Another user's pending authorization must survive: the reset is scoped to one
 	// account, and burning everyone's codes would log out unrelated users mid-flow.
-	if _, _, err := authorizations.Consume(context.Background(), "code-other-user", revokedAt); err != nil {
+	if _, _, err := authorizations.Consume(context.Background(), "code-other-user", revokedAt, client.ID); err != nil {
 		t.Fatalf("Consume(code-other-user) error = %v, want the code to survive", err)
 	}
 }

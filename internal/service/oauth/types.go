@@ -52,6 +52,11 @@ type AuthorizeRequestPayload struct {
 	CodeChallenge       string   `json:"code_challenge"`
 	CodeChallengeMethod string   `json:"code_challenge_method"`
 	Nonce               string   `json:"nonce,omitempty"`
+	// Prompt is carried into the stash because the silent path runs after
+	// Authorize with only the stashed payload in hand, so the stash is the only
+	// place it can read the veto from. omitempty keeps the tag compatible with
+	// stashes written before it existed.
+	Prompt string `json:"prompt,omitempty"`
 }
 
 // AuthorizeRequestStore holds validated authorize requests between the two legs
@@ -89,20 +94,26 @@ type ClientRepository interface {
 type AuthorizationRepository interface {
 	// CreateWithGrant persists a new authorization code and records the user's
 	// consent for the client in oauth_grants, in one transaction. Consent is the
-	// only code-minting path.
+	// only code-minting path that may create a grant.
 	CreateWithGrant(ctx context.Context, authorization *model.OAuthAuthorization) error
+	// CreateWithExistingGrant persists a new authorization code only if the
+	// user's consent grant with the client still exists, in one transaction; a
+	// missing grant returns repository.ErrNotFound and writes no code. The silent
+	// path uses it so a mint in flight cannot resurrect a grant the user has just
+	// revoked.
+	CreateWithExistingGrant(ctx context.Context, authorization *model.OAuthAuthorization) error
 	// Consume marks a code used under a row lock. On replay it returns
 	// repository.ErrAuthorizationReplayed together with the record, whose family
 	// the caller must revoke. The second return is the owning user's token_version
 	// snapshot taken inside the consume transaction, which the pair write verifies
 	// against so a revocation committing between the two refuses the pair.
-	Consume(ctx context.Context, code string, now time.Time) (*model.OAuthAuthorization, int64, error)
+	Consume(ctx context.Context, code string, now time.Time, clientID int64) (*model.OAuthAuthorization, int64, error)
+	// FindGrantScopes returns the scopes of the user's standing consent with one
+	// client, keyed by the client's numeric ID. found is false when the user has
+	// never consented or has revoked the grant.
+	FindGrantScopes(ctx context.Context, userID, clientID int64) (scopes model.StringArray, found bool, err error)
 	// ListGrantsByUser returns the applications a user has authorized.
 	ListGrantsByUser(ctx context.Context, userID int64) ([]repository.OAuthGrant, error)
-	// DeleteByUserClient removes every authorization and consent grant a user
-	// holds with one client (dropping it from the authorized-apps list and
-	// killing any in-flight code).
-	DeleteByUserClient(ctx context.Context, userID, clientID int64) error
 }
 
 // TokenRepository persists and revokes token metadata.
@@ -117,8 +128,9 @@ type TokenRepository interface {
 	// ErrNotFound) when the code's state changed: the user's token_version no
 	// longer matches the Consume snapshot, the client is inactive, or its scopes no
 	// longer contain the pair's. A bulk revocation or client disable/narrowing
-	// between consume and write cannot be outlived by the pair.
-	CreatePairWithUserAndClientLock(ctx context.Context, userID int64, clientID int64, expectedTokenVersion int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
+	// between consume and write cannot be outlived by the pair. The exact consumed
+	// authorization must still exist and be unexpired under its shared row lock.
+	CreatePairWithUserAndClientLock(ctx context.Context, userID int64, clientID int64, expectedTokenVersion int64, authorizationID int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error
 	// RotateRefreshToken rotates currentRefreshTokenHash inside familyID and
 	// returns the family origin's created_at, the earliest instant the family
 	// authenticates to.
@@ -141,7 +153,7 @@ type TokenRepository interface {
 	FamilyOriginCreatedAt(ctx context.Context, familyID string) (time.Time, error)
 	FindAccessTokenByJTI(ctx context.Context, jti string) (*model.OAuthAccessToken, error)
 	RevokeFamily(ctx context.Context, familyID string, revokedAt time.Time) ([]model.BlacklistEntry, error)
-	// RevokeUserClientTokens revokes every live token a user holds with one
+	// RevokeUserClientTokens atomically deletes codes and consent and revokes every live token for one
 	// client (removing an application's access).
 	RevokeUserClientTokens(ctx context.Context, userID, clientID int64, revokedAt time.Time) ([]model.BlacklistEntry, error)
 }
@@ -166,8 +178,12 @@ type AuthorizeInput struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	Nonce               string
-	ClientIP            string
-	UserAgent           string
+	// Prompt is the OIDC prompt parameter. Only its interaction-forcing values
+	// (login, consent) are acted on: they veto the silent authorize path. The
+	// parameter is otherwise ignored, so prompt=none is not supported.
+	Prompt    string
+	ClientIP  string
+	UserAgent string
 }
 
 // AuthorizeResult tells the handler where to send the browser.
@@ -197,6 +213,16 @@ type ConsentInput struct {
 // the client as access_denied rather than swallowed here.
 type ConsentResult struct {
 	RedirectURI string
+}
+
+// SilentConsentInput asks to complete a pending authorization without user
+// interaction. The user is the one the HTTP layer identified from the browser's
+// link session (bearer token or session cookie), never a request-supplied value.
+type SilentConsentInput struct {
+	RequestID string
+	UserID    int64
+	ClientIP  string
+	UserAgent string
 }
 
 // ConsentInfoInput identifies the pending authorization request whose verified

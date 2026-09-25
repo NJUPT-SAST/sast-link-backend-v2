@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -401,6 +404,70 @@ func TestListAdminUsersKeywordNameInitials(t *testing.T) {
 			if len(rows) != want {
 				t.Fatalf("keyword %q matched %d rows, want %d", keyword, len(rows), want)
 			}
+		}
+	})
+}
+
+// A numeric keyword matches the account id (as text): the console's jump-off
+// point for a user is often an audit row's resource_id, which is the id. The
+// seeded rows have every text column scrubbed of digits so a hit can only come
+// from the id arm, and the misses prove a digit-bearing keyword does not leak
+// into the text columns either.
+func TestListAdminUsersKeywordUserID(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	a := adminSeed(t, database, "alpha@njupt.edu.cn", "甲", model.UserRoleMember, model.UserStateOnSAST, nil)
+	b := adminSeed(t, database, "beta@njupt.edu.cn", "乙", model.UserRoleMember, model.UserStateOnSAST, nil)
+	// testUser defaults carry digit-bearing qq_number/phone_number; blank them
+	// so the only numeric column left is id.
+	for _, id := range []int64{a.ID, b.ID} {
+		if err := database.Model(&model.User{}).Where("id = ?", id).
+			Updates(map[string]any{"qq_number": "", "phone_number": ""}).Error; err != nil {
+			t.Fatalf("scrub contact columns for %d: %v", id, err)
+		}
+	}
+
+	t.Run("full id", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: strconv.FormatInt(a.ID, 10), Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 1 || rows[0].ID != a.ID {
+			t.Fatalf("rows = %+v, want only user %d", rows, a.ID)
+		}
+	})
+
+	t.Run("id substring", func(t *testing.T) {
+		// The substring semantics every other column uses apply to id as well:
+		// a keyword shorter than the id still matches it. The expected set is
+		// computed, not assumed, so the assertion holds whatever ids the
+		// sequence assigned.
+		prefix := strconv.FormatInt(a.ID, 10)[:1]
+		want := 0
+		for _, id := range []int64{a.ID, b.ID} {
+			if strings.Contains(strconv.FormatInt(id, 10), prefix) {
+				want++
+			}
+		}
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: prefix, Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != want {
+			t.Fatalf("keyword %q matched %d rows, want %d", prefix, len(rows), want)
+		}
+	})
+
+	t.Run("unknown id misses", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: "999", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 0 {
+			t.Fatalf("rows = %+v, want none", rows)
 		}
 	})
 }
@@ -1334,5 +1401,80 @@ func TestListAdminUsersReportsStateManual(t *testing.T) {
 	}
 	if !detail.StateManual {
 		t.Fatal("FindByID lost state_manual")
+	}
+}
+
+// Users matching both tables must appear once before pagination. Apply
+// every filter inside each bounded branch, and retain users without profiles.
+func TestListAdminUsersIndexedSearchPages(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	software := model.DepartmentSoftware
+	seeded := make([]*model.User, 7)
+	for i := range seeded {
+		name := "普通姓名"
+		if i == 0 || i == 2 || i == 4 {
+			name = "needle"
+		}
+		seeded[i] = adminSeed(t, database, fmt.Sprintf("search%d@njupt.edu.cn", i), name,
+			model.UserRoleMember, model.UserStateOnSAST, &software)
+	}
+	for _, i := range []int{1, 2} {
+		if err := database.Model(&model.Profile{}).Where("user_id = ?", seeded[i].ID).
+			Update("nickname", "needle").Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.Model(&model.User{}).Where("id = ?", seeded[3].ID).
+		Update("phone_number", "needle").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Where("user_id = ?", seeded[4].ID).Delete(&model.Profile{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Model(&model.Profile{}).Where("user_id = ?", seeded[5].ID).
+		Updates(map[string]any{"nickname": "nee", "blog_url": "dle"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Model(&model.Profile{}).Where("user_id = ?", seeded[6].ID).
+		Update("nickname", `abc%_\literal`).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		filter repository.AdminUserFilter
+		total  int64
+		ids    []int
+	}{
+		{"deduplicated page", repository.AdminUserFilter{Keyword: "needle", Offset: 1, Limit: 2}, 4, []int{1, 2}},
+		{"phone excluded", repository.AdminUserFilter{Keyword: "needle", Offset: 2, Limit: 3}, 4, []int{2, 4}},
+		{"phone included", repository.AdminUserFilter{Keyword: "needle", IncludePhoneColumn: true, Offset: 2, Limit: 3}, 5, []int{2, 3, 4}},
+		{"student filter before branch limit", repository.AdminUserFilter{Keyword: "needle", StudentID: seeded[4].StudentID, Limit: 1}, 1, []int{4}},
+		{"filter before bounds", repository.AdminUserFilter{Keyword: "needle", Department: &software, Offset: 1, Limit: 2}, 3, []int{1, 2}},
+		{"escaped indexed term", repository.AdminUserFilter{Keyword: `abc%_\literal`, Limit: 10}, 1, []int{6}},
+		{"beyond last page", repository.AdminUserFilter{Keyword: "needle", Offset: 5, Limit: 2}, 4, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, total, err := users.ListAdminUsers(context.Background(), tc.filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if total != tc.total || len(rows) != len(tc.ids) {
+				t.Fatalf("total/rows = %d/%d, want %d/%d", total, len(rows), tc.total, len(tc.ids))
+			}
+			for i, index := range tc.ids {
+				if rows[i].ID != seeded[index].ID {
+					t.Fatalf("row %d id = %d, want %d", i, rows[i].ID, seeded[index].ID)
+				}
+			}
+		})
+	}
+}
+
+func TestListAdminUsersRejectsPageBoundOverflow(t *testing.T) {
+	_, _, err := repository.NewUser(nil).ListAdminUsers(context.Background(),
+		repository.AdminUserFilter{Limit: 20, Offset: math.MaxInt})
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("error = %v, want invalid page bound", err)
 	}
 }

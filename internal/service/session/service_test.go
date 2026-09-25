@@ -1206,6 +1206,123 @@ func TestRefreshRotatesSameFamilyAndScopes(t *testing.T) {
 	}
 }
 
+// The silent authorize path identifies a browser by its session cookie without
+// doing anything to it. That "without" is the whole contract: this runs on an
+// unauthenticated, cross-site-reachable GET, so a rotation here would let a
+// plain navigation churn a victim's family and displace a device record.
+func TestIdentifyByRefreshTokenReadsWithoutWriting(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	devices := &fakeDevices{}
+	service = withDevices(service, devices)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	audit.entries = nil
+	// The login above registers a device of its own; only what the identify adds
+	// is under test.
+	outboxRows := len(tokens.auditEntries)
+	deviceWrites := len(devices.registrations) + len(devices.touches) + len(devices.removed)
+
+	userID, err := service.IdentifyByRefreshToken(context.Background(), login.RefreshToken)
+	if err != nil {
+		t.Fatalf("IdentifyByRefreshToken returned error: %v", err)
+	}
+	if userID != 42 {
+		t.Fatalf("IdentifyByRefreshToken = %d, want the session's subject 42", userID)
+	}
+	if tokens.rotatedRefresh != nil || tokens.rotatedAccess != nil {
+		t.Fatalf("rotated=%+v/%+v, want no rotation on an identify", tokens.rotatedRefresh, tokens.rotatedAccess)
+	}
+	if len(tokens.revokedFamilies) != 0 {
+		t.Fatalf("revoked families = %#v, want none", tokens.revokedFamilies)
+	}
+	if got := len(devices.registrations) + len(devices.touches) + len(devices.removed); got != deviceWrites {
+		t.Fatalf("device writes = %d, want %d: an identify must leave the device record alone", got, deviceWrites)
+	}
+	if len(tokens.auditEntries) != outboxRows || len(audit.entries) != 0 {
+		t.Fatalf("audit rows = %d/%#v, want an identify to write none", len(tokens.auditEntries)-outboxRows, audit.entries)
+	}
+}
+
+func TestIdentifyByRefreshTokenRejectsEverythingRefreshRejects(t *testing.T) {
+	// Each case mutates the live session into one shape Refresh also refuses; the
+	// point is that identity never outlives the credential that carries it.
+	cases := []struct {
+		name string
+		// absent presents a credential the repository has no row for, by dropping
+		// the live one; presentBlank presents no credential at all. The rest mutate
+		// the session so the lookup finds a row it must turn down.
+		absent       bool
+		presentBlank bool
+		mutate       func(users *fakeUsers, tokens *fakeTokens)
+	}{
+		{
+			name: "revoked token",
+			mutate: func(_ *fakeUsers, tokens *fakeTokens) {
+				revokedAt := time.Date(2026, 7, 22, 9, 59, 0, 0, time.UTC)
+				tokens.createdRefresh.RevokedAt = &revokedAt
+			},
+		},
+		{
+			name: "expired token",
+			mutate: func(_ *fakeUsers, tokens *fakeTokens) {
+				tokens.createdRefresh.ExpiresAt = time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+			},
+		},
+		{
+			name: "token of another client",
+			mutate: func(_ *fakeUsers, tokens *fakeTokens) {
+				tokens.createdRefresh.ClientID = 99
+			},
+		},
+		{
+			name: "deleted owner",
+			mutate: func(users *fakeUsers, _ *fakeTokens) {
+				users.byID[42].State = model.UserStateDeleted
+			},
+		},
+		{
+			name:   "unknown token",
+			absent: true,
+			mutate: func(_ *fakeUsers, tokens *fakeTokens) {
+				delete(tokens.refreshByHash, tokens.createdRefresh.TokenHash)
+			},
+		},
+		{name: "empty token", presentBlank: true, mutate: func(_ *fakeUsers, _ *fakeTokens) {}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service, users, _, tokens, _, _ := newTestService(t)
+			devices := &fakeDevices{}
+			service = withDevices(service, devices)
+			login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+			if err != nil {
+				t.Fatalf("Login returned error: %v", err)
+			}
+			// Every case presents the credential the login issued — even the absent
+			// one, where the mutation removed the row it names rather than swapping
+			// the value. presentBlank is the one that carries nothing.
+			token := login.RefreshToken
+			if testCase.presentBlank {
+				token = ""
+			}
+			testCase.mutate(users, tokens)
+
+			userID, err := service.IdentifyByRefreshToken(context.Background(), token)
+			if err == nil {
+				t.Fatalf("IdentifyByRefreshToken = %d, want a refusal", userID)
+			}
+			if userID != 0 {
+				t.Fatalf("IdentifyByRefreshToken returned %d alongside %v, want no subject", userID, err)
+			}
+			if len(tokens.revokedFamilies) != 0 {
+				t.Fatalf("revoked families = %#v, want a refusal to be passive", tokens.revokedFamilies)
+			}
+		})
+	}
+}
+
 func TestRefreshRejectsDeletedExpiredAndReplay(t *testing.T) {
 	service, users, _, tokens, _, _ := newTestService(t)
 	devices := &fakeDevices{}
