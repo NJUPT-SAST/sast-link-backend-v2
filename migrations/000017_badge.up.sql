@@ -4,13 +4,17 @@
 -- publicly, so database exposure grants no privilege beyond links the user is
 -- already handing out, while the random key keeps the sequential-id
 -- enumeration problem (why /card/:id was removed) out of the public surface.
--- Row existence is the enable flag: deleting the row disables the badge, and
--- re-enabling mints a fresh key so a retired link never resurrects.
+--
+-- The row survives disable: disabled_at marks the sharing state, and toggling
+-- never rotates the key — a saved embed URL recovers the moment the owner
+-- switches back on, and while off it renders the neutral "closed" card. The
+-- key is minted exactly once, on the first enable.
 CREATE TABLE badge (
-    id         BIGSERIAL PRIMARY KEY,
-    user_id    BIGINT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
-    badge_key  TEXT NOT NULL,
-    enabled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+    badge_key   TEXT NOT NULL,
+    enabled_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    disabled_at TIMESTAMPTZ,
     CONSTRAINT uq_badge_user_id UNIQUE (user_id),
     CONSTRAINT uq_badge_badge_key UNIQUE (badge_key)
 );

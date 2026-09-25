@@ -131,3 +131,49 @@ func TestBadgeRepositoryDeleteIsIdempotent(t *testing.T) {
 		t.Fatalf("second DeleteByUserID = (%v, %v), want (false, nil)", removed, err)
 	}
 }
+
+func TestBadgeRepositoryPauseAndResumeKeepTheKey(t *testing.T) {
+	database := setupDatabase(t)
+	userRepository := repository.NewUser(database)
+	badges := repository.NewBadge(database)
+	user := createUserWithProfile(t, userRepository, "badge-pause@njupt.edu.cn")
+
+	if err := badges.Create(context.Background(), badgeFor(user.ID, "badge-key-pause")); err != nil {
+		t.Fatalf("Create error = %v", err)
+	}
+
+	// Pause: the row stays, the public lookup stops resolving.
+	paused, err := badges.Disable(context.Background(), user.ID, time.Now())
+	if err != nil || !paused {
+		t.Fatalf("Disable = (%v, %v), want (true, nil)", paused, err)
+	}
+	row, err := badges.FindByUserID(context.Background(), user.ID)
+	if err != nil || row.BadgeKey != "badge-key-pause" {
+		t.Fatalf("FindByUserID after pause = (%v, %v), want the row kept", row, err)
+	}
+	_, targetErr := badges.FindBadgeTarget(context.Background(), "badge-key-pause")
+	if !errors.Is(targetErr, repository.ErrNotFound) {
+		t.Fatalf("FindBadgeTarget(paused) error = %v, want ErrNotFound", targetErr)
+	}
+
+	// Pausing again is a no-op.
+	pausedAgain, err := badges.Disable(context.Background(), user.ID, time.Now())
+	if err != nil || pausedAgain {
+		t.Fatalf("second Disable = (%v, %v), want (false, nil)", pausedAgain, err)
+	}
+
+	// Resume: the same key resolves again.
+	resumed, err := badges.ReEnable(context.Background(), user.ID, time.Now())
+	if err != nil || !resumed {
+		t.Fatalf("ReEnable = (%v, %v), want (true, nil)", resumed, err)
+	}
+	resumedTarget, resumedTargetErr := badges.FindBadgeTarget(context.Background(), "badge-key-pause")
+	if resumedTargetErr != nil || resumedTarget == nil {
+		t.Fatalf("FindBadgeTarget(resumed) = (%v, %v), want the row", resumedTarget, resumedTargetErr)
+	}
+	// Resuming an already-sharing row is a no-op.
+	resumedAgain, err := badges.ReEnable(context.Background(), user.ID, time.Now())
+	if err != nil || resumedAgain {
+		t.Fatalf("second ReEnable = (%v, %v), want (false, nil)", resumedAgain, err)
+	}
+}

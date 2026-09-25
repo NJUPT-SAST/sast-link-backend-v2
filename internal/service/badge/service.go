@@ -62,11 +62,13 @@ type DisableInput struct {
 	ActorClientID string
 }
 
-// Enable creates the caller's badge row and returns its key. It refuses a
+// Enable starts sharing the caller's badge and returns its key. The key is
+// minted exactly once — on the first enable; a later enable after a pause
+// resumes the same key, so a saved embed URL recovers as-is. It refuses a
 // profile without a nickname (the badge's identity anchor) and an account
-// that already holds a badge — the client shows the existing badge rather
-// than retrying. A user id that resolves to no live account is
-// ErrUserNotFound, the same folding FindPublicCardByUserID applies.
+// that is already sharing — the client shows the existing badge rather than
+// retrying. A user id that resolves to no live account is ErrUserNotFound,
+// the same folding FindPublicCardByUserID applies.
 func (s *Service) Enable(ctx context.Context, input EnableInput) (*Status, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrUserNotFound, "enable badge: non-positive user id", nil)
@@ -86,28 +88,52 @@ func (s *Service) Enable(ctx context.Context, input EnableInput) (*Status, error
 		return nil, newError(ErrNicknameMissing, "enable badge: profile has no nickname", nil)
 	}
 
+	enabledAt := s.Clock.Now()
 	key, err := generateBadgeKey()
 	if err != nil {
 		return nil, newError(ErrInternal, "enable badge: generate key", err)
 	}
-	enabledAt := s.Clock.Now()
 	badge := &model.Badge{UserID: input.UserID, BadgeKey: key, EnabledAt: enabledAt}
 	if err := s.Badges.Create(ctx, badge); err != nil {
-		if errors.Is(err, repository.ErrBadgeAlreadyEnabled) {
+		if !errors.Is(err, repository.ErrBadgeAlreadyEnabled) {
+			return nil, newError(ErrInternal, "enable badge: create row", err)
+		}
+		// The row already exists. If it is sharing, this is the 40907 case;
+		// if it is paused, resume it — keeping the key, so a saved embed URL
+		// recovers as-is instead of pointing at a forever-dead link.
+		existing, findErr := s.Badges.FindByUserID(ctx, input.UserID)
+		if findErr != nil {
+			return nil, newError(ErrInternal, "enable badge: load existing row", findErr)
+		}
+		if existing.DisabledAt == nil {
 			return nil, newError(ErrAlreadyEnabled, "enable badge: badge already enabled", err)
 		}
-		return nil, newError(ErrInternal, "enable badge: create row", err)
+		resumed, reEnableErr := s.Badges.ReEnable(ctx, input.UserID, enabledAt)
+		if reEnableErr != nil {
+			return nil, newError(ErrInternal, "enable badge: resume row", reEnableErr)
+		}
+		if !resumed {
+			// A concurrent enable won the resume; the badge is sharing now.
+			return nil, newError(ErrAlreadyEnabled, "enable badge: badge already enabled", nil)
+		}
+		// The cache may still hold the paused 404 card for this key — drop it
+		// so the badge recovers immediately.
+		s.purgeRenderCache(existing.BadgeKey)
+		s.audit(ctx, input.UserID, input.ActorClientID, "badge_enable", existing.BadgeKey, true, 0)
+		return &Status{Enabled: true, Key: existing.BadgeKey, EnabledAt: &enabledAt}, nil
 	}
 
 	s.audit(ctx, input.UserID, input.ActorClientID, "badge_enable", key, true, 0)
 	return &Status{Enabled: true, Key: key, EnabledAt: &enabledAt}, nil
 }
 
-// Disable removes the caller's badge row. Disabling a badge that is not
-// enabled is a success — the observable end state is the same — but no audit
-// row is written when nothing was removed. A real removal also purges the
-// render cache for that key: without the purge, every embed keeps serving
-// the cached SVG until the TTL expires, and "关闭后链接立即失效" would be a
+// Disable pauses sharing on the caller's badge, keeping the key: the embed
+// URL starts rendering the neutral "closed" card and recovers as-is when
+// the owner switches back on. Disabling a badge that is already paused (or
+// absent) is a success — the observable end state is the same — but no audit
+// row is written when nothing changed. A real pause also purges the render
+// cache for that key: without the purge, every embed keeps serving the
+// cached SVG until the TTL expires, and “关闭后链接立即失效” would be a
 // lie for up to five minutes.
 func (s *Service) Disable(ctx context.Context, input DisableInput) error {
 	if input.UserID <= 0 {
@@ -118,22 +144,28 @@ func (s *Service) Disable(ctx context.Context, input DisableInput) error {
 	}
 
 	existing, findErr := s.Badges.FindByUserID(ctx, input.UserID)
-	if findErr != nil && !errors.Is(findErr, repository.ErrNotFound) {
+	if findErr != nil {
+		if errors.Is(findErr, repository.ErrNotFound) {
+			return nil
+		}
 		return newError(ErrInternal, "disable badge: find row", findErr)
 	}
-
-	removed, err := s.Badges.DeleteByUserID(ctx, input.UserID)
-	if err != nil {
-		return newError(ErrInternal, "disable badge: delete row", err)
-	}
-	if !removed {
+	if existing.DisabledAt != nil {
+		// Already paused — the end state is unchanged.
 		return nil
 	}
 
-	if findErr == nil && existing != nil {
-		s.purgeRenderCache(existing.BadgeKey)
+	paused, err := s.Badges.Disable(ctx, input.UserID, s.Clock.Now())
+	if err != nil {
+		return newError(ErrInternal, "disable badge: pause row", err)
 	}
-	s.audit(ctx, input.UserID, input.ActorClientID, "badge_disable", "", true, 0)
+	if !paused {
+		// A concurrent disable won the pause; the end state is what we want.
+		return nil
+	}
+
+	s.purgeRenderCache(existing.BadgeKey)
+	s.audit(ctx, input.UserID, input.ActorClientID, "badge_disable", existing.BadgeKey, true, 0)
 	return nil
 }
 
@@ -150,6 +182,10 @@ func (s *Service) Status(ctx context.Context, userID int64) (*Status, error) {
 			return &Status{Enabled: false}, nil
 		}
 		return nil, newError(ErrInternal, "badge status: find row", err)
+	}
+	if badge.DisabledAt != nil {
+		// The row survives the pause, but the sharing state is off.
+		return &Status{Enabled: false}, nil
 	}
 	enabledAt := badge.EnabledAt
 	return &Status{Enabled: true, Key: badge.BadgeKey, EnabledAt: &enabledAt}, nil

@@ -25,7 +25,8 @@ func (f *fakeUserRepository) FindPublicCardByUserID(_ context.Context, userID in
 	return nil, repository.ErrNotFound
 }
 
-// fakeBadgeRepository mirrors the row semantics: one row per user.
+// fakeBadgeRepository mirrors the row semantics: one row per user, kept
+// across the sharing pause, keyed by both user id and badge key.
 type fakeBadgeRepository struct {
 	mu   sync.Mutex
 	rows map[int64]*model.Badge
@@ -60,7 +61,7 @@ func (f *fakeBadgeRepository) FindBadgeTarget(_ context.Context, badgeKey string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, row := range f.rows {
-		if row.BadgeKey == badgeKey {
+		if row.BadgeKey == badgeKey && row.DisabledAt == nil {
 			stored := *row
 			return &stored, nil
 		}
@@ -122,4 +123,27 @@ func newTestService(users *fakeUserRepository, badges *fakeBadgeRepository, audi
 
 func nicknameCard(nickname string) *repository.PublicCard {
 	return &repository.PublicCard{Nickname: &nickname}
+}
+
+func (f *fakeBadgeRepository) ReEnable(_ context.Context, userID int64, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row, ok := f.rows[userID]
+	if !ok || row.DisabledAt == nil {
+		return false, nil
+	}
+	row.DisabledAt = nil
+	row.EnabledAt = now
+	return true, nil
+}
+
+func (f *fakeBadgeRepository) Disable(_ context.Context, userID int64, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row, ok := f.rows[userID]
+	if !ok || row.DisabledAt != nil {
+		return false, nil
+	}
+	row.DisabledAt = &now
+	return true, nil
 }

@@ -137,7 +137,7 @@ func TestDisableIsIdempotentAndAuditsOnlyRealChanges(t *testing.T) {
 		t.Fatalf("audit entries = %d, want %d", got, enableEntries+1)
 	}
 
-	// The status is back to disabled...
+	// The status is back to disabled — the row survives, hidden.
 	status, err := service.Status(context.Background(), 7)
 	if err != nil {
 		t.Fatalf("Status error = %v", err)
@@ -146,12 +146,12 @@ func TestDisableIsIdempotentAndAuditsOnlyRealChanges(t *testing.T) {
 		t.Fatalf("status after disable = %#v, want disabled without key", status)
 	}
 
-	// ...and re-enabling mints a different key: a retired link never resurrects.
+	// ...and re-enabling restores the SAME key: toggling never rotates it, so
+	// a saved embed URL recovers as-is.
 	first, err := service.Enable(context.Background(), EnableInput{UserID: 7})
 	if err != nil {
 		t.Fatalf("re-enable error = %v", err)
 	}
-	// Enable once more after disable to compare keys within this test.
 	if err := service.Disable(context.Background(), DisableInput{UserID: 7}); err != nil {
 		t.Fatalf("Disable error = %v", err)
 	}
@@ -159,8 +159,46 @@ func TestDisableIsIdempotentAndAuditsOnlyRealChanges(t *testing.T) {
 	if secondErr != nil {
 		t.Fatalf("second re-enable error = %v", secondErr)
 	}
-	if first.Key == second.Key {
-		t.Fatalf("re-enabled key = %q, want a fresh key", first.Key)
+	if first.Key != second.Key {
+		t.Fatalf("re-enabled key = %q, want the original %q", second.Key, first.Key)
+	}
+}
+
+func TestReEnabledKeyServesTheBadgeAgain(t *testing.T) {
+	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{7: {Nickname: strPtr("张三")}}}
+	badges := newFakeBadgeRepository()
+	service := newTestService(users, badges, &fakeAuditRepository{})
+
+	first, err := service.Enable(context.Background(), EnableInput{UserID: 7})
+	if err != nil {
+		t.Fatalf("Enable error = %v", err)
+	}
+	disableErr := service.Disable(context.Background(), DisableInput{UserID: 7})
+	if disableErr != nil {
+		t.Fatalf("Disable error = %v", disableErr)
+	}
+
+	// While paused the key renders the closed card.
+	paused, err := service.Render(context.Background(), RenderInput{Key: first.Key, Size: "md", Theme: "auto"})
+	if err != nil {
+		t.Fatalf("paused Render error = %v", err)
+	}
+	if !paused.NotFound {
+		t.Fatalf("paused badge must render the closed card")
+	}
+
+	// The resume must also clear the cached 404 — the same request then
+	// serves the badge again under the same key.
+	_, resumeErr := service.Enable(context.Background(), EnableInput{UserID: 7})
+	if resumeErr != nil {
+		t.Fatalf("re-enable error = %v", resumeErr)
+	}
+	resumed, err := service.Render(context.Background(), RenderInput{Key: first.Key, Size: "md", Theme: "auto"})
+	if err != nil {
+		t.Fatalf("resumed Render error = %v", err)
+	}
+	if resumed.NotFound {
+		t.Fatalf("resumed badge still renders the closed card: cached 404 not purged")
 	}
 }
 
