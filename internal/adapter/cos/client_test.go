@@ -57,3 +57,49 @@ func TestNewHonorsEndpointAndBaseURL(t *testing.T) {
 		t.Fatalf("Bucket() = %q", got)
 	}
 }
+
+// TestPublicHostCoversEveryURLShape pins the host behind every configuration
+// shape PublicURL can mint. The badge avatar renderer pins its server-side
+// fetch to PublicHost, so a shape whose host is missed here silently degrades
+// every badge avatar to the initial mark (the fetch allowlist is fail-closed).
+func TestPublicHostCoversEveryURLShape(t *testing.T) {
+	const bucket = "sast-link-1250000000"
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "default region form",
+			cfg:  Config{Region: "ap-nanjing", Bucket: bucket, AccessKey: "AK", SecretKey: "SK"},
+			want: bucket + ".cos.ap-nanjing.myqcloud.com",
+		},
+		{
+			name: "endpoint form includes the bucket already",
+			cfg: Config{
+				Endpoint: "sast-link-1250000000.cos-internal.ap-nanjing.myqcloud.com",
+				Region:   "ap-nanjing", Bucket: bucket, AccessKey: "AK", SecretKey: "SK",
+			},
+			want: "sast-link-1250000000.cos-internal.ap-nanjing.myqcloud.com",
+		},
+		{
+			name: "cdn base url wins",
+			cfg: Config{
+				Region: "ap-nanjing", Bucket: bucket, AccessKey: "AK", SecretKey: "SK",
+				BaseURL: "https://cdn.sast.fun/",
+			},
+			want: "cdn.sast.fun",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := New(tc.cfg)
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			if got := client.PublicHost(); got != tc.want {
+				t.Fatalf("PublicHost() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

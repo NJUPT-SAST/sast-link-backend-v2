@@ -141,6 +141,21 @@ func (c *Client) PublicURL(key string) string {
 	return c.client.Object.GetObjectURL(key).String()
 }
 
+// PublicHost returns the host every URL this client mints resolves to — the
+// base URL's host when configured, the bucket access host otherwise. Callers
+// that fetch minted URLs server-side (the badge avatar renderer) pin their
+// fetch to this host instead of re-deriving the URL shape from configuration:
+// a second derivation drifts from PublicURL the first time one of them gains
+// a rule (the CDN prefix, the endpoint-includes-bucket convention, the
+// {bucket}.cos.{region} template).
+func (c *Client) PublicHost() string {
+	parsed, err := url.Parse(c.PublicURL("x"))
+	if err != nil || parsed.Hostname() == "" {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
 // Bucket returns the configured bucket name, for diagnostics.
 func (c *Client) Bucket() string {
 	return c.bucket

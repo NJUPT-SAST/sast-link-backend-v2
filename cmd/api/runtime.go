@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -136,34 +135,17 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	badgePublicLimiter := badgeredis.EndpointLimiter{
 		Limiter: internalredis.FixedWindowLimiter{Client: rdb, Keys: keys, Limit: cfg.RateLimitBadgePublicRPM, Window: cfg.RateLimitBadgePublicWindow},
 	}
-	// The badge renderer fetches avatars server-side; pin it to the hosts
-	// this deployment itself mints avatar URLs on — the optional CDN base URL
-	// and the bucket access host. Empty storage config leaves the allowlist
-	// empty, which disables remote fetching (initial-mark fallback).
-	var badgeAvatarHosts []string
-	if cfg.StorageBaseURL != "" {
-		if base, err := url.Parse(cfg.StorageBaseURL); err == nil && base.Hostname() != "" {
-			badgeAvatarHosts = append(badgeAvatarHosts, strings.ToLower(base.Hostname()))
-		}
-	}
-	if cfg.StorageEndpoint != "" && cfg.StorageBucket != "" {
-		ep := strings.TrimPrefix(strings.TrimPrefix(cfg.StorageEndpoint, "https://"), "http://")
-		badgeAvatarHosts = append(badgeAvatarHosts, strings.ToLower(cfg.StorageBucket+"."+ep))
-	}
-	badgeService := badge.Service{
-		Users:               users,
-		Badges:              repository.NewBadge(database),
-		Audits:              audit,
-		Clock:               auth.SystemClock,
-		InternalClientID:    cfg.InternalOAuthClientID,
-		ToggleLimiter:       badgeToggleLimiter,
-		PublicLimiter:       badgePublicLimiter,
-		AvatarHostAllowlist: badgeAvatarHosts,
-	}
 	// Object storage is optional: unconfigured, PUT /user/avatar answers 50002;
 	// when configured the COS client also carries fail-closed image review.
 	var avatarStore objectstore.ObjectStore
 	var avatarAuditor objectstore.AvatarAuditor
+	// The badge renderer fetches avatars server-side; pin it to the host the
+	// storage client itself mints URLs on (PublicHost walks the same
+	// PublicURL path the upload flow stores in profile.avatar, so the CDN
+	// prefix and the bucket-host conventions cannot drift apart). Empty
+	// storage config leaves the allowlist empty, which disables remote
+	// fetching (initial-mark fallback).
+	var badgeAvatarHosts []string
 	if cfg.StorageConfigured() {
 		storage, storageErr := cosadapter.New(cosadapter.Config{
 			Endpoint:  cfg.StorageEndpoint,
@@ -180,6 +162,19 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		if cfg.StorageAuditEnabled {
 			avatarAuditor = storage
 		}
+		if host := storage.PublicHost(); host != "" {
+			badgeAvatarHosts = append(badgeAvatarHosts, host)
+		}
+	}
+	badgeService := badge.Service{
+		Users:               users,
+		Badges:              repository.NewBadge(database),
+		Audits:              audit,
+		Clock:               auth.SystemClock,
+		InternalClientID:    cfg.InternalOAuthClientID,
+		ToggleLimiter:       badgeToggleLimiter,
+		PublicLimiter:       badgePublicLimiter,
+		AvatarHostAllowlist: badgeAvatarHosts,
 	}
 	emailer := mailer.New(mailer.Config{
 		Host:          cfg.SMTPHost,
