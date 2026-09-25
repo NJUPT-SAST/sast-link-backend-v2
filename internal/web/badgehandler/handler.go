@@ -129,10 +129,11 @@ const badgeCacheMaxAge = 300
 // badgeCSP narrows the global default-src 'self' policy for the SVG response.
 // The badge's palette rides an inline <style> element (the auto theme needs a
 // prefers-color-scheme media query, which only CSS can express), and the
-// global policy would block it, leaving a blank image. 'none' everywhere
-// else keeps the surface tighter than the API default: an SVG served as an
-// image has no scripts and loads nothing external by construction.
-const badgeCSP = "default-src 'none'; style-src 'unsafe-inline'"
+// avatar rides a data: URI (camo strips external references) — the global
+// policy would block both, leaving a blank card. 'none' everywhere else
+// keeps the surface tighter than the API default: an SVG served as an image
+// has no scripts and loads nothing beyond those two by construction.
+const badgeCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
 
 // ServeSVG answers GET /badge/:key(.svg) with the rendered badge. Unknown or
 // closed badges answer 404 with an SVG error card — an img embed must not

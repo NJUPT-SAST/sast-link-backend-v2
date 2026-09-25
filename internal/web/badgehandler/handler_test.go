@@ -309,7 +309,21 @@ func TestServeSVGNarrowsCSPForInlineStyles(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/badge/k.svg", nil))
 
-	if got := recorder.Header().Get("Content-Security-Policy"); got != "default-src 'none'; style-src 'unsafe-inline'" {
+	if got := recorder.Header().Get("Content-Security-Policy"); got != badgeCSP {
 		t.Fatalf("CSP = %q, want the narrowed badge policy", got)
+	}
+}
+
+func TestServeSVGAllowsDataImagesInCSP(t *testing.T) {
+	// The embedded avatar is a base64 data URI; without img-src data: the
+	// avatar would be stripped whenever the SVG is rendered as a document.
+	service := &fakeService{renderResult: &badge.RenderResult{SVG: []byte("<svg/>")}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/badge/k.svg", nil))
+
+	if got := recorder.Header().Get("Content-Security-Policy"); got != "default-src 'none'; style-src 'unsafe-inline'; img-src data:" {
+		t.Fatalf("CSP = %q, want the img-src data: allowance", got)
 	}
 }

@@ -1370,7 +1370,7 @@ paths:
     delete:
       summary: 关闭个人徽标
       description: |
-        删除徽标行。幂等：未开启时同样返回 200。关闭后所有已嵌入的链接立即失效
+        暂停分享（保留徽标行与 key）。幂等：未开启时同样返回 200。关闭后所有已嵌入的链接立即失效
         （渲染 404 错误卡片）。每用户限流 5 次/小时。
       operationId: disableBadge
       tags:

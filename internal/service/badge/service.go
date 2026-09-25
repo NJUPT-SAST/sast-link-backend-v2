@@ -42,6 +42,10 @@ type Service struct {
 	// PublicLimiter throttles the unauthenticated render endpoint per IP.
 	// Nil disables the check (tests).
 	PublicLimiter EndpointLimiter
+	// AvatarHostAllowlist pins the hosts a badge avatar may be fetched from
+	// (the deployment's own storage/CDN host). Empty disables remote avatar
+	// fetching entirely — badges render the initial mark.
+	AvatarHostAllowlist []string
 	// renderCache absorbs render bursts. Lazily initialized in Render so a
 	// service constructed without one (older tests) still works.
 	renderCacheOnce sync.Once

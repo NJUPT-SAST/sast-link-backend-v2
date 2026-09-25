@@ -1,8 +1,14 @@
 package badge
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/png"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -326,5 +332,58 @@ func TestReEnabledKeyServesTheBadgeAgain(t *testing.T) {
 	}
 	if resumed.NotFound {
 		t.Fatalf("resumed badge still renders the closed card: cached 404 not purged")
+	}
+}
+
+func TestRenderAvatarOriginAllowlist(t *testing.T) {
+	var img = image.NewRGBA(image.Rect(0, 0, 32, 32))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+	// TLS server: avatarURLAllowed only admits https origins.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	host := u.Hostname()
+
+	// Swap the shared fetch client for one that trusts the test certificate.
+	originalClient := avatarHTTPClient
+	avatarHTTPClient = server.Client()
+	t.Cleanup(func() { avatarHTTPClient = originalClient })
+
+	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{
+		7: {Nickname: strPtr("张三"), Avatar: strPtr(server.URL + "/a.png")},
+	}}
+	badges := newFakeBadgeRepository()
+	if err := badges.Create(context.Background(), &model.Badge{UserID: 7, BadgeKey: "origin-key"}); err != nil {
+		t.Fatalf("seed badge error = %v", err)
+	}
+
+	// A host on the allowlist: the avatar is fetched and embedded.
+	allowedService := newTestService(users, badges, &fakeAuditRepository{})
+	allowedService.AvatarHostAllowlist = []string{host}
+	allowed, err := allowedService.Render(context.Background(), RenderInput{Key: "origin-key", Theme: "light"})
+	if err != nil {
+		t.Fatalf("allowed-origin render error = %v", err)
+	}
+	if !strings.Contains(string(allowed.SVG), "data:image/png;base64,") {
+		t.Fatalf("allowed-origin avatar was not embedded")
+	}
+
+	// Off-allowlist (or empty allowlist): no fetch attempt, initial mark.
+	blockedService := newTestService(users, badges, &fakeAuditRepository{})
+	blockedService.AvatarHostAllowlist = nil
+	blocked, err := blockedService.Render(context.Background(), RenderInput{Key: "origin-key", Theme: "light"})
+	if err != nil {
+		t.Fatalf("blocked-origin render error = %v", err)
+	}
+	if strings.Contains(string(blocked.SVG), "data:image/png;base64,") {
+		t.Fatalf("non-allowlisted avatar was fetched")
+	}
+	if !strings.Contains(string(blocked.SVG), ">张</text>") {
+		t.Fatalf("initial-mark fallback missing: %s", blocked.SVG)
 	}
 }

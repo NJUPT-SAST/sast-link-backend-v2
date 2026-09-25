@@ -170,9 +170,21 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	}
 
 	data := buildCardData(card)
-	if card.Avatar != nil && *card.Avatar != "" {
+	avatarURL := ""
+	if card.Avatar != nil {
+		avatarURL = strings.TrimSpace(*card.Avatar)
+	}
+	if avatarURL != "" && !avatarURLAllowed(avatarURL, s.AvatarHostAllowlist) {
+		// Defense in depth: the URL was minted by this service's upload path,
+		// but the server-side fetch stays pinned to the configured storage
+		// origin. A non-allowlisted avatar renders the initial mark.
+		slog.WarnContext(ctx, "badge avatar origin not allowed, using initial mark",
+			"user_id", badge.UserID)
+		avatarURL = ""
+	}
+	if avatarURL != "" {
 		fetchCtx, cancel := context.WithTimeout(ctx, renderAvatarBudget)
-		dataURI, fetchErr := fetchAvatarThumbnail(fetchCtx, *card.Avatar)
+		dataURI, fetchErr := fetchAvatarThumbnail(fetchCtx, avatarURL)
 		cancel()
 		if fetchErr == nil {
 			data.AvatarDataURI = dataURI
