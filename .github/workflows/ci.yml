@@ -261,6 +261,13 @@ jobs:
           go build -v -o bin/api ./cmd/api
           go build -v -o bin/migrate ./cmd/migrate
 
+      # The generator is a nested module outside the main module's build/lint/test
+      # scope, so without this step a breakage only surfaces when someone
+      # re-runs it to emit the next mapping revision.
+      - name: Build pinyin generator (nested module)
+        working-directory: scripts/gen_pinyin_initials
+        run: go build ./...
+
   workflows:
     name: workflows
     runs-on: ubuntu-latest

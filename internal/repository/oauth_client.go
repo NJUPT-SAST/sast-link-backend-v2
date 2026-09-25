@@ -154,7 +154,7 @@ func (r *OAuthClientRepository) UpdateAndRevoke(
 		// admin:read to in the gap, and that client's authorization codes would then
 		// carry a capability scope to a host of the caller's choosing.
 		var locked model.OAuthClient
-		lockErr := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+		lockErr := transaction.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).
 			Where("id = ?", id).
 			Take(&locked).Error
 		if errors.Is(lockErr, gorm.ErrRecordNotFound) {
@@ -201,10 +201,9 @@ func (r *OAuthClientRepository) UpdateAndRevoke(
 // delivery (and auth-state cache invalidation), and revokedRefresh counts the
 // unrevoked refresh tokens cut.
 //
-// A token minted by a concurrent redeem/refresh that commits between the
-// revocation leg and the delete escapes the outbox and is then CASCADE-removed;
-// it can only outlive the delete if its auth-state blob was already cached — a
-// sub-millisecond race bounded by the blob TTL, accepted without a re-check.
+// Client validation, code deletion and family revocation share one lock order.
+// The final parent delete runs after in-flight rotations finish, so their new
+// tokens are included in the outbox before FK cascades remove metadata.
 //
 // Returns ErrNotFound when the client does not exist.
 func (r *OAuthClientRepository) DeleteAndRevoke(
@@ -218,6 +217,23 @@ func (r *OAuthClientRepository) DeleteAndRevoke(
 	var entries []model.BlacklistEntry
 	var revokedRefresh int64
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		// Block new grant/code writers and pair validation, but allow an
+		// already-running refresh's FK KEY SHARE to finish before family locks.
+		var client model.OAuthClient
+		if err := transaction.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).
+			Select("id").Where("id = ?", id).Take(&client).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if err := transaction.Where("client_id = ?", id).Delete(&model.OAuthGrant{}).Error; err != nil {
+			return err
+		}
+		if err := transaction.Where("client_id = ?", id).Delete(&model.OAuthAuthorization{}).Error; err != nil {
+			return err
+		}
+
 		revoked, refreshed, revokeErr := revokeAllByClientInTransaction(transaction, id, revokedAt)
 		if revokeErr != nil {
 			return revokeErr

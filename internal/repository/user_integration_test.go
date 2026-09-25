@@ -290,7 +290,7 @@ func TestUserRepositoryUpdatePasswordAndRevokeSessions(t *testing.T) {
 	createTokenPair(t, tokenRepository, "rotate-live", "family-rotate", 0, client.ID, user.ID)
 
 	revokedAt := time.Now().UTC().Truncate(time.Millisecond)
-	entries, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), user.ID, "new-hash", revokedAt)
+	entries, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), user.ID, "new-hash", revokedAt, repository.RevokeReasonPasswordChanged)
 	if err != nil {
 		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", err)
 	}
@@ -308,7 +308,7 @@ func TestUserRepositoryUpdatePasswordAndRevokeSessions(t *testing.T) {
 	if stored.TokenVersion != user.TokenVersion+1 {
 		t.Fatalf("token_version = %d, want %d", stored.TokenVersion, user.TokenVersion+1)
 	}
-	assertTokenRevokedAt(t, database, "rotate-live-access", "rotate-live-refresh", revokedAt)
+	assertTokenRevokedAtWithReason(t, database, "rotate-live-access", "rotate-live-refresh", revokedAt, repository.RevokeReasonPasswordChanged)
 
 	var outboxCount int64
 	if err := database.Model(&model.TokenBlacklistOutbox{}).
@@ -368,7 +368,7 @@ func TestUserRepositoryUpdatePasswordSkipsExpiredTokens(t *testing.T) {
 	// Move the revocation clock past the token's one-hour expiry. Truncate to
 	// milliseconds so the value survives PostgreSQL's microsecond precision.
 	revokedAt := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Millisecond)
-	entries, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), user.ID, "another-hash", revokedAt)
+	entries, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), user.ID, "another-hash", revokedAt, repository.RevokeReasonPasswordChanged)
 	if err != nil {
 		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", err)
 	}
@@ -599,20 +599,21 @@ func TestUserRepositoryUpdatePasswordBurnsAuthorizationCodes(t *testing.T) {
 	revokedAt := time.Now().UTC().Truncate(time.Millisecond)
 	if _, err := userRepository.UpdatePasswordAndRevokeSessions(
 		context.Background(), user.ID, "new-hash", revokedAt,
+		repository.RevokeReasonPasswordChanged,
 	); err != nil {
 		t.Fatalf("UpdatePasswordAndRevokeSessions() error = %v", err)
 	}
 
 	// The victim's code is spent, so redeeming it now reports a replay rather than
 	// minting a post-reset session.
-	if _, _, err := authorizations.Consume(context.Background(), "code-live", revokedAt); !errors.Is(
+	if _, _, err := authorizations.Consume(context.Background(), "code-live", revokedAt, client.ID); !errors.Is(
 		err, repository.ErrAuthorizationReplayed,
 	) {
 		t.Fatalf("Consume(code-live) error = %v, want ErrAuthorizationReplayed", err)
 	}
 	// Another user's pending authorization must survive: the reset is scoped to one
 	// account, and burning everyone's codes would log out unrelated users mid-flow.
-	if _, _, err := authorizations.Consume(context.Background(), "code-other-user", revokedAt); err != nil {
+	if _, _, err := authorizations.Consume(context.Background(), "code-other-user", revokedAt, client.ID); err != nil {
 		t.Fatalf("Consume(code-other-user) error = %v, want the code to survive", err)
 	}
 }
@@ -623,7 +624,7 @@ func TestUserRepositoryUpdatePasswordAndRevokeSessionsReportsMissingUser(t *test
 	database := setupDatabase(t)
 	userRepository := repository.NewUser(database)
 
-	_, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), 999999, "new-hash", time.Now())
+	_, err := userRepository.UpdatePasswordAndRevokeSessions(context.Background(), 999999, "new-hash", time.Now(), repository.RevokeReasonPasswordChanged)
 	if !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("UpdatePasswordAndRevokeSessions(missing) error = %v, want ErrNotFound", err)
 	}

@@ -49,7 +49,7 @@ func (s Service) RevokeGrant(ctx context.Context, userID, clientID int64, actorC
 	if s.Tokens == nil {
 		return newError(ErrInternal, "令牌仓储未配置", nil)
 	}
-	// The revoke runs a family-revocation transaction plus a consent-history delete,
+	// The revoke atomically cuts families, codes and consent history,
 	// so it gets its own per-user budget that the read path cannot starve.
 	if err := s.checkGrantsRevokeLimit(ctx, userID); err != nil {
 		return err
@@ -60,12 +60,6 @@ func (s Service) RevokeGrant(ctx context.Context, userID, clientID int64, actorC
 		return err
 	}
 	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
-	// Drop the consent history too, so the application leaves the authorized list.
-	if s.Authorizations != nil {
-		if err := s.Authorizations.DeleteByUserClient(ctx, userID, clientID); err != nil {
-			return err
-		}
-	}
 	// resource_id is the client whose access was cut; actor_client_id is the
 	// credential that authorized the cut, with an empty azp staying NULL.
 	clientIDStr := strconv.FormatInt(clientID, 10)

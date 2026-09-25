@@ -29,7 +29,7 @@ const (
 	CodeRegisterTicketInvalid = 40103 // Register-Ticket 无效或已过期
 	CodeBindTicketInvalid     = 40104 // Bind-Ticket 无效或已过期
 	CodePasswordInvalid       = 40105 // 密码错误
-	CodeUnknownIdentifier     = 40106 // 登录邮箱不存在
+	CodeUnknownIdentifier     = 40106 // 该邮箱尚未注册
 	CodeLoginCodeInvalid      = 40107 // login_code 无效或已过期
 	// CodeConcurrentRefresh reports a benign concurrent refresh: the presented
 	// refresh token was already rotated by a sibling request within the 30s grace
@@ -128,7 +128,7 @@ var Messages = map[int]string{
 	CodeRegisterTicketInvalid: "Register-Ticket 无效或已过期",
 	CodeBindTicketInvalid:     "Bind-Ticket 无效或已过期",
 	CodePasswordInvalid:       "密码错误",
-	CodeUnknownIdentifier:     "登录邮箱不存在",
+	CodeUnknownIdentifier:     "该邮箱尚未注册",
 	CodeLoginCodeInvalid:      "login_code 无效或已过期",
 	CodeConcurrentRefresh:     "刷新请求冲突，请重试",
 

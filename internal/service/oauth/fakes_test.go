@@ -13,6 +13,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 type fixedClock struct{ value time.Time }
@@ -63,13 +64,26 @@ type fakeAuthorizations struct {
 	createErr          error
 	consumeAs          error
 	consumeUserVersion int64
+	// grantScopes mirrors oauth_grants: upserted by CreateWithGrant exactly like
+	// the repository's transaction, so a silent-consent test can build a standing
+	// grant by running one interactive consent first.
+	grantScopes  map[[2]int64]model.StringArray
+	findGrantErr error
+	// deleteGrantsOnCreate mimics a revoke committing between the silent path's
+	// grant check and its write, which is what the update-only writer exists to
+	// survive: the next CreateWithExistingGrant finds nothing and mints nothing.
+	deleteGrantsOnCreate bool
 }
 
 func newFakeAuthorizations() *fakeAuthorizations {
 	// consumeUserVersion defaults to activeUser().TokenVersion (2) so the
 	// redemption's snapshot check passes for the stock user; tests that drive a
 	// mismatch set consumeUserVersion explicitly.
-	return &fakeAuthorizations{byCode: map[string]*model.OAuthAuthorization{}, consumeUserVersion: 2}
+	return &fakeAuthorizations{
+		byCode:             map[string]*model.OAuthAuthorization{},
+		grantScopes:        map[[2]int64]model.StringArray{},
+		consumeUserVersion: 2,
+	}
 }
 
 func (f *fakeAuthorizations) CreateWithGrant(_ context.Context, authorization *model.OAuthAuthorization) error {
@@ -81,19 +95,55 @@ func (f *fakeAuthorizations) CreateWithGrant(_ context.Context, authorization *m
 	stored := *authorization
 	f.byCode[authorization.Code] = &stored
 	f.created = append(f.created, authorization)
+	key := [2]int64{authorization.UserID, authorization.ClientID}
+	f.grantScopes[key] = authorization.Scopes
 	return nil
+}
+
+// CreateWithExistingGrant mirrors the repository's update-only writer: it
+// refreshes an existing grant and stores the code, and reports ErrNotFound
+// without storing anything when there is no grant to update.
+func (f *fakeAuthorizations) CreateWithExistingGrant(_ context.Context, authorization *model.OAuthAuthorization) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	key := [2]int64{authorization.UserID, authorization.ClientID}
+	if f.deleteGrantsOnCreate {
+		delete(f.grantScopes, key)
+		f.deleteGrantsOnCreate = false
+	}
+	if covered, err := scope.ContainsAll(f.grantScopes[key], authorization.Scopes); err != nil || !covered {
+		return repository.ErrNotFound
+	}
+	f.grantScopes[key] = authorization.Scopes
+	stored := *authorization
+	f.byCode[authorization.Code] = &stored
+	f.created = append(f.created, authorization)
+	return nil
+}
+
+func (f *fakeAuthorizations) FindGrantScopes(_ context.Context, userID, clientID int64) (model.StringArray, bool, error) {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	if f.findGrantErr != nil {
+		return nil, false, f.findGrantErr
+	}
+	scopes, ok := f.grantScopes[[2]int64{userID, clientID}]
+	return scopes, ok, nil
 }
 
 // Consume mirrors the repository's single-use contract, including returning the
 // record alongside ErrAuthorizationReplayed so the caller can read its family.
-func (f *fakeAuthorizations) Consume(_ context.Context, code string, now time.Time) (*model.OAuthAuthorization, int64, error) {
+func (f *fakeAuthorizations) Consume(_ context.Context, code string, now time.Time, clientID int64) (*model.OAuthAuthorization, int64, error) {
 	if f.consumeAs != nil {
 		return nil, 0, f.consumeAs
 	}
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
 	stored, ok := f.byCode[code]
-	if !ok {
+	if !ok || stored.ClientID != clientID {
 		return nil, 0, repository.ErrNotFound
 	}
 	if stored.IsUsed {
@@ -109,10 +159,6 @@ func (f *fakeAuthorizations) Consume(_ context.Context, code string, now time.Ti
 
 func (f *fakeAuthorizations) ListGrantsByUser(_ context.Context, _ int64) ([]repository.OAuthGrant, error) {
 	return nil, nil
-}
-
-func (f *fakeAuthorizations) DeleteByUserClient(_ context.Context, _, _ int64) error {
-	return nil
 }
 
 func (f *fakeTokens) RevokeUserClientTokens(_ context.Context, userID, clientID int64, revokedAt time.Time) ([]model.BlacklistEntry, error) {
@@ -198,7 +244,7 @@ func (f *fakeTokens) CreatePairWithAudit(_ context.Context, access *model.OAuthA
 // CreatePairWithUserAndClientLock mirrors the repository's user-and-client-lock
 // write: it refuses when the stored version differs or the client check fails,
 // and otherwise records like CreatePairWithAudit.
-func (f *fakeTokens) CreatePairWithUserAndClientLock(_ context.Context, _ int64, _ int64, expected int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error {
+func (f *fakeTokens) CreatePairWithUserAndClientLock(_ context.Context, _ int64, _ int64, expected int64, _ int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error {
 	if f.userVersionErr != nil {
 		return f.userVersionErr
 	}

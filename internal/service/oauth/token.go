@@ -67,7 +67,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, newError(ErrInvalidRequest, "code_verifier 不能为空", nil)
 	}
 
-	authorization, consumedVersion, consumeErr := s.Authorizations.Consume(ctx, code, s.now())
+	authorization, consumedVersion, consumeErr := s.Authorizations.Consume(ctx, code, s.now(), client.ID)
 	switch {
 	case errors.Is(consumeErr, repository.ErrNotFound):
 		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
@@ -140,6 +140,15 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if scopeErr := checkScopeForClient(client, []string(authorization.Scopes)); scopeErr != nil {
 		return nil, newError(ErrInvalidScope, "scope 已不在客户端注册范围内，请重新发起授权", scopeErr)
 	}
+	// The user's role is re-checked for the same reason, the user-side twin of the
+	// registration re-check: a code may outlive a demotion that did not move
+	// token_version (none exists today — a role change always bumps it — but the
+	// token_version guard and this predicate answer different questions), and a
+	// redemption that cannot pass the role gate should not mint the pair at all.
+	// Like the scope re-check, the consume above already burned the code.
+	if scopeErr := checkScopeForUser(user, []string(authorization.Scopes)); scopeErr != nil {
+		return nil, newError(ErrInvalidScope, "admin scope 不可授予当前用户角色，请重新发起授权", scopeErr)
+	}
 
 	scopes := []string(authorization.Scopes)
 	familyID := ""
@@ -187,7 +196,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 			codeAudit = nil
 		}
 	}
-	if createErr := s.Tokens.CreatePairWithUserAndClientLock(ctx, user.ID, client.ID, consumedVersion, pair.Access, pair.Refresh, codeAudit); createErr != nil {
+	if createErr := s.Tokens.CreatePairWithUserAndClientLock(ctx, user.ID, client.ID, consumedVersion, authorization.ID, pair.Access, pair.Refresh, codeAudit); createErr != nil {
 		if errors.Is(createErr, repository.ErrUserStateChanged) || errors.Is(createErr, repository.ErrClientInactive) ||
 			errors.Is(createErr, repository.ErrClientScopeChanged) || errors.Is(createErr, repository.ErrNotFound) {
 			// A revocation landed between the consume and this write: the pair must not
@@ -253,6 +262,10 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 			errors.New("refresh token belongs to a different client"))
 	}
 	if current.RevokedAt != nil {
+		if current.RevokedReason != nil && *current.RevokedReason != "" {
+			s.auditSessionRevoked(ctx, current.UserID, client.ClientID, input, *current.RevokedReason)
+			return nil, newError(ErrInvalidGrant, "refresh_token 无效", nil)
+		}
 		// The token was rotated or cancelled by another request in this family: within
 		// the grace window that is a benign concurrent refresh that must not re-revoke,
 		// or it would log out the winner; beyond it, a true replay whose family is cut.
@@ -350,6 +363,11 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		s.capabilityRefreshLifetime(scopes),
 	)
 	if rotateErr != nil {
+		var revoked *repository.SessionRevokedError
+		if errors.As(rotateErr, &revoked) {
+			s.auditSessionRevoked(ctx, user.ID, client.ClientID, input, revoked.Reason)
+			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
+		}
 		if errors.Is(rotateErr, repository.ErrTokenReplayWithinGrace) {
 			// The rotation transaction preserved the family for a benign concurrent
 			// refresh; re-revoking would log out the winner. Audited as
@@ -506,5 +524,14 @@ func (s Service) auditToken(
 		"client_id":  clientID,
 		"grant_type": grantType,
 		"outcome":    outcome,
+	})
+}
+
+// auditSessionRevoked preserves the durable administrative cause across both
+// the pre-read and locked rotation paths without issuing another revocation.
+func (s Service) auditSessionRevoked(ctx context.Context, userID int64, clientID string, input TokenInput, reason string) {
+	s.audit(ctx, &userID, "oauth_token", &clientID, false, errcode.CodeAccessTokenInvalid, input.ClientIP, input.UserAgent, map[string]any{
+		"client_id": clientID, "grant_type": grantTypeRefreshToken,
+		"outcome": "session_revoked", "revoked_reason": reason,
 	})
 }

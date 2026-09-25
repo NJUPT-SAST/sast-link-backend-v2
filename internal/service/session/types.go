@@ -113,8 +113,10 @@ type UserRepository interface {
 	CreateRegistrationWithIdentity(ctx context.Context, user *model.User, profile *model.Profile, identity *model.Identity, pairFactory repository.TokenPairFactory) error
 	// UpdatePasswordAndRevokeSessions rewrites the password, bumps token_version
 	// and revokes every live token of the user atomically, returning the
-	// access-token entries still pending revocation delivery.
-	UpdatePasswordAndRevokeSessions(ctx context.Context, userID int64, passwordHash string, revokedAt time.Time) ([]model.BlacklistEntry, error)
+	// access-token entries still pending revocation delivery. revokedReason (a
+	// repository RevokeReason* value) lands on the revoked refresh tokens so the
+	// next refresh audits session_revoked rather than a replay.
+	UpdatePasswordAndRevokeSessions(ctx context.Context, userID int64, passwordHash string, revokedAt time.Time, revokedReason string) ([]model.BlacklistEntry, error)
 	// UpdatePasswordHash rewrites only the stored hash for rehash-on-login after a
 	// KDF parameter change; it deliberately does not revoke sessions or bump
 	// token_version, which password *changes* do through

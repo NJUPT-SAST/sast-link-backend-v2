@@ -268,8 +268,11 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
           description: >-
-            未认证（401xx）。登录失败统一返回 40105（邮箱或密码错误）：邮箱不存在、
-            密码错误与账号已注销不区分（避免枚举已注册邮箱）。
+            未认证（401xx）。邮箱未注册返回 40106（该邮箱尚未注册），密码错误
+            返回 40105；不存在邮箱的尝试同样计入失败锁定。
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 账号已注销（40301）
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: 登录限流或失败锁定（42900）
@@ -431,7 +434,9 @@ paths:
     post:
       summary: 发送重置密码验证码
       deprecated: false
-      description: 对格式合法且未触发限流的邮箱统一受理。响应不表示账号存在，也不保证邮件已经送达；服务端通过有界内存队列异步处理。
+      description: >-
+        邮箱未注册时返回 40106（该邮箱尚未注册）；存在的账号异步受理，响应只
+        表示请求已入队，不保证邮件已经送达。服务端通过有界内存队列异步处理。
       operationId: authSendForgotPasswordCode
       tags:
         - Auth
@@ -452,7 +457,7 @@ paths:
         required: true
       responses:
         "200":
-          description: 请求已受理；不表示账号存在或邮件已送达
+          description: 请求已受理；不表示邮件已送达
           content:
             application/json:
               schema:
@@ -461,6 +466,9 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
           description: 参数错误（400xx）
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 该邮箱尚未注册（40106）
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: 频率限制（429xx）
@@ -1468,9 +1476,17 @@ paths:
       description: |
         授权流程的第一段，**无需认证**——从第三方跳转来的浏览器不携带 Authorization header。
 
-        校验参数后将请求暂存 10 分钟，302 重定向至前端授权页
-        `{OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..&expires_in=600`。
-        用户决定由第二段 `POST /oauth/authorize/consent` 提交。
+        校验参数后将请求暂存（默认 20 分钟，OAUTH_AUTHORIZE_REQUEST_TTL），按浏览器携带的
+        凭证从三种出口之一 302：
+
+        - 静默发码：浏览器已登录 SAST Link（Authorization header 或 httpOnly sl_session
+          cookie，两者都只做只读校验），且该用户对该 client 的既有授权覆盖本次请求 scope、
+          prompt 未要求重新确认时，直接回 redirect_uri，携带 code 与 state，不渲染授权页。
+        - 授权页：`{OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..&expires_in=1200`，
+          用户决定由第二段 `POST /oauth/authorize/consent` 提交。
+        - 错误形态：静默尝试已消费暂存后才失败时（客户端停用、回调被摘、scope 收窄、
+          账号注销、写库失败），302 至授权页并携带 error / error_description，
+          **不携带 request_id**——该请求已不存在，授权页无法加载它。
 
         使用 PKCE-S256，仅接受 code_challenge_method=S256。
         redirect_uri 必须与客户端注册值精确字符串相等，不做前缀匹配。
@@ -1520,6 +1536,11 @@ paths:
             `admin:read` / `admin:write` 仅 `third_party`（机密）客户端可请求；
             `user:read` / `user:write` 无客户端类型约束，任何客户端皆可请求——`/user/*`
             每个端点只操作 token 主体本人的记录。
+
+            admin scope 另受授权者角色约束，与 `/admin/*` 角色门对齐：`admin:read`
+            需当前用户为 admin 或 lecturer，`admin:write` 需 admin。角色不足以持有
+            该 scope 的用户不会看到含它的同意页（consent-info 预检拒绝），同意提交
+            与授权码兑换同样拒绝（`invalid_scope`）。
           required: true
           schema:
             type: string
@@ -1549,11 +1570,21 @@ paths:
           required: false
           schema:
             type: string
+        - name: prompt
+          in: query
+          description: |
+            OIDC prompt，空格分隔。本服务只识别 `login` 与 `consent`：二者否决静默发码，
+            强制回到授权页。其余取值（含 `none`）被忽略，`prompt=none` 语义不受支持。原始参数不得超过 255 字节。
+          required: false
+          schema:
+            type: string
       responses:
         "302":
           description: >-
-            成功时重定向至前端授权页，携带 request_id / client_name / scope /
-            expires_in（暂存剩余秒数，供页面显示截止时间）。
+            静默发码时重定向至客户端 redirect_uri，携带 code 与 state。
+            否则重定向至前端授权页，携带 request_id / client_name / scope /
+            expires_in（暂存剩余秒数，供页面显示截止时间）；静默尝试已消费暂存
+            后才失败时改带 error / error_description，不带 request_id。
             错误时按可重定向性重定向至授权页或客户端 redirect_uri，携带
             error / error_description。除参数校验类错误外，限流与 Redis 暂存失败
             会以 temporarily_unavailable、查库失败会以 server_error 重定向回授权页。
@@ -1575,6 +1606,10 @@ paths:
         同意页不应信任 consent URL 上的 client_name / scope —— 攻击者可构造
         指向同意页的链接，带自己的合法 request_id 却伪造可信应用名，诱导受害者
         同意给恶意应用 —— 应改从本端点读取。peek 不消费暂存，查看页面不烧请求。
+
+        暂存 scopes 含 admin scope 时，当前用户角色不足以持有（admin:read 需
+        admin/lecturer，admin:write 需 admin）则返回 40000——含该 scope 的同意页
+        对这类用户不渲染，这是普通用户不会看到 admin scope 授权页的保证。
 
         本端点按用户限流（RATE_LIMIT_CONSENT_INFO_RPM，默认 60/min），而非 IP：
         校园共享一个 NAT 出口 IP，按 IP 限流会被单个学生耗尽全校配额。
@@ -2243,10 +2278,11 @@ paths:
         - name: keyword
           in: query
           description: |
-            搜索关键词，对姓名/学号/登录邮箱/QQ 号/昵称（profile）/博客链接/
-            GitHub 链接做大小写不敏感的模糊匹配。手机号仅 admin 角色参与匹配——
-            搜索谓词与响应裁剪同边界（"admin or hidden"），lecturer 的关键词
-            不会命中手机号。
+            搜索关键词，对账号 ID/姓名/学号/登录邮箱/QQ 号/昵称（profile）/
+            博客链接/GitHub 链接做大小写不敏感的模糊匹配，另匹配姓名拼音
+            首字母（如 lhq 命中刘华强，多音字取默认读音）。手机号仅
+            admin 角色参与匹配——搜索谓词与响应裁剪同边界（"admin or
+            hidden"），lecturer 的关键词不会命中手机号。
             `%`、`_`、`\` 按字面量处理，不作为通配符。
           required: false
           schema:
@@ -5559,7 +5595,7 @@ components:
               summary: wrong_password
               value:
                 code: 40105
-                message: 邮箱或密码错误
+                message: 密码错误
                 data: null
             token_expired:
               summary: token_expired

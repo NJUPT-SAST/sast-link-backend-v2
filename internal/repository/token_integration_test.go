@@ -208,6 +208,17 @@ func TestTokenRepositoryRotateRefreshToken(t *testing.T) {
 	assertAccessTokenUnrevoked(t, database, "rotate-current-access")
 	assertRefreshTokenRevokedBetween(t, database, "rotate-current-refresh", before, after)
 	assertTokenUnrevoked(t, database, "rotate-new-access", "rotate-new-refresh")
+	// Rotation revokes the presented token without a reason (V018): NULL keeps
+	// meaning "rotation-family revocation" on the refresh leg, so a later
+	// presentment is judged by the grace/replay rules rather than read as an
+	// administrative session_revoked.
+	var rotated model.OAuthRefreshToken
+	if err := database.Where("token_hash = ?", "rotate-current-refresh").First(&rotated).Error; err != nil {
+		t.Fatalf("read rotated refresh: %v", err)
+	}
+	if rotated.RevokedReason != nil {
+		t.Fatalf("rotated-out token revoked_reason = %q, want NULL (rotation never records one)", *rotated.RevokedReason)
+	}
 }
 
 // A capability family's total life is capped from its origin: a rotation with a
@@ -562,7 +573,13 @@ func TestTokenRepositoryCreatePairWithUserAndClientLock(t *testing.T) {
 	t.Run("matching version creates the pair", func(t *testing.T) {
 		access := accessToken("pair-user-lock-access", client.ID, user.ID, ptr("pair-user-lock-family"))
 		refresh := refreshToken("pair-user-lock-refresh", "pair-user-lock-family", 0, client.ID, user.ID)
-		if err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID, version, access, refresh, nil); err != nil {
+		authorization := testAuthorization("pair-user-lock-code", client.ID, user.ID, time.Now().Add(time.Hour))
+		authorization.FamilyID = access.FamilyID
+		authorization.IsUsed = true
+		if err := repository.NewOAuthAuthorization(database).CreateWithGrant(context.Background(), authorization); err != nil {
+			t.Fatal(err)
+		}
+		if err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID, version, authorization.ID, access, refresh, nil); err != nil {
 			t.Fatalf("CreatePairWithUserAndClientLock() error = %v", err)
 		}
 		if access.ID == 0 || refresh.ID == 0 {
@@ -573,7 +590,7 @@ func TestTokenRepositoryCreatePairWithUserAndClientLock(t *testing.T) {
 	t.Run("stale version refuses the pair", func(t *testing.T) {
 		access := accessToken("pair-user-lock-stale-access", client.ID, user.ID, ptr("pair-user-lock-stale-family"))
 		refresh := refreshToken("pair-user-lock-stale-refresh", "pair-user-lock-stale-family", 0, client.ID, user.ID)
-		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID, version+1, access, refresh, nil)
+		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID, version+1, 0, access, refresh, nil)
 		if !errors.Is(err, repository.ErrUserStateChanged) {
 			t.Fatalf("CreatePairWithUserAndClientLock(stale) error = %v, want ErrUserStateChanged", err)
 		}
@@ -583,7 +600,7 @@ func TestTokenRepositoryCreatePairWithUserAndClientLock(t *testing.T) {
 	t.Run("missing user refuses the pair", func(t *testing.T) {
 		access := accessToken("pair-user-lock-missing-access", client.ID, user.ID, ptr("pair-user-lock-missing-family"))
 		refresh := refreshToken("pair-user-lock-missing-refresh", "pair-user-lock-missing-family", 0, client.ID, user.ID)
-		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID+999999, client.ID, version, access, refresh, nil)
+		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID+999999, client.ID, version, 0, access, refresh, nil)
 		if !errors.Is(err, repository.ErrNotFound) {
 			t.Fatalf("CreatePairWithUserAndClientLock(missing user) error = %v, want ErrNotFound", err)
 		}
@@ -601,7 +618,7 @@ func TestTokenRepositoryCreatePairWithUserAndClientLock(t *testing.T) {
 		})
 		access := accessToken("pair-client-inactive-access", client.ID, user.ID, ptr("pair-client-inactive-family"))
 		refresh := refreshToken("pair-client-inactive-refresh", "pair-client-inactive-family", 0, client.ID, user.ID)
-		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID, version, access, refresh, nil)
+		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID, version, 0, access, refresh, nil)
 		if !errors.Is(err, repository.ErrClientInactive) {
 			t.Fatalf("CreatePairWithUserAndClientLock(inactive client) error = %v, want ErrClientInactive", err)
 		}
@@ -623,11 +640,12 @@ func TestTokenRepositoryCreatePairWithUserAndClientLock(t *testing.T) {
 		access := accessToken("pair-client-narrowed-access", narrowed.ID, user.ID, ptr("pair-client-narrowed-family"))
 		access.Scopes = model.StringArray{"openid", "profile"}
 		refresh := refreshToken("pair-client-narrowed-refresh", "pair-client-narrowed-family", 0, narrowed.ID, user.ID)
+		refresh.Scopes = access.Scopes
 		if err := database.Model(&model.OAuthClient{}).Where("id = ?", narrowed.ID).
 			Update("scopes", model.StringArray{"openid"}).Error; err != nil {
 			t.Fatalf("narrow client scopes: %v", err)
 		}
-		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, narrowed.ID, version, access, refresh, nil)
+		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, narrowed.ID, version, 0, access, refresh, nil)
 		if !errors.Is(err, repository.ErrClientScopeChanged) {
 			t.Fatalf("CreatePairWithUserAndClientLock(narrowed scope) error = %v, want ErrClientScopeChanged", err)
 		}
@@ -637,7 +655,7 @@ func TestTokenRepositoryCreatePairWithUserAndClientLock(t *testing.T) {
 	t.Run("missing client refuses the pair", func(t *testing.T) {
 		access := accessToken("pair-client-missing-access", client.ID, user.ID, ptr("pair-client-missing-family"))
 		refresh := refreshToken("pair-client-missing-refresh", "pair-client-missing-family", 0, client.ID, user.ID)
-		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID+999999, version, access, refresh, nil)
+		err := tokenRepository.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID+999999, version, 0, access, refresh, nil)
 		if !errors.Is(err, repository.ErrNotFound) {
 			t.Fatalf("CreatePairWithUserAndClientLock(missing client) error = %v, want ErrNotFound", err)
 		}
@@ -730,4 +748,28 @@ func TestTokenRepositoryRevokeUserClientTokensIsIdempotent(t *testing.T) {
 	if queued != 1 {
 		t.Fatalf("outbox rows = %d, want 1 (the repeat must not re-enqueue)", queued)
 	}
+}
+
+func TestRotateAdministrativelyRevokedTokenSkipsGrace(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "rotation-admin@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	tokens := repository.NewToken(database)
+	family := "administratively-revoked-family"
+	currentAccess := accessToken("admin-revoked-access", client.ID, user.ID, &family)
+	currentRefresh := refreshToken("admin-revoked-refresh", family, 0, client.ID, user.ID)
+	if err := tokens.CreatePair(context.Background(), currentAccess, currentRefresh); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tokens.RevokeAllByUser(context.Background(), user.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	nextAccess := accessToken("admin-revoked-next-access", client.ID, user.ID, &family)
+	nextRefresh := refreshToken("admin-revoked-next-refresh", family, 1, client.ID, user.ID)
+	_, err := tokens.RotateRefreshToken(context.Background(), family, currentRefresh.TokenHash, nextAccess, nextRefresh)
+	var revoked *repository.SessionRevokedError
+	if !errors.As(err, &revoked) || revoked.Reason != repository.RevokeReasonPasswordChanged {
+		t.Fatalf("rotation error = %v", err)
+	}
+	assertTokenPairAbsent(t, database, nextAccess.TokenID, nextRefresh.TokenHash)
 }

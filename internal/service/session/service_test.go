@@ -74,7 +74,10 @@ type fakeUsers struct {
 	lookups []string
 	// tokens lets the fake mirror the repository's atomic
 	// password-update-plus-revocation transaction.
-	tokens            *fakeTokens
+	tokens *fakeTokens
+	// lastRevokeReason records the reason the service handed to
+	// UpdatePasswordAndRevokeSessions, so tests can pin the audit-side cause.
+	lastRevokeReason  string
 	updatePasswordErr error
 	passwordUpdates   []int64
 	// rehashUpdates records UpdatePasswordHash calls, which the repository makes
@@ -272,6 +275,7 @@ func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
 	userID int64,
 	passwordHash string,
 	revokedAt time.Time,
+	revokedReason string,
 ) ([]model.BlacklistEntry, error) {
 	if f.updatePasswordErr != nil {
 		return nil, f.updatePasswordErr
@@ -283,6 +287,7 @@ func (f *fakeUsers) UpdatePasswordAndRevokeSessions(
 	user.PasswordHash = passwordHash
 	user.TokenVersion++
 	f.passwordUpdates = append(f.passwordUpdates, userID)
+	f.lastRevokeReason = revokedReason
 	if f.tokens == nil {
 		return nil, nil
 	}
@@ -993,9 +998,9 @@ func TestLoginDoesNotRehashWhenParametersMatch(t *testing.T) {
 func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 	service, _, _, _, audit, failures := newTestService(t)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	// An unknown identifier answers exactly like a wrong password (audit-fix #7):
-	// distinguishing them on the wire hands anyone a registered-email oracle.
-	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
+	// An unknown identifier answers 40106 but still counts toward lockout:
+	// enumeration is answered explicitly, yet never unthrottled.
+	assertKind(t, err, KindUnknownIdentifier, errcode.CodeUnknownIdentifier)
 	if len(failures.failures) != 1 || failures.failures[0] != "identifier:missing@sast.fun" {
 		t.Fatalf("failures = %#v, want unknown bucket counted", failures.failures)
 	}
@@ -1005,7 +1010,7 @@ func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 	if len(failures.failures) != 2 || failures.failures[1] != "user:42" {
 		t.Fatalf("failures = %#v, want known user bucket", failures.failures)
 	}
-	// One audit code for both legs; the reason field keeps the distinction.
+	// Each leg audits its own code; the reason field keeps the finer shape.
 	if got := lastErrCode(audit); got != errcode.CodePasswordInvalid {
 		t.Fatalf("audit err code = %d, want %d", got, errcode.CodePasswordInvalid)
 	}
@@ -1014,12 +1019,12 @@ func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 func TestServiceErrorsMatchSentinels(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
 
-	// An unknown identifier now answers with the login-failed sentinel (audit-fix
-	// #7): the wire must not distinguish the two, or a login attempt becomes a
-	// registered-email oracle.
+	// An unknown identifier answers with the unknown-identifier sentinel: the
+	// wire distinguishes it from a wrong password, and the attempt still
+	// counts toward lockout.
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	if !errors.Is(err, ErrLoginFailed) {
-		t.Fatalf("unknown identifier: errors.Is(err, ErrLoginFailed) = false, err=%v", err)
+	if !errors.Is(err, ErrUnknownIdentifier) {
+		t.Fatalf("unknown identifier: errors.Is(err, ErrUnknownIdentifier) = false, err=%v", err)
 	}
 
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
@@ -1107,9 +1112,9 @@ func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
 	service, _, clients, _, _, failures := newTestService(t)
 	service.Users.(*fakeUsers).byLogin["deleted@sast.fun"] = testUser(t, 99, "deleted@sast.fun", model.UserStateDeleted)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "deleted@sast.fun", Password: "secret"})
-	// A deleted account answers like any other failed login, so probing cannot
-	// tell "never registered" from "closed" (audit-fix #7 follow-up).
-	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
+	// A closed account answers 40301 like the other account-level paths, and
+	// still spends no lockout budget.
+	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
 	if len(failures.failures) != 0 {
 		t.Fatalf("deleted login failures = %#v, want no credential failure count", failures.failures)
 	}
@@ -1198,6 +1203,123 @@ func TestRefreshRotatesSameFamilyAndScopes(t *testing.T) {
 	}
 	if ok, err := scope.Equal([]string(tokens.rotatedRefresh.Scopes), []string(tokens.createdRefresh.Scopes)); err != nil || !ok {
 		t.Fatalf("rotated scopes = %#v current = %#v err=%v", tokens.rotatedRefresh.Scopes, tokens.createdRefresh.Scopes, err)
+	}
+}
+
+// The silent authorize path identifies a browser by its session cookie without
+// doing anything to it. That "without" is the whole contract: this runs on an
+// unauthenticated, cross-site-reachable GET, so a rotation here would let a
+// plain navigation churn a victim's family and displace a device record.
+func TestIdentifyByRefreshTokenReadsWithoutWriting(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	devices := &fakeDevices{}
+	service = withDevices(service, devices)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login returned error: %v", err)
+	}
+	audit.entries = nil
+	// The login above registers a device of its own; only what the identify adds
+	// is under test.
+	outboxRows := len(tokens.auditEntries)
+	deviceWrites := len(devices.registrations) + len(devices.touches) + len(devices.removed)
+
+	userID, err := service.IdentifyByRefreshToken(context.Background(), login.RefreshToken)
+	if err != nil {
+		t.Fatalf("IdentifyByRefreshToken returned error: %v", err)
+	}
+	if userID != 42 {
+		t.Fatalf("IdentifyByRefreshToken = %d, want the session's subject 42", userID)
+	}
+	if tokens.rotatedRefresh != nil || tokens.rotatedAccess != nil {
+		t.Fatalf("rotated=%+v/%+v, want no rotation on an identify", tokens.rotatedRefresh, tokens.rotatedAccess)
+	}
+	if len(tokens.revokedFamilies) != 0 {
+		t.Fatalf("revoked families = %#v, want none", tokens.revokedFamilies)
+	}
+	if got := len(devices.registrations) + len(devices.touches) + len(devices.removed); got != deviceWrites {
+		t.Fatalf("device writes = %d, want %d: an identify must leave the device record alone", got, deviceWrites)
+	}
+	if len(tokens.auditEntries) != outboxRows || len(audit.entries) != 0 {
+		t.Fatalf("audit rows = %d/%#v, want an identify to write none", len(tokens.auditEntries)-outboxRows, audit.entries)
+	}
+}
+
+func TestIdentifyByRefreshTokenRejectsEverythingRefreshRejects(t *testing.T) {
+	// Each case mutates the live session into one shape Refresh also refuses; the
+	// point is that identity never outlives the credential that carries it.
+	cases := []struct {
+		name string
+		// absent presents a credential the repository has no row for, by dropping
+		// the live one; presentBlank presents no credential at all. The rest mutate
+		// the session so the lookup finds a row it must turn down.
+		absent       bool
+		presentBlank bool
+		mutate       func(users *fakeUsers, tokens *fakeTokens)
+	}{
+		{
+			name: "revoked token",
+			mutate: func(_ *fakeUsers, tokens *fakeTokens) {
+				revokedAt := time.Date(2026, 7, 22, 9, 59, 0, 0, time.UTC)
+				tokens.createdRefresh.RevokedAt = &revokedAt
+			},
+		},
+		{
+			name: "expired token",
+			mutate: func(_ *fakeUsers, tokens *fakeTokens) {
+				tokens.createdRefresh.ExpiresAt = time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+			},
+		},
+		{
+			name: "token of another client",
+			mutate: func(_ *fakeUsers, tokens *fakeTokens) {
+				tokens.createdRefresh.ClientID = 99
+			},
+		},
+		{
+			name: "deleted owner",
+			mutate: func(users *fakeUsers, _ *fakeTokens) {
+				users.byID[42].State = model.UserStateDeleted
+			},
+		},
+		{
+			name:   "unknown token",
+			absent: true,
+			mutate: func(_ *fakeUsers, tokens *fakeTokens) {
+				delete(tokens.refreshByHash, tokens.createdRefresh.TokenHash)
+			},
+		},
+		{name: "empty token", presentBlank: true, mutate: func(_ *fakeUsers, _ *fakeTokens) {}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service, users, _, tokens, _, _ := newTestService(t)
+			devices := &fakeDevices{}
+			service = withDevices(service, devices)
+			login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+			if err != nil {
+				t.Fatalf("Login returned error: %v", err)
+			}
+			// Every case presents the credential the login issued — even the absent
+			// one, where the mutation removed the row it names rather than swapping
+			// the value. presentBlank is the one that carries nothing.
+			token := login.RefreshToken
+			if testCase.presentBlank {
+				token = ""
+			}
+			testCase.mutate(users, tokens)
+
+			userID, err := service.IdentifyByRefreshToken(context.Background(), token)
+			if err == nil {
+				t.Fatalf("IdentifyByRefreshToken = %d, want a refusal", userID)
+			}
+			if userID != 0 {
+				t.Fatalf("IdentifyByRefreshToken returned %d alongside %v, want no subject", userID, err)
+			}
+			if len(tokens.revokedFamilies) != 0 {
+				t.Fatalf("revoked families = %#v, want a refusal to be passive", tokens.revokedFamilies)
+			}
+		})
 	}
 }
 
@@ -1590,28 +1712,43 @@ func TestSendRegisterCodeRejectsHeaderInjectionPayload(t *testing.T) {
 	}
 }
 
-// The anonymous request path must be identical for known and unknown accounts:
-// both enqueue the same normalized job and neither performs SMTP or Redis work.
-func TestForgotPasswordSendCodeHidesAccountExistence(t *testing.T) {
-	for _, email := range []string{"nobody@njupt.edu.cn", "user@njupt.edu.cn"} {
-		t.Run(email, func(t *testing.T) {
-			service := newRegisterService(t)
-			dispatcher := service.ForgotPasswords.(*fakeForgotPasswordDispatcher)
-			result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: email, ClientIP: "127.0.0.1"})
-			if err != nil {
-				t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
-			}
-			if result.Email != email || result.ExpiresIn != 300 {
-				t.Fatalf("result = %+v, want uniform accepted shape", result)
-			}
-			if len(dispatcher.jobs) != 1 || dispatcher.jobs[0].Email != email {
-				t.Fatalf("jobs = %+v, want one normalized job", dispatcher.jobs)
-			}
-			if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
-				t.Fatalf("mailer sent=%d in request path, want 0", sent)
-			}
-		})
+// The send-code path answers account existence explicitly: an unknown
+// identifier is refused with 40106 before anything is enqueued, while a known
+// one is accepted with no SMTP work in the request path (delivery stays in the
+// worker).
+func TestForgotPasswordSendCodeAnswersAccountExistence(t *testing.T) {
+	service := newRegisterService(t)
+	dispatcher := service.ForgotPasswords.(*fakeForgotPasswordDispatcher)
+
+	result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
 	}
+	if result.Email != "user@njupt.edu.cn" || result.ExpiresIn != 300 {
+		t.Fatalf("result = %+v, want accepted shape", result)
+	}
+	if len(dispatcher.jobs) != 1 || dispatcher.jobs[0].Email != "user@njupt.edu.cn" {
+		t.Fatalf("jobs = %+v, want one normalized job", dispatcher.jobs)
+	}
+	if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
+		t.Fatalf("mailer sent=%d in request path, want 0", sent)
+	}
+
+	_, err = service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "nobody@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindUnknownIdentifier, errcode.CodeUnknownIdentifier)
+	if len(dispatcher.jobs) != 1 {
+		t.Fatalf("jobs = %+v, want unknown account to enqueue nothing", dispatcher.jobs)
+	}
+}
+
+// A lookup failure must surface as ErrInternal, not masquerade as "unknown
+// account": the distinction keeps a database outage from feeding the
+// enumeration signal this endpoint now answers.
+func TestForgotPasswordSendCodeLookupFailure(t *testing.T) {
+	service := newRegisterService(t)
+	service.Users.(*fakeUsers).err = errors.New("db down")
+	_, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
 }
 
 func TestForgotPasswordSendCodeReturnsAcceptedWhenQueueIsFull(t *testing.T) {
@@ -2262,6 +2399,11 @@ func TestChangePasswordRotatesCredentialAndRevokesSessions(t *testing.T) {
 	if len(tokens.revokedUsers) != 1 || tokens.revokedUsers[0] != 42 {
 		t.Fatalf("revoked users = %#v, want all sessions of user 42 revoked", tokens.revokedUsers)
 	}
+	// The revocation carries the self-service-change reason, so the user's next
+	// refresh audits session_revoked/password_changed instead of a replay.
+	if users.lastRevokeReason != repository.RevokeReasonPasswordChanged {
+		t.Fatalf("revoke reason = %q, want %q", users.lastRevokeReason, repository.RevokeReasonPasswordChanged)
+	}
 }
 
 func TestChangePasswordRejectsWrongOldSameNewAndShortNew(t *testing.T) {
@@ -2299,6 +2441,11 @@ func TestResetPasswordConsumesCodeAndRevokesSessions(t *testing.T) {
 	}
 	if _, ok := codes.codes[codeKey(resetPurpose, "user@njupt.edu.cn")]; ok {
 		t.Fatal("verification code was not consumed")
+	}
+	// The revocation carries the reset reason, distinct from an authenticated
+	// change: the next refresh's session_revoked row names the exact flow.
+	if users.lastRevokeReason != repository.RevokeReasonPasswordReset {
+		t.Fatalf("revoke reason = %q, want %q", users.lastRevokeReason, repository.RevokeReasonPasswordReset)
 	}
 }
 
@@ -3176,5 +3323,146 @@ func TestRegisterRejectsUnparseableStudentIDWithoutSpendingCredentials(t *testin
 	}
 	if _, ok := store.states["rs_abc"]; !ok {
 		t.Fatal("registration_state was consumed by an unreadable student ID: the applicant would have to re-authorize with GitHub")
+	}
+}
+
+// A token cut by a user-level bulk revocation (role change, account close,
+// password change/reset) must not read as a replay: before V018 the audit
+// outcome for the target user's next refresh was refresh_replayed (or
+// concurrent_refresh inside the grace window), which made every administrative
+// edit look like an attack. The token row's revoked_reason is what separates
+// the two, and it lands in the audit detail so "why was this session cut" is
+// answerable from the log alone.
+func TestRefreshAuditRecordsSessionRevokedOutcomeForAdministrativeRevocation(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if _, rotateErr := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); rotateErr != nil {
+		t.Fatalf("Refresh: %v", rotateErr)
+	}
+	// The bulk revocation shape: the still-presentable token carries both a
+	// revoked_at and a recorded reason.
+	reason := repository.RevokeReasonAdminRoleChange
+	for _, stored := range tokens.refreshByHash {
+		if stored.RevokedAt != nil {
+			stored.RevokedReason = &reason
+		}
+	}
+
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	if err == nil {
+		t.Fatal("Refresh accepted a revoked token")
+	}
+	entry := lastAuditAction(t, audit, "refresh")
+	if got := auditOutcome(t, entry); got != refreshOutcomeSessionRevoked {
+		t.Fatalf("administratively revoked outcome = %q, want %q", got, refreshOutcomeSessionRevoked)
+	}
+	var detail struct {
+		Outcome       string `json:"outcome"`
+		RevokedReason string `json:"revoked_reason"`
+	}
+	if unmarshalErr := json.Unmarshal(entry.Detail, &detail); unmarshalErr != nil {
+		t.Fatalf("unmarshal audit detail %s: %v", entry.Detail, unmarshalErr)
+	}
+	if detail.RevokedReason != repository.RevokeReasonAdminRoleChange {
+		t.Fatalf("revoked_reason = %q, want %q", detail.RevokedReason, repository.RevokeReasonAdminRoleChange)
+	}
+	// The client sees the same 40102 a dead token always produced — the
+	// distinction is for the audit trail, not a new client contract.
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+}
+
+// The grace window must not turn an administrative revocation into a retry
+// loop: within 30s of the cut the concurrent_refresh answer would keep the
+// client's cookie and have it retry against a family that can never rotate
+// again. A recorded reason answers 40102 immediately instead.
+func TestRefreshSessionRevokedSkipsGraceWindow(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if _, rotateErr := service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken}); rotateErr != nil {
+		t.Fatalf("Refresh: %v", rotateErr)
+	}
+	// The revocation just happened — well inside the grace window.
+	reason := repository.RevokeReasonPasswordChanged
+	for _, stored := range tokens.refreshByHash {
+		if stored.RevokedAt != nil {
+			*stored.RevokedAt = service.now().Add(-time.Second)
+			stored.RevokedReason = &reason
+		}
+	}
+
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	if err == nil {
+		t.Fatal("Refresh accepted a revoked token")
+	}
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	if got := auditOutcome(t, lastAuditAction(t, audit, "refresh")); got != refreshOutcomeSessionRevoked {
+		t.Fatalf("grace-window administrative revocation outcome = %q, want %q", got, refreshOutcomeSessionRevoked)
+	}
+}
+
+// A failed login records the attempted identifier in its audit detail: the
+// user_id column stays NULL on the identifier_unknown leg, so without the
+// detail field a reviewer cannot cluster attempts against one target — the
+// difference between a typo and a directed probe is exactly that cluster. The
+// value is recorded in full, matching the email fields the other audit details
+// (register_send_code, reset_password, bind_email_send_code) already carry;
+// audit_logs is an admin-only surface on a 90-day retention.
+func TestLoginFailureAuditRecordsAttemptedIdentifier(t *testing.T) {
+	service, _, _, _, audit, _ := newTestService(t)
+
+	_, err := service.Login(context.Background(), LoginInput{Identifier: "target@njupt.edu.cn", Password: "wrong"})
+	if err == nil {
+		t.Fatal("Login succeeded with a wrong password")
+	}
+	_, err = service.Login(context.Background(), LoginInput{Identifier: "  Target@NJUPT.edu.cn  ", Password: "wrong"})
+	if err == nil {
+		t.Fatal("Login succeeded with a wrong password")
+	}
+
+	loginEntries := make([]model.AuditLog, 0, 2)
+	for _, entry := range audit.entries {
+		if entry.Action == "login" {
+			loginEntries = append(loginEntries, entry)
+		}
+	}
+	if len(loginEntries) != 2 {
+		t.Fatalf("login audit entries = %d, want 2", len(loginEntries))
+	}
+	for _, entry := range loginEntries {
+		var detail struct {
+			Method     string `json:"method"`
+			Reason     string `json:"reason"`
+			Identifier string `json:"identifier"`
+		}
+		if err := json.Unmarshal(entry.Detail, &detail); err != nil {
+			t.Fatalf("unmarshal audit detail %s: %v", entry.Detail, err)
+		}
+		if detail.Identifier != "target@njupt.edu.cn" {
+			t.Fatalf("identifier = %q, want the normalized target so attempts cluster", detail.Identifier)
+		}
+	}
+}
+
+func TestRefreshAdministrativeRevocationDuringRotation(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens.rotateErr = &repository.SessionRevokedError{Reason: repository.RevokeReasonPasswordReset}
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	entry := lastAuditAction(t, audit, "refresh")
+	if got := auditOutcome(t, entry); got != refreshOutcomeSessionRevoked {
+		t.Fatalf("outcome = %q", got)
+	}
+	if !strings.Contains(string(entry.Detail), repository.RevokeReasonPasswordReset) {
+		t.Fatalf("missing reason: %s", entry.Detail)
 	}
 }

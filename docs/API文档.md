@@ -1,6 +1,20 @@
-# SAST Link v2 API 文档
+# SAST Link v2 API 文档（兼容入口）
 
-## 概述
+> 本文件保留用于兼容历史链接。新的 API 正文按调用场景拆分在 [`docs/api/`](api/README.md)，机器可读契约仍在 [`docs/openapi.yaml`](openapi.yaml)。
+>
+> 详细正文迁移地图：
+>
+> - 通用约定：[`api/conventions.md`](api/conventions.md)
+> - 认证与密码：[`api/auth.md`](api/auth.md)
+> - 用户、资料与设备：[`api/user.md`](api/user.md)
+> - 身份绑定：[`api/identities.md`](api/identities.md)
+> - OAuth/OIDC Provider：[`api/oauth-provider.md`](api/oauth-provider.md)
+> - GitHub/Lark 登录：[`api/third-party-login.md`](api/third-party-login.md)
+> - 管理后台：[`api/admin.md`](api/admin.md)
+> - 校友申请：[`api/alumni.md`](api/alumni.md)
+> - 健康检查：[`api/health.md`](api/health.md)
+>
+> 历史章节正文暂保留在 git 历史中。新增或修改接口时，应同时更新人类可读文档、OpenAPI 和相关测试。
 
 - **Base URL**: `https://link.sast.fun/v2`
 - **认证方式**: JWT Bearer Token（`Authorization: Bearer <access_token>`）
@@ -32,7 +46,7 @@
 ```json
 {
   "code": 40105,
-  "message": "邮箱或密码错误",
+  "message": "密码错误",
   "data": null
 }
 ```
@@ -47,7 +61,7 @@
 
 **直出响应例外**：
 
-- `/oauth/authorize`：成功重定向至前端授权页（携带 `request_id`）；错误按可重定向性重定向至授权页或客户端 `redirect_uri`（携带 `error` / `error_description`）。授权码在第二段 `/oauth/authorize/consent` 才签发，详见 §5.1。
+- `/oauth/authorize`：有三种出口，取决于浏览器是否已持有覆盖请求 scope 的 link session 授权：静默发码后直接 302 至客户端 `redirect_uri`（携带 `code` 与 `state`），或重定向至前端授权页（携带 `request_id`），或对已失效的请求重定向至授权页**错误形态**（携带 `error` / `error_description`，不带 `request_id`）。错误按可重定向性重定向至授权页或客户端 `redirect_uri`。详见 §5.1。
 - `/oauth/token`：请求体为 `application/x-www-form-urlencoded`；成功和错误均使用 OAuth JSON 格式（RFC 6749），字段名使用 `scope`（单数）。
 - `/oauth/revoke`：请求体为 `application/x-www-form-urlencoded`；遵循 RFC 7009，成功固定 `200 OK` 且响应体为空，错误使用 OAuth JSON 格式。
 - `/userinfo`：成功直出 OIDC UserInfo claims；错误遵循 RFC 6750 Bearer Token 错误格式。
@@ -99,8 +113,8 @@
 | `40102` | Access Token 无效或已被撤销 |
 | `40103` | Register-Ticket 无效或已过期 |
 | `40104` | Bind-Ticket 无效或已过期 |
-| `40105` | 邮箱或密码错误（登录统一返回，避免枚举已注册邮箱；旧密码校验的"密码错误"亦为此码） |
-| `40106` | 登录邮箱不存在（仅非登录流程如找回密码返回） |
+| `40105` | 密码错误（密码登录密码不匹配、修改密码旧密码校验失败） |
+| `40106` | 该邮箱尚未注册（登录、找回密码发送验证码） |
 | `40107` | login_code 无效或已过期 |
 | `40108` | 刷新请求冲突（30s 宽限窗内被并发刷新，家族保留） |
 
@@ -377,6 +391,8 @@ POST /user/login
 - 所有密码登录共用同一套密码（`user.password`），第三方邮箱仅作为登录标识
 - `profile_needs_completion` / `incomplete_fields`：旧库迁移账号的资料补全提示，详见 §3.0
 
+**错误码**: 400xx（参数错误）、40105（密码错误）、40106（该邮箱尚未注册）、40301（账号已注销）、429xx（频率限制与登录锁定）；不存在账号的尝试同样计入失败锁定（按邮箱维度计数）
+
 ---
 
 ### 1.5 刷新 Token
@@ -414,6 +430,7 @@ POST /auth/refresh
 
 - Refresh Token 旋转机制 — 每次使用后旧 token 立即撤销，下发新 token；同时通过 `Set-Cookie` 更新 `sl_session` cookie，保持其与最新 refresh token 同步
 - `40108`（刷新请求冲突）出现在多 tab 并发冷启动：同一 cookie 的 refresh token 已被兄弟请求在 30s 宽限窗内轮换，家族保留。客户端应**重读当前 cookie 后重试一次**（此时 cookie 已携带赢家的新 token），不要拿同一枚旧 token 无限重试——超过 30s 宽限窗仍用旧 token 会按真重放处理并撤销整个家族（连带赢家会话）
+- 被用户级批量撤销（改密/重置、管理员改 role、账号注销）切断的会话**不走** `40108`/重放分支：token 行记录了撤销原因（V018 `revoked_reason`），下一次刷新直接返回 `40102`，审计记为 `refresh` / `session_revoked`（detail 带具体 `revoked_reason`，包括服务预读后、轮换事务内才发现撤销的并发情形）而非 `refresh_replayed`——管理员编辑不再伪装成重放攻击，告警而不再污染。30s 宽限窗对这类撤销同样不适用：家族已死，宽限窗内的 `40108` 重试只会无限循环
 - 账号已注销（`40301`）时，**cookie 来源**的刷新返回 `401`（错误码仍是 `40301`）而非 `403`：前端只在刷新以 401 结束时清会话并跳登录，已注销的账号必须让标签页脱离死会话壳。请求体携带 `refresh_token` 的调用保持 `403`——调用方已在带内认证，应当得到准确的账号状态
 - 此端点用于内部登录（密码/第三方）的 token 刷新；OAuth 客户端刷新请使用 `POST /oauth/token`（grant_type=refresh_token）
 
@@ -507,11 +524,11 @@ POST /auth/forgot-password/send-code
 }
 ```
 
-**说明**: 对格式合法且未触发限流的邮箱，接口总是返回同一结果。响应不表示账号存在，也不表示邮件已经送达。服务端把请求放入有界内存队列；worker 只为已注册邮箱生成并发送验证码。队列满、进程重启或邮件依赖失败时任务可能丢失，用户可在限流窗口后重试。
+**说明**: 邮箱未注册时返回 `40106`（该邮箱尚未注册）。存在的账号仍为异步受理：响应只表示请求已入队，不表示邮件已经送达。服务端把请求放入有界内存队列；队列满、进程重启或邮件依赖失败时任务可能丢失，用户可在限流窗口后重试。
 
-`login_email` 可以是账号的主登录邮箱，也可以是已绑定为该账号 `other_mail` 身份的个人邮箱（例如管理员建号时直绑的邮箱，见 §6.2.1）。worker 按登录标识解析账号，验证码发到本次提交的这个地址。毕业成员的主登录邮箱如果已不可用，可用绑定的个人邮箱自助重置密码。
+`login_email` 可以是账号的主登录邮箱，也可以是已绑定为该账号 `other_mail` 身份的个人邮箱（例如管理员建号时直绑的邮箱，见 §6.2.1）。请求路径与 worker 均按登录标识解析账号，验证码发到本次提交的这个地址。毕业成员的主登录邮箱如果已不可用，可用绑定的个人邮箱自助重置密码。
 
-**错误码**: 400xx（参数错误）、429xx（频率限制）
+**错误码**: 400xx（参数错误）、40106（该邮箱尚未注册）、429xx（频率限制）
 
 ---
 
@@ -543,7 +560,7 @@ POST /auth/reset-password
 
 改密与重置密码在同一事务内写入新密码哈希、递增 `token_version`、并撤销该用户全部活跃 Access / Refresh Token。同时作废该用户尚未兑换的 OAuth 授权码：授权码是一张还没花出去的凭证，Token 端点签发时会现读用户行上的 `token_version`，因此一张跨过重置动作的授权码兑换出来的会话会带着新的 `token_version`，中间件照单全收。只撤销 token 不撤销授权码，会在「怀疑被入侵而重置密码」的场景留下一个等于授权码 TTL 的窗口。
 
-**错误码**: 400xx（参数错误）、40106（邮箱不存在）、40301（账号已注销）、42201（密码长度不足）、42202（新旧密码相同）
+**错误码**: 400xx（参数错误）、40106（该邮箱尚未注册）、40301（账号已注销）、42201（密码长度不足）、42202（新旧密码相同）
 
 ---
 
@@ -1202,26 +1219,48 @@ GET /oauth/authorize
 | `code_challenge` | 是 | PKCE challenge，固定 43 字符 base64url（`BASE64URL(SHA256(verifier))` 的长度）；其他长度返回 `invalid_request` |
 | `code_challenge_method` | 是 | 固定 `S256`；不接受 `plain` |
 | `nonce` | 否 | OIDC nonce，最长 255 字符 |
+| `prompt` | 否 | OIDC prompt，空格分隔。本服务只识别 `login` 与 `consent` 两个值，二者**否决静默发码**、强制回到授权页；其余取值（含 `none`）一律忽略，`prompt=none` 不受支持 |
 
 `code_challenge` 与 `nonce` 的长度上限对应 `oauth_authorizations` 表中这两列的 `VARCHAR(255)` 宽度。校验放在第一段而非第二段，是因为超长值若拖到写库时才失败，用户会拿到一个不可重试的 `500`——此时一次性暂存已被消费，只能从头再来；在第一段拒绝则是客户端可以直接修正的可重定向 `invalid_request`。
 
-**行为**: 授权分两段完成。本端点**不需要认证**——从第三方跳转来的浏览器不会携带 `Authorization` header。
+**行为**: 本端点**不需要认证**——从第三方跳转来的浏览器不会携带 `Authorization` header。校验并暂存请求后，它按浏览器携带的凭证分三种出口。
 
 ```
 第三方 app
   └─> GET /oauth/authorize?client_id=..&redirect_uri=..&code_challenge=..
         校验参数 → 暂存请求（20min，`OAUTH_AUTHORIZE_REQUEST_TTL`）→ 302
-  └─> {OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..&expires_in=1200
-        前端展示授权页，读取本地 access_token
-        expires_in 为暂存剩余秒数，供页面显示截止时间并在超时后
-        阻止提交（否则用户会提交进一个没有预告的 400）
-  └─> POST /oauth/authorize/consent   （见 §5.2）
-        Authorization: Bearer <access_token>
-        → 200 { redirect_uri }
-  └─> 前端 navigate 至 redirect_uri（携带 code 与 state）
+        │
+        ├─ (A) 静默发码：浏览器带 link session（`Authorization` header 或
+        │      httpOnly `sl_session` cookie），且该用户对该 client 的既有
+        │      grant 覆盖本次请求的 scope，且未出现 prompt=login/consent
+        │      → 302 直接回 redirect_uri（携带 code 与 state），不渲染授权页
+        │      已授权过 + scope 未扩张的再次授权走这条路
+        │
+        ├─ (B) 授权页：无可用 session，或没有 grant / scope 超出既有 grant /
+        │      prompt 要求重新确认
+        │      → {OAUTH_CONSENT_URL}?request_id=ar_xxx&client_name=..&scope=..&expires_in=1200
+        │      前端展示授权页，读取本地 access_token
+        │      expires_in 为暂存剩余秒数，供页面显示截止时间并在超时后
+        │      阻止提交（否则用户会提交进一个没有预告的 400）
+        │      └─> POST /oauth/authorize/consent   （见 §5.2）
+        │            Authorization: Bearer <access_token>
+        │            → 200 { redirect_uri }
+        │      └─> 前端 navigate 至 redirect_uri（携带 code 与 state）
+        │
+        └─ (C) 错误形态：静默尝试已经消费了暂存、随后失败（客户端被停用、
+               回调被摘除、scope 被收窄、账号注销、写库失败）
+               → 302 至 {OAUTH_CONSENT_URL}，携带 error / error_description，
+                 **不带 request_id**——那份请求已经不存在，授权页也加载不了它
+
+  说明：走 (B) 时若用户此前**没有** grant，那正是首次授权；静默路径只在
+        既有 grant 覆盖请求范围时才介入，因此授权页始终是首次授权的必经之路。
 ```
 
-采用两段式而非 cookie session，是为了保持 PRD §7.1「JWT 不存 cookie，不存在 CSRF 攻击面」；保留标准的 `GET /oauth/authorize` 入口 URL，则是为了让第三方 OAuth 库无需特殊适配。
+**(A) 静默发码**是 SSO 路径：浏览器已经登录过 link，客户端把浏览器弹到本端点即可拿到授权码，用户看不到任何页面。它不读取任何请求方提供的身份——会话来自 `Authorization` header（且必须由内网 client 签发，第三方 token 不能替浏览器作证）或 httpOnly `sl_session` cookie，两者都只做**只读校验**，不轮换、不发 access token、不写审计行。
+
+这里确实是本服务唯一读取 cookie 的对外端点，与 PRD §7.1「JWT 不存 cookie」的边界需要说清：cookie 里存的是 refresh token 而非 JWT，`sl_session` 是 `SameSite=Lax` 且 httpOnly，跨站子资源请求不会携带它；能被跨站触发的只有顶层导航，而它最多让浏览器拿一个**签给会话主体本人**的授权码，redirect_uri 精确匹配 + PKCE 双重约束下攻击者既截不到码也无法兑换。所以该路径既不扩大凭据暴露面，也不构成写入面——识别失败一律静默回落到 (B)。保留标准的 `GET /oauth/authorize` 入口 URL，则是为了让第三方 OAuth 库无需特殊适配。
+
+授权码始终由本端点的 (A) 或 `/oauth/authorize/consent`（§5.2）签发，两处共用同一套消费后复核（活注册的 `redirect_uri` 与 scope、用户可授权性），差别仅在写库方式：静默路径只更新既有 grant、绝不创建 grant，因此用户在控制台点「撤销」与一次在途静默发码相撞时，撤销先提交则发码失败回滚，不会被反过来复活。
 
 **错误重定向规则**：错误分两条路径，取决于 `redirect_uri` 是否已通过校验。
 
@@ -1291,6 +1330,7 @@ POST /oauth/authorize/consent
 - `approve: false` 同样返回 `200` 与一个 `redirect_uri`，其中携带 `error=access_denied` 与原始 `state`（RFC 6749 §4.1.2.1 要求把拒绝告知客户端，而非静默丢弃）
 - 授权码有效期 5min，一次性使用，`family_id` 在此刻生成并由授权码传递给后续 token pair
 - 客户端状态、`redirect_uri` 与 `scopes` 在本段**重新校验**：两段之间客户端被停用返回 `40402`，暂存的 `redirect_uri` 或 `scopes` 已不在客户端当前注册值中则返回 `40000`。管理员摘掉一个被攻陷的回调地址、或收回一个客户端的 admin scope 之后，不应该还有授权码继续按旧注册签发
+- **授权者角色约束**：暂存的 `scopes` 含 `admin:read` 时，当前用户角色须为 admin/lecturer；含 `admin:write` 时须为 admin。角色不足以持有该 scope 的用户提交 approve 会返回 `40000`，拒绝被审计为 `oauth_authorize` / `scope_role_forbidden`，不签发授权码
 - 按**用户**限流（`RATE_LIMIT_CONSENT_RPM`，默认 60/min），且只对 approve 路径计费——`approve: false` 的拒绝不铸码、不消耗配额；被限流的 approve 在消费暂存**之前**即返回 `42900`，窗口恢复后可用同一 `request_id` 重试，无需重新发起授权
 
 **错误码**: `40000`（`request_id` / `approve` 缺失、未知字段、Content-Type 非 JSON、暂存已过期或已消费、`redirect_uri` 已不在客户端注册值中、暂存的 `scopes` 已超出客户端当前注册范围）、`40100`/`40101`/`40102`（未登录、token 已过期或 token 无效）、`40402`（两段之间客户端被停用，HTTP 状态为 `404`）、`40301`（账号已注销——本端点在 JWT 中间件之后，注销账号在中间件即被拦下，返回 `40301` 而非 service 层的 `40300`）、`42900`（请求过于频繁，按用户限流，仅 approve 路径计费，带 Retry-After）、`50300`（Redis 暂存不可读，fail-closed）、`50000`（服务器内部错误）
@@ -1333,6 +1373,7 @@ GET /oauth/authorize/consent?request_id=ar_3f2a1b...
 - `request_id` 为 128-bit 随机值，不可枚举
 - 本端点按**用户**限流（`RATE_LIMIT_CONSENT_INFO_RPM`，默认 60/min），而非 IP——校园 egress 共享一个 NAT IP，按 IP 限流会被单个学生耗尽全校配额；认证用户随机打 `request_id` 刷 Redis GET 有上限
 - 暂存不存在或已过期返回 `40000`；Redis 暂存不可读返回 `50300`（fail-closed，同 POST）
+- **授权者角色约束**：同 POST 段——暂存的 `scopes` 含 admin scope 而当前用户角色不足以持有时返回 `40000`，含该 scope 的同意页对这类用户不渲染（这是普通用户不会看到 admin scope 授权页的保证）
 
 **错误码**: `40000`（`request_id` 缺失 / 无效或已过期）、`40100`/`40101`/`40102`、`40301`（账号已注销）、`42900`（请求过于频繁，按用户限流）、`50300`、`50000`
 
@@ -1416,7 +1457,7 @@ grant_type=refresh_token&refresh_token=rt_abc123...&client_id=9f3a1c7d2e5b40a8c6
 | `400` | `invalid_grant` | 授权码无效/已过期/已使用、PKCE 校验失败、`redirect_uri` 不一致、授权码或 refresh token 不属于该客户端、refresh token 已撤销或过期、账号已注销 |
 | `400` | `unsupported_grant_type` | `grant_type` 非 `authorization_code` / `refresh_token` |
 | `400` | `unauthorized_client` | 客户端未注册该 grant type |
-| `400` | `invalid_scope` | 授权码携带的 scope 已不在客户端当前注册范围内（签发后被管理员收回）。该授权码仍被消耗，不可重放 |
+| `400` | `invalid_scope` | 授权码携带的 scope 已不在客户端当前注册范围内（签发后被管理员收回），或授权者角色不足以持有其中的 admin scope（`admin:read` 需 admin/lecturer，`admin:write` 需 admin——同意后被降级的用户其未兑换授权码同样被拒）。该授权码仍被消耗，不可重放 |
 | `401` | `invalid_client` | 客户端认证失败（RFC 6749 §5.2 单独规定此项为 401，其余皆为 400）。**不附带 `WWW-Authenticate`**：本服务只从表单体读取 `client_secret`，discovery 仅通告 `none` 与 `client_secret_post`，通告未实现的 Basic 方案会让客户端反复重试并始终失败 |
 | `429` | `temporarily_unavailable` | 按调用方 IP 限流（`RATE_LIMIT_TOKEN_RPM`，默认 300 次/60s），附带 `Retry-After`。`/oauth/revoke` 与本端点共用同一限流器 |
 | `500` | `server_error` | 服务器内部错误 |
@@ -1608,7 +1649,7 @@ GET /admin/users
 | `state` | 筛选状态：on_sast / retired_sast / njupter / is_deleted |
 | `department` | 筛选部门：software / media |
 | `student_id` | 筛选学号 |
-| `keyword` | 搜索关键词（姓名/学号/邮箱/QQ/昵称/博客/仓库链接模糊匹配，大小写不敏感；手机号仅 admin 角色参与匹配；`%`、`_`、`\` 按字面量处理，不作通配符） |
+| `keyword` | 搜索关键词（账号 ID/姓名/学号/邮箱/QQ/昵称/博客/仓库链接模糊匹配，大小写不敏感；另匹配姓名拼音首字母，如 `lhq` 命中 `刘华强`（多音字取默认读音，姓氏异读请改用汉字搜）；手机号仅 admin 角色参与匹配；`%`、`_`、`\` 按字面量处理，不作通配符） |
 | `needs_completion` | 筛选资料待补全账号（§3.0）：`true` 只列出待补全的，`false` 只列出已完整的，不传则不筛选 |
 
 **说明**：
@@ -2777,7 +2818,7 @@ Content-Type: application/json
 | `email_verified` | `email` | 邮箱已验证，固定 `true` |
 | `updated_at` | `profile` | 用户信息最后修改时间 |
 
-> **`auth_time` 已移除**：服务端未持久化真实认证时刻，之前的近似值（授权确认时刻）会高报认证新鲜度，误导按 OIDC 语义消费该 claim 的 RP。因此 ID Token **不再签发** `auth_time`，也未列入 `claims_supported`；`max_age` / `prompt` 未实现。待将来持久化真实认证时刻后再加回。
+> **`auth_time` 已移除**：服务端未持久化真实认证时刻，之前的近似值（授权确认时刻）会高报认证新鲜度，误导按 OIDC 语义消费该 claim 的 RP。因此 ID Token **不再签发** `auth_time`，也未列入 `claims_supported`；`max_age` 未实现；`prompt=login/consent` 仅回退授权页，不强制重新登录。待将来持久化真实认证时刻后再加回。
 
 **OIDC 授权码流完整交互**：
 

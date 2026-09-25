@@ -18,10 +18,9 @@ const (
 	KindLocked            Kind = "locked"
 	KindUnknownIdentifier Kind = "unknown_identifier"
 	KindPasswordInvalid   Kind = "password_invalid"
-	// KindLoginFailed is what a failed sign-in answers with, unknown identifier
-	// and wrong password alike (audit-fix #7): the wire must not distinguish the
-	// two, or a login attempt becomes a registered-email oracle. The audit trail
-	// keeps the distinction via the failure reason.
+	// KindLoginFailed is what a wrong password answers with; the unknown
+	// identifier leg answers KindUnknownIdentifier instead. The audit reason
+	// still names which leg fired, one level finer than the wire split.
 	KindLoginFailed      Kind = "login_failed"
 	KindUserDeleted      Kind = "user_deleted"
 	KindInvalidToken     Kind = "invalid_token"
@@ -82,9 +81,8 @@ var (
 	ErrLocked            = &Error{Kind: KindLocked, Code: errcode.CodeRateLimited}
 	ErrUnknownIdentifier = &Error{Kind: KindUnknownIdentifier, Code: errcode.CodeUnknownIdentifier}
 	ErrPasswordInvalid   = &Error{Kind: KindPasswordInvalid, Code: errcode.CodePasswordInvalid}
-	// ErrLoginFailed is the single code a failed sign-in returns whether the
-	// identifier is unknown or the password wrong, so neither leg leaks whether
-	// the address is registered (audit-fix #7).
+	// ErrLoginFailed is the wrong-password rejection; an unknown identifier
+	// answers ErrUnknownIdentifier, and a closed account ErrUserDeleted.
 	ErrLoginFailed  = &Error{Kind: KindLoginFailed, Code: errcode.CodePasswordInvalid}
 	ErrUserDeleted  = &Error{Kind: KindUserDeleted, Code: errcode.CodeAccountDeleted}
 	ErrInvalidToken = &Error{Kind: KindInvalidToken, Code: errcode.CodeAccessTokenInvalid}

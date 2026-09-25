@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +37,24 @@ func assertPairRevokedAt(t *testing.T, database *gorm.DB, familyID string, want 
 	}
 	if refresh.RevokedAt == nil || !refresh.RevokedAt.Equal(want) {
 		t.Fatalf("refresh token revoked_at = %v, want %v", refresh.RevokedAt, want)
+	}
+}
+
+// assertPairRevokedReason pins the V018 revoked_reason on a family's refresh
+// row: the value the refresh leg reads to audit session_revoked instead of a
+// replay, so each revoking flow must record its own cause.
+func assertPairRevokedReason(t *testing.T, database *gorm.DB, familyID string, wantReason string) {
+	t.Helper()
+	var refresh model.OAuthRefreshToken
+	if err := database.Where("family_id = ?", familyID).First(&refresh).Error; err != nil {
+		t.Fatalf("read refresh token for %q: %v", familyID, err)
+	}
+	if refresh.RevokedReason == nil || *refresh.RevokedReason != wantReason {
+		got := "<nil>"
+		if refresh.RevokedReason != nil {
+			got = *refresh.RevokedReason
+		}
+		t.Fatalf("refresh token revoked_reason = %q, want %q", got, wantReason)
 	}
 }
 
@@ -164,6 +185,19 @@ func TestListAdminUsersFiltersAndPages(t *testing.T) {
 		}
 		if len(rows) != 1 {
 			t.Fatalf("rows = %d, want the ILIKE match to ignore case", len(rows))
+		}
+	})
+
+	t.Run("keyword matches pinyin initials", func(t *testing.T) {
+		for _, keyword := range []string{"zs", "ZS"} {
+			rows, _, err := users.ListAdminUsers(context.Background(),
+				repository.AdminUserFilter{Keyword: keyword, Limit: 10})
+			if err != nil {
+				t.Fatalf("ListAdminUsers(%q): %v", keyword, err)
+			}
+			if len(rows) != 1 || rows[0].Name != "张三" {
+				t.Fatalf("keyword %q rows = %+v, want 张三 only", keyword, rows)
+			}
 		}
 	})
 
@@ -318,6 +352,126 @@ func TestListAdminUsersEscapesKeywordWildcards(t *testing.T) {
 	}
 }
 
+// The name_initials generated column (V017) makes pinyin initials searchable:
+// 'lhq' finds 刘华强 without the console knowing any hanzi. Non-Han debris
+// names lower into searchable initials ('John' -> 'john'), the interpunct is
+// stripped (阿依古丽·买买提 -> ayglmmt), and a rename recomputes the column
+// because it is generated, not written by hand.
+func TestListAdminUsersKeywordNameInitials(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	liu := adminSeed(t, database, "b120@njupt.edu.cn", "刘华强", model.UserRoleMember, model.UserStateOnSAST, nil)
+	adminSeed(t, database, "b121@njupt.edu.cn", "阿依古丽·买买提", model.UserRoleMember, model.UserStateOnSAST, nil)
+
+	t.Run("initials keyword", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: "lhq", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 1 || rows[0].ID != liu.ID {
+			t.Fatalf("rows = %+v, want only 刘华强", rows)
+		}
+	})
+
+	t.Run("interpunct stripped from initials", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: "ayglmmt", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Name != "阿依古丽·买买提" {
+			t.Fatalf("rows = %+v, want only the interpunct name", rows)
+		}
+	})
+
+	t.Run("rename recomputes initials", func(t *testing.T) {
+		newName := "李雷"
+		if _, err := users.UpdateProfile(context.Background(), liu.ID,
+			repository.ProfileUpdate{Name: &newName}); err != nil {
+			t.Fatalf("UpdateProfile: %v", err)
+		}
+		for _, keyword := range []string{"lhq", "ll"} {
+			rows, _, err := users.ListAdminUsers(context.Background(),
+				repository.AdminUserFilter{Keyword: keyword, Limit: 10})
+			if err != nil {
+				t.Fatalf("ListAdminUsers(%q): %v", keyword, err)
+			}
+			want := 0
+			if keyword == "ll" {
+				want = 1
+			}
+			if len(rows) != want {
+				t.Fatalf("keyword %q matched %d rows, want %d", keyword, len(rows), want)
+			}
+		}
+	})
+}
+
+// A numeric keyword matches the account id (as text): the console's jump-off
+// point for a user is often an audit row's resource_id, which is the id. The
+// seeded rows have every text column scrubbed of digits so a hit can only come
+// from the id arm, and the misses prove a digit-bearing keyword does not leak
+// into the text columns either.
+func TestListAdminUsersKeywordUserID(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	a := adminSeed(t, database, "alpha@njupt.edu.cn", "甲", model.UserRoleMember, model.UserStateOnSAST, nil)
+	b := adminSeed(t, database, "beta@njupt.edu.cn", "乙", model.UserRoleMember, model.UserStateOnSAST, nil)
+	// testUser defaults carry digit-bearing qq_number/phone_number; blank them
+	// so the only numeric column left is id.
+	for _, id := range []int64{a.ID, b.ID} {
+		if err := database.Model(&model.User{}).Where("id = ?", id).
+			Updates(map[string]any{"qq_number": "", "phone_number": ""}).Error; err != nil {
+			t.Fatalf("scrub contact columns for %d: %v", id, err)
+		}
+	}
+
+	t.Run("full id", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: strconv.FormatInt(a.ID, 10), Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 1 || rows[0].ID != a.ID {
+			t.Fatalf("rows = %+v, want only user %d", rows, a.ID)
+		}
+	})
+
+	t.Run("id substring", func(t *testing.T) {
+		// The substring semantics every other column uses apply to id as well:
+		// a keyword shorter than the id still matches it. The expected set is
+		// computed, not assumed, so the assertion holds whatever ids the
+		// sequence assigned.
+		prefix := strconv.FormatInt(a.ID, 10)[:1]
+		want := 0
+		for _, id := range []int64{a.ID, b.ID} {
+			if strings.Contains(strconv.FormatInt(id, 10), prefix) {
+				want++
+			}
+		}
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: prefix, Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != want {
+			t.Fatalf("keyword %q matched %d rows, want %d", prefix, len(rows), want)
+		}
+	})
+
+	t.Run("unknown id misses", func(t *testing.T) {
+		rows, _, err := users.ListAdminUsers(context.Background(),
+			repository.AdminUserFilter{Keyword: "999", Limit: 10})
+		if err != nil {
+			t.Fatalf("ListAdminUsers: %v", err)
+		}
+		if len(rows) != 0 {
+			t.Fatalf("rows = %+v, want none", rows)
+		}
+	})
+}
+
 // A role change must increment token_version and revoke every live token in the
 // same transaction, or a demoted account keeps refresh tokens able to mint new
 // access tokens.
@@ -346,6 +500,7 @@ func TestUpdateAdminUserRevokesSessionsAtomically(t *testing.T) {
 		t.Fatalf("entries = %+v, want the live access token returned for blacklisting", entries)
 	}
 	assertPairRevokedAt(t, database, familyID, revokedAt)
+	assertPairRevokedReason(t, database, familyID, repository.RevokeReasonAdminRoleChange)
 
 	var reloaded model.User
 	if err := database.First(&reloaded, user.ID).Error; err != nil {
@@ -498,6 +653,7 @@ func TestSoftDeleteAndRevokeSessions(t *testing.T) {
 		t.Fatalf("entries = %+v, want the live access token", entries)
 	}
 	assertPairRevokedAt(t, database, familyID, revokedAt)
+	assertPairRevokedReason(t, database, familyID, repository.RevokeReasonAccountClosed)
 
 	var reloaded model.User
 	if err := database.First(&reloaded, user.ID).Error; err != nil {
@@ -1245,5 +1401,80 @@ func TestListAdminUsersReportsStateManual(t *testing.T) {
 	}
 	if !detail.StateManual {
 		t.Fatal("FindByID lost state_manual")
+	}
+}
+
+// Users matching both tables must appear once before pagination. Apply
+// every filter inside each bounded branch, and retain users without profiles.
+func TestListAdminUsersIndexedSearchPages(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	software := model.DepartmentSoftware
+	seeded := make([]*model.User, 7)
+	for i := range seeded {
+		name := "普通姓名"
+		if i == 0 || i == 2 || i == 4 {
+			name = "needle"
+		}
+		seeded[i] = adminSeed(t, database, fmt.Sprintf("search%d@njupt.edu.cn", i), name,
+			model.UserRoleMember, model.UserStateOnSAST, &software)
+	}
+	for _, i := range []int{1, 2} {
+		if err := database.Model(&model.Profile{}).Where("user_id = ?", seeded[i].ID).
+			Update("nickname", "needle").Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.Model(&model.User{}).Where("id = ?", seeded[3].ID).
+		Update("phone_number", "needle").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Where("user_id = ?", seeded[4].ID).Delete(&model.Profile{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Model(&model.Profile{}).Where("user_id = ?", seeded[5].ID).
+		Updates(map[string]any{"nickname": "nee", "blog_url": "dle"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Model(&model.Profile{}).Where("user_id = ?", seeded[6].ID).
+		Update("nickname", `abc%_\literal`).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		filter repository.AdminUserFilter
+		total  int64
+		ids    []int
+	}{
+		{"deduplicated page", repository.AdminUserFilter{Keyword: "needle", Offset: 1, Limit: 2}, 4, []int{1, 2}},
+		{"phone excluded", repository.AdminUserFilter{Keyword: "needle", Offset: 2, Limit: 3}, 4, []int{2, 4}},
+		{"phone included", repository.AdminUserFilter{Keyword: "needle", IncludePhoneColumn: true, Offset: 2, Limit: 3}, 5, []int{2, 3, 4}},
+		{"student filter before branch limit", repository.AdminUserFilter{Keyword: "needle", StudentID: seeded[4].StudentID, Limit: 1}, 1, []int{4}},
+		{"filter before bounds", repository.AdminUserFilter{Keyword: "needle", Department: &software, Offset: 1, Limit: 2}, 3, []int{1, 2}},
+		{"escaped indexed term", repository.AdminUserFilter{Keyword: `abc%_\literal`, Limit: 10}, 1, []int{6}},
+		{"beyond last page", repository.AdminUserFilter{Keyword: "needle", Offset: 5, Limit: 2}, 4, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, total, err := users.ListAdminUsers(context.Background(), tc.filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if total != tc.total || len(rows) != len(tc.ids) {
+				t.Fatalf("total/rows = %d/%d, want %d/%d", total, len(rows), tc.total, len(tc.ids))
+			}
+			for i, index := range tc.ids {
+				if rows[i].ID != seeded[index].ID {
+					t.Fatalf("row %d id = %d, want %d", i, rows[i].ID, seeded[index].ID)
+				}
+			}
+		})
+	}
+}
+
+func TestListAdminUsersRejectsPageBoundOverflow(t *testing.T) {
+	_, _, err := repository.NewUser(nil).ListAdminUsers(context.Background(),
+		repository.AdminUserFilter{Limit: 20, Offset: math.MaxInt})
+	if !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("error = %v, want invalid page bound", err)
 	}
 }

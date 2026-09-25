@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -513,6 +514,9 @@ func TestTokenRefreshGrantRotates(t *testing.T) {
 // not let a refresh mint anything the family was not issued.
 func TestTokenRefreshCapabilityClientKeepsFamilyScopes(t *testing.T) {
 	h := newHarness(t)
+	// The delegation scenario: an administrative user authorizes the capability
+	// client, so the consent-time role gate must pass.
+	h.users.byID[1].Role = model.UserRoleAdmin
 	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{scope.OpenID, scope.AdminWrite}
 
 	code := issueCode(t, h, testConfidentialClientID, "openid admin:write")
@@ -549,6 +553,7 @@ func TestTokenRefreshCapabilityClientKeepsFamilyScopes(t *testing.T) {
 func TestTokenRefreshCapabilityFamilyCappedAtLifetime(t *testing.T) {
 	h := newHarness(t)
 	h.service.CapabilityRefreshMaxLifetime = 7 * 24 * time.Hour
+	h.users.byID[1].Role = model.UserRoleAdmin
 	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{scope.OpenID, scope.AdminWrite}
 
 	code := issueCode(t, h, testConfidentialClientID, "openid admin:write")
@@ -618,6 +623,7 @@ func TestTokenRefreshCapabilityFamilyCappedAtLifetime(t *testing.T) {
 func TestTokenRefreshCapabilityFamilyPastCapRevokes(t *testing.T) {
 	h := newHarness(t)
 	h.service.CapabilityRefreshMaxLifetime = 7 * 24 * time.Hour
+	h.users.byID[1].Role = model.UserRoleAdmin
 	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{scope.OpenID, scope.AdminWrite}
 
 	code := issueCode(t, h, testConfidentialClientID, "openid admin:write")
@@ -946,6 +952,9 @@ func parseIDTokenClaims(t *testing.T, h *harness, idToken string) *auth.IDTokenC
 // every outstanding code redeemable for an administrative token until it expired.
 func TestTokenAuthorizationCodeRejectsScopeRevokedAfterConsent(t *testing.T) {
 	h := newHarness(t)
+	// The delegation scenario: an administrative user authorizes the capability
+	// client, so the consent-time role gate must pass.
+	h.users.byID[1].Role = model.UserRoleAdmin
 	delegated := h.clients.byClientID[testConfidentialClientID]
 	delegated.Scopes = model.StringArray{"openid", scope.AdminWrite}
 
@@ -1053,5 +1062,77 @@ func TestTokenAuthorizationCodeRejectsClientScopeNarrowed(t *testing.T) {
 	}
 	if h.tokens.createdAccess != nil || h.tokens.createdRefresh != nil {
 		t.Fatalf("token pair = %v/%v, want none created", h.tokens.createdAccess, h.tokens.createdRefresh)
+	}
+}
+
+// A code minted for an administrative user is re-judged against the user's live
+// role at redemption, the user-side twin of the registration re-check: a grant
+// must not outlive the role that justified it. In production a demotion always
+// bumps token_version, which refuses the redemption one branch earlier — the
+// predicate under test is the defense in depth that answers a different question
+// (may this user hold this scope at all) should any role-affecting path ever
+// forget the bump.
+func TestTokenAuthorizationCodeRefusesAdminScopeAfterDemotion(t *testing.T) {
+	h := newHarness(t)
+	h.users.byID[1].Role = model.UserRoleAdmin
+	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{"openid", scope.AdminRead}
+
+	code := issueCode(t, h, testConfidentialClientID, "openid "+scope.AdminRead)
+
+	// The administrator is demoted between consent and redemption; token_version
+	// is left untouched so this test pins the scope predicate, not the version
+	// guard.
+	h.users.byID[1].Role = model.UserRoleMember
+
+	input := validCodeTokenInput(code)
+	input.ClientID = testConfidentialClientID
+	input.ClientSecret = testClientSecret
+	_, err := h.service.Token(context.Background(), input)
+
+	requireOAuthError(t, err, ErrorInvalidScope)
+	if h.tokens.createdAccess != nil {
+		t.Fatalf("an access token was issued despite the demoted role: %#v", h.tokens.createdAccess)
+	}
+	// The code is still burned: the consume happens before the bindings are
+	// validated, so a rejection must not leave a replayable code behind.
+	if _, err := h.service.Token(context.Background(), input); err == nil {
+		t.Fatal("the code survived a rejected redemption and was redeemable again")
+	}
+}
+
+func TestTokenRefreshPreservesAdministrativeRevocation(t *testing.T) {
+	for _, stage := range []string{"pre_read_grace", "pre_read_old", "rotation"} {
+		t.Run(stage, func(t *testing.T) {
+			h := newHarness(t)
+			code := issueCode(t, h, testPublicClientID, "openid")
+			first, err := h.service.Token(context.Background(), validCodeTokenInput(code))
+			if err != nil {
+				t.Fatal(err)
+			}
+			reason := "admin_role_change"
+			if stage == "rotation" {
+				h.tokens.rotateErr = &repository.SessionRevokedError{Reason: reason}
+			} else {
+				now := time.Now()
+				if stage == "pre_read_old" {
+					now = now.Add(-2 * repository.RefreshGracePeriod)
+				}
+				h.tokens.createdRefresh.RevokedAt = &now
+				h.tokens.createdRefresh.RevokedReason = &reason
+			}
+			_, err = h.service.Token(context.Background(), TokenInput{GrantType: grantTypeRefreshToken, RefreshToken: first.RefreshToken, ClientID: testPublicClientID})
+			requireOAuthError(t, err, ErrorInvalidGrant)
+			if len(h.tokens.revokedFamilies) != 0 {
+				t.Fatal("administrative revocation redundantly revoked family")
+			}
+			last := h.audit.entries[len(h.audit.entries)-1]
+			var detail map[string]any
+			if err := json.Unmarshal(last.Detail, &detail); err != nil {
+				t.Fatal(err)
+			}
+			if detail["outcome"] != "session_revoked" || detail["revoked_reason"] != reason {
+				t.Fatalf("detail = %v", detail)
+			}
+		})
 	}
 }
