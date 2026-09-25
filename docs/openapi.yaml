@@ -268,8 +268,11 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
           description: >-
-            未认证（401xx）。登录失败统一返回 40105（邮箱或密码错误）：邮箱不存在、
-            密码错误与账号已注销不区分（避免枚举已注册邮箱）。
+            未认证（401xx）。邮箱未注册返回 40106（该邮箱尚未注册），密码错误
+            返回 40105；不存在邮箱的尝试同样计入失败锁定。
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 账号已注销（40301）
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: 登录限流或失败锁定（42900）
@@ -431,7 +434,9 @@ paths:
     post:
       summary: 发送重置密码验证码
       deprecated: false
-      description: 对格式合法且未触发限流的邮箱统一受理。响应不表示账号存在，也不保证邮件已经送达；服务端通过有界内存队列异步处理。
+      description: >-
+        邮箱未注册时返回 40106（该邮箱尚未注册）；存在的账号异步受理，响应只
+        表示请求已入队，不保证邮件已经送达。服务端通过有界内存队列异步处理。
       operationId: authSendForgotPasswordCode
       tags:
         - Auth
@@ -452,7 +457,7 @@ paths:
         required: true
       responses:
         "200":
-          description: 请求已受理；不表示账号存在或邮件已送达
+          description: 请求已受理；不表示邮件已送达
           content:
             application/json:
               schema:
@@ -461,6 +466,9 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
           description: 参数错误（400xx）
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+          description: 该邮箱尚未注册（40106）
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: 频率限制（429xx）
@@ -5421,7 +5429,7 @@ components:
               summary: wrong_password
               value:
                 code: 40105
-                message: 邮箱或密码错误
+                message: 密码错误
                 data: null
             token_expired:
               summary: token_expired

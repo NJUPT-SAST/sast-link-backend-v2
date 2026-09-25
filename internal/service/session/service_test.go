@@ -998,9 +998,9 @@ func TestLoginDoesNotRehashWhenParametersMatch(t *testing.T) {
 func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 	service, _, _, _, audit, failures := newTestService(t)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	// An unknown identifier answers exactly like a wrong password (audit-fix #7):
-	// distinguishing them on the wire hands anyone a registered-email oracle.
-	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
+	// An unknown identifier answers 40106 but still counts toward lockout:
+	// enumeration is answered explicitly, yet never unthrottled.
+	assertKind(t, err, KindUnknownIdentifier, errcode.CodeUnknownIdentifier)
 	if len(failures.failures) != 1 || failures.failures[0] != "identifier:missing@sast.fun" {
 		t.Fatalf("failures = %#v, want unknown bucket counted", failures.failures)
 	}
@@ -1010,7 +1010,7 @@ func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 	if len(failures.failures) != 2 || failures.failures[1] != "user:42" {
 		t.Fatalf("failures = %#v, want known user bucket", failures.failures)
 	}
-	// One audit code for both legs; the reason field keeps the distinction.
+	// Each leg audits its own code; the reason field keeps the finer shape.
 	if got := lastErrCode(audit); got != errcode.CodePasswordInvalid {
 		t.Fatalf("audit err code = %d, want %d", got, errcode.CodePasswordInvalid)
 	}
@@ -1019,12 +1019,12 @@ func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 func TestServiceErrorsMatchSentinels(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
 
-	// An unknown identifier now answers with the login-failed sentinel (audit-fix
-	// #7): the wire must not distinguish the two, or a login attempt becomes a
-	// registered-email oracle.
+	// An unknown identifier answers with the unknown-identifier sentinel: the
+	// wire distinguishes it from a wrong password, and the attempt still
+	// counts toward lockout.
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	if !errors.Is(err, ErrLoginFailed) {
-		t.Fatalf("unknown identifier: errors.Is(err, ErrLoginFailed) = false, err=%v", err)
+	if !errors.Is(err, ErrUnknownIdentifier) {
+		t.Fatalf("unknown identifier: errors.Is(err, ErrUnknownIdentifier) = false, err=%v", err)
 	}
 
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
@@ -1112,9 +1112,9 @@ func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
 	service, _, clients, _, _, failures := newTestService(t)
 	service.Users.(*fakeUsers).byLogin["deleted@sast.fun"] = testUser(t, 99, "deleted@sast.fun", model.UserStateDeleted)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "deleted@sast.fun", Password: "secret"})
-	// A deleted account answers like any other failed login, so probing cannot
-	// tell "never registered" from "closed" (audit-fix #7 follow-up).
-	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
+	// A closed account answers 40301 like the other account-level paths, and
+	// still spends no lockout budget.
+	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
 	if len(failures.failures) != 0 {
 		t.Fatalf("deleted login failures = %#v, want no credential failure count", failures.failures)
 	}
@@ -1712,28 +1712,43 @@ func TestSendRegisterCodeRejectsHeaderInjectionPayload(t *testing.T) {
 	}
 }
 
-// The anonymous request path must be identical for known and unknown accounts:
-// both enqueue the same normalized job and neither performs SMTP or Redis work.
-func TestForgotPasswordSendCodeHidesAccountExistence(t *testing.T) {
-	for _, email := range []string{"nobody@njupt.edu.cn", "user@njupt.edu.cn"} {
-		t.Run(email, func(t *testing.T) {
-			service := newRegisterService(t)
-			dispatcher := service.ForgotPasswords.(*fakeForgotPasswordDispatcher)
-			result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: email, ClientIP: "127.0.0.1"})
-			if err != nil {
-				t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
-			}
-			if result.Email != email || result.ExpiresIn != 300 {
-				t.Fatalf("result = %+v, want uniform accepted shape", result)
-			}
-			if len(dispatcher.jobs) != 1 || dispatcher.jobs[0].Email != email {
-				t.Fatalf("jobs = %+v, want one normalized job", dispatcher.jobs)
-			}
-			if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
-				t.Fatalf("mailer sent=%d in request path, want 0", sent)
-			}
-		})
+// The send-code path answers account existence explicitly: an unknown
+// identifier is refused with 40106 before anything is enqueued, while a known
+// one is accepted with no SMTP work in the request path (delivery stays in the
+// worker).
+func TestForgotPasswordSendCodeAnswersAccountExistence(t *testing.T) {
+	service := newRegisterService(t)
+	dispatcher := service.ForgotPasswords.(*fakeForgotPasswordDispatcher)
+
+	result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("ForgotPasswordSendCode returned error: %v", err)
 	}
+	if result.Email != "user@njupt.edu.cn" || result.ExpiresIn != 300 {
+		t.Fatalf("result = %+v, want accepted shape", result)
+	}
+	if len(dispatcher.jobs) != 1 || dispatcher.jobs[0].Email != "user@njupt.edu.cn" {
+		t.Fatalf("jobs = %+v, want one normalized job", dispatcher.jobs)
+	}
+	if sent := len(service.Mailer.(*fakeMailer).sent); sent != 0 {
+		t.Fatalf("mailer sent=%d in request path, want 0", sent)
+	}
+
+	_, err = service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "nobody@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindUnknownIdentifier, errcode.CodeUnknownIdentifier)
+	if len(dispatcher.jobs) != 1 {
+		t.Fatalf("jobs = %+v, want unknown account to enqueue nothing", dispatcher.jobs)
+	}
+}
+
+// A lookup failure must surface as ErrInternal, not masquerade as "unknown
+// account": the distinction keeps a database outage from feeding the
+// enumeration signal this endpoint now answers.
+func TestForgotPasswordSendCodeLookupFailure(t *testing.T) {
+	service := newRegisterService(t)
+	service.Users.(*fakeUsers).err = errors.New("db down")
+	_, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindInternal, errcode.CodeInternal)
 }
 
 func TestForgotPasswordSendCodeReturnsAcceptedWhenQueueIsFull(t *testing.T) {
