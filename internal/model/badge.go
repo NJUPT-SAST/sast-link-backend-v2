@@ -20,7 +20,7 @@ type Badge struct {
 	DisabledAt *time.Time `gorm:"column:disabled_at"`
 }
 
-// TableName returns the exact V017 table name for Badge.
+// TableName returns the exact badge table name for Badge.
 func (Badge) TableName() string {
 	return "badge"
 }
