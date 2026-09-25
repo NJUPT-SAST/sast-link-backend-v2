@@ -69,6 +69,10 @@ const (
 	// clients can observe - two codes for one observable outcome is drift waiting to
 	// happen.
 	CodeAlumniRequestPending = 40906 // 该学号已有待审申请
+	// CodeBadgeAlreadyEnabled is an enable call on an account that already holds
+	// a badge row. Separate from the generic CodeConflict because the client's
+	// remedy is specific: show the existing badge, not a retry.
+	CodeBadgeAlreadyEnabled = 40907 // 徽标已开启
 
 	CodeValidationFailed  = 42200 // 业务校验失败
 	CodePasswordTooShort  = 42201 // 密码长度不足
@@ -80,6 +84,11 @@ const (
 	// sees, which is why the approval transaction locks the row rather than trusting
 	// a prior read.
 	CodeAlumniRequestReviewed = 42204 // 申请已被处理
+	// CodeBadgeNicknameMissing is an enable call on a profile with no nickname.
+	// The nickname is the badge's identity anchor — a nameless card is meaningless
+	// — so the enable is refused with a pointer at the profile edit instead of
+	// rendering an empty slot.
+	CodeBadgeNicknameMissing = 42205 // 请先设置昵称再开启徽标
 
 	CodeRateLimited = 42900 // 请求过于频繁
 
@@ -139,12 +148,14 @@ var Messages = map[int]string{
 	CodeIdentityAlreadyBound:   "该类型账号已绑定",
 	CodeIdentityLimitReached:   "第三方邮箱绑定数量已达上限",
 	CodeAlumniRequestPending:   "该学号已有待审申请",
+	CodeBadgeAlreadyEnabled:    "徽标已开启",
 
 	CodeValidationFailed:      "业务校验失败",
 	CodePasswordTooShort:      "密码长度不足",
 	CodePasswordUnchanged:     "新旧密码相同",
 	CodeAvatarRejected:        "头像未通过内容审核",
 	CodeAlumniRequestReviewed: "申请已被处理",
+	CodeBadgeNicknameMissing:  "请先设置昵称再开启徽标",
 
 	CodeRateLimited: "请求过于频繁",
 

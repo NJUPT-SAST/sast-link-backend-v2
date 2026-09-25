@@ -355,6 +355,17 @@ type Config struct {
 	// by user is exact. Fail-open, per PRD §6.0.
 	RateLimitUploadAvatarRPM    int           `env:"RATE_LIMIT_UPLOAD_AVATAR_RPM" envDefault:"10"`
 	RateLimitUploadAvatarWindow time.Duration `env:"RATE_LIMIT_UPLOAD_AVATAR_WINDOW" envDefault:"60s"`
+	// Badge toggle throttling is per user: every accepted enable/disable writes
+	// an audit row, so the cap bounds audit spam from a looping client. The
+	// window is an hour, not a minute, because toggling is rare by design.
+	RateLimitBadgeToggleRPM    int           `env:"RATE_LIMIT_BADGE_TOGGLE_RPM" envDefault:"5"`
+	RateLimitBadgeToggleWindow time.Duration `env:"RATE_LIMIT_BADGE_TOGGLE_WINDOW" envDefault:"1h"`
+	// Badge public render throttling is per IP: the endpoint is unauthenticated
+	// (the capability key is the credential) and every miss costs a DB read, so
+	// the cap bounds probing. Sized for a friend-link wall loading dozens of
+	// badges from one viewer.
+	RateLimitBadgePublicRPM    int           `env:"RATE_LIMIT_BADGE_PUBLIC_RPM" envDefault:"120"`
+	RateLimitBadgePublicWindow time.Duration `env:"RATE_LIMIT_BADGE_PUBLIC_WINDOW" envDefault:"60s"`
 }
 
 // Load parses configuration from environment variables and validates required fields.
@@ -486,6 +497,9 @@ func (c *Config) ValidateAPIAuth() error {
 		return err
 	}
 	if err := c.validateUploadAvatar(); err != nil {
+		return err
+	}
+	if err := c.validateBadgeToggle(); err != nil {
 		return err
 	}
 	if err := c.validateThirdPartyLogin(); err != nil {
@@ -792,6 +806,21 @@ func (c *Config) validateUploadAvatar() error {
 		return fmt.Errorf("RATE_LIMIT_UPLOAD_AVATAR_RPM must be positive")
 	case c.RateLimitUploadAvatarWindow < time.Second:
 		return fmt.Errorf("RATE_LIMIT_UPLOAD_AVATAR_WINDOW must be at least 1s")
+	}
+	return nil
+}
+
+// validateBadgeToggle checks the per-user throttle on the badge endpoints.
+func (c *Config) validateBadgeToggle() error {
+	switch {
+	case c.RateLimitBadgeToggleRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_BADGE_TOGGLE_RPM must be positive")
+	case c.RateLimitBadgeToggleWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_BADGE_TOGGLE_WINDOW must be at least 1s")
+	case c.RateLimitBadgePublicRPM <= 0:
+		return fmt.Errorf("RATE_LIMIT_BADGE_PUBLIC_RPM must be positive")
+	case c.RateLimitBadgePublicWindow < time.Second:
+		return fmt.Errorf("RATE_LIMIT_BADGE_PUBLIC_WINDOW must be at least 1s")
 	}
 	return nil
 }
