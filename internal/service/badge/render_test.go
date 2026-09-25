@@ -350,3 +350,21 @@ func TestBuildCardDataResolvesLinkTarget(t *testing.T) {
 		t.Fatalf("LinkTarget = %q, want empty", neither.LinkTarget)
 	}
 }
+
+// TestRenderBorderStaysInsideCanvas pins the missing-right-border regression:
+// the hairline rect starts at x=0.5, so its width must be canvas-1 — a full
+// width pushes the right stroke outside the viewBox and the browser clips it.
+func TestRenderBorderStaysInsideCanvas(t *testing.T) {
+	for size, want := range map[Size][2]int{
+		SizeSM: {320, 72},
+		SizeMD: {460, 120},
+		SizeLG: {540, 200},
+	} {
+		svg := renderForTest(t, size, ThemeLight, cardData{Nickname: "张三"})
+		wantBorder := `x="0.5" y="0.5" width="` + strconv.Itoa(want[0]-1) +
+			`" fill="none" stroke="#e5e7eb" height="` + strconv.Itoa(want[1]-1) + `"`
+		if !strings.Contains(svg, wantBorder) {
+			t.Fatalf("%s border rect not found as %q", size, wantBorder)
+		}
+	}
+}

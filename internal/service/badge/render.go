@@ -173,7 +173,7 @@ var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
 .card-bg{fill:{{.Palette.Background}}}.card-fg{fill:{{.Palette.Foreground}}}.card-muted{fill:{{.Palette.Muted}}}.card-accent{fill:{{.Palette.Accent}}}
 {{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-fg{fill:{{.Dark.Foreground}}}.card-muted{fill:{{.Dark.Muted}}}.card-accent{fill:{{.Dark.Accent}}}}
 {{end}}</style>{{if .Data.LinkTarget}}<a href="{{esc .Data.LinkTarget}}" target="_blank" rel="noopener noreferrer">{{end}}<rect class="card-bg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" rx="10"/>
-<rect x="0.5" y="0.5" width="{{.Layout.Width}}" fill="none" stroke="{{.Palette.Hairline}}" height="{{.DecHeight}}" rx="10" stroke-width="1"/>
+<rect x="0.5" y="0.5" width="{{.DecWidth}}" fill="none" stroke="{{.Palette.Hairline}}" height="{{.DecHeight}}" rx="10" stroke-width="1"/>
 {{if .Data.AvatarDataURI}}<image x="{{.Layout.AvatarX}}" y="{{.Layout.AvatarY}}" width="{{.Layout.AvatarSize}}" height="{{.Layout.AvatarSize}}" href="{{.Data.AvatarDataURI}}" clip-path="inset(0 round {{.Layout.AvatarRadius}}px)" preserveAspectRatio="xMidYMid slice"/>
 {{else if .Data.AvatarInitial}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-muted"/>
 <text x="{{.DecAvatarCX}}" y="{{.DecAvatarTextY}}" text-anchor="middle" class="card-bg" font-size="{{.DecAvatarFontSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.AvatarInitial}}</text>
@@ -220,6 +220,7 @@ func renderCard(size Size, theme Theme, data cardData) ([]byte, error) {
 		Data                 cardData
 		FontStack            string
 		DecHeight            int
+		DecWidth             int
 		DecAvatarCX          int
 		DecAvatarCY          int
 		DecAvatarTextY       int
@@ -233,6 +234,7 @@ func renderCard(size Size, theme Theme, data cardData) ([]byte, error) {
 		Data:      data,
 		FontStack: fontStack,
 		DecHeight: chosen.Height - 1,
+		DecWidth:  chosen.Width - 1,
 	}
 	switch theme {
 	case ThemeDark:
