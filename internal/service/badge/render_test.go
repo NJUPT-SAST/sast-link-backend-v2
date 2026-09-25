@@ -314,3 +314,39 @@ func TestRenderStartsWithXMLDeclaration(t *testing.T) {
 		t.Fatalf("error card does not start with the XML declaration: %q", body[:40])
 	}
 }
+
+func TestRenderCardLinksToMembersOwnPage(t *testing.T) {
+	// Blog wins when both exist.
+	withBoth := cardData{Nickname: "张三", LinkTarget: "https://blog.example.com"}
+	svg := renderForTest(t, SizeMD, ThemeLight, withBoth)
+	if !strings.Contains(svg, `<a href="https://blog.example.com" target="_blank" rel="noopener noreferrer">`) {
+		t.Fatalf("card missing the link wrap: %s", svg[:200])
+	}
+	if !strings.Contains(svg, "</a>") {
+		t.Fatalf("card link never closes")
+	}
+
+	// No target, no link element at all.
+	without := renderForTest(t, SizeMD, ThemeLight, cardData{Nickname: "张三"})
+	if strings.Contains(without, "<a ") {
+		t.Fatalf("card without a link target must not emit an anchor")
+	}
+}
+
+func TestBuildCardDataResolvesLinkTarget(t *testing.T) {
+	blog := "https://blog.example.com"
+	github := "https://github.com/alice"
+
+	withBoth := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &blog, GitHubURL: &github})
+	if withBoth.LinkTarget != blog {
+		t.Fatalf("LinkTarget = %q, want the blog url", withBoth.LinkTarget)
+	}
+	githubOnly := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), GitHubURL: &github})
+	if githubOnly.LinkTarget != github {
+		t.Fatalf("LinkTarget = %q, want the github fallback", githubOnly.LinkTarget)
+	}
+	neither := buildCardData(&repository.PublicCard{Nickname: strPtr("张三")})
+	if neither.LinkTarget != "" {
+		t.Fatalf("LinkTarget = %q, want empty", neither.LinkTarget)
+	}
+}

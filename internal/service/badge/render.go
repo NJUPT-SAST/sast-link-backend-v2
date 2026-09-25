@@ -149,6 +149,12 @@ type cardData struct {
 	Intro         string
 	Links         string
 	Brand         string
+	// LinkTarget is the member's own page the whole card links to — blog
+	// first, GitHub as the fallback, empty when neither exists. An <img>
+	// embed ignores links inside the SVG (camo strips them anyway); the
+	// target matters where the SVG is inlined or shown via <object>, and the
+	// frontend preview builds its own <a> from the same rule.
+	LinkTarget string
 }
 
 // svgTemplate renders one badge. The palette rides in through classes so the
@@ -166,7 +172,7 @@ var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
 <style>
 .card-bg{fill:{{.Palette.Background}}}.card-fg{fill:{{.Palette.Foreground}}}.card-muted{fill:{{.Palette.Muted}}}.card-accent{fill:{{.Palette.Accent}}}
 {{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-fg{fill:{{.Dark.Foreground}}}.card-muted{fill:{{.Dark.Muted}}}.card-accent{fill:{{.Dark.Accent}}}}
-{{end}}</style><rect class="card-bg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" rx="10"/>
+{{end}}</style>{{if .Data.LinkTarget}}<a href="{{esc .Data.LinkTarget}}" target="_blank" rel="noopener noreferrer">{{end}}<rect class="card-bg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" rx="10"/>
 <rect x="0.5" y="0.5" width="{{.Layout.Width}}" fill="none" stroke="{{.Palette.Hairline}}" height="{{.DecHeight}}" rx="10" stroke-width="1"/>
 {{if .Data.AvatarDataURI}}<image x="{{.Layout.AvatarX}}" y="{{.Layout.AvatarY}}" width="{{.Layout.AvatarSize}}" height="{{.Layout.AvatarSize}}" href="{{.Data.AvatarDataURI}}" clip-path="inset(0 round {{.Layout.AvatarRadius}}px)" preserveAspectRatio="xMidYMid slice"/>
 {{else if .Data.AvatarInitial}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-muted"/>
@@ -177,7 +183,7 @@ var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
 {{if .Data.Department}}<text x="{{.Layout.DeptX}}" y="{{.Layout.DeptY}}" class="card-muted" font-size="{{.Layout.DeptSize}}" font-family="{{.FontStack}}">{{esc .Data.Department}}</text>
 {{end}}{{if .Data.Intro}}<text x="{{.Layout.IntroX}}" y="{{.Layout.IntroY}}" class="card-muted" font-size="{{.Layout.IntroSize}}" font-family="{{.FontStack}}">{{esc .Data.Intro}}</text>
 {{end}}{{if .Data.Links}}<text x="{{.Layout.LinksX}}" y="{{.Layout.LinksY}}" class="card-accent" font-size="{{.Layout.LinksSize}}" font-family="{{.FontStack}}">{{esc .Data.Links}}</text>
-{{end}}<text x="{{.Layout.BrandX}}" y="{{.Layout.BrandY}}" text-anchor="end" class="card-muted" font-size="{{.Layout.BrandSize}}" font-family="{{.FontStack}}" letter-spacing="1">SAST Link</text>
+{{end}}<text x="{{.Layout.BrandX}}" y="{{.Layout.BrandY}}" text-anchor="end" class="card-muted" font-size="{{.Layout.BrandSize}}" font-family="{{.FontStack}}" letter-spacing="1">SAST Link</text>{{if .Data.LinkTarget}}</a>{{end}}
 </svg>
 `))
 

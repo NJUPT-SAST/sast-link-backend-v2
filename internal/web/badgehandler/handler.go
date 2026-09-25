@@ -87,7 +87,7 @@ func (h Handler) Status(c *gin.Context) {
 	response.Ok(c, status)
 }
 
-// Enable answers POST /user/badge: opt in (or, once rotation exists, rotate).
+// Enable answers POST /user/badge: opt in.
 func (h Handler) Enable(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {

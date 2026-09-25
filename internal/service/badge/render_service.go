@@ -226,14 +226,24 @@ func buildCardData(card *repository.PublicCard) cardData {
 	}
 
 	var links []string
+	blog := ""
 	if card.BlogURL != nil && strings.TrimSpace(*card.BlogURL) != "" {
-		links = append(links, truncate(hostOf(*card.BlogURL), 20))
+		blog = strings.TrimSpace(*card.BlogURL)
+		links = append(links, truncate(hostOf(blog), 20))
 	}
+	github := ""
 	if card.GitHubURL != nil && strings.TrimSpace(*card.GitHubURL) != "" {
-		links = append(links, truncate(hostOf(*card.GitHubURL), 20))
+		github = strings.TrimSpace(*card.GitHubURL)
+		links = append(links, truncate(hostOf(github), 20))
 	}
 	if len(links) > 0 {
 		data.Links = truncate(joinLinks(links), layouts[SizeLG].LinksMax)
+	}
+	// The card links to the member's own page — blog first, GitHub as the
+	// fallback, nothing when neither exists.
+	data.LinkTarget = blog
+	if data.LinkTarget == "" {
+		data.LinkTarget = github
 	}
 	return data
 }
