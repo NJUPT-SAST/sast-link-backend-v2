@@ -34,7 +34,9 @@ const (
 )
 
 // layout carries every per-size geometry and truncation bound the template
-// consumes. Fixed canvas, fixed slots.
+// consumes. Fixed canvas, fixed slots. Y values are text baselines; the
+// vertical divider and the department accent dot are only drawn when their
+// coordinates are non-zero.
 type layout struct {
 	Width  int
 	Height int
@@ -49,10 +51,13 @@ type layout struct {
 	NameSize int
 	NameMax  int
 
-	DeptX    int
-	DeptY    int
-	DeptSize int
-	DeptMax  int
+	DeptX     int
+	DeptY     int
+	DeptSize  int
+	DeptMax   int
+	DeptDotCX int
+	DeptDotCY int
+	DeptDotR  int
 
 	IntroX    int
 	IntroY    int
@@ -64,38 +69,54 @@ type layout struct {
 	LinksSize int
 	LinksMax  int
 
+	DividerX  int
+	DividerY1 int
+	DividerY2 int
+
 	BrandX    int
 	BrandY    int
 	BrandSize int
 }
 
-// layouts pins the three canvases. All Y values are text baselines.
+// layouts pins the three canvases.
+//
+// sm: avatar + name + department (accent dot), brand top-right — the
+// compact friend-link wall tile.
+//
+// md: avatar | vertical divider | name, department, quoted intro — the
+// README-sized introduction. Brand top-right.
+//
+// lg: everything, roomier: avatar | divider | name, department, quoted
+// intro, social hosts in accent — brand bottom-right.
 var layouts = map[Size]layout{
 	SizeSM: {
 		Width: 320, Height: 72,
 		AvatarX: 8, AvatarY: 8, AvatarSize: 56, AvatarRadius: 28,
-		NameX: 78, NameY: 34, NameSize: 17, NameMax: 12,
-		DeptX: 78, DeptY: 56, DeptSize: 11, DeptMax: 18,
-		BrandX: 312, BrandY: 18, BrandSize: 9,
+		NameX: 78, NameY: 33, NameSize: 17, NameMax: 12,
+		DeptX: 90, DeptY: 54, DeptSize: 11, DeptMax: 18,
+		DeptDotCX: 82, DeptDotCY: 50, DeptDotR: 3,
+		BrandX: 312, BrandY: 16, BrandSize: 9,
 	},
 	SizeMD: {
 		Width: 460, Height: 120,
 		AvatarX: 16, AvatarY: 16, AvatarSize: 88, AvatarRadius: 44,
-		NameX: 122, NameY: 52, NameSize: 20, NameMax: 14,
-		DeptX: 122, DeptY: 76, DeptSize: 12, DeptMax: 24,
-		IntroX: 122, IntroY: 98, IntroSize: 12, IntroMax: 26,
-		// md renders no links row: only lg has the slot (see renderCard).
-		LinksX: 0, LinksY: 0, LinksSize: 0, LinksMax: 0,
-		BrandX: 448, BrandY: 18, BrandSize: 9,
+		DividerX: 118, DividerY1: 24, DividerY2: 96,
+		NameX: 134, NameY: 48, NameSize: 20, NameMax: 14,
+		DeptX: 147, DeptY: 75, DeptSize: 12, DeptMax: 24,
+		DeptDotCX: 138, DeptDotCY: 71, DeptDotR: 3,
+		IntroX: 134, IntroY: 100, IntroSize: 12, IntroMax: 24,
+		BrandX: 448, BrandY: 22, BrandSize: 9,
 	},
 	SizeLG: {
 		Width: 540, Height: 200,
 		AvatarX: 28, AvatarY: 36, AvatarSize: 128, AvatarRadius: 64,
-		NameX: 180, NameY: 88, NameSize: 24, NameMax: 16,
-		DeptX: 180, DeptY: 118, DeptSize: 14, DeptMax: 28,
-		IntroX: 180, IntroY: 148, IntroSize: 14, IntroMax: 34,
-		LinksX: 180, LinksY: 178, LinksSize: 12, LinksMax: 44,
-		BrandX: 526, BrandY: 20, BrandSize: 9,
+		DividerX: 170, DividerY1: 56, DividerY2: 164,
+		NameX: 190, NameY: 84, NameSize: 24, NameMax: 16,
+		DeptX: 207, DeptY: 116, DeptSize: 14, DeptMax: 28,
+		DeptDotCX: 194, DeptDotCY: 111, DeptDotR: 3,
+		IntroX: 190, IntroY: 146, IntroSize: 14, IntroMax: 30,
+		LinksX: 190, LinksY: 176, LinksSize: 12, LinksMax: 44,
+		BrandX: 526, BrandY: 184, BrandSize: 9,
 	},
 }
 
@@ -170,8 +191,8 @@ var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
 }).Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" viewBox="0 0 {{.Layout.Width}} {{.Layout.Height}}" role="img" aria-label="{{esc .Data.Nickname}} 的 SAST Link 徽标">
 <style>
-.card-bg{fill:{{.Palette.Background}}}.card-fg{fill:{{.Palette.Foreground}}}.card-muted{fill:{{.Palette.Muted}}}.card-accent{fill:{{.Palette.Accent}}}
-{{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-fg{fill:{{.Dark.Foreground}}}.card-muted{fill:{{.Dark.Muted}}}.card-accent{fill:{{.Dark.Accent}}}}
+.card-bg{fill:{{.Palette.Background}}}.card-fg{fill:{{.Palette.Foreground}}}.card-muted{fill:{{.Palette.Muted}}}.card-accent{fill:{{.Palette.Accent}}}.card-line{stroke:{{.Palette.Hairline}}}
+{{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-fg{fill:{{.Dark.Foreground}}}.card-muted{fill:{{.Dark.Muted}}}.card-accent{fill:{{.Dark.Accent}}}.card-line{stroke:{{.Dark.Hairline}}}}
 {{end}}</style>{{if .Data.LinkTarget}}<a href="{{esc .Data.LinkTarget}}" target="_blank" rel="noopener noreferrer">{{end}}<rect class="card-bg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" rx="10"/>
 <rect x="0.5" y="0.5" width="{{.DecWidth}}" fill="none" stroke="{{.Palette.Hairline}}" height="{{.DecHeight}}" rx="10" stroke-width="1"/>
 {{if .Data.AvatarDataURI}}<image x="{{.Layout.AvatarX}}" y="{{.Layout.AvatarY}}" width="{{.Layout.AvatarSize}}" height="{{.Layout.AvatarSize}}" href="{{.Data.AvatarDataURI}}" clip-path="inset(0 round {{.Layout.AvatarRadius}}px)" preserveAspectRatio="xMidYMid slice"/>
@@ -179,9 +200,10 @@ var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
 <text x="{{.DecAvatarCX}}" y="{{.DecAvatarTextY}}" text-anchor="middle" class="card-bg" font-size="{{.DecAvatarFontSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.AvatarInitial}}</text>
 {{else}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-bg" stroke="{{.Palette.Hairline}}" stroke-width="1"/>
 <circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.DecAvatarRadiusInner}}" class="card-accent" fill-opacity="0.25"/>
+{{end}}{{if .Layout.DividerX}}<line x1="{{.Layout.DividerX}}" y1="{{.Layout.DividerY1}}" x2="{{.Layout.DividerX}}" y2="{{.Layout.DividerY2}}" class="card-line" stroke-width="1"/>
 {{end}}<text x="{{.Layout.NameX}}" y="{{.Layout.NameY}}" class="card-fg" font-size="{{.Layout.NameSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.Nickname}}</text>
-{{if .Data.Department}}<text x="{{.Layout.DeptX}}" y="{{.Layout.DeptY}}" class="card-muted" font-size="{{.Layout.DeptSize}}" font-family="{{.FontStack}}">{{esc .Data.Department}}</text>
-{{end}}{{if .Data.Intro}}<text x="{{.Layout.IntroX}}" y="{{.Layout.IntroY}}" class="card-muted" font-size="{{.Layout.IntroSize}}" font-family="{{.FontStack}}">{{esc .Data.Intro}}</text>
+{{if .Data.Department}}{{if .Layout.DeptDotCX}}<circle cx="{{.Layout.DeptDotCX}}" cy="{{.Layout.DeptDotCY}}" r="{{.Layout.DeptDotR}}" class="card-accent"/>{{end}}<text x="{{.Layout.DeptX}}" y="{{.Layout.DeptY}}" class="card-muted" font-size="{{.Layout.DeptSize}}" font-family="{{.FontStack}}">{{esc .Data.Department}}</text>
+{{end}}{{if .Data.Intro}}<text x="{{.Layout.IntroX}}" y="{{.Layout.IntroY}}" class="card-muted" font-size="{{.Layout.IntroSize}}" font-family="{{.FontStack}}">「{{esc .Data.Intro}}」</text>
 {{end}}{{if .Data.Links}}<text x="{{.Layout.LinksX}}" y="{{.Layout.LinksY}}" class="card-accent" font-size="{{.Layout.LinksSize}}" font-family="{{.FontStack}}">{{esc .Data.Links}}</text>
 {{end}}<text x="{{.Layout.BrandX}}" y="{{.Layout.BrandY}}" text-anchor="end" class="card-muted" font-size="{{.Layout.BrandSize}}" font-family="{{.FontStack}}" letter-spacing="1">SAST Link</text>{{if .Data.LinkTarget}}</a>{{end}}
 </svg>
