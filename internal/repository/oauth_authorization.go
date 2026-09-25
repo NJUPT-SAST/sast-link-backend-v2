@@ -81,15 +81,16 @@ func (r *OAuthAuthorizationRepository) CreateWithGrant(ctx context.Context, auth
 // serializes this transaction against the revoking DELETE, and if the delete
 // committed first there is nothing to update, RowsAffected is 0, and returning
 // ErrNotFound rolls back the code insert with the rest of the transaction. No
-// grant row, no code. (PostgreSQL counts rows matched by the UPDATE, not rows
-// whose values changed, so 0 rows reliably means "the row is gone".)
+// grant row, no code. The scope predicate is rechecked under the same row
+// lock, so a concurrent interactive scope reduction cannot be overwritten.
+// Zero affected rows means the grant is absent or no longer covers the request.
 func (r *OAuthAuthorizationRepository) CreateWithExistingGrant(ctx context.Context, authorization *model.OAuthAuthorization) error {
 	if err := validateNewAuthorization(authorization); err != nil {
 		return fmt.Errorf("create authorization with existing grant: %w", err)
 	}
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		updated := transaction.Model(&model.OAuthGrant{}).
-			Where("user_id = ? AND client_id = ?", authorization.UserID, authorization.ClientID).
+			Where("user_id = ? AND client_id = ? AND scopes @> ?::text[]", authorization.UserID, authorization.ClientID, authorization.Scopes).
 			Updates(map[string]any{
 				"scopes":     authorization.Scopes,
 				"granted_at": authorization.CreatedAt,
@@ -260,12 +261,15 @@ func (r *OAuthAuthorizationRepository) ListGrantsByUser(ctx context.Context, use
 // effect at once instead of leaving a code redeemable for the rest of its TTL.
 func (r *OAuthAuthorizationRepository) DeleteByUserClient(ctx context.Context, userID, clientID int64) error {
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		// Lock/delete the grant before deleting codes, in the same order as the
+		// silent writer. A silent mint that wins the lock must finish before
+		// the code deletion takes its snapshot.
 		if err := transaction.Where("user_id = ? AND client_id = ?", userID, clientID).
-			Delete(&model.OAuthAuthorization{}).Error; err != nil {
+			Delete(&model.OAuthGrant{}).Error; err != nil {
 			return err
 		}
 		return transaction.Where("user_id = ? AND client_id = ?", userID, clientID).
-			Delete(&model.OAuthGrant{}).Error
+			Delete(&model.OAuthAuthorization{}).Error
 	})
 	if err != nil {
 		return fmt.Errorf("delete user client authorizations: %w", err)

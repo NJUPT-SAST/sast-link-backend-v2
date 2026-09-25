@@ -109,6 +109,10 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 		return nil, redirectableError(ErrInvalidRequest, "nonce 长度超出限制", nil)
 	}
 
+	if len(input.Prompt) > maxAuthorizeParameterLength {
+		return nil, redirectableError(ErrInvalidRequest, "prompt 长度超出限制", nil)
+	}
+
 	requested, err := parseRequestedScopes(input.Scope)
 	if err != nil {
 		return nil, redirectableError(ErrInvalidScope, "scope 无效：必须包含 openid，且仅支持受支持的取值", err)

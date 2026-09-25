@@ -916,3 +916,12 @@ func TestConsentDenialRefusesWhenClientDisabled(t *testing.T) {
 		t.Fatalf("Consent(deny after disable) error = %v, want ErrInvalidClient", err)
 	}
 }
+
+func TestAuthorizeRejectsOversizedPrompt(t *testing.T) {
+	h := newHarness(t)
+	input := validAuthorizeInput(t)
+	input.Prompt = strings.Repeat("x", maxAuthorizeParameterLength+1)
+	if _, err := h.service.Authorize(context.Background(), input); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Authorize(oversized prompt) = %v, want ErrInvalidRequest", err)
+	}
+}

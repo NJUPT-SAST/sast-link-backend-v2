@@ -2809,7 +2809,7 @@ Content-Type: application/json
 | `email_verified` | `email` | 邮箱已验证，固定 `true` |
 | `updated_at` | `profile` | 用户信息最后修改时间 |
 
-> **`auth_time` 已移除**：服务端未持久化真实认证时刻，之前的近似值（授权确认时刻）会高报认证新鲜度，误导按 OIDC 语义消费该 claim 的 RP。因此 ID Token **不再签发** `auth_time`，也未列入 `claims_supported`；`max_age` / `prompt` 未实现。待将来持久化真实认证时刻后再加回。
+> **`auth_time` 已移除**：服务端未持久化真实认证时刻，之前的近似值（授权确认时刻）会高报认证新鲜度，误导按 OIDC 语义消费该 claim 的 RP。因此 ID Token **不再签发** `auth_time`，也未列入 `claims_supported`；`max_age` 未实现；`prompt=login/consent` 仅回退授权页，不强制重新登录。待将来持久化真实认证时刻后再加回。
 
 **OIDC 授权码流完整交互**：
 

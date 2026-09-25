@@ -1412,7 +1412,7 @@ paths:
           in: query
           description: |
             OIDC prompt，空格分隔。本服务只识别 `login` 与 `consent`：二者否决静默发码，
-            强制回到授权页。其余取值（含 `none`）被忽略，`prompt=none` 语义不受支持。
+            强制回到授权页。其余取值（含 `none`）被忽略，`prompt=none` 语义不受支持。原始参数不得超过 255 字节。
           required: false
           schema:
             type: string

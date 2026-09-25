@@ -13,6 +13,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 )
 
 type fixedClock struct{ value time.Time }
@@ -113,7 +114,7 @@ func (f *fakeAuthorizations) CreateWithExistingGrant(_ context.Context, authoriz
 		delete(f.grantScopes, key)
 		f.deleteGrantsOnCreate = false
 	}
-	if _, ok := f.grantScopes[key]; !ok {
+	if covered, err := scope.ContainsAll(f.grantScopes[key], authorization.Scopes); err != nil || !covered {
 		return repository.ErrNotFound
 	}
 	f.grantScopes[key] = authorization.Scopes

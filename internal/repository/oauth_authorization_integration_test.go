@@ -536,6 +536,23 @@ func TestOAuthAuthorizationRepositoryCreateWithExistingGrant(t *testing.T) {
 		t.Fatalf("grants = %d, want the pair updated in place", grantCount)
 	}
 
+	// A scope reduction committed after the service read must win as well.
+	stale := testAuthorization("code-stale-scope", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	stale.Scopes = model.StringArray{"openid", "email"}
+	if err := authorizations.CreateWithExistingGrant(context.Background(), stale); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("CreateWithExistingGrant(stale scopes) = %v, want ErrNotFound", err)
+	}
+	if err := database.Model(&model.OAuthAuthorization{}).Where("code = ?", stale.Code).Count(&codeCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if codeCount != 0 {
+		t.Fatal("scope reduction was bypassed by a stale silent authorization")
+	}
+	scopes, found, err := authorizations.FindGrantScopes(context.Background(), user.ID, client.ID)
+	if err != nil || !found || len(scopes) != 1 || scopes[0] != "openid" {
+		t.Fatalf("narrowed grant changed: scopes=%v found=%v err=%v", scopes, found, err)
+	}
+
 	// And the revoke that commits first wins: the row the update needs is gone,
 	// so the mint fails instead of putting it back.
 	if err := authorizations.DeleteByUserClient(context.Background(), user.ID, client.ID); err != nil {
@@ -663,4 +680,58 @@ func TestOAuthAuthorizationRedemptionRefusesPairAfterBulkRevocation(t *testing.T
 		t.Fatalf("CreatePairWithUserAndClientLock() error = %v, want ErrUserStateChanged", err)
 	}
 	assertTokenPairAbsent(t, database, access.TokenID, refresh.TokenHash)
+}
+
+// Hold the grant row as an in-flight silent writer, let revoke block on it,
+// then commit a new code. Revoke must delete that code after acquiring the row.
+func TestGrantRevokeWaitsForSilentCodeBeforeDeletingCodes(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "authz-race@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	grant := &model.OAuthGrant{UserID: user.ID, ClientID: client.ID, Scopes: model.StringArray{"openid", "profile"}, GrantedAt: time.Now()}
+	if err := database.Create(grant).Error; err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx := database.WithContext(ctx).Begin()
+	defer tx.Rollback()
+	if err := tx.Model(grant).Where("user_id = ? AND client_id = ?", user.ID, client.ID).Update("granted_at", time.Now()).Error; err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- repository.NewOAuthAuthorization(database).DeleteByUserClient(ctx, user.ID, client.ID) }()
+	for {
+		var blocked int64
+		if err := database.WithContext(ctx).Raw(`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%DELETE FROM "oauth_grants"%'`).Scan(&blocked).Error; err != nil {
+			t.Fatal(err)
+		}
+		if blocked > 0 {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("revoke finished before writer released grant: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	code := testAuthorization("code-during-revoke", client.ID, user.ID, time.Now().Add(time.Minute))
+	if err := tx.Create(code).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := database.Model(&model.OAuthAuthorization{}).Where("code = ?", code.Code).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("revoke left the concurrently minted code redeemable")
+	}
 }
