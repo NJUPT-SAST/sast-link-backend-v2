@@ -32,6 +32,8 @@ It never performs DDL or schema migrations at startup. `cmd/migrate` is the only
 
 ## Current Commands
 
+OAuth grant revocation now deletes consent and authorization codes, revokes token families, and persists blacklist outbox entries in one database transaction. Code redemption checks the exact consumed authorization row under a shared lock until token persistence commits; re-consenting cannot revive an old code. Replays expire the consumed row under its lock before family revocation so a still-running first redemption cannot mint afterward. User/client validation also uses shared row locks: concurrent redemptions can proceed together, while state-changing updates must wait. This requires PostgreSQL READ COMMITTED isolation (the configured default).
+
 The project targets Go `1.26.6`, Gin, GORM, PostgreSQL 16+, Redis 8+, and testcontainers-go. Full integration tests provision PostgreSQL 16 through Testcontainers and require Docker.
 
 ```powershell

@@ -40,6 +40,9 @@ func (r *OAuthAuthorizationRepository) CreateWithGrant(ctx context.Context, auth
 		return fmt.Errorf("create authorization with grant: %w", err)
 	}
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := lockAuthorizationClient(transaction, authorization.ClientID); err != nil {
+			return err
+		}
 		if err := transaction.Create(authorization).Error; err != nil {
 			return err
 		}
@@ -74,7 +77,7 @@ func (r *OAuthAuthorizationRepository) CreateWithGrant(ctx context.Context, auth
 // could resurrect a grant the user revoked a millisecond earlier — the app
 // reappears in the authorized-apps list and the client holds a live code, so the
 // revoke's promise ("the client must consent again") is silently undone.
-// DeleteByUserClient deletes the grants and codes that exist when it runs, and
+// Grant revocation deletes the grants and codes that exist when it runs, and
 // cannot delete a row a later transaction re-inserts.
 //
 // Ordering the grant write first, as an UPDATE, closes that: the row lock
@@ -89,6 +92,9 @@ func (r *OAuthAuthorizationRepository) CreateWithExistingGrant(ctx context.Conte
 		return fmt.Errorf("create authorization with existing grant: %w", err)
 	}
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := lockAuthorizationClient(transaction, authorization.ClientID); err != nil {
+			return err
+		}
 		updated := transaction.Model(&model.OAuthGrant{}).
 			Where("user_id = ? AND client_id = ? AND scopes @> ?::text[]", authorization.UserID, authorization.ClientID, authorization.Scopes).
 			Updates(map[string]any{
@@ -129,8 +135,9 @@ func (r *OAuthAuthorizationRepository) Consume(
 	ctx context.Context,
 	code string,
 	now time.Time,
+	clientID int64,
 ) (*model.OAuthAuthorization, int64, error) {
-	if strings.TrimSpace(code) == "" || now.IsZero() {
+	if strings.TrimSpace(code) == "" || now.IsZero() || clientID <= 0 {
 		return nil, 0, fmt.Errorf("consume authorization: %w", ErrInvalidArgument)
 	}
 	var authorization model.OAuthAuthorization
@@ -140,7 +147,7 @@ func (r *OAuthAuthorizationRepository) Consume(
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		lockErr := transaction.
 			Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("code = ?", code).
+			Where("code = ? AND client_id = ?", code, clientID).
 			First(&authorization).Error
 		if errors.Is(lockErr, gorm.ErrRecordNotFound) {
 			return ErrNotFound
@@ -150,7 +157,11 @@ func (r *OAuthAuthorizationRepository) Consume(
 		}
 		if authorization.IsUsed {
 			replayed = true
-			return nil
+			// A replay may precede the first request's pair write. Expire the
+			// code under its lock to fence that write, retaining the family for
+			// repeated revocation attempts if downstream delivery fails.
+			return transaction.Model(&authorization).
+				Update("expires_at", gorm.Expr("LEAST(expires_at, ?)", now)).Error
 		}
 		if !authorization.ExpiresAt.After(now) {
 			expired = true
@@ -255,24 +266,25 @@ func (r *OAuthAuthorizationRepository) ListGrantsByUser(ctx context.Context, use
 	return grants, nil
 }
 
-// DeleteByUserClient removes every authorization and the consent grant a user
-// holds with one client, dropping the application from the authorized-apps list.
-// The authorization delete also kills any in-flight code, so a revoke takes
-// effect at once instead of leaving a code redeemable for the rest of its TTL.
-func (r *OAuthAuthorizationRepository) DeleteByUserClient(ctx context.Context, userID, clientID int64) error {
-	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		// Lock/delete the grant before deleting codes, in the same order as the
-		// silent writer. A silent mint that wins the lock must finish before
-		// the code deletion takes its snapshot.
-		if err := transaction.Where("user_id = ? AND client_id = ?", userID, clientID).
-			Delete(&model.OAuthGrant{}).Error; err != nil {
-			return err
-		}
-		return transaction.Where("user_id = ? AND client_id = ?", userID, clientID).
-			Delete(&model.OAuthAuthorization{}).Error
-	})
-	if err != nil {
-		return fmt.Errorf("delete user client authorizations: %w", err)
+// deleteAuthorizationsInTransaction shares the grant -> code lock order with
+// issuance. The caller must revoke tokens and persist the outbox before commit.
+func deleteAuthorizationsInTransaction(transaction *gorm.DB, userID, clientID int64) error {
+	if err := transaction.Where("user_id = ? AND client_id = ?", userID, clientID).
+		Delete(&model.OAuthGrant{}).Error; err != nil {
+		return err
 	}
-	return nil
+	return transaction.Where("user_id = ? AND client_id = ?", userID, clientID).
+		Delete(&model.OAuthAuthorization{}).Error
+}
+
+// All grant/code writers share-lock the client first. Client deletion takes a
+// conflicting NO KEY UPDATE lock before grant -> code -> family, preventing
+// cascades from reversing that order. Readers do not serialize each other.
+func lockAuthorizationClient(transaction *gorm.DB, clientID int64) error {
+	var client model.OAuthClient
+	err := transaction.Clauses(clause.Locking{Strength: "SHARE"}).Select("id").Where("id = ?", clientID).Take(&client).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrNotFound
+	}
+	return err
 }

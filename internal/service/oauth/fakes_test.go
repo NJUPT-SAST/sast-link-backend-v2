@@ -136,14 +136,14 @@ func (f *fakeAuthorizations) FindGrantScopes(_ context.Context, userID, clientID
 
 // Consume mirrors the repository's single-use contract, including returning the
 // record alongside ErrAuthorizationReplayed so the caller can read its family.
-func (f *fakeAuthorizations) Consume(_ context.Context, code string, now time.Time) (*model.OAuthAuthorization, int64, error) {
+func (f *fakeAuthorizations) Consume(_ context.Context, code string, now time.Time, clientID int64) (*model.OAuthAuthorization, int64, error) {
 	if f.consumeAs != nil {
 		return nil, 0, f.consumeAs
 	}
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
 	stored, ok := f.byCode[code]
-	if !ok {
+	if !ok || stored.ClientID != clientID {
 		return nil, 0, repository.ErrNotFound
 	}
 	if stored.IsUsed {
@@ -159,10 +159,6 @@ func (f *fakeAuthorizations) Consume(_ context.Context, code string, now time.Ti
 
 func (f *fakeAuthorizations) ListGrantsByUser(_ context.Context, _ int64) ([]repository.OAuthGrant, error) {
 	return nil, nil
-}
-
-func (f *fakeAuthorizations) DeleteByUserClient(_ context.Context, _, _ int64) error {
-	return nil
 }
 
 func (f *fakeTokens) RevokeUserClientTokens(_ context.Context, userID, clientID int64, revokedAt time.Time) ([]model.BlacklistEntry, error) {
@@ -248,7 +244,7 @@ func (f *fakeTokens) CreatePairWithAudit(_ context.Context, access *model.OAuthA
 // CreatePairWithUserAndClientLock mirrors the repository's user-and-client-lock
 // write: it refuses when the stored version differs or the client check fails,
 // and otherwise records like CreatePairWithAudit.
-func (f *fakeTokens) CreatePairWithUserAndClientLock(_ context.Context, _ int64, _ int64, expected int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error {
+func (f *fakeTokens) CreatePairWithUserAndClientLock(_ context.Context, _ int64, _ int64, expected int64, _ int64, access *model.OAuthAccessToken, refresh *model.OAuthRefreshToken, audit *model.AuditLog) error {
 	if f.userVersionErr != nil {
 		return f.userVersionErr
 	}
