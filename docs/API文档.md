@@ -426,6 +426,7 @@ POST /auth/refresh
 
 - Refresh Token 旋转机制 — 每次使用后旧 token 立即撤销，下发新 token；同时通过 `Set-Cookie` 更新 `sl_session` cookie，保持其与最新 refresh token 同步
 - `40108`（刷新请求冲突）出现在多 tab 并发冷启动：同一 cookie 的 refresh token 已被兄弟请求在 30s 宽限窗内轮换，家族保留。客户端应**重读当前 cookie 后重试一次**（此时 cookie 已携带赢家的新 token），不要拿同一枚旧 token 无限重试——超过 30s 宽限窗仍用旧 token 会按真重放处理并撤销整个家族（连带赢家会话）
+- 被用户级批量撤销（改密/重置、管理员改 role、账号注销）切断的会话**不走** `40108`/重放分支：token 行记录了撤销原因（V018 `revoked_reason`），下一次刷新直接返回 `40102`，审计记为 `refresh` / `session_revoked`（detail 带具体 `revoked_reason`，包括服务预读后、轮换事务内才发现撤销的并发情形）而非 `refresh_replayed`——管理员编辑不再伪装成重放攻击，告警而不再污染。30s 宽限窗对这类撤销同样不适用：家族已死，宽限窗内的 `40108` 重试只会无限循环
 - 账号已注销（`40301`）时，**cookie 来源**的刷新返回 `401`（错误码仍是 `40301`）而非 `403`：前端只在刷新以 401 结束时清会话并跳登录，已注销的账号必须让标签页脱离死会话壳。请求体携带 `refresh_token` 的调用保持 `403`——调用方已在带内认证，应当得到准确的账号状态
 - 此端点用于内部登录（密码/第三方）的 token 刷新；OAuth 客户端刷新请使用 `POST /oauth/token`（grant_type=refresh_token）
 
@@ -1323,6 +1324,7 @@ POST /oauth/authorize/consent
 - `approve: false` 同样返回 `200` 与一个 `redirect_uri`，其中携带 `error=access_denied` 与原始 `state`（RFC 6749 §4.1.2.1 要求把拒绝告知客户端，而非静默丢弃）
 - 授权码有效期 5min，一次性使用，`family_id` 在此刻生成并由授权码传递给后续 token pair
 - 客户端状态、`redirect_uri` 与 `scopes` 在本段**重新校验**：两段之间客户端被停用返回 `40402`，暂存的 `redirect_uri` 或 `scopes` 已不在客户端当前注册值中则返回 `40000`。管理员摘掉一个被攻陷的回调地址、或收回一个客户端的 admin scope 之后，不应该还有授权码继续按旧注册签发
+- **授权者角色约束**：暂存的 `scopes` 含 `admin:read` 时，当前用户角色须为 admin/lecturer；含 `admin:write` 时须为 admin。角色不足以持有该 scope 的用户提交 approve 会返回 `40000`，拒绝被审计为 `oauth_authorize` / `scope_role_forbidden`，不签发授权码
 - 按**用户**限流（`RATE_LIMIT_CONSENT_RPM`，默认 60/min），且只对 approve 路径计费——`approve: false` 的拒绝不铸码、不消耗配额；被限流的 approve 在消费暂存**之前**即返回 `42900`，窗口恢复后可用同一 `request_id` 重试，无需重新发起授权
 
 **错误码**: `40000`（`request_id` / `approve` 缺失、未知字段、Content-Type 非 JSON、暂存已过期或已消费、`redirect_uri` 已不在客户端注册值中、暂存的 `scopes` 已超出客户端当前注册范围）、`40100`/`40101`/`40102`（未登录、token 已过期或 token 无效）、`40402`（两段之间客户端被停用，HTTP 状态为 `404`）、`40301`（账号已注销——本端点在 JWT 中间件之后，注销账号在中间件即被拦下，返回 `40301` 而非 service 层的 `40300`）、`42900`（请求过于频繁，按用户限流，仅 approve 路径计费，带 Retry-After）、`50300`（Redis 暂存不可读，fail-closed）、`50000`（服务器内部错误）
@@ -1365,6 +1367,7 @@ GET /oauth/authorize/consent?request_id=ar_3f2a1b...
 - `request_id` 为 128-bit 随机值，不可枚举
 - 本端点按**用户**限流（`RATE_LIMIT_CONSENT_INFO_RPM`，默认 60/min），而非 IP——校园 egress 共享一个 NAT IP，按 IP 限流会被单个学生耗尽全校配额；认证用户随机打 `request_id` 刷 Redis GET 有上限
 - 暂存不存在或已过期返回 `40000`；Redis 暂存不可读返回 `50300`（fail-closed，同 POST）
+- **授权者角色约束**：同 POST 段——暂存的 `scopes` 含 admin scope 而当前用户角色不足以持有时返回 `40000`，含该 scope 的同意页对这类用户不渲染（这是普通用户不会看到 admin scope 授权页的保证）
 
 **错误码**: `40000`（`request_id` 缺失 / 无效或已过期）、`40100`/`40101`/`40102`、`40301`（账号已注销）、`42900`（请求过于频繁，按用户限流）、`50300`、`50000`
 
@@ -1448,7 +1451,7 @@ grant_type=refresh_token&refresh_token=rt_abc123...&client_id=9f3a1c7d2e5b40a8c6
 | `400` | `invalid_grant` | 授权码无效/已过期/已使用、PKCE 校验失败、`redirect_uri` 不一致、授权码或 refresh token 不属于该客户端、refresh token 已撤销或过期、账号已注销 |
 | `400` | `unsupported_grant_type` | `grant_type` 非 `authorization_code` / `refresh_token` |
 | `400` | `unauthorized_client` | 客户端未注册该 grant type |
-| `400` | `invalid_scope` | 授权码携带的 scope 已不在客户端当前注册范围内（签发后被管理员收回）。该授权码仍被消耗，不可重放 |
+| `400` | `invalid_scope` | 授权码携带的 scope 已不在客户端当前注册范围内（签发后被管理员收回），或授权者角色不足以持有其中的 admin scope（`admin:read` 需 admin/lecturer，`admin:write` 需 admin——同意后被降级的用户其未兑换授权码同样被拒）。该授权码仍被消耗，不可重放 |
 | `401` | `invalid_client` | 客户端认证失败（RFC 6749 §5.2 单独规定此项为 401，其余皆为 400）。**不附带 `WWW-Authenticate`**：本服务只从表单体读取 `client_secret`，discovery 仅通告 `none` 与 `client_secret_post`，通告未实现的 Basic 方案会让客户端反复重试并始终失败 |
 | `429` | `temporarily_unavailable` | 按调用方 IP 限流（`RATE_LIMIT_TOKEN_RPM`，默认 300 次/60s），附带 `Retry-After`。`/oauth/revoke` 与本端点共用同一限流器 |
 | `500` | `server_error` | 服务器内部错误 |

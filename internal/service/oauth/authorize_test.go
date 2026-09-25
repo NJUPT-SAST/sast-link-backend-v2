@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
@@ -579,6 +580,9 @@ func TestConsentRejectsRedirectURIRemovedBetweenLegs(t *testing.T) {
 // the client could still complete a consent it had already started.
 func TestConsentRejectsScopeRemovedBetweenLegs(t *testing.T) {
 	h := newHarness(t)
+	// An administrative user, so the role re-check below stays out of the way and
+	// the test exercises the registration re-check alone.
+	h.users.byID[1].Role = model.UserRoleAdmin
 	delegated := h.clients.byClientID[testConfidentialClientID]
 	delegated.Scopes = model.StringArray{"openid", scope.AdminRead}
 
@@ -821,6 +825,9 @@ func TestConsentInfoReturnsVerifiedClientMetadata(t *testing.T) {
 // leave the page rendering scopes the client can no longer be granted.
 func TestConsentInfoRejectsScopeRevokedAfterAuthorize(t *testing.T) {
 	h := newHarness(t)
+	// An administrative user, so the role re-check below stays out of the way and
+	// the test exercises the registration re-check alone.
+	h.users.byID[1].Role = model.UserRoleAdmin
 	delegated := h.clients.byClientID[testConfidentialClientID]
 	delegated.Scopes = model.StringArray{"openid", scope.AdminRead}
 
@@ -917,6 +924,146 @@ func TestConsentDenialRefusesWhenClientDisabled(t *testing.T) {
 	}
 }
 
+// The admin scopes are bounded by the authorizing user's live role, mirroring the
+// /admin role gates: admin:read matches the reader gate (admin or lecturer),
+// admin:write the writer gate (admin only). A member authorizing an admin scope
+// would mint a token the role gate rejects on every use, so the grant must be
+// refused instead — this predicate is what keeps that request from ever being
+// shown to, or approved by, someone it can never apply to.
+func TestCheckScopeForUserBindsAdminScopesToRole(t *testing.T) {
+	tests := []struct {
+		name      string
+		role      model.UserRole
+		requested []string
+		wantErr   bool
+	}{
+		{"admin grants read", model.UserRoleAdmin, []string{scope.OpenID, scope.AdminRead}, false},
+		{"admin grants write", model.UserRoleAdmin, []string{scope.OpenID, scope.AdminWrite}, false},
+		{"admin grants read and write", model.UserRoleAdmin, []string{scope.OpenID, scope.AdminRead, scope.AdminWrite}, false},
+		{"lecturer grants read", model.UserRoleLecturer, []string{scope.OpenID, scope.AdminRead}, false},
+		{"lecturer cannot grant write", model.UserRoleLecturer, []string{scope.OpenID, scope.AdminWrite}, true},
+		{"lecturer cannot grant read and write", model.UserRoleLecturer, []string{scope.OpenID, scope.AdminRead, scope.AdminWrite}, true},
+		{"member cannot grant read", model.UserRoleMember, []string{scope.OpenID, scope.AdminRead}, true},
+		{"freshman cannot grant read", model.UserRoleFreshman, []string{scope.OpenID, scope.AdminRead}, true},
+		{"member grants user scope", model.UserRoleMember, []string{scope.OpenID, scope.UserRead, scope.UserWrite}, false},
+		{"member grants plain oidc scopes", model.UserRoleMember, []string{scope.OpenID, scope.Profile, scope.Email}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			user := &model.User{Role: test.role}
+			err := checkScopeForUser(user, test.requested)
+			if test.wantErr && err == nil {
+				t.Fatal("checkScopeForUser() = nil, want invalid_scope")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("checkScopeForUser() error = %v, want nil", err)
+			}
+			if test.wantErr && !errors.Is(err, ErrInvalidScope) {
+				t.Fatalf("checkScopeForUser() error = %v, want ErrInvalidScope", err)
+			}
+		})
+	}
+}
+
+// The consent page for an admin-scope request must never render for a user whose
+// role cannot hold it: the member is told the authorization cannot proceed
+// instead of being shown a consent prompt whose approval would be refused anyway.
+func TestConsentInfoRefusesAdminScopeForNonAdminUser(t *testing.T) {
+	h := newHarness(t)
+	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{"openid", scope.AdminRead}
+
+	input := validAuthorizeInput(t)
+	input.ClientID = testConfidentialClientID
+	input.Scope = "openid " + scope.AdminRead
+	authorized, err := h.service.Authorize(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+
+	// User 1 is a member: the reader gate would refuse every use of the token.
+	_, err = h.service.ConsentInfo(context.Background(), ConsentInfoInput{
+		RequestID: authorized.RequestID,
+		UserID:    1,
+	})
+	requireOAuthError(t, err, ErrorInvalidScope)
+}
+
+// A member cannot mint an administrative code even by submitting the approval
+// directly: the refusal is audited so an incident review can tell a probing
+// client from a misconfigured one, and no code is created.
+func TestConsentRefusesAdminScopeForNonAdminUser(t *testing.T) {
+	h := newHarness(t)
+	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{"openid", scope.AdminRead}
+
+	input := validAuthorizeInput(t)
+	input.ClientID = testConfidentialClientID
+	input.Scope = "openid " + scope.AdminRead
+	authorized, err := h.service.Authorize(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+
+	_, err = h.service.Consent(context.Background(), ConsentInput{
+		RequestID: authorized.RequestID,
+		Approve:   true,
+		UserID:    1,
+	})
+	requireOAuthError(t, err, ErrorInvalidScope)
+	if len(h.authorizations.created) != 0 {
+		t.Fatalf("created %d codes, want none for a member authorizing an admin scope",
+			len(h.authorizations.created))
+	}
+	if len(h.audit.entries) != 1 || h.audit.entries[0].Action != "oauth_authorize" ||
+		h.audit.entries[0].Success == nil || *h.audit.entries[0].Success {
+		t.Fatalf("audit entries = %+v, want one failed oauth_authorize", h.audit.entries)
+	}
+	detail := map[string]any{}
+	if err := json.Unmarshal(h.audit.entries[0].Detail, &detail); err != nil {
+		t.Fatalf("unmarshal audit detail: %v", err)
+	}
+	if detail["decision"] != "scope_role_forbidden" {
+		t.Fatalf("decision = %v, want scope_role_forbidden", detail["decision"])
+	}
+}
+
+// A lecturer sits between the two gates: admin:read is grantable (the reader
+// gate admits lecturers), admin:write is not. Both facts are pinned here so a
+// future tightening cannot silently drop the directory-reader delegation.
+func TestConsentLecturerReadAllowedWriteRefused(t *testing.T) {
+	h := newHarness(t)
+	h.users.byID[1].Role = model.UserRoleLecturer
+	delegated := h.clients.byClientID[testConfidentialClientID]
+	delegated.Scopes = model.StringArray{"openid", scope.AdminRead, scope.AdminWrite}
+
+	readInput := validAuthorizeInput(t)
+	readInput.ClientID = testConfidentialClientID
+	readInput.Scope = "openid " + scope.AdminRead
+	authorized, err := h.service.Authorize(context.Background(), readInput)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	if _, consentErr := h.service.Consent(context.Background(), ConsentInput{
+		RequestID: authorized.RequestID,
+		Approve:   true,
+		UserID:    1,
+	}); consentErr != nil {
+		t.Fatalf("Consent(lecturer admin:read) error = %v, want nil", consentErr)
+	}
+
+	writeInput := validAuthorizeInput(t)
+	writeInput.ClientID = testConfidentialClientID
+	writeInput.Scope = "openid " + scope.AdminWrite
+	authorized, err = h.service.Authorize(context.Background(), writeInput)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	_, err = h.service.Consent(context.Background(), ConsentInput{
+		RequestID: authorized.RequestID,
+		Approve:   true,
+		UserID:    1,
+	})
+	requireOAuthError(t, err, ErrorInvalidScope)
+}
 func TestAuthorizeRejectsOversizedPrompt(t *testing.T) {
 	h := newHarness(t)
 	input := validAuthorizeInput(t)

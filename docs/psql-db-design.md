@@ -782,6 +782,7 @@ CREATE TABLE oauth_refresh_tokens (
                                 REFERENCES "user"(id) ON DELETE CASCADE,
     scopes      TEXT[],
     revoked_at TIMESTAMPTZ,
+    revoked_reason TEXT,
     expires_at TIMESTAMPTZ      NOT NULL,
     created_at TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
 
@@ -803,6 +804,7 @@ CREATE TABLE oauth_refresh_tokens (
 |`user_id`||
 |`scopes`|授权范围|
 |`revoked_at`|NULL = 未撤销|
+|`revoked_reason`|V018。用户级批量撤销（改密/重置、admin 改 role、注销）写入原因；NULL = 旋转类撤销（rotate、RevokeFamily、登出/逐设备、重放防御）及历史行。refresh 侧见到非 NULL 原因即审计为 `session_revoked`（不再进入 grace/replay 分支），与真实重放区分。只写入正在撤销的行，已撤销行保留自身死因|
 |`expires_at`||
 |`created_at`||
 

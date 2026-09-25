@@ -297,11 +297,16 @@ func (r *UserRepository) FindAuthUserByLoginIdentifier(ctx context.Context, iden
 // returning the access-token entries that still need revocation delivery. The
 // steps must not be split: token_version alone does not invalidate refresh
 // tokens, so a partial failure would leave them able to mint fresh access tokens.
+// revokedReason is recorded on the revoked refresh tokens (one of the
+// repository's RevokeReason* values) so the next refresh audits session_revoked
+// instead of a replay — the caller distinguishes the self-service change from
+// the code-based reset.
 func (r *UserRepository) UpdatePasswordAndRevokeSessions(
 	ctx context.Context,
 	userID int64,
 	passwordHash string,
 	revokedAt time.Time,
+	revokedReason string,
 ) ([]model.BlacklistEntry, error) {
 	var entries []model.BlacklistEntry
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
@@ -319,7 +324,7 @@ func (r *UserRepository) UpdatePasswordAndRevokeSessions(
 			// caller "password changed, sessions revoked" while nothing happened.
 			return ErrNotFound
 		}
-		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
+		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt, revokedReason)
 		if revokeErr != nil {
 			return revokeErr
 		}

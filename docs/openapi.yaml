@@ -1379,6 +1379,11 @@ paths:
             `admin:read` / `admin:write` 仅 `third_party`（机密）客户端可请求；
             `user:read` / `user:write` 无客户端类型约束，任何客户端皆可请求——`/user/*`
             每个端点只操作 token 主体本人的记录。
+
+            admin scope 另受授权者角色约束，与 `/admin/*` 角色门对齐：`admin:read`
+            需当前用户为 admin 或 lecturer，`admin:write` 需 admin。角色不足以持有
+            该 scope 的用户不会看到含它的同意页（consent-info 预检拒绝），同意提交
+            与授权码兑换同样拒绝（`invalid_scope`）。
           required: true
           schema:
             type: string
@@ -1444,6 +1449,10 @@ paths:
         同意页不应信任 consent URL 上的 client_name / scope —— 攻击者可构造
         指向同意页的链接，带自己的合法 request_id 却伪造可信应用名，诱导受害者
         同意给恶意应用 —— 应改从本端点读取。peek 不消费暂存，查看页面不烧请求。
+
+        暂存 scopes 含 admin scope 时，当前用户角色不足以持有（admin:read 需
+        admin/lecturer，admin:write 需 admin）则返回 40000——含该 scope 的同意页
+        对这类用户不渲染，这是普通用户不会看到 admin scope 授权页的保证。
 
         本端点按用户限流（RATE_LIMIT_CONSENT_INFO_RPM，默认 60/min），而非 IP：
         校园共享一个 NAT 出口 IP，按 IP 限流会被单个学生耗尽全校配额。

@@ -39,6 +39,9 @@ func TestTokenAuthorizationCodeReportsClampedExpiresIn(t *testing.T) {
 	// The cap is far shorter than the configured access TTL, so the clamp is what
 	// decides the answer.
 	h.service.CapabilityRefreshMaxLifetime = 10 * time.Minute
+	// The delegation scenario: an administrative user authorizes the capability
+	// client, so the consent-time role gate must pass.
+	h.users.byID[1].Role = model.UserRoleAdmin
 	h.clients.byClientID[testConfidentialClientID].Scopes = model.StringArray{scope.OpenID, scope.AdminWrite}
 
 	code := issueCode(t, h, testConfidentialClientID, "openid admin:write")

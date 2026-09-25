@@ -20,6 +20,13 @@ const tokenFamilyAdvisoryLockNamespace int32 = 0x53415354
 // family that already contains revoked token metadata.
 var ErrTokenFamilyRevoked = errors.New("token family is revoked")
 
+// SessionRevokedError carries an administrative revocation observed under the
+// rotation lock, after the service's earlier token read.
+type SessionRevokedError struct{ Reason string }
+
+func (e *SessionRevokedError) Error() string { return "session revoked: " + e.Reason }
+func (e *SessionRevokedError) Unwrap() error { return ErrTokenFamilyRevoked }
+
 // ErrUserStateChanged indicates that the owning user's token_version no longer
 // matches the snapshot a caller captured before the write: a bulk revocation
 // (password change, demotion, account close) committed in between, so the
@@ -341,6 +348,9 @@ func (r *TokenRepository) rotateRefreshToken(
 			return fmt.Errorf("%w: refresh token family changed during rotation", ErrInvalidArgument)
 		}
 		if current.RevokedAt != nil {
+			if current.RevokedReason != nil {
+				return &SessionRevokedError{Reason: *current.RevokedReason}
+			}
 			// A token revoked within the grace window is a benign concurrent refresh, so
 			// the family survives and this request fails without cutting anything.
 			// Older revocations are a true replay and cut the family.
@@ -775,6 +785,9 @@ func revokeAllByClientInTransaction(
 // userID and enqueues the still-live access-token JTIs for revocation delivery.
 // Password change/reset must instead use UserRepository.UpdatePasswordAndRevokeSessions,
 // which performs the same revocation in the transaction that rewrites the password.
+// The reason is deliberately the password-change one: the only production callers
+// of the user-level revocation are credential events, and the value exists so the
+// refresh leg can audit session_revoked rather than a replay.
 func (r *TokenRepository) RevokeAllByUser(
 	ctx context.Context,
 	userID int64,
@@ -782,7 +795,7 @@ func (r *TokenRepository) RevokeAllByUser(
 ) ([]model.BlacklistEntry, error) {
 	var entries []model.BlacklistEntry
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
-		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt)
+		revoked, revokeErr := revokeAllByUserInTransaction(transaction, userID, revokedAt, RevokeReasonPasswordChanged)
 		if revokeErr != nil {
 			return revokeErr
 		}
@@ -803,6 +816,7 @@ func revokeAllByUserInTransaction(
 	transaction *gorm.DB,
 	userID int64,
 	revokedAt time.Time,
+	revokedReason string,
 ) ([]model.BlacklistEntry, error) {
 	// Acquire code rows before family locks, matching grant revoke and redemption.
 	// Outstanding authorization codes are burned too: a code held across a password
@@ -828,9 +842,13 @@ func revokeAllByUserInTransaction(
 		Update("revoked_at", revokedAt).Error; err != nil {
 		return nil, fmt.Errorf("revoke access tokens by user: %w", err)
 	}
+	// The reason lands on the rows being revoked only — an already-revoked row
+	// keeps the reason of its own death, so a replay signal recorded earlier is
+	// never masked by a later administrative revocation, and the refresh leg can
+	// tell an administrative cut from a rotation-shaped replay by the column.
 	if err := transaction.Model(&model.OAuthRefreshToken{}).
 		Where("user_id = ? AND revoked_at IS NULL", userID).
-		Update("revoked_at", revokedAt).Error; err != nil {
+		Updates(map[string]any{"revoked_at": revokedAt, "revoked_reason": revokedReason}).Error; err != nil {
 		return nil, fmt.Errorf("revoke refresh tokens by user: %w", err)
 	}
 	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
