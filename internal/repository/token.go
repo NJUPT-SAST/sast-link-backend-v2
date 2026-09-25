@@ -129,7 +129,7 @@ func (r *TokenRepository) CreatePairWithAudit(
 }
 
 // CreatePairWithUserAndClientLock persists a token pair inside a transaction
-// that first locks the owning user's row and the issuing client's row,
+// that first share-locks the owning user's row and the issuing client's row,
 // verifying the user's token_version still matches expectedTokenVersion and
 // that the client is still active with scopes containing the pair's.
 //
@@ -147,13 +147,18 @@ func (r *TokenRepository) CreatePairWithUserAndClientLock(
 	userID int64,
 	clientID int64,
 	expectedTokenVersion int64,
+	authorizationID int64,
 	access *model.OAuthAccessToken,
 	refresh *model.OAuthRefreshToken,
 	audit *model.AuditLog,
 ) error {
+	if err := validateTokenPair(access, refresh); err != nil {
+		return err
+	}
+
 	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var locked model.User
-		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+		if err := transaction.Clauses(clause.Locking{Strength: "SHARE"}).
 			Select("token_version").
 			Where("id = ?", userID).
 			First(&locked).Error; err != nil {
@@ -165,12 +170,12 @@ func (r *TokenRepository) CreatePairWithUserAndClientLock(
 		if int64(locked.TokenVersion) != expectedTokenVersion {
 			return ErrUserStateChanged
 		}
-		// The client row is locked FOR UPDATE so these checks serialize against
+		// The client row is locked FOR SHARE so these checks serialize against
 		// UpdateAndRevoke's client-row write: a disable or scope narrowing committed
 		// before this lock refuses the pair; one committed after lets its
 		// revocation cut the pair once it lands. A deleted client leaves no row.
 		var client model.OAuthClient
-		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+		if err := transaction.Clauses(clause.Locking{Strength: "SHARE"}).
 			Select("is_active", "scopes").
 			Where("id = ?", clientID).
 			First(&client).Error; err != nil {
@@ -188,6 +193,23 @@ func (r *TokenRepository) CreatePairWithUserAndClientLock(
 		}
 		if !contained {
 			return ErrClientScopeChanged
+		}
+		// Keep the exact consumed code alive until the pair commits. Grant revoke
+		// deletes codes before scanning tokens: either it waits for this pair and
+		// revokes it, or the missing code refuses the write. A new consent cannot
+		// resurrect an older consumed code, even for the same user/client pair.
+		var authorization model.OAuthAuthorization
+		if err := transaction.Clauses(clause.Locking{Strength: "SHARE"}).
+			Select("id", "expires_at").Where("id = ? AND user_id = ? AND client_id = ? AND is_used = TRUE AND family_id = ?",
+			authorizationID, userID, clientID, refresh.FamilyID).First(&authorization).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock consumed authorization: %w", err)
+		}
+		// Check after any row-lock wait, not using a timestamp captured before it.
+		if !authorization.ExpiresAt.After(time.Now().UTC()) {
+			return ErrNotFound
 		}
 		if err := createTokenPairInTransaction(transaction, access, refresh); err != nil {
 			return err
@@ -782,6 +804,15 @@ func revokeAllByUserInTransaction(
 	userID int64,
 	revokedAt time.Time,
 ) ([]model.BlacklistEntry, error) {
+	// Acquire code rows before family locks, matching grant revoke and redemption.
+	// Outstanding authorization codes are burned too: a code held across a password
+	// reset would redeem into a session carrying the *new* token_version, which
+	// the auth middleware accepts, leaving a hole as wide as the code TTL.
+	if err := transaction.Model(&model.OAuthAuthorization{}).
+		Where("user_id = ? AND is_used = FALSE AND expires_at > ?", userID, revokedAt).
+		Update("is_used", true).Error; err != nil {
+		return nil, fmt.Errorf("burn authorization codes by user: %w", err)
+	}
 	if err := lockLiveTokenFamilies(transaction, "user_id = ? AND revoked_at IS NULL", userID); err != nil {
 		return nil, fmt.Errorf("lock live token families by user: %w", err)
 	}
@@ -802,18 +833,10 @@ func revokeAllByUserInTransaction(
 		Update("revoked_at", revokedAt).Error; err != nil {
 		return nil, fmt.Errorf("revoke refresh tokens by user: %w", err)
 	}
-	// Outstanding authorization codes are burned too: a code held across a password
-	// reset would redeem into a session carrying the *new* token_version, which
-	// the auth middleware accepts, leaving a hole as wide as the code TTL.
-	if err := transaction.Model(&model.OAuthAuthorization{}).
-		Where("user_id = ? AND is_used = FALSE AND expires_at > ?", userID, revokedAt).
-		Update("is_used", true).Error; err != nil {
-		return nil, fmt.Errorf("burn authorization codes by user: %w", err)
-	}
 	return entries, enqueueBlacklistInTransaction(transaction, entries, revokedAt)
 }
 
-// RevokeUserClientTokens revokes every live token a user holds with one client
+// RevokeUserClientTokens deletes consent/codes and revokes every live token for one client
 // — a user removing an application's access. Returns the blacklist entries for
 // the revoked access tokens so the caller can clear the auth-state cache.
 func (r *TokenRepository) RevokeUserClientTokens(
@@ -823,6 +846,18 @@ func (r *TokenRepository) RevokeUserClientTokens(
 ) ([]model.BlacklistEntry, error) {
 	var entries []model.BlacklistEntry
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := lockAuthorizationClient(transaction, clientID); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+		// One transaction owns the grant, pending/consumed codes, token families
+		// and outbox. Order is grant -> code -> family, matching code issuance.
+		if err := deleteAuthorizationsInTransaction(transaction, userID, clientID); err != nil {
+			return err
+		}
+
 		if err := lockLiveTokenFamilies(transaction, "user_id = ? AND client_id = ? AND revoked_at IS NULL", userID, clientID); err != nil {
 			return fmt.Errorf("lock live token families by user and client: %w", err)
 		}

@@ -379,8 +379,14 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	return &sessionRuntime{
 		Handler: sessionhandler.Handler{Service: service, Cookies: sessionCookie},
 		OAuth: oauthhandler.Handler{
-			Service:    oauthService,
-			Auth:       authenticator,
+			Service: oauthService,
+			Auth:    authenticator,
+			// The silent authorize path resolves the session cookie read-only: it
+			// learns who the browser is and changes nothing, because the endpoint it
+			// runs on is an unauthenticated navigation any page can aim a browser at.
+			// The cookie is only read here, never written back.
+			Sessions:   service,
+			Cookies:    sessionCookie,
 			ConsentURL: cfg.OAuthConsentURL,
 		},
 		OAuthLogin: oauthloginhandler.Handler{

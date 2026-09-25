@@ -45,7 +45,7 @@ func TestOAuthAuthorizationRepositoryCreateAndConsume(t *testing.T) {
 		t.Fatal("CreateWithGrant() left the authorization without a primary key")
 	}
 
-	consumed, _, err := authorizations.Consume(context.Background(), "code-consume", time.Now())
+	consumed, _, err := authorizations.Consume(context.Background(), "code-consume", time.Now(), client.ID)
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -76,11 +76,11 @@ func TestOAuthAuthorizationRepositoryConsumeReportsReplayWithFamily(t *testing.T
 	); err != nil {
 		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
-	if _, _, err := authorizations.Consume(context.Background(), "code-replay", time.Now()); err != nil {
+	if _, _, err := authorizations.Consume(context.Background(), "code-replay", time.Now(), client.ID); err != nil {
 		t.Fatalf("first Consume() error = %v", err)
 	}
 
-	replayed, _, err := authorizations.Consume(context.Background(), "code-replay", time.Now())
+	replayed, _, err := authorizations.Consume(context.Background(), "code-replay", time.Now(), client.ID)
 	if !errors.Is(err, repository.ErrAuthorizationReplayed) {
 		t.Fatalf("second Consume() error = %v, want ErrAuthorizationReplayed", err)
 	}
@@ -113,7 +113,7 @@ func TestOAuthAuthorizationRepositoryConsumeConcurrentSingleSuccess(t *testing.T
 		go func() {
 			defer waitGroup.Done()
 			<-start
-			_, _, err := authorizations.Consume(context.Background(), "code-concurrent", time.Now())
+			_, _, err := authorizations.Consume(context.Background(), "code-concurrent", time.Now(), client.ID)
 			results <- err
 		}()
 	}
@@ -153,7 +153,7 @@ func TestOAuthAuthorizationRepositoryConsumeReportsExpiryWithoutMarkingUsed(t *t
 		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
 
-	if _, _, err := authorizations.Consume(context.Background(), "code-expired", time.Now()); !errors.Is(err, repository.ErrAuthorizationExpired) {
+	if _, _, err := authorizations.Consume(context.Background(), "code-expired", time.Now(), client.ID); !errors.Is(err, repository.ErrAuthorizationExpired) {
 		t.Fatalf("Consume() error = %v, want ErrAuthorizationExpired", err)
 	}
 	assertAuthorizationUsed(t, database, "code-expired", false)
@@ -312,6 +312,58 @@ func TestOAuthAuthorizationRepositoryListGrantsScansTextArraysAndJoinsClient(t *
 	}
 }
 
+// FindGrantScopes answers the silent-authorize question "does this user's
+// standing consent with this client cover the request?": the grant row's own
+// scopes come back, another user's identical grant does not satisfy the lookup,
+// and a revoked (deleted) grant reads as absent.
+func TestOAuthAuthorizationRepositoryFindGrantScopes(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "grant-find@njupt.edu.cn")
+	otherUser := createUserWithProfile(t, repository.NewUser(database), "grant-find-2@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	authorizations := repository.NewOAuthAuthorization(database)
+
+	seed := &model.OAuthGrant{
+		UserID:    user.ID,
+		ClientID:  client.ID,
+		Scopes:    model.StringArray{"openid", "profile"},
+		GrantedAt: time.Now().Truncate(time.Microsecond),
+	}
+	if err := database.Create(seed).Error; err != nil {
+		t.Fatalf("Create(grant) error = %v", err)
+	}
+
+	scopes, found, err := authorizations.FindGrantScopes(context.Background(), user.ID, client.ID)
+	if err != nil {
+		t.Fatalf("FindGrantScopes() error = %v", err)
+	}
+	if !found || len(scopes) != 2 || scopes[0] != "openid" || scopes[1] != "profile" {
+		t.Fatalf("scopes = %v found = %v, want the seeded granted set", scopes, found)
+	}
+
+	// Another user's grant with the same client is not this user's consent.
+	if _, found, err := authorizations.FindGrantScopes(context.Background(), otherUser.ID, client.ID); err != nil {
+		t.Fatalf("FindGrantScopes(other user) error = %v", err)
+	} else if found {
+		t.Fatal("found a grant for a user who never consented")
+	}
+
+	// A revoked grant is deleted from oauth_grants, so it must read as absent.
+	if _, err := repository.NewToken(database).RevokeUserClientTokens(context.Background(), user.ID, client.ID, time.Now()); err != nil {
+		t.Fatalf("DeleteByUserClient() error = %v", err)
+	}
+	if _, found, err := authorizations.FindGrantScopes(context.Background(), user.ID, client.ID); err != nil {
+		t.Fatalf("FindGrantScopes(after revoke) error = %v", err)
+	} else if found {
+		t.Fatal("found a revoked grant")
+	}
+
+	// Invalid keys are argument errors, not database round trips.
+	if _, _, err := authorizations.FindGrantScopes(context.Background(), 0, client.ID); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("FindGrantScopes(0, client) error = %v, want ErrInvalidArgument", err)
+	}
+}
+
 // CreateWithGrant persists the code and the consent grant in one transaction.
 // Re-consenting the same client upserts the grant row rather than duplicating
 // it, so the authorized-apps list keeps exactly one entry per client, carrying
@@ -392,7 +444,7 @@ func TestOAuthAuthorizationRepositoryDeleteByUserClientClearsBothTables(t *testi
 		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
 
-	if err := authorizations.DeleteByUserClient(context.Background(), user.ID, client.ID); err != nil {
+	if _, err := repository.NewToken(database).RevokeUserClientTokens(context.Background(), user.ID, client.ID, time.Now()); err != nil {
 		t.Fatalf("DeleteByUserClient() error = %v", err)
 	}
 
@@ -408,7 +460,7 @@ func TestOAuthAuthorizationRepositoryDeleteByUserClientClearsBothTables(t *testi
 
 	// The in-flight code is gone too: consuming it must report not-found rather
 	// than issuing a token from a code the revoke was supposed to kill.
-	if _, _, err := authorizations.Consume(context.Background(), "code-revoke-grant", time.Now()); !errors.Is(err, repository.ErrNotFound) {
+	if _, _, err := authorizations.Consume(context.Background(), "code-revoke-grant", time.Now(), client.ID); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("Consume() after revoke = %v, want ErrNotFound", err)
 	}
 }
@@ -417,8 +469,105 @@ func TestOAuthAuthorizationRepositoryConsumeUnknownCode(t *testing.T) {
 	database := setupDatabase(t)
 	authorizations := repository.NewOAuthAuthorization(database)
 
-	if _, _, err := authorizations.Consume(context.Background(), "code-missing", time.Now()); !errors.Is(err, repository.ErrNotFound) {
+	if _, _, err := authorizations.Consume(context.Background(), "code-missing", time.Now(), 1); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("Consume() error = %v, want ErrNotFound", err)
+	}
+}
+
+// CreateWithExistingGrant is the silent path's writer, and its contract is
+// narrower than CreateWithGrant's by exactly one promise: it may never create a
+// grant. Without that, a silent mint racing the user's revoke would upsert the
+// pair back and undo the revoke — the app returns to the authorized-apps list
+// and the client holds a live code.
+func TestOAuthAuthorizationRepositoryCreateWithExistingGrant(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "authz-existing-grant@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	authorizations := repository.NewOAuthAuthorization(database)
+
+	// No consent yet: the write must change nothing at all, code included.
+	orphan := testAuthorization("code-orphan", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	if err := authorizations.CreateWithExistingGrant(context.Background(), orphan); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("CreateWithExistingGrant(no grant) error = %v, want ErrNotFound", err)
+	}
+	var codeCount int64
+	if err := database.Model(&model.OAuthAuthorization{}).Where("code = ?", orphan.Code).Count(&codeCount).Error; err != nil {
+		t.Fatalf("count authorizations: %v", err)
+	}
+	if codeCount != 0 {
+		t.Fatal("a refused write left an authorization code behind, want the transaction rolled back with it")
+	}
+	var grantCount int64
+	if err := database.Model(&model.OAuthGrant{}).
+		Where("user_id = ? AND client_id = ?", user.ID, client.ID).Count(&grantCount).Error; err != nil {
+		t.Fatalf("count grants: %v", err)
+	}
+	if grantCount != 0 {
+		t.Fatal("a refused write created the grant it was supposed to require")
+	}
+
+	// A standing grant: the write lands, and it refreshes the row rather than
+	// duplicating it.
+	seeded := &model.OAuthGrant{
+		UserID:    user.ID,
+		ClientID:  client.ID,
+		Scopes:    model.StringArray{"openid", "profile", "email"},
+		GrantedAt: time.Now().Truncate(time.Microsecond),
+	}
+	if err := database.Create(seeded).Error; err != nil {
+		t.Fatalf("Create(grant) error = %v", err)
+	}
+	narrowed := testAuthorization("code-existing", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	narrowed.Scopes = model.StringArray{"openid"}
+	if err := authorizations.CreateWithExistingGrant(context.Background(), narrowed); err != nil {
+		t.Fatalf("CreateWithExistingGrant(standing grant) error = %v", err)
+	}
+	if err := database.Model(&model.OAuthAuthorization{}).Where("code = ?", narrowed.Code).Count(&codeCount).Error; err != nil {
+		t.Fatalf("count authorizations: %v", err)
+	}
+	if codeCount != 1 {
+		t.Fatalf("authorization codes = %d, want the mint to have landed", codeCount)
+	}
+	if err := database.Model(&model.OAuthGrant{}).
+		Where("user_id = ? AND client_id = ?", user.ID, client.ID).Count(&grantCount).Error; err != nil {
+		t.Fatalf("count grants: %v", err)
+	}
+	if grantCount != 1 {
+		t.Fatalf("grants = %d, want the pair updated in place", grantCount)
+	}
+
+	// A scope reduction committed after the service read must win as well.
+	stale := testAuthorization("code-stale-scope", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	stale.Scopes = model.StringArray{"openid", "email"}
+	if err := authorizations.CreateWithExistingGrant(context.Background(), stale); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("CreateWithExistingGrant(stale scopes) = %v, want ErrNotFound", err)
+	}
+	if err := database.Model(&model.OAuthAuthorization{}).Where("code = ?", stale.Code).Count(&codeCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if codeCount != 0 {
+		t.Fatal("scope reduction was bypassed by a stale silent authorization")
+	}
+	scopes, found, err := authorizations.FindGrantScopes(context.Background(), user.ID, client.ID)
+	if err != nil || !found || len(scopes) != 1 || scopes[0] != "openid" {
+		t.Fatalf("narrowed grant changed: scopes=%v found=%v err=%v", scopes, found, err)
+	}
+
+	// And the revoke that commits first wins: the row the update needs is gone,
+	// so the mint fails instead of putting it back.
+	if _, err := repository.NewToken(database).RevokeUserClientTokens(context.Background(), user.ID, client.ID, time.Now()); err != nil {
+		t.Fatalf("DeleteByUserClient() error = %v", err)
+	}
+	afterRevoke := testAuthorization("code-after-revoke", client.ID, user.ID, time.Now().Add(5*time.Minute))
+	if err := authorizations.CreateWithExistingGrant(context.Background(), afterRevoke); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("CreateWithExistingGrant(revoked) error = %v, want ErrNotFound", err)
+	}
+	if err := database.Model(&model.OAuthGrant{}).
+		Where("user_id = ? AND client_id = ?", user.ID, client.ID).Count(&grantCount).Error; err != nil {
+		t.Fatalf("count grants: %v", err)
+	}
+	if grantCount != 0 {
+		t.Fatal("the revoke was undone, want a mint to never recreate a deleted grant")
 	}
 }
 
@@ -429,13 +578,19 @@ func TestOAuthAuthorizationRepositoryRejectsInvalidArguments(t *testing.T) {
 	if err := authorizations.CreateWithGrant(context.Background(), nil); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("CreateWithGrant(nil) error = %v, want ErrInvalidArgument", err)
 	}
+	if err := authorizations.CreateWithExistingGrant(context.Background(), nil); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("CreateWithExistingGrant(nil) error = %v, want ErrInvalidArgument", err)
+	}
+	if err := authorizations.CreateWithExistingGrant(context.Background(), &model.OAuthAuthorization{}); !errors.Is(err, repository.ErrInvalidArgument) {
+		t.Fatalf("CreateWithExistingGrant(empty) error = %v, want ErrInvalidArgument", err)
+	}
 	if err := authorizations.CreateWithGrant(context.Background(), &model.OAuthAuthorization{}); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("CreateWithGrant(empty) error = %v, want ErrInvalidArgument", err)
 	}
-	if _, _, err := authorizations.Consume(context.Background(), "  ", time.Now()); !errors.Is(err, repository.ErrInvalidArgument) {
+	if _, _, err := authorizations.Consume(context.Background(), "  ", time.Now(), 1); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("Consume(blank) error = %v, want ErrInvalidArgument", err)
 	}
-	if _, _, err := authorizations.Consume(context.Background(), "code", time.Time{}); !errors.Is(err, repository.ErrInvalidArgument) {
+	if _, _, err := authorizations.Consume(context.Background(), "code", time.Time{}, 1); !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("Consume(zero time) error = %v, want ErrInvalidArgument", err)
 	}
 }
@@ -483,7 +638,7 @@ func TestOAuthAuthorizationConsumeReturnsUserTokenVersion(t *testing.T) {
 	if err := authorizations.CreateWithGrant(context.Background(), testAuthorization("code-consume-version", 1, user.ID, time.Now().Add(time.Hour))); err != nil {
 		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
-	_, version, err := authorizations.Consume(context.Background(), "code-consume-version", time.Now())
+	_, version, err := authorizations.Consume(context.Background(), "code-consume-version", time.Now(), 1)
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -505,7 +660,7 @@ func TestOAuthAuthorizationRedemptionRefusesPairAfterBulkRevocation(t *testing.T
 	if err := authorizations.CreateWithGrant(context.Background(), testAuthorization("code-redeem-after-revoke", client.ID, user.ID, time.Now().Add(time.Hour))); err != nil {
 		t.Fatalf("CreateWithGrant() error = %v", err)
 	}
-	_, consumedVersion, err := authorizations.Consume(context.Background(), "code-redeem-after-revoke", time.Now())
+	_, consumedVersion, err := authorizations.Consume(context.Background(), "code-redeem-after-revoke", time.Now(), client.ID)
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -520,9 +675,66 @@ func TestOAuthAuthorizationRedemptionRefusesPairAfterBulkRevocation(t *testing.T
 
 	access := accessToken("redeem-after-revoke-access", client.ID, user.ID, ptr("redeem-after-revoke-family"))
 	refresh := refreshToken("redeem-after-revoke-refresh", "redeem-after-revoke-family", 0, client.ID, user.ID)
-	err = tokens.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID, consumedVersion, access, refresh, nil)
+	err = tokens.CreatePairWithUserAndClientLock(context.Background(), user.ID, client.ID, consumedVersion, 0, access, refresh, nil)
 	if !errors.Is(err, repository.ErrUserStateChanged) {
 		t.Fatalf("CreatePairWithUserAndClientLock() error = %v, want ErrUserStateChanged", err)
 	}
 	assertTokenPairAbsent(t, database, access.TokenID, refresh.TokenHash)
+}
+
+// Hold the grant row as an in-flight silent writer, let revoke block on it,
+// then commit a new code. Revoke must delete that code after acquiring the row.
+func TestGrantRevokeWaitsForSilentCodeBeforeDeletingCodes(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "authz-race@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	grant := &model.OAuthGrant{UserID: user.ID, ClientID: client.ID, Scopes: model.StringArray{"openid", "profile"}, GrantedAt: time.Now()}
+	if err := database.Create(grant).Error; err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx := database.WithContext(ctx).Begin()
+	defer tx.Rollback()
+	if err := tx.Model(grant).Where("user_id = ? AND client_id = ?", user.ID, client.ID).Update("granted_at", time.Now()).Error; err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := repository.NewToken(database).RevokeUserClientTokens(ctx, user.ID, client.ID, time.Now())
+		done <- err
+	}()
+	for {
+		var blocked int64
+		if err := database.WithContext(ctx).Raw(`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%DELETE FROM "oauth_grants"%'`).Scan(&blocked).Error; err != nil {
+			t.Fatal(err)
+		}
+		if blocked > 0 {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("revoke finished before writer released grant: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	code := testAuthorization("code-during-revoke", client.ID, user.ID, time.Now().Add(time.Minute))
+	if err := tx.Create(code).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := database.Model(&model.OAuthAuthorization{}).Where("code = ?", code.Code).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("revoke left the concurrently minted code redeemable")
+	}
 }

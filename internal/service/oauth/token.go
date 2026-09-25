@@ -67,7 +67,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, newError(ErrInvalidRequest, "code_verifier 不能为空", nil)
 	}
 
-	authorization, consumedVersion, consumeErr := s.Authorizations.Consume(ctx, code, s.now())
+	authorization, consumedVersion, consumeErr := s.Authorizations.Consume(ctx, code, s.now(), client.ID)
 	switch {
 	case errors.Is(consumeErr, repository.ErrNotFound):
 		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
@@ -187,7 +187,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 			codeAudit = nil
 		}
 	}
-	if createErr := s.Tokens.CreatePairWithUserAndClientLock(ctx, user.ID, client.ID, consumedVersion, pair.Access, pair.Refresh, codeAudit); createErr != nil {
+	if createErr := s.Tokens.CreatePairWithUserAndClientLock(ctx, user.ID, client.ID, consumedVersion, authorization.ID, pair.Access, pair.Refresh, codeAudit); createErr != nil {
 		if errors.Is(createErr, repository.ErrUserStateChanged) || errors.Is(createErr, repository.ErrClientInactive) ||
 			errors.Is(createErr, repository.ErrClientScopeChanged) || errors.Is(createErr, repository.ErrNotFound) {
 			// A revocation landed between the consume and this write: the pair must not
