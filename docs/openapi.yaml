@@ -268,8 +268,11 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
           description: >-
-            未认证（401xx）。登录失败统一返回 40105（邮箱或密码错误）：邮箱不存在、
-            密码错误与账号已注销不区分（避免枚举已注册邮箱）。
+            未认证（401xx）。邮箱不存在返回 40106，密码错误返回 40105；不存在
+            邮箱的尝试同样计入失败锁定。
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: 账号已注销（40301）
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: 登录限流或失败锁定（42900）

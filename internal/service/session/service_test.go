@@ -998,9 +998,9 @@ func TestLoginDoesNotRehashWhenParametersMatch(t *testing.T) {
 func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 	service, _, _, _, audit, failures := newTestService(t)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	// An unknown identifier answers exactly like a wrong password (audit-fix #7):
-	// distinguishing them on the wire hands anyone a registered-email oracle.
-	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
+	// An unknown identifier answers 40106 but still counts toward lockout:
+	// enumeration is answered explicitly, yet never unthrottled.
+	assertKind(t, err, KindUnknownIdentifier, errcode.CodeUnknownIdentifier)
 	if len(failures.failures) != 1 || failures.failures[0] != "identifier:missing@sast.fun" {
 		t.Fatalf("failures = %#v, want unknown bucket counted", failures.failures)
 	}
@@ -1010,7 +1010,7 @@ func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 	if len(failures.failures) != 2 || failures.failures[1] != "user:42" {
 		t.Fatalf("failures = %#v, want known user bucket", failures.failures)
 	}
-	// One audit code for both legs; the reason field keeps the distinction.
+	// Each leg audits its own code; the reason field keeps the finer shape.
 	if got := lastErrCode(audit); got != errcode.CodePasswordInvalid {
 		t.Fatalf("audit err code = %d, want %d", got, errcode.CodePasswordInvalid)
 	}
@@ -1019,12 +1019,12 @@ func TestLoginFailuresAreTypedAndCounted(t *testing.T) {
 func TestServiceErrorsMatchSentinels(t *testing.T) {
 	service, _, _, tokens, _, _ := newTestService(t)
 
-	// An unknown identifier now answers with the login-failed sentinel (audit-fix
-	// #7): the wire must not distinguish the two, or a login attempt becomes a
-	// registered-email oracle.
+	// An unknown identifier answers with the unknown-identifier sentinel: the
+	// wire distinguishes it from a wrong password, and the attempt still
+	// counts toward lockout.
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "missing@sast.fun", Password: "secret"})
-	if !errors.Is(err, ErrLoginFailed) {
-		t.Fatalf("unknown identifier: errors.Is(err, ErrLoginFailed) = false, err=%v", err)
+	if !errors.Is(err, ErrUnknownIdentifier) {
+		t.Fatalf("unknown identifier: errors.Is(err, ErrUnknownIdentifier) = false, err=%v", err)
 	}
 
 	_, err = service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "wrong"})
@@ -1112,9 +1112,9 @@ func TestLoginRejectsDeletedAndInvalidClient(t *testing.T) {
 	service, _, clients, _, _, failures := newTestService(t)
 	service.Users.(*fakeUsers).byLogin["deleted@sast.fun"] = testUser(t, 99, "deleted@sast.fun", model.UserStateDeleted)
 	_, err := service.Login(context.Background(), LoginInput{Identifier: "deleted@sast.fun", Password: "secret"})
-	// A deleted account answers like any other failed login, so probing cannot
-	// tell "never registered" from "closed" (audit-fix #7 follow-up).
-	assertKind(t, err, KindLoginFailed, errcode.CodePasswordInvalid)
+	// A closed account answers 40301 like the other account-level paths, and
+	// still spends no lockout budget.
+	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
 	if len(failures.failures) != 0 {
 		t.Fatalf("deleted login failures = %#v, want no credential failure count", failures.failures)
 	}
@@ -3405,6 +3405,7 @@ func TestRefreshSessionRevokedSkipsGraceWindow(t *testing.T) {
 		t.Fatalf("grace-window administrative revocation outcome = %q, want %q", got, refreshOutcomeSessionRevoked)
 	}
 }
+
 // A failed login records the attempted identifier in its audit detail: the
 // user_id column stays NULL on the identifier_unknown leg, so without the
 // detail field a reviewer cannot cluster attempts against one target — the
