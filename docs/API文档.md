@@ -46,7 +46,7 @@
 ```json
 {
   "code": 40105,
-  "message": "邮箱或密码错误",
+  "message": "密码错误",
   "data": null
 }
 ```

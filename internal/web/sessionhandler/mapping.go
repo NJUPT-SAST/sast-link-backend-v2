@@ -148,7 +148,7 @@ func defaultMessage(kind session.Kind) string {
 	case session.KindPasswordInvalid:
 		return "密码错误"
 	case session.KindLoginFailed:
-		return "邮箱或密码错误"
+		return "密码错误"
 	case session.KindUserDeleted:
 		return "账号已注销"
 	case session.KindInvalidToken:

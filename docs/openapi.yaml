@@ -5429,7 +5429,7 @@ components:
               summary: wrong_password
               value:
                 code: 40105
-                message: 邮箱或密码错误
+                message: 密码错误
                 data: null
             token_expired:
               summary: token_expired
