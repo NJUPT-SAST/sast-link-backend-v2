@@ -124,7 +124,7 @@ POST /user/login
 
 1. 校验邮箱格式 — `@njupt.edu.cn` / `@sast.fun` 查 `user.login_email`；第三方邮箱查 `identities(provider='other_mail').provider_id` 反查 user
 2. 检查登录失败次数（Redis `sastlink:auth:login_failure:{email}`，15min 窗口 ≥ 10 次则锁定）
-3. 查用户是否存在：不存在返回 40106（邮箱不存在）；存在则执行密码哈希校验（默认 argon2id m=19456KiB/t2，按存储哈希参数分派）
+3. 查用户是否存在：不存在返回 40106（该邮箱尚未注册）；存在则执行密码哈希校验（默认 argon2id m=19456KiB/t2，按存储哈希参数分派）
 4. 校验账号状态 — `is_deleted` 拒绝（40301）
 5. 生成 Token Pair（family 即设备 ID），DB 写入 `oauth_refresh_tokens`、`oauth_access_tokens` 元数据，`audit_logs` 在同一事务内原子提交（audit 随 token pair 一起写入，不触发 compensate，也就不产生孤儿设备记录）
 6. 设备登记（fail-open，Redis 不可用仅 WARN 不影响登录）：`ZADD devices:{uid}` + `HSET device:{id}`；该用户设备数超 5 时淘汰最旧设备并**撤销被淘汰设备的全部 token（RevokeFamily）+ 审计 `evict_device`**——设备记录读写失败不进入 compensate 路径
@@ -239,7 +239,7 @@ POST /auth/forgot-password/send-code  →  发送验证码到注册邮箱
 POST /auth/reset-password             →  校验验证码 + 新密码
 ```
 
-- `POST /auth/forgot-password/send-code`：邮箱不存在时返回 `40106`（邮箱不存在），存在性检查位于限流之后；存在的账号进入有界内存队列异步发送验证码。响应只表示请求已入队，不保证邮件已经送达；队列满或进程重启时任务可能丢失，用户可在限流窗口后重试
+- `POST /auth/forgot-password/send-code`：邮箱未注册时返回 `40106`（该邮箱尚未注册），存在性检查位于限流之后；存在的账号进入有界内存队列异步发送验证码。响应只表示请求已入队，不保证邮件已经送达；队列满或进程重启时任务可能丢失，用户可在限流窗口后重试
 - `POST /auth/reset-password`：校验验证码 + 新密码；账号不存在同样返回 40106
 - 验证码正确后 `user.token_version` 递增，撤销所有 Token，设备记录清除
 - 登录失败计数器清零
@@ -754,7 +754,7 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 | ------ | ------ | ------ |
 | `0` | 成功 | — |
 | `400xx` | 参数错误 | 40000 参数错误 / 40010 验证码错误 / 40020 邮箱域名不允许 |
-| `401xx` | 认证错误 | 40100 未登录 / 40105 密码错误 / 40106 邮箱不存在 |
+| `401xx` | 认证错误 | 40100 未登录 / 40105 密码错误 / 40106 该邮箱尚未注册 |
 | `403xx` | 权限错误 | 40300 无权限 / 40301 账号已注销 / 40302 非 SAST 企业飞书用户 |
 | `404xx` | 资源不存在 | 40401 用户不存在 / 40402 OAuth 客户端不存在 |
 | `409xx` | 资源冲突 | 40901 邮箱已注册 / 40903 第三方账号已绑定 / 40905 第三方邮箱绑定上限 |

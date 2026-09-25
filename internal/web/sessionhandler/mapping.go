@@ -144,7 +144,7 @@ func defaultMessage(kind session.Kind) string {
 	case session.KindLocked:
 		return "登录失败次数过多，账号已锁定"
 	case session.KindUnknownIdentifier:
-		return "登录邮箱不存在"
+		return "该邮箱尚未注册"
 	case session.KindPasswordInvalid:
 		return "密码错误"
 	case session.KindLoginFailed:

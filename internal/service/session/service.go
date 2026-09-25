@@ -104,7 +104,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		// An unknown identifier answers 40106 distinctly: the attempt still
 		// counts toward lockout and carries reason identifier_unknown in the
 		// audit, so a probe can enumerate but cannot do it unthrottled.
-		return nil, s.failLogin(ctx, nil, input, failureKey, ErrUnknownIdentifier, "邮箱不存在", "identifier_unknown", nil)
+		return nil, s.failLogin(ctx, nil, input, failureKey, ErrUnknownIdentifier, "该邮箱尚未注册", "identifier_unknown", nil)
 	}
 	if err != nil {
 		return nil, newError(ErrInternal, "查询登录用户失败", err)
@@ -835,7 +835,7 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 	// half-processed job.
 	if _, err := s.Users.FindAuthUserByLoginIdentifier(ctx, email); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
-			return nil, newError(ErrUnknownIdentifier, "邮箱不存在", nil)
+			return nil, newError(ErrUnknownIdentifier, "该邮箱尚未注册", nil)
 		}
 		return nil, newError(ErrInternal, "查询账号失败", err)
 	}
@@ -869,7 +869,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	}
 	user, err := s.Users.FindAuthUserByLoginIdentifier(ctx, email)
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, newError(ErrUnknownIdentifier, "邮箱不存在", nil)
+		return nil, newError(ErrUnknownIdentifier, "该邮箱尚未注册", nil)
 	}
 	if err != nil {
 		return nil, newError(ErrInternal, "查询账号失败", err)

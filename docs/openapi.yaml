@@ -268,8 +268,8 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
           description: >-
-            未认证（401xx）。邮箱不存在返回 40106，密码错误返回 40105；不存在
-            邮箱的尝试同样计入失败锁定。
+            未认证（401xx）。邮箱未注册返回 40106（该邮箱尚未注册），密码错误
+            返回 40105；不存在邮箱的尝试同样计入失败锁定。
         "403":
           $ref: "#/components/responses/Forbidden"
           description: 账号已注销（40301）
@@ -435,8 +435,8 @@ paths:
       summary: 发送重置密码验证码
       deprecated: false
       description: >-
-        邮箱不存在时返回 40106（邮箱不存在）；存在的账号异步受理，响应只表示
-        请求已入队，不保证邮件已经送达。服务端通过有界内存队列异步处理。
+        邮箱未注册时返回 40106（该邮箱尚未注册）；存在的账号异步受理，响应只
+        表示请求已入队，不保证邮件已经送达。服务端通过有界内存队列异步处理。
       operationId: authSendForgotPasswordCode
       tags:
         - Auth
@@ -468,7 +468,7 @@ paths:
           description: 参数错误（400xx）
         "401":
           $ref: "#/components/responses/Unauthorized"
-          description: 邮箱不存在（40106）
+          description: 该邮箱尚未注册（40106）
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: 频率限制（429xx）
