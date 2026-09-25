@@ -57,8 +57,8 @@ func (c *renderCache) get(key string) (renderCacheEntry, bool) {
 	return entry, true
 }
 
-// purge drops every cached variant of one badge key (all size/theme
-// combinations). Called when a badge is disabled so the public endpoint
+// purge drops the cached render for one badge key. Called when a badge
+// is disabled so the public endpoint
 // flips to the 404 error card immediately instead of after the TTL.
 func (c *renderCache) purge(badgeKey string) {
 	if badgeKey == "" {
@@ -104,25 +104,20 @@ func (c *renderCache) put(key string, entry renderCacheEntry) {
 // RenderInput names one public render request.
 type RenderInput struct {
 	Key      string
-	Size     string
 	Theme    string
 	ClientIP string
 }
 
 // renderCacheKey folds the request coordinates into one cache identity.
-func renderCacheKey(key string, size Size, theme Theme) string {
-	return string(size) + "|" + string(theme) + "|" + key
+func renderCacheKey(key string, theme Theme) string {
+	return string(theme) + "|" + key
 }
 
 // Render resolves a public badge key to its SVG. Unknown, closed or deleted
 // badges answer the error card (NotFound=true) so an img embed never cracks;
 // the caller pairs it with HTTP 404.
 func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult, error) {
-	size := Size(input.Size)
 	theme := Theme(input.Theme)
-	if _, ok := layouts[size]; !ok {
-		size = SizeMD
-	}
 	switch theme {
 	case ThemeLight, ThemeDark, ThemeAuto:
 	default:
@@ -146,7 +141,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 		}
 	}
 
-	cacheKey := renderCacheKey(input.Key, size, theme)
+	cacheKey := renderCacheKey(input.Key, theme)
 	if entry, ok := s.renderCache.get(cacheKey); ok {
 		return &RenderResult{SVG: entry.svg, ETag: entry.etag, NotFound: entry.notFound}, nil
 	}
@@ -190,7 +185,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 		}
 	}
 
-	svg, err := renderCard(size, theme, data)
+	svg, err := renderCard(theme, data)
 	if err != nil {
 		return nil, newError(ErrInternal, "render badge: render", err)
 	}
@@ -210,7 +205,7 @@ func buildCardData(card *repository.PublicCard) cardData {
 	if card.Nickname != nil {
 		nickname = strings.TrimSpace(*card.Nickname)
 	}
-	data.Nickname = truncate(nickname, layouts[SizeLG].NameMax)
+	data.Nickname = truncate(nickname, compactLayout.NameMax)
 	if data.Nickname == "" {
 		// The enable gate refuses a missing nickname, so this only guards
 		// against data drift; the placeholder keeps the canvas honest.
@@ -219,25 +214,20 @@ func buildCardData(card *repository.PublicCard) cardData {
 	data.AvatarInitial = firstRune(data.Nickname)
 
 	if card.Intro != nil {
-		data.Intro = truncate(strings.TrimSpace(*card.Intro), layouts[SizeLG].IntroMax)
+		data.Intro = truncate(strings.TrimSpace(*card.Intro), compactLayout.IntroMax)
 	}
 
-	var links []string
 	blog := ""
 	if card.BlogURL != nil && strings.TrimSpace(*card.BlogURL) != "" {
 		blog = strings.TrimSpace(*card.BlogURL)
-		links = append(links, truncate(hostOf(blog), 20))
 	}
 	github := ""
 	if card.GitHubURL != nil && strings.TrimSpace(*card.GitHubURL) != "" {
 		github = strings.TrimSpace(*card.GitHubURL)
-		links = append(links, truncate(hostOf(github), 20))
-	}
-	if len(links) > 0 {
-		data.Links = truncate(joinLinks(links), layouts[SizeLG].LinksMax)
 	}
 	// The card links to the member's own page — blog first, GitHub as the
-	// fallback, nothing when neither exists.
+	// fallback, nothing when neither exists. The compact canvas has no
+	// social-host row, so the hosts are no longer displayed.
 	data.LinkTarget = blog
 	if data.LinkTarget == "" {
 		data.LinkTarget = github

@@ -10,10 +10,9 @@ import (
 	"text/template"
 )
 
-// Size identifies one badge canvas. Every badge of a given size renders at
-// exactly the same dimensions regardless of content — empty fields leave
-// their slot blank rather than reflowing the layout, so friend-link walls
-// stay a uniform grid.
+// Size identifies a badge canvas. Only the compact tile ships today — sm,
+// 320×72 — while md and lg are reserved for a later iteration; the render
+// path ignores the size parameter until then.
 type Size string
 
 const (
@@ -33,10 +32,9 @@ const (
 	ThemeDark  Theme = "dark"
 )
 
-// layout carries every per-size geometry and truncation bound the template
-// consumes. Fixed canvas, fixed slots. Y values are text baselines; the
-// vertical divider is only drawn when its X is non-zero. The department
-// was removed from the badge surface entirely; slots were re-spaced.
+// layout carries every geometry and truncation bound the template consumes.
+// Fixed canvas, fixed slots. Y values are text baselines; the vertical
+// divider is only drawn when its X is non-zero.
 type layout struct {
 	Width  int
 	Height int
@@ -56,11 +54,6 @@ type layout struct {
 	IntroSize int
 	IntroMax  int
 
-	LinksX    int
-	LinksY    int
-	LinksSize int
-	LinksMax  int
-
 	DividerX  int
 	DividerY1 int
 	DividerY2 int
@@ -70,40 +63,15 @@ type layout struct {
 	BrandSize int
 }
 
-// layouts pins the three canvases.
-//
-// sm: avatar + name — the compact friend-link wall tile.
-// compact friend-link wall tile.
-//
-// md: avatar | vertical divider | name, quoted intro — the
-// README-sized introduction. Brand top-right.
-//
-// lg: everything, roomier: avatar | divider | name, quoted
-// intro, social hosts in accent — brand bottom-right.
-var layouts = map[Size]layout{
-	SizeSM: {
-		Width: 320, Height: 72,
-		AvatarX: 8, AvatarY: 8, AvatarSize: 56, AvatarRadius: 28,
-		NameX: 78, NameY: 33, NameSize: 17, NameMax: 12,
-		BrandX: 312, BrandY: 16, BrandSize: 9,
-	},
-	SizeMD: {
-		Width: 460, Height: 120,
-		AvatarX: 16, AvatarY: 16, AvatarSize: 88, AvatarRadius: 44,
-		DividerX: 118, DividerY1: 24, DividerY2: 96,
-		NameX: 134, NameY: 48, NameSize: 20, NameMax: 14,
-		IntroX: 134, IntroY: 100, IntroSize: 12, IntroMax: 24,
-		BrandX: 448, BrandY: 22, BrandSize: 9,
-	},
-	SizeLG: {
-		Width: 540, Height: 200,
-		AvatarX: 28, AvatarY: 36, AvatarSize: 128, AvatarRadius: 64,
-		DividerX: 170, DividerY1: 56, DividerY2: 164,
-		NameX: 190, NameY: 84, NameSize: 24, NameMax: 16,
-		IntroX: 190, IntroY: 146, IntroSize: 14, IntroMax: 30,
-		LinksX: 190, LinksY: 176, LinksSize: 12, LinksMax: 44,
-		BrandX: 526, BrandY: 184, BrandSize: 9,
-	},
+// compactLayout is the one badge canvas that ships today: 320×72, avatar on
+// the left, nickname and quoted signature stacked on the right, brand mark
+// top-right. The md and lg canvases are a later iteration.
+var compactLayout = layout{
+	Width: 320, Height: 72,
+	AvatarX: 8, AvatarY: 8, AvatarSize: 56, AvatarRadius: 28,
+	NameX: 78, NameY: 33, NameSize: 17, NameMax: 12,
+	IntroX: 78, IntroY: 54, IntroSize: 11, IntroMax: 20,
+	BrandX: 312, BrandY: 16, BrandSize: 9,
 }
 
 // palette is one resolved color set.
@@ -137,7 +105,6 @@ type cardData struct {
 	AvatarInitial string // first rune of the nickname, for the fallback
 	Nickname      string
 	Intro         string
-	Links         string
 	Brand         string
 	// LinkTarget is the member's own page the whole card links to — blog
 	// first, GitHub as the fallback, empty when neither exists. An <img>
@@ -172,7 +139,6 @@ var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
 {{end}}{{if .Layout.DividerX}}<line x1="{{.Layout.DividerX}}" y1="{{.Layout.DividerY1}}" x2="{{.Layout.DividerX}}" y2="{{.Layout.DividerY2}}" class="card-line" stroke-width="1"/>
 {{end}}<text x="{{.Layout.NameX}}" y="{{.Layout.NameY}}" class="card-fg" font-size="{{.Layout.NameSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.Nickname}}</text>
 {{if .Data.Intro}}<text x="{{.Layout.IntroX}}" y="{{.Layout.IntroY}}" class="card-muted" font-size="{{.Layout.IntroSize}}" font-family="{{.FontStack}}">「{{esc .Data.Intro}}」</text>
-{{end}}{{if .Data.Links}}<text x="{{.Layout.LinksX}}" y="{{.Layout.LinksY}}" class="card-accent" font-size="{{.Layout.LinksSize}}" font-family="{{.FontStack}}">{{esc .Data.Links}}</text>
 {{end}}<text x="{{.Layout.BrandX}}" y="{{.Layout.BrandY}}" text-anchor="end" class="card-muted" font-size="{{.Layout.BrandSize}}" font-family="{{.FontStack}}" letter-spacing="1">SAST Link</text>{{if .Data.LinkTarget}}</a>{{end}}
 </svg>
 `))
@@ -185,21 +151,15 @@ const fontStack = `'PingFang SC','Microsoft YaHei','Noto Sans CJK SC','Source Ha
 
 // renderCard renders one badge SVG. It never fails on content: truncation
 // bounds every field and missing fields simply skip their slot.
-func renderCard(size Size, theme Theme, data cardData) ([]byte, error) {
-	chosen, ok := layouts[size]
-	if !ok {
-		return nil, fmt.Errorf("render badge: unknown size %q", size)
-	}
-
-	// Field visibility is size-driven: sm is the name only, md adds
-	// the intro, lg adds the social links. Empty fields already skip their
-	// slot; this clamp also hides fields a smaller canvas has no slot for.
-	if size == SizeSM {
-		data.Intro = ""
-		data.Links = ""
-	}
-	if size == SizeMD {
-		data.Links = ""
+func renderCard(theme Theme, data cardData) ([]byte, error) {
+	var resolved palette
+	switch theme {
+	case ThemeDark:
+		resolved = darkPalette
+	case ThemeAuto, ThemeLight:
+		resolved = lightPalette
+	default:
+		return nil, fmt.Errorf("render badge: unknown theme %q", theme)
 	}
 
 	view := struct {
@@ -217,30 +177,22 @@ func renderCard(size Size, theme Theme, data cardData) ([]byte, error) {
 		DecAvatarFontSize    int
 		DecAvatarRadiusInner int
 	}{
-		Layout:    chosen,
-		Palette:   lightPalette,
+		Layout:    compactLayout,
+		Palette:   resolved,
 		Dark:      darkPalette,
 		AutoTheme: theme == ThemeAuto,
 		Data:      data,
 		FontStack: fontStack,
-		DecHeight: chosen.Height - 1,
-		DecWidth:  chosen.Width - 1,
-	}
-	switch theme {
-	case ThemeDark:
-		view.Palette = darkPalette
-	case ThemeAuto, ThemeLight:
-		view.Palette = lightPalette
-	default:
-		return nil, fmt.Errorf("render badge: unknown theme %q", theme)
+		DecHeight: compactLayout.Height - 1,
+		DecWidth:  compactLayout.Width - 1,
 	}
 
-	view.DecAvatarCX = chosen.AvatarX + chosen.AvatarRadius
-	view.DecAvatarCY = chosen.AvatarY + chosen.AvatarRadius
+	view.DecAvatarCX = compactLayout.AvatarX + compactLayout.AvatarRadius
+	view.DecAvatarCY = compactLayout.AvatarY + compactLayout.AvatarRadius
 	// The initial glyph sits on the circle's optical center: baseline ≈ cy + 35% of the radius.
-	view.DecAvatarTextY = view.DecAvatarCY + chosen.AvatarRadius*7/20
-	view.DecAvatarFontSize = chosen.AvatarRadius
-	view.DecAvatarRadiusInner = chosen.AvatarRadius / 2
+	view.DecAvatarTextY = view.DecAvatarCY + compactLayout.AvatarRadius*7/20
+	view.DecAvatarFontSize = compactLayout.AvatarRadius
+	view.DecAvatarRadiusInner = compactLayout.AvatarRadius / 2
 
 	var buf bytes.Buffer
 	if err := svgTemplate.Execute(&buf, view); err != nil {
@@ -313,25 +265,4 @@ func firstRune(value string) string {
 		}
 	}
 	return ""
-}
-
-// hostOf extracts a URL's host, tolerating scheme-less input; it falls back
-// to the raw value so a malformed link still shows something identifiable.
-func hostOf(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if idx := strings.Index(trimmed, "://"); idx >= 0 {
-		trimmed = trimmed[idx+3:]
-	}
-	if idx := strings.IndexAny(trimmed, "/?#"); idx >= 0 {
-		trimmed = trimmed[:idx]
-	}
-	if trimmed == "" {
-		return strings.TrimSpace(raw)
-	}
-	return trimmed
-}
-
-// joinLinks collapses the social hosts into one display line.
-func joinLinks(links []string) string {
-	return strings.Join(links, " · ")
 }

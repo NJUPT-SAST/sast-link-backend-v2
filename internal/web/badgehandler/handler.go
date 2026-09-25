@@ -142,7 +142,6 @@ func (h Handler) ServeSVG(c *gin.Context) {
 	key := strings.TrimSuffix(c.Param("key"), ".svg")
 	result, err := h.Service.Render(c.Request.Context(), badge.RenderInput{
 		Key:      key,
-		Size:     c.Query("size"),
 		Theme:    c.Query("theme"),
 		ClientIP: c.ClientIP(),
 	})

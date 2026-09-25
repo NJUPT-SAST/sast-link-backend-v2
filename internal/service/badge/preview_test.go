@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// TestWritePreviewFiles renders one sample card per size into the directory
-// named by BADGE_PREVIEW_DIR, for manual visual inspection during development.
+// TestWritePreviewFiles renders sample cards into the directory named by
+// BADGE_PREVIEW_DIR, for manual visual inspection during development.
 // Skipped unless the variable is set, so CI never writes anywhere.
 func TestWritePreviewFiles(t *testing.T) {
 	dir := os.Getenv("BADGE_PREVIEW_DIR")
@@ -16,19 +16,16 @@ func TestWritePreviewFiles(t *testing.T) {
 	data := cardData{
 		Nickname:      "张三",
 		Intro:         "Full-stack developer / 在写 Go 和 React",
-		Links:         "blog.example.com · github.com/zhangsan",
 		AvatarInitial: "张",
 	}
-	for _, size := range []Size{SizeSM, SizeMD, SizeLG} {
-		for _, theme := range []Theme{ThemeAuto, ThemeLight, ThemeDark} {
-			svg, err := renderCard(size, theme, data)
-			if err != nil {
-				t.Fatalf("render %s/%s: %v", size, theme, err)
-			}
-			path := dir + "/badge-" + string(size) + "-" + string(theme) + ".svg"
-			if err := os.WriteFile(path, svg, 0o600); err != nil { // #nosec G703 -- dev-only preview helper, dir is operator-controlled
-				t.Fatalf("write %s: %v", path, err)
-			}
+	for _, theme := range []Theme{ThemeAuto, ThemeLight, ThemeDark} {
+		svg, err := renderCard(theme, data)
+		if err != nil {
+			t.Fatalf("render %s: %v", theme, err)
+		}
+		path := dir + "/badge-compact-" + string(theme) + ".svg"
+		if err := os.WriteFile(path, svg, 0o600); err != nil { // #nosec G703 -- dev-only preview helper, dir is operator-controlled
+			t.Fatalf("write %s: %v", path, err)
 		}
 	}
 	// The not-found card too.

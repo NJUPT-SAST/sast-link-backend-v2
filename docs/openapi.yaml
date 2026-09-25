@@ -1421,11 +1421,12 @@ paths:
             maxLength: 43
         - name: size
           in: query
-          description: 画布尺寸
+          description: |
+            画布尺寸。当前仅支持紧凑档（sm，320×72：左头像、右昵称+「签名」）；
+            传任何值（含 md/lg）均按紧凑渲染，md/lg 为后续预留档位。
           schema:
             type: string
-            enum: [sm, md, lg]
-            default: md
+            default: sm
         - name: theme
           in: query
           description: |

@@ -252,7 +252,7 @@ func TestServeSVGReturnsSVGWithCacheHeaders(t *testing.T) {
 	if got := recorder.Header().Get("ETag"); got != `"abc123"` {
 		t.Fatalf("ETag = %q", got)
 	}
-	if service.renderInput.Key != "somekey" || service.renderInput.Size != "lg" || service.renderInput.Theme != "dark" {
+	if service.renderInput.Key != "somekey" || service.renderInput.Theme != "dark" {
 		t.Fatalf("Render input = %#v", service.renderInput)
 	}
 }
