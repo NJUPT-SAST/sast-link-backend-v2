@@ -1459,11 +1459,8 @@ paths:
               schema:
                 type: string
         "429":
-          description: 每 IP 限流（42900）
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
+          $ref: "#/components/responses/TooManyRequests"
+          description: 每 IP 限流（42900），60s 内最多 120 次
   /oauth/authorize:
     get:
       summary: 授权端点
