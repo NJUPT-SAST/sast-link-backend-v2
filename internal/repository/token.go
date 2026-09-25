@@ -20,6 +20,13 @@ const tokenFamilyAdvisoryLockNamespace int32 = 0x53415354
 // family that already contains revoked token metadata.
 var ErrTokenFamilyRevoked = errors.New("token family is revoked")
 
+// SessionRevokedError carries an administrative revocation observed under the
+// rotation lock, after the service's earlier token read.
+type SessionRevokedError struct{ Reason string }
+
+func (e *SessionRevokedError) Error() string { return "session revoked: " + e.Reason }
+func (e *SessionRevokedError) Unwrap() error { return ErrTokenFamilyRevoked }
+
 // ErrUserStateChanged indicates that the owning user's token_version no longer
 // matches the snapshot a caller captured before the write: a bulk revocation
 // (password change, demotion, account close) committed in between, so the
@@ -319,6 +326,9 @@ func (r *TokenRepository) rotateRefreshToken(
 			return fmt.Errorf("%w: refresh token family changed during rotation", ErrInvalidArgument)
 		}
 		if current.RevokedAt != nil {
+			if current.RevokedReason != nil {
+				return &SessionRevokedError{Reason: *current.RevokedReason}
+			}
 			// A token revoked within the grace window is a benign concurrent refresh, so
 			// the family survives and this request fails without cutting anything.
 			// Older revocations are a true replay and cut the family.

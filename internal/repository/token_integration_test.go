@@ -742,3 +742,27 @@ func TestTokenRepositoryRevokeUserClientTokensIsIdempotent(t *testing.T) {
 		t.Fatalf("outbox rows = %d, want 1 (the repeat must not re-enqueue)", queued)
 	}
 }
+
+func TestRotateAdministrativelyRevokedTokenSkipsGrace(t *testing.T) {
+	database := setupDatabase(t)
+	user := createUserWithProfile(t, repository.NewUser(database), "rotation-admin@njupt.edu.cn")
+	client := createOAuthClient(t, database)
+	tokens := repository.NewToken(database)
+	family := "administratively-revoked-family"
+	currentAccess := accessToken("admin-revoked-access", client.ID, user.ID, &family)
+	currentRefresh := refreshToken("admin-revoked-refresh", family, 0, client.ID, user.ID)
+	if err := tokens.CreatePair(context.Background(), currentAccess, currentRefresh); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tokens.RevokeAllByUser(context.Background(), user.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	nextAccess := accessToken("admin-revoked-next-access", client.ID, user.ID, &family)
+	nextRefresh := refreshToken("admin-revoked-next-refresh", family, 1, client.ID, user.ID)
+	_, err := tokens.RotateRefreshToken(context.Background(), family, currentRefresh.TokenHash, nextAccess, nextRefresh)
+	var revoked *repository.SessionRevokedError
+	if !errors.As(err, &revoked) || revoked.Reason != repository.RevokeReasonPasswordChanged {
+		t.Fatalf("rotation error = %v", err)
+	}
+	assertTokenPairAbsent(t, database, nextAccess.TokenID, nextRefresh.TokenHash)
+}

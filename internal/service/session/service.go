@@ -335,6 +335,11 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		}
 	}
 	if _, rotateErr := s.Tokens.RotateRefreshTokenWithAudit(ctx, current.FamilyID, tokenHash, pair.access, pair.refresh, audit); rotateErr != nil {
+		var revoked *repository.SessionRevokedError
+		if errors.As(rotateErr, &revoked) {
+			s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeSessionRevoked, revoked.Reason, input)
+			return nil, newError(ErrInvalidToken, "Refresh Token 无效", rotateErr)
+		}
 		if errors.Is(rotateErr, repository.ErrTokenReplayWithinGrace) {
 			// A benign concurrent refresh: another request in this family already
 			// rotated, and the repository preserved the family. The presented token

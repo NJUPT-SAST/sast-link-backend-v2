@@ -3237,7 +3237,7 @@ func TestRefreshAuditRecordsSessionRevokedOutcomeForAdministrativeRevocation(t *
 	if detail.RevokedReason != repository.RevokeReasonAdminRoleChange {
 		t.Fatalf("revoked_reason = %q, want %q", detail.RevokedReason, repository.RevokeReasonAdminRoleChange)
 	}
-	// The client sees the same 40106 a dead token always produced — the
+	// The client sees the same 40102 a dead token always produced — the
 	// distinction is for the audit trail, not a new client contract.
 	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
 }
@@ -3245,7 +3245,7 @@ func TestRefreshAuditRecordsSessionRevokedOutcomeForAdministrativeRevocation(t *
 // The grace window must not turn an administrative revocation into a retry
 // loop: within 30s of the cut the concurrent_refresh answer would keep the
 // client's cookie and have it retry against a family that can never rotate
-// again. A recorded reason answers 40106 immediately instead.
+// again. A recorded reason answers 40102 immediately instead.
 func TestRefreshSessionRevokedSkipsGraceWindow(t *testing.T) {
 	service, _, _, tokens, audit, _ := newTestService(t)
 	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
@@ -3314,5 +3314,23 @@ func TestLoginFailureAuditRecordsAttemptedIdentifier(t *testing.T) {
 		if detail.Identifier != "target@njupt.edu.cn" {
 			t.Fatalf("identifier = %q, want the normalized target so attempts cluster", detail.Identifier)
 		}
+	}
+}
+
+func TestRefreshAdministrativeRevocationDuringRotation(t *testing.T) {
+	service, _, _, tokens, audit, _ := newTestService(t)
+	login, err := service.Login(context.Background(), LoginInput{Identifier: "user@njupt.edu.cn", Password: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens.rotateErr = &repository.SessionRevokedError{Reason: repository.RevokeReasonPasswordReset}
+	_, err = service.Refresh(context.Background(), RefreshInput{RefreshToken: login.RefreshToken})
+	assertKind(t, err, KindInvalidToken, errcode.CodeAccessTokenInvalid)
+	entry := lastAuditAction(t, audit, "refresh")
+	if got := auditOutcome(t, entry); got != refreshOutcomeSessionRevoked {
+		t.Fatalf("outcome = %q", got)
+	}
+	if !strings.Contains(string(entry.Detail), repository.RevokeReasonPasswordReset) {
+		t.Fatalf("missing reason: %s", entry.Detail)
 	}
 }
