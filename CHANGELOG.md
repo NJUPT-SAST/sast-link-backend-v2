@@ -99,6 +99,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **紧急回滚：admin scope 授权用户角色门**（2026-09-26）：回滚 `721d849`（`checkScopeForUser`，consent-info / consent / 兑现三段把 admin scope 绑定到授权用户实时角色）。该门使注册了 admin scope 的应用对非 admin 用户在 consent-info 阶段直接 400，前端兜底文案误导为「授权请求已失效，请重新发起授权」，第三方登录被完全阻断且重试无解。回滚后恢复登录；安全底线不受影响——`/admin` 角色门每请求从数据库行读角色，非 admin 用户拿到的 admin-scoped token 在使用处仍被拒。
 - **补全判据与写路径校验对齐（V015 重建生成列）**：`profile_needs_completion` / `incomplete_fields` 原先只判空白与 `name` 等于 `student_id`，而 `PUT /user/profile`（§3.2）还会拒绝**超长**与**含 C0/C1 控制字符**的值。旧库导入的字段若带着二进制残渣（如姓名尾随 U+0001），补全页永远不会提示该字段；用户补完其他空字段后生成列直接翻回 `false`，不可用值永久留存且不再被引导。V015 把判据扩为写路径的完整拒绝形状（空白 / 超长 / 控制字符，`name` 另有学号重名，TrimSpace 后比较），新增 SQL 函数 `sl_has_control_character` 与 Go 的 `validate.HasControlCharacter` 成对，列宽字面量与 `internal/validate/limits.go` 锁步；`TestControlCharacterTestMatchesSQL` / `TestOverlengthTestMatchesSQL` 把函数与行级判据钉在同一组输入上。零宽字符（U+200B 等）并非控制字符、写路径接受它们，不在扩围之内。
 - **名字字符集规则入后端（V016）**：前端口径（`realNameSchema`：仅汉字与间隔号 · 及其常见变体）拒绝的名字此前只被前端拦——后端写路径接受 `"AAA"`，判定不标记，而编辑表单整表提交带着该名字被前端拒，账号的**全部资料编辑被锁死且无引导**。V016 把名字字符规则放进判定与全部写入口：Go `validate.IsInvalidName` + SQL `sl_name_invalid`（PG 正则无 `\p{Script=Han}`，两侧逐块列出汉字区至 Unicode 16 + 间隔号变体，取超集策略防「提示无法消除」），`PUT /user/profile`、注册、alumni 申请、admin 建号/更新同规则拒收；`TestNameRuleMatchesSQL` 同源对照。零宽字符因不在字符集内也一并被标记（与前端一致）。
 - x/net 升级修 CVE-2026-25680、x/text 升级修 GO-2026-5970（2026-07-22 / 07-27）。
