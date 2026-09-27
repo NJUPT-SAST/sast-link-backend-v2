@@ -21,7 +21,7 @@ type UserRepository interface {
 type BadgeRepository interface {
 	Create(ctx context.Context, badge *model.Badge) error
 	FindByUserID(ctx context.Context, userID int64) (*model.Badge, error)
-	FindBadgeTarget(ctx context.Context, badgeKey string) (*model.Badge, error)
+	FindBadgeTarget(ctx context.Context, badgeKey string) (*repository.BadgeTarget, error)
 	ReEnable(ctx context.Context, userID int64, now time.Time) (bool, error)
 	Disable(ctx context.Context, userID int64, now time.Time) (bool, error)
 	DeleteByUserID(ctx context.Context, userID int64) (bool, error)

@@ -81,6 +81,11 @@ type palette struct {
 	Muted      string
 	Hairline   string
 	Accent     string
+	// Border is the outer frame's color: deliberately CONTRASTING with the
+	// background rather than tonal — the light card carries a dark line and
+	// the dark card a light one — so the frame stays visible on both themes
+	// and on pages of either shade.
+	Border string
 }
 
 var lightPalette = palette{
@@ -89,6 +94,7 @@ var lightPalette = palette{
 	Muted:      "#6b7280",
 	Hairline:   "#e5e7eb",
 	Accent:     "#0a96d6",
+	Border:     "#1c1f23",
 }
 
 var darkPalette = palette{
@@ -97,6 +103,7 @@ var darkPalette = palette{
 	Muted:      "#9aa0a6",
 	Hairline:   "#2a2d33",
 	Accent:     "#4db8f0",
+	Border:     "#e8eaed",
 }
 
 // cardData is the resolved, truncated, display-ready projection of one badge.
@@ -127,14 +134,14 @@ var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
 }).Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" viewBox="0 0 {{.Layout.Width}} {{.Layout.Height}}" role="img" aria-label="{{esc .Data.Nickname}} 的 SAST Link 徽标">
 <style>
-.card-bg{fill:{{.Palette.Background}}}.card-fg{fill:{{.Palette.Foreground}}}.card-muted{fill:{{.Palette.Muted}}}.card-accent{fill:{{.Palette.Accent}}}.card-line{stroke:{{.Palette.Hairline}}}
-{{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-fg{fill:{{.Dark.Foreground}}}.card-muted{fill:{{.Dark.Muted}}}.card-accent{fill:{{.Dark.Accent}}}.card-line{stroke:{{.Dark.Hairline}}}}
+.card-bg{fill:{{.Palette.Background}}}.card-fg{fill:{{.Palette.Foreground}}}.card-muted{fill:{{.Palette.Muted}}}.card-accent{fill:{{.Palette.Accent}}}.card-line{stroke:{{.Palette.Hairline}}}.card-border{stroke:{{.Palette.Border}}}
+{{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-fg{fill:{{.Dark.Foreground}}}.card-muted{fill:{{.Dark.Muted}}}.card-accent{fill:{{.Dark.Accent}}}.card-line{stroke:{{.Dark.Hairline}}}.card-border{stroke:{{.Dark.Border}}}}
 {{end}}</style>{{if .Data.LinkTarget}}<a href="{{esc .Data.LinkTarget}}" target="_blank" rel="noopener noreferrer">{{end}}<rect class="card-bg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" rx="10"/>
-<rect x="0.5" y="0.5" width="{{.DecWidth}}" fill="none" stroke="{{.Palette.Hairline}}" height="{{.DecHeight}}" rx="10" stroke-width="1"/>
+<rect x="0.5" y="0.5" width="{{.DecWidth}}" fill="none" class="card-border" height="{{.DecHeight}}" rx="10" stroke-width="1"/>
 {{if .Data.AvatarDataURI}}<image x="{{.Layout.AvatarX}}" y="{{.Layout.AvatarY}}" width="{{.Layout.AvatarSize}}" height="{{.Layout.AvatarSize}}" href="{{.Data.AvatarDataURI}}" clip-path="inset(0 round {{.Layout.AvatarRadius}}px)" preserveAspectRatio="xMidYMid slice"/>
 {{else if .Data.AvatarInitial}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-muted"/>
 <text x="{{.DecAvatarCX}}" y="{{.DecAvatarTextY}}" text-anchor="middle" class="card-bg" font-size="{{.DecAvatarFontSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.AvatarInitial}}</text>
-{{else}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-bg" stroke="{{.Palette.Hairline}}" stroke-width="1"/>
+{{else}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-bg card-line" stroke-width="1"/>
 <circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.DecAvatarRadiusInner}}" class="card-accent" fill-opacity="0.25"/>
 {{end}}{{if .Layout.DividerX}}<line x1="{{.Layout.DividerX}}" y1="{{.Layout.DividerY1}}" x2="{{.Layout.DividerX}}" y2="{{.Layout.DividerY2}}" class="card-line" stroke-width="1"/>
 {{end}}<text x="{{.Layout.NameX}}" y="{{.Layout.NameY}}" class="card-fg" font-size="{{.Layout.NameSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.Nickname}}</text>

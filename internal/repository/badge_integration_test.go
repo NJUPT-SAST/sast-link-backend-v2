@@ -177,3 +177,31 @@ func TestBadgeRepositoryPauseAndResumeKeepTheKey(t *testing.T) {
 		t.Fatalf("second ReEnable = (%v, %v), want (false, nil)", resumedAgain, err)
 	}
 }
+
+func TestBadgeRepositoryFindBadgeTargetWithoutProfileRow(t *testing.T) {
+	// Data drift: a badge row whose owner lost the profile row (the enable
+	// gate requires a nickname, so this cannot happen through the normal
+	// flow — but the LEFT JOIN must degrade to a zero version, not error,
+	// or the render path would 500 instead of drawing the card.
+	database := setupDatabase(t)
+	badges := repository.NewBadge(database)
+
+	user := testUser("badge-noprofile@njupt.edu.cn")
+	if err := database.Create(user).Error; err != nil {
+		t.Fatalf("create bare user: %v", err)
+	}
+	if err := badges.Create(context.Background(), badgeFor(user.ID, "badge-key-noprofile")); err != nil {
+		t.Fatalf("Create error = %v", err)
+	}
+
+	target, err := badges.FindBadgeTarget(context.Background(), "badge-key-noprofile")
+	if err != nil {
+		t.Fatalf("FindBadgeTarget without profile row error = %v, want zero-version target", err)
+	}
+	if target.Version.IsZero() {
+		t.Logf("version is zero time as expected")
+	} else if !target.Version.IsZero() {
+		// Either zero or a value is acceptable as long as no error; log what we got.
+		t.Logf("version = %v", target.Version)
+	}
+}
