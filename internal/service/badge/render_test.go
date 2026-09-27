@@ -227,10 +227,28 @@ func TestRenderStartsWithXMLDeclaration(t *testing.T) {
 // width pushes the right stroke outside the viewBox and the browser clips it.
 func TestRenderBorderStaysInsideCanvas(t *testing.T) {
 	svg := renderForTest(t, ThemeLight, cardData{Nickname: "张三"})
+	// The frame is class-based (theme-aware in auto) and contrasts with the
+	// background: the light card carries a dark line, the dark card a light
+	// one. Geometry: inset by half a stroke on every side.
 	wantBorder := `x="0.5" y="0.5" width="` + strconv.Itoa(320-1) +
-		`" fill="none" stroke="#e5e7eb" height="` + strconv.Itoa(72-1) + `"`
+		`" fill="none" class="card-border" height="` + strconv.Itoa(72-1) + `"`
 	if !strings.Contains(svg, wantBorder) {
 		t.Fatalf("border rect not found as %q", wantBorder)
+	}
+	if !strings.Contains(svg, ".card-border{stroke:#1c1f23}") {
+		t.Fatalf("light theme must carry the dark border color")
+	}
+	dark := renderForTest(t, ThemeDark, cardData{Nickname: "张三"})
+	if !strings.Contains(dark, ".card-border{stroke:#e8eaed}") {
+		t.Fatalf("dark theme must carry the light border color")
+	}
+	auto := renderForTest(t, ThemeAuto, cardData{Nickname: "张三"})
+	// The auto variant must carry BOTH border colors behind the media query —
+	// previously the raw stroke attribute pinned the light hairline for every
+	// scheme, which is exactly the auto-vs-fixed inconsistency.
+	if !strings.Contains(auto, ".card-border{stroke:#1c1f23}") ||
+		!strings.Contains(auto, ".card-border{stroke:#e8eaed}") {
+		t.Fatalf("auto theme missing one of the two border palettes")
 	}
 }
 
@@ -472,5 +490,50 @@ func TestRenderRejectsOversizedKeyBeforeDependencies(t *testing.T) {
 	result, err := service.Render(context.Background(), RenderInput{Key: strings.Repeat("a", 44)})
 	if err != nil || result == nil || !result.NotFound {
 		t.Fatalf("oversized key: error = %v", err)
+	}
+}
+
+// TestRenderProfileChangeInvalidatesCache pins the avatar-complaint root
+// cause: the render cache is keyed per theme, so an avatar uploaded mid-
+// session left the auto variant serving the stale avatar-less render for a
+// full TTL while light/dark re-rendered fresh. The cache identity now leads
+// with the owner's profile version, so any profile change — avatar upload
+// included — mints a fresh key on the very next request.
+func TestRenderProfileChangeInvalidatesCache(t *testing.T) {
+	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{
+		7: {Nickname: strPtr("张三"), Intro: strPtr("旧签名")},
+	}}
+	badges := newFakeBadgeRepository()
+	if err := badges.Create(context.Background(), &model.Badge{UserID: 7, BadgeKey: "version-key"}); err != nil {
+		t.Fatalf("seed badge error = %v", err)
+	}
+	service := newTestService(users, badges, &fakeAuditRepository{})
+
+	// Warm the cache for every theme variant with the old profile.
+	for _, theme := range []string{"auto", "light", "dark"} {
+		result, err := service.Render(context.Background(), RenderInput{Key: "version-key", Theme: theme})
+		if err != nil || result.NotFound {
+			t.Fatalf("warm render (%s) error = %v, notFound = %v", theme, err, result.NotFound)
+		}
+		if !strings.Contains(string(result.SVG), "旧签名") {
+			t.Fatalf("warm render (%s) lost the old intro", theme)
+		}
+	}
+
+	// The profile changes (avatar upload / signature edit) — the version
+	// bumps with it.
+	users.cards[7] = &repository.PublicCard{Nickname: strPtr("张三"), Intro: strPtr("新签名")}
+	badges.bumpVersion(7)
+
+	// Every theme variant must pick the change up immediately — including
+	// auto, which previously kept serving its stale cached render.
+	for _, theme := range []string{"auto", "light", "dark"} {
+		result, err := service.Render(context.Background(), RenderInput{Key: "version-key", Theme: theme})
+		if err != nil || result.NotFound {
+			t.Fatalf("post-change render (%s) error = %v, notFound = %v", theme, err, result.NotFound)
+		}
+		if !strings.Contains(string(result.SVG), "新签名") {
+			t.Fatalf("theme %s still serves the stale cached render after a profile change", theme)
+		}
 	}
 }

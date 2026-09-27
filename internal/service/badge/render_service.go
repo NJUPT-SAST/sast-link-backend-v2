@@ -134,8 +134,14 @@ type RenderInput struct {
 }
 
 // renderCacheKey folds the request coordinates into one cache identity.
-func renderCacheKey(key string, theme Theme) string {
-	return string(theme) + "|" + key
+// The owner's profile version leads: any profile change (avatar upload,
+// nickname/signature edit) mints a fresh identity, so the next render picks
+// the change up immediately instead of after the TTL — per-theme keys alone
+// previously let a stale avatar-less auto render linger beside fresh
+// light/dark renders. The badge key stays last so the pause/resume purge,
+// which matches the "|key" suffix, keeps working across versions.
+func renderCacheKey(version, key string, theme Theme) string {
+	return version + "|" + string(theme) + "|" + key
 }
 
 // Render resolves a public badge key to its SVG. Unknown, closed or deleted
@@ -167,15 +173,18 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 		}
 	}
 
-	cacheKey := renderCacheKey(input.Key, theme)
+	cacheKey := ""
 	badge, err := s.Badges.FindBadgeTarget(ctx, input.Key)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
-			result := &RenderResult{SVG: renderErrorCard(), NotFound: true}
-			return result, nil
+			return &RenderResult{SVG: renderErrorCard(), NotFound: true}, nil
 		}
 		return nil, newError(ErrInternal, "render badge: resolve key", err)
 	}
+	if badge == nil {
+		return nil, newError(ErrInternal, "render badge: nil target", nil)
+	}
+	cacheKey = renderCacheKey(badge.Version.UTC().Format(time.RFC3339Nano), input.Key, theme)
 
 	// Authorization is always live, including on a render-cache hit: another
 	// instance may have disabled sharing, or an admin may have closed the user.
