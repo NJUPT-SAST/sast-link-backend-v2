@@ -170,9 +170,10 @@ func TestSetPrincipalRoundTrips(t *testing.T) {
 //
 // This asserts the composition root passes all five in order, and that each route
 // picks the gates its contract calls for: the user reads (list, detail, batch)
-// admit a lecturer — the phone field, not the endpoint, is what a non-admin role
-// loses — everything else is admin-only; reads accept a read-or-write delegated
-// scope, writes demand write.
+// admit a lecturer — the phone field, not the endpoint, is what a lesser role
+// loses — user writes and the overview admit the user-writer roles, and the
+// technical surfaces (OAuth clients, audit logs) are admin-only; reads accept a
+// read-or-write delegated scope, writes demand write.
 func TestAdminRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -209,6 +210,8 @@ func TestAdminRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 		{http.MethodGet, "/admin/users", "read-scope", "reader"},
 		{http.MethodGet, "/admin/users/5", "read-scope", "reader"},
 		{http.MethodGet, "/admin/users/batch", "read-scope", "reader"},
+		{http.MethodPost, "/admin/users", "write-scope", "user-writer"},
+		{http.MethodPut, "/admin/users", "write-scope", "user-writer"},
 		{http.MethodPut, "/admin/users/5", "write-scope", "user-writer"},
 		{http.MethodDelete, "/admin/users/5", "write-scope", "user-writer"},
 		{http.MethodPut, "/admin/users/5/restore", "write-scope", "user-writer"},

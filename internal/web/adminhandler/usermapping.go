@@ -17,11 +17,12 @@ var errInvalidQueryParameter = errors.New("query parameter is not valid")
 // than serializing model.User, which carries the password hash: a response type
 // with no such field cannot leak it no matter how the model changes later.
 //
-// The phone field is a pointer with omitempty: only an admin sees it; any other
-// role reading the list (a lecturer) gets the directory view, where the field is
-// absent rather than empty — "not disclosed" must not read as "not filled in".
-// The rule is "admin or hidden", so a future role defaults to the restricted
-// view. qq_number carries no such restriction and stays a plain field.
+// The phone field is a pointer with omitempty: only the roles seesPhone admits
+// (admin and manager) get it; any other role reading the list (a lecturer) gets
+// the directory view, where the field is absent rather than empty — "not
+// disclosed" must not read as "not filled in". The rule is an explicit allow
+// list, so a future role defaults to the restricted view. qq_number carries no
+// such restriction and stays a plain field.
 type adminUserDTO struct {
 	ID          int64   `json:"id"`
 	Name        string  `json:"name"`
@@ -78,7 +79,7 @@ type batchRoleUpdateResponse struct {
 
 // userDetailDTO is one full user record. Same reasoning as adminUserDTO, plus the
 // profile and identity halves. The phone field follows the same role rule as the
-// list: present for an admin, absent for every other role.
+// list: present for the roles seesPhone admits, absent for every other role.
 type userDetailDTO struct {
 	ID          int64   `json:"id"`
 	Name        string  `json:"name"`
@@ -152,15 +153,23 @@ type auditLogListResponse struct {
 	PageSize int           `json:"page_size"`
 }
 
+// seesPhone is the single predicate for which roles may see phone numbers —
+// the response mappings and the keyword predicate (via the handler's
+// seesCallerPhone) both go through it, so the trimmed view and the search can
+// never drift apart: a role that cannot see the field must not be able to probe
+// for its existence with keyword matches either.
+func seesPhone(role string) bool {
+	return role == string(model.UserRoleAdmin) || role == string(model.UserRoleManager)
+}
+
 // mapAdminUser maps one list row. The phone field rides on the caller's role:
 // an admin or a manager sees the stored value (an empty string stays an empty
 // string — it is the true "not filled in" state), every other role gets nil,
 // which drops the field from the response entirely. qq_number is visible to
 // every role.
 func mapAdminUser(user adminuser.UserListItem, role string) adminUserDTO {
-	seesPhone := role == string(model.UserRoleAdmin) || role == string(model.UserRoleManager)
 	var phoneNumber *string
-	if seesPhone {
+	if seesPhone(role) {
 		phoneNumber = &user.PhoneNumber
 	}
 	return adminUserDTO{
@@ -192,9 +201,8 @@ func mapAdminUser(user adminuser.UserListItem, role string) adminUserDTO {
 // profile ride along for every role — the same view the detail endpoint always
 // offered before the phone restriction.
 func mapUserDetail(detail adminuser.UserDetail, role string) userDetailDTO {
-	seesPhone := role == string(model.UserRoleAdmin) || role == string(model.UserRoleManager)
 	var phoneNumber *string
-	if seesPhone {
+	if seesPhone(role) {
 		phoneNumber = &detail.PhoneNumber
 	}
 	dto := userDetailDTO{

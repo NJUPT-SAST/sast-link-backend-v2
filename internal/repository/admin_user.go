@@ -442,7 +442,9 @@ func (u AdminUserUpdate) columns() map[string]any {
 // Whether the write demotes an administrator is decided from the row inside the
 // transaction, not from a caller-supplied flag, so the guard cannot be bypassed
 // by a stale pre-transaction read: trusting that comparison would let a demotion
-// commit with no guard or revocation. A role change bumps token_version and
+// commit with no guard or revocation. The caller's role is re-judged the same
+// way: a non-admin caller (the manager) is refused on an admin's row and on an
+// admin-role grant under the same lock. A role change bumps token_version and
 // revokes the user's live tokens in the same transaction, so a demoted account
 // cannot keep minting access tokens from live refresh tokens.
 //
@@ -453,6 +455,7 @@ func (r *UserRepository) UpdateAdminUser(
 	ctx context.Context,
 	userID int64,
 	update AdminUserUpdate,
+	callerRole model.UserRole,
 	revokedAt time.Time,
 ) ([]model.BlacklistEntry, bool, error) {
 	if userID <= 0 {
@@ -500,6 +503,18 @@ func (r *UserRepository) UpdateAdminUser(
 				return classifyMissingUser(transaction, userID)
 			}
 			return fmt.Errorf("load user for update: %w", err)
+		}
+		// The manager boundary, re-judged against the locked row so a concurrent
+		// promotion cannot turn an already-authorized write into one on an admin.
+		// Only the literal admin role is unrestricted; anything else — a manager,
+		// or an empty value from a wiring slip — stays on the restricted side.
+		if callerRole != model.UserRoleAdmin {
+			if stored.Role == model.UserRoleAdmin {
+				return ErrAdminTarget
+			}
+			if update.Role != nil && *update.Role == model.UserRoleAdmin {
+				return ErrAdminGrant
+			}
 		}
 		if update.StateAuto {
 			// state_auto re-derives from the locked row's role and student_id, so the
@@ -579,7 +594,8 @@ func (r *UserRepository) UpdateAdminUser(
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrLastAdmin) {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrLastAdmin) ||
+			errors.Is(err, ErrAdminTarget) || errors.Is(err, ErrAdminGrant) {
 			return nil, false, err
 		}
 		return nil, false, fmt.Errorf("update admin user: %w", err)
@@ -594,6 +610,7 @@ func (r *UserRepository) UpdateAdminUser(
 func (r *UserRepository) SoftDeleteAndRevokeSessions(
 	ctx context.Context,
 	userID int64,
+	callerRole model.UserRole,
 	revokedAt time.Time,
 ) ([]model.BlacklistEntry, error) {
 	if userID <= 0 {
@@ -603,6 +620,24 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		if err := ensureAnotherAdminRemains(transaction, userID); err != nil {
 			return err
+		}
+		// Lock and read the row's role before the write, so the manager boundary
+		// is judged against the same serialized state the close itself lands on —
+		// the lock order (advisory, then user row) matches UpdateAdminUser.
+		if callerRole != model.UserRoleAdmin {
+			var stored model.User
+			if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Select("id", "role").
+				Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
+				First(&stored).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return classifyMissingUser(transaction, userID)
+				}
+				return fmt.Errorf("load user for close: %w", err)
+			}
+			if stored.Role == model.UserRoleAdmin {
+				return ErrAdminTarget
+			}
 		}
 		result := transaction.Model(&model.User{}).
 			Where("id = ? AND state <> ?", userID, model.UserStateDeleted).
@@ -626,7 +661,8 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStateConflict) || errors.Is(err, ErrLastAdmin) {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStateConflict) ||
+			errors.Is(err, ErrLastAdmin) || errors.Is(err, ErrAdminTarget) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("soft delete and revoke sessions: %w", err)
@@ -645,7 +681,7 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 // The row read and the UPDATE both target state = is_deleted, and no other
 // writer touches a closed row, so a plain read plus a guarded UPDATE is enough;
 // the RowsAffected guard still distinguishes "missing" from "already live".
-func (r *UserRepository) RestoreUser(ctx context.Context, userID int64, now time.Time) error {
+func (r *UserRepository) RestoreUser(ctx context.Context, userID int64, callerRole model.UserRole, now time.Time) error {
 	if userID <= 0 {
 		return fmt.Errorf("%w: user id must be positive", ErrInvalidArgument)
 	}
@@ -659,6 +695,12 @@ func (r *UserRepository) RestoreUser(ctx context.Context, userID int64, now time
 				return classifyLiveUser(transaction, userID)
 			}
 			return fmt.Errorf("load user for restore: %w", err)
+		}
+		// Deleted accounts cannot change role (every role-writing path requires a
+		// live row), so the read above is stable; the boundary check is kept here
+		// anyway so all three write transactions judge it the same way.
+		if callerRole != model.UserRoleAdmin && stored.Role == model.UserRoleAdmin {
+			return ErrAdminTarget
 		}
 		state := model.UserStateNJUPTer
 		if derived, derErr := validate.DeriveState(stored.Role, stored.StudentID, now); derErr == nil {
@@ -679,7 +721,7 @@ func (r *UserRepository) RestoreUser(ctx context.Context, userID int64, now time
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStateConflict) {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStateConflict) || errors.Is(err, ErrAdminTarget) {
 			return err
 		}
 		return fmt.Errorf("restore user: %w", err)

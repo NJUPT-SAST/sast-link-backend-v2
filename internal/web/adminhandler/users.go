@@ -6,7 +6,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/adminuser"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
@@ -23,14 +22,13 @@ func principalRole(c *gin.Context) string {
 	return principal.Role
 }
 
-// seesCallerPhone reports whether the caller's role may see phone numbers.
-// The keyword predicate (IncludePhoneColumn) and the response mapping use this
-// one helper so the search and the trimmed view can never drift apart: a role
-// that cannot see the field must not be able to probe for its existence with
-// keyword matches either.
+// seesCallerPhone reports whether the caller's role may see phone numbers, for
+// the keyword predicate (IncludePhoneColumn). It delegates to seesPhone — the
+// same predicate the response mappings use — so the search and the trimmed view
+// can never drift apart: a role that cannot see the field must not be able to
+// probe for its existence with keyword matches either.
 func seesCallerPhone(c *gin.Context) bool {
-	role := principalRole(c)
-	return role == string(AdminRole) || role == string(model.UserRoleManager)
+	return seesPhone(principalRole(c))
 }
 
 // ListUsers returns a filtered page of accounts.

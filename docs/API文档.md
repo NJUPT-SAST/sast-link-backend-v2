@@ -1645,7 +1645,7 @@ GET /admin/users
 | ------ | ------ |
 | `page` | 页码，默认 1，最小 1，最大 2^30（超出范围或溢出返回 `40000`） |
 | `page_size` | 每页条数，默认 20，最大 100 |
-| `role` | 筛选角色：freshman / member / lecturer / admin |
+| `role` | 筛选角色：freshman / member / manager / lecturer / admin |
 | `state` | 筛选状态：on_sast / retired_sast / njupter / is_deleted |
 | `department` | 筛选部门：software / media |
 | `student_id` | 筛选学号 |
@@ -2273,7 +2273,7 @@ GET /admin/stats
 
 **Headers**: `Authorization: Bearer <access_token>`（需 admin / manager 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
-控制台概览页的一次性数据源，聚合账户、客户端与最近审计三条视图。
+控制台概览页的一次性数据源，聚合账户、客户端与最近审计三条视图。manager 调用时响应仅含 `users` 一路——`clients` 与 `audit` 两键整体缺席（不返回 null/空值），与 phone 字段「未披露而非未填写」的裁剪口径一致：OAuth 注册计数与审计行（含 `client_ip` / `actor_client_id`）属于技术信息面。
 
 **Response** `200`:
 

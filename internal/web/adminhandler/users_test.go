@@ -311,14 +311,13 @@ func TestListUsersSerializesEmptyPageAsArray(t *testing.T) {
 }
 
 // The read endpoints are readable by lecturers, but the phone field on them is
-// admin-only: an admin sees the stored value (an empty string stays an empty
-// string, the true "not filled in" state), any other role sees the field dropped
-// entirely — "not disclosed" must not read as "not filled in". qq_number is
-// visible to every role. The rule is "admin or hidden" for the phone only, so the
-// test asserts the restricted shape for a lecturer rather than pinning the
-// allowed set. It covers all three read surfaces: the list, the detail record and
-// the batch read, which share the same phone rule but map through different
-// functions.
+// an explicit allow list (admin and manager): they see the stored value (an
+// empty string stays an empty string, the true "not filled in" state), any
+// other role sees the field dropped entirely — "not disclosed" must not read as
+// "not filled in". qq_number is visible to every role. The test asserts the
+// restricted shape for a lecturer and the full shape for both allowed roles. It
+// covers all three read surfaces: the list, the detail record and the batch
+// read, which share the same phone rule but map through different functions.
 func TestListUsersHidesContactFieldsFromLecturer(t *testing.T) {
 	listResult := &adminuser.ListUsersResult{
 		Users: []adminuser.UserListItem{{

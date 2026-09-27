@@ -16,6 +16,15 @@ var (
 	// administrator. Enforced inside the writing transaction, where a count over
 	// other rows can be serialized.
 	ErrLastAdmin = errors.New("repository: last active admin")
+	// ErrAdminTarget reports that the caller's role may not write an
+	// administrator's account — the manager boundary, judged against the row
+	// locked inside the writing transaction so a promotion racing the write
+	// cannot slip past a stale pre-transaction read.
+	ErrAdminTarget = errors.New("repository: target is an admin account")
+	// ErrAdminGrant reports that the caller's role may not set the admin role,
+	// whatever the target's current role. Same transaction-time guarantee as
+	// ErrAdminTarget.
+	ErrAdminGrant = errors.New("repository: admin role grant out of reach")
 	// ErrLastLoginMethod reports that deleting the identity would leave the
 	// account with no way to sign in. Decided under a lock on the user row so
 	// concurrent unbinds cannot both pass a stale snapshot.

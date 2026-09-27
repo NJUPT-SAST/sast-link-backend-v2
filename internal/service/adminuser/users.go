@@ -174,7 +174,7 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		PersonalEmail: validated.personalEmail,
 		// A role change invalidates sessions: a demoted account's live refresh tokens
 		// must not keep minting tokens for a session meant to end.
-	}, s.now())
+	}, model.UserRole(input.AdminRole), s.now())
 	if err != nil {
 		mapped := s.mapWriteError(ctx, err)
 		// The write failed, so the audit records no changed fields; a rolled-back
@@ -313,7 +313,7 @@ func (s Service) DeleteUser(ctx context.Context, input TargetUserInput) error {
 	if targetErr := s.refuseManagerOnAdminTarget(ctx, input.AdminRole, input.UserID, actionDeleteUser, input); targetErr != nil {
 		return targetErr
 	}
-	entries, err := s.Users.SoftDeleteAndRevokeSessions(ctx, input.UserID, s.now())
+	entries, err := s.Users.SoftDeleteAndRevokeSessions(ctx, input.UserID, model.UserRole(input.AdminRole), s.now())
 	if err != nil {
 		mapped := s.mapDeleteError(ctx, err)
 		s.auditTarget(ctx, input, actionDeleteUser, false, errorCode(mapped))
@@ -347,7 +347,7 @@ func (s Service) RestoreUser(ctx context.Context, input TargetUserInput) error {
 	if targetErr := s.refuseManagerOnAdminTarget(ctx, input.AdminRole, input.UserID, actionRestoreUser, input); targetErr != nil {
 		return targetErr
 	}
-	err := s.Users.RestoreUser(ctx, input.UserID, s.now())
+	err := s.Users.RestoreUser(ctx, input.UserID, model.UserRole(input.AdminRole), s.now())
 	if err != nil {
 		var mapped error
 		switch {
@@ -355,6 +355,8 @@ func (s Service) RestoreUser(ctx context.Context, input TargetUserInput) error {
 			mapped = newError(ErrNotFound, "用户不存在", nil)
 		case errors.Is(err, repository.ErrStateConflict):
 			mapped = newError(ErrStateConflict, "用户未被注销，无需恢复", nil)
+		case errors.Is(err, repository.ErrAdminTarget):
+			mapped = newError(ErrProtected, "无权操作管理员账号", nil)
 		default:
 			mapped = internalError(ctx, "restore admin user", "恢复用户失败", err)
 		}
@@ -428,6 +430,10 @@ func (s Service) mapWriteError(ctx context.Context, err error) error {
 		return newError(ErrStateConflict, "用户已注销，请先恢复后再编辑", nil)
 	case errors.Is(err, repository.ErrLastAdmin):
 		return newError(ErrProtected, "系统中至少需要保留一名管理员", nil)
+	case errors.Is(err, repository.ErrAdminTarget):
+		return newError(ErrProtected, "无权操作管理员账号", nil)
+	case errors.Is(err, repository.ErrAdminGrant):
+		return newError(ErrProtected, "不可授予 admin 角色", nil)
 	case errors.Is(err, repository.ErrIdentityLimitExceeded):
 		return newError(ErrIdentityLimitReached, "第三方邮箱绑定数量已达上限", nil)
 	// state_auto cannot derive from an unreadable student ID. That is a field the
@@ -448,6 +454,8 @@ func (s Service) mapDeleteError(ctx context.Context, err error) error {
 		return newError(ErrStateConflict, "用户已注销", nil)
 	case errors.Is(err, repository.ErrLastAdmin):
 		return newError(ErrProtected, "系统中至少需要保留一名管理员", nil)
+	case errors.Is(err, repository.ErrAdminTarget):
+		return newError(ErrProtected, "无权操作管理员账号", nil)
 	}
 	return internalError(ctx, "soft delete admin user", "注销用户失败", err)
 }

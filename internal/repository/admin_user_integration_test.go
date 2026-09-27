@@ -492,7 +492,7 @@ func TestUpdateAdminUserRevokesSessionsAtomically(t *testing.T) {
 
 	role := model.UserRoleMember
 	entries, _, err := users.UpdateAdminUser(context.Background(), user.ID,
-		repository.AdminUserUpdate{Role: &role}, revokedAt)
+		repository.AdminUserUpdate{Role: &role}, model.UserRoleAdmin, revokedAt)
 	if err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestUpdateAdminUserKeepsSessionsWhenRoleUnchanged(t *testing.T) {
 
 	name := "新名字"
 	entries, _, err := users.UpdateAdminUser(context.Background(), user.ID,
-		repository.AdminUserUpdate{Name: &name}, time.Now().UTC())
+		repository.AdminUserUpdate{Name: &name}, model.UserRoleAdmin, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestUpdateAdminUserLetsTriggerRecomputeEmailType(t *testing.T) {
 	emailType := model.EmailTypeSAST
 	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
 		repository.AdminUserUpdate{LoginEmail: &email, EmailType: &emailType},
-		time.Now().UTC()); err != nil {
+		model.UserRoleAdmin, time.Now().UTC()); err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
 	}
 	var reloaded model.User
@@ -584,7 +584,7 @@ func TestUpdateAdminUserRejectsForeignEmailDomain(t *testing.T) {
 	email := "someone@gmail.com"
 	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
 		repository.AdminUserUpdate{LoginEmail: &email},
-		time.Now().UTC()); err == nil {
+		model.UserRoleAdmin, time.Now().UTC()); err == nil {
 		t.Fatal("UpdateAdminUser accepted a foreign domain; the trigger should refuse it")
 	}
 }
@@ -600,7 +600,7 @@ func TestUpdateAdminUserSkipsDeletedAccounts(t *testing.T) {
 
 	name := "改不动"
 	_, _, err := users.UpdateAdminUser(context.Background(), user.ID,
-		repository.AdminUserUpdate{Name: &name}, time.Now().UTC())
+		repository.AdminUserUpdate{Name: &name}, model.UserRoleAdmin, time.Now().UTC())
 	// The row exists and the caller may see it in the console, so the closed state is
 	// a conflict to report rather than a missing record. Reporting ErrNotFound here
 	// would render as a 404 on a user the list just showed, and it would disagree with
@@ -617,7 +617,7 @@ func TestUpdateAdminUserReportsAMissingRowAsNotFound(t *testing.T) {
 
 	name := "无此人"
 	_, _, err := users.UpdateAdminUser(context.Background(), 999999999,
-		repository.AdminUserUpdate{Name: &name}, time.Now().UTC())
+		repository.AdminUserUpdate{Name: &name}, model.UserRoleAdmin, time.Now().UTC())
 	if !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
@@ -628,7 +628,7 @@ func TestUpdateAdminUserRejectsEmptyUpdate(t *testing.T) {
 	users := repository.NewUser(database)
 
 	_, _, err := users.UpdateAdminUser(context.Background(), 1,
-		repository.AdminUserUpdate{}, time.Now().UTC())
+		repository.AdminUserUpdate{}, model.UserRoleAdmin, time.Now().UTC())
 	if !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("error = %v, want ErrInvalidArgument", err)
 	}
@@ -645,7 +645,7 @@ func TestSoftDeleteAndRevokeSessions(t *testing.T) {
 	createTokenPair(t, tokens, "delete", familyID, 0, client.ID, user.ID)
 	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
 
-	entries, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, revokedAt)
+	entries, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, model.UserRoleAdmin, revokedAt)
 	if err != nil {
 		t.Fatalf("SoftDeleteAndRevokeSessions: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestSoftDeleteAndRevokeSessions(t *testing.T) {
 	}
 
 	t.Run("closing it twice is a state conflict", func(t *testing.T) {
-		_, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, revokedAt)
+		_, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, model.UserRoleAdmin, revokedAt)
 		if !errors.Is(err, repository.ErrStateConflict) {
 			t.Fatalf("error = %v, want ErrStateConflict", err)
 		}
@@ -678,7 +678,7 @@ func TestSoftDeleteReportsMissingUser(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)
 
-	_, err := users.SoftDeleteAndRevokeSessions(context.Background(), 999999, time.Now().UTC())
+	_, err := users.SoftDeleteAndRevokeSessions(context.Background(), 999999, model.UserRoleAdmin, time.Now().UTC())
 	if !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
@@ -696,11 +696,11 @@ func TestRestoreUser(t *testing.T) {
 	familyID := "family-restore"
 	createTokenPair(t, tokens, "restore", familyID, 0, client.ID, user.ID)
 	revokedAt := time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, revokedAt); err != nil {
+	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, model.UserRoleAdmin, revokedAt); err != nil {
 		t.Fatalf("soft delete: %v", err)
 	}
 
-	if err := users.RestoreUser(context.Background(), user.ID, time.Now().UTC()); err != nil {
+	if err := users.RestoreUser(context.Background(), user.ID, model.UserRoleAdmin, time.Now().UTC()); err != nil {
 		t.Fatalf("RestoreUser: %v", err)
 	}
 	var reloaded model.User
@@ -716,14 +716,14 @@ func TestRestoreUser(t *testing.T) {
 	assertPairRevokedAt(t, database, familyID, revokedAt)
 
 	t.Run("restoring a live account is a state conflict", func(t *testing.T) {
-		err := users.RestoreUser(context.Background(), user.ID, time.Now().UTC())
+		err := users.RestoreUser(context.Background(), user.ID, model.UserRoleAdmin, time.Now().UTC())
 		if !errors.Is(err, repository.ErrStateConflict) {
 			t.Fatalf("error = %v, want ErrStateConflict", err)
 		}
 	})
 
 	t.Run("restoring a missing account is not found", func(t *testing.T) {
-		err := users.RestoreUser(context.Background(), 999999, time.Now().UTC())
+		err := users.RestoreUser(context.Background(), 999999, model.UserRoleAdmin, time.Now().UTC())
 		if !errors.Is(err, repository.ErrNotFound) {
 			t.Fatalf("error = %v, want ErrNotFound", err)
 		}
@@ -741,7 +741,7 @@ func TestUpdateAdminUserRefusesEmailTypeWithoutAddress(t *testing.T) {
 
 	emailType := model.EmailTypeSAST
 	_, _, err := users.UpdateAdminUser(context.Background(), user.ID,
-		repository.AdminUserUpdate{EmailType: &emailType}, time.Now().UTC())
+		repository.AdminUserUpdate{EmailType: &emailType}, model.UserRoleAdmin, time.Now().UTC())
 	if !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("error = %v, want ErrInvalidArgument", err)
 	}
@@ -900,7 +900,7 @@ func TestUpdateAdminUserRefusesStateIsDeleted(t *testing.T) {
 
 	deleted := model.UserStateDeleted
 	_, _, err := userRepository.UpdateAdminUser(context.Background(), user.ID,
-		repository.AdminUserUpdate{State: &deleted}, time.Now())
+		repository.AdminUserUpdate{State: &deleted}, model.UserRoleAdmin, time.Now())
 	if !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("UpdateAdminUser(state=is_deleted) error = %v, want ErrInvalidArgument", err)
 	}
@@ -946,11 +946,11 @@ func TestAdminUserDemoteAndSoftDeleteDoNotDeadlock(t *testing.T) {
 		errs := make(chan error, 2)
 		go func() {
 			_, _, err := userRepository.UpdateAdminUser(context.Background(), admin.ID,
-				repository.AdminUserUpdate{Role: &member}, time.Now())
+				repository.AdminUserUpdate{Role: &member}, model.UserRoleAdmin, time.Now())
 			errs <- err
 		}()
 		go func() {
-			_, err := userRepository.SoftDeleteAndRevokeSessions(context.Background(), admin.ID, time.Now())
+			_, err := userRepository.SoftDeleteAndRevokeSessions(context.Background(), admin.ID, model.UserRoleAdmin, time.Now())
 			errs <- err
 		}()
 		for range 2 {
@@ -960,7 +960,7 @@ func TestAdminUserDemoteAndSoftDeleteDoNotDeadlock(t *testing.T) {
 				}
 			}
 		}
-		if err := userRepository.RestoreUser(context.Background(), admin.ID, time.Now().UTC()); err != nil {
+		if err := userRepository.RestoreUser(context.Background(), admin.ID, model.UserRoleAdmin, time.Now().UTC()); err != nil {
 			t.Fatalf("round %d: RestoreUser: %v", round, err)
 		}
 		if err := database.Model(&model.User{}).Where("id = ?", admin.ID).
@@ -1136,7 +1136,7 @@ func TestUpdateAdminUserStateAutoDerivesAndUnpins(t *testing.T) {
 	}
 
 	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
-		repository.AdminUserUpdate{StateAuto: true}, now); err != nil {
+		repository.AdminUserUpdate{StateAuto: true}, model.UserRoleAdmin, now); err != nil {
 		t.Fatalf("UpdateAdminUser(state_auto): %v", err)
 	}
 	var reloaded model.User
@@ -1157,7 +1157,7 @@ func TestUpdateAdminUserStateAutoDerivesAndUnpins(t *testing.T) {
 	// A generated-column UPDATE without state would leave the pin intact; and a
 	// fresh StateAuto call re-derives again even when already unpinned (idempotent).
 	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
-		repository.AdminUserUpdate{StateAuto: true}, now); err != nil {
+		repository.AdminUserUpdate{StateAuto: true}, model.UserRoleAdmin, now); err != nil {
 		t.Fatalf("second UpdateAdminUser(state_auto): %v", err)
 	}
 	if err := database.First(&reloaded, user.ID).Error; err != nil {
@@ -1200,7 +1200,7 @@ func TestRecomputeDerivedStateSkipsPinnedRow(t *testing.T) {
 
 	pinned := model.UserStateOnSAST
 	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
-		repository.AdminUserUpdate{State: &pinned}, now); err != nil {
+		repository.AdminUserUpdate{State: &pinned}, model.UserRoleAdmin, now); err != nil {
 		t.Fatalf("pin state: %v", err)
 	}
 	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
@@ -1241,7 +1241,7 @@ func TestRecomputeDerivedStateSkipsClosedRow(t *testing.T) {
 		t.Fatalf("unpinned sweep left state = %q, want retired_sast: sweep not live, the rest would be vacuous", reloaded.State)
 	}
 
-	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, revokedAt); err != nil {
+	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, model.UserRoleAdmin, revokedAt); err != nil {
 		t.Fatalf("soft delete: %v", err)
 	}
 	if _, err := retention.RecomputeDerivedState(context.Background(), 0, now, 100); err != nil {
@@ -1254,7 +1254,7 @@ func TestRecomputeDerivedStateSkipsClosedRow(t *testing.T) {
 		t.Fatalf("state = %q, want is_deleted untouched by the sweep", reloaded.State)
 	}
 
-	if err := users.RestoreUser(context.Background(), user.ID, now); err != nil {
+	if err := users.RestoreUser(context.Background(), user.ID, model.UserRoleAdmin, now); err != nil {
 		t.Fatalf("RestoreUser: %v", err)
 	}
 	if err := database.First(&reloaded, user.ID).Error; err != nil {
@@ -1313,7 +1313,7 @@ func TestRecomputeDerivedStateNeverOverwritesPinnedRowUnderContention(t *testing
 			default:
 			}
 			if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
-				repository.AdminUserUpdate{State: &pinned}, now); err != nil {
+				repository.AdminUserUpdate{State: &pinned}, model.UserRoleAdmin, now); err != nil {
 				t.Errorf("churn pin: %v", err)
 				return
 			}
@@ -1362,10 +1362,10 @@ func TestRestoreUserDerivesState(t *testing.T) {
 	if err := users.CreateWithProfile(context.Background(), user, &model.Profile{}); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, revokedAt); err != nil {
+	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(), user.ID, model.UserRoleAdmin, revokedAt); err != nil {
 		t.Fatalf("soft delete: %v", err)
 	}
-	if err := users.RestoreUser(context.Background(), user.ID, now); err != nil {
+	if err := users.RestoreUser(context.Background(), user.ID, model.UserRoleAdmin, now); err != nil {
 		t.Fatalf("RestoreUser: %v", err)
 	}
 	var reloaded model.User
@@ -1494,5 +1494,69 @@ func TestListAdminUsersRejectsPageBoundOverflow(t *testing.T) {
 		repository.AdminUserFilter{Limit: 20, Offset: math.MaxInt})
 	if !errors.Is(err, repository.ErrInvalidArgument) {
 		t.Fatalf("error = %v, want invalid page bound", err)
+	}
+}
+
+// The manager boundary is re-judged inside the writing transaction, against the
+// locked row: a non-admin caller cannot write an administrator's account and
+// cannot grant the admin role, whatever a stale pre-transaction read said. The
+// grant check needs no row state — the requested role is the request's own.
+func TestUserRepositoryManagerBoundaryRejudgedInTransaction(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+
+	adminSeed(t, database, "guard-admin@njupt.edu.cn", "管理员甲",
+		model.UserRoleAdmin, model.UserStateOnSAST, nil)
+	target := adminSeed(t, database, "boundary-target@njupt.edu.cn", "目标管理员",
+		model.UserRoleAdmin, model.UserStateOnSAST, nil)
+
+	name := "越权改名"
+	_, _, err := users.UpdateAdminUser(context.Background(), target.ID,
+		repository.AdminUserUpdate{Name: &name}, model.UserRoleManager, time.Now().UTC())
+	if !errors.Is(err, repository.ErrAdminTarget) {
+		t.Fatalf("UpdateAdminUser(manager on admin) error = %v, want ErrAdminTarget", err)
+	}
+
+	_, err = users.SoftDeleteAndRevokeSessions(
+		context.Background(), target.ID, model.UserRoleManager, time.Now().UTC())
+	if !errors.Is(err, repository.ErrAdminTarget) {
+		t.Fatalf("SoftDelete(manager on admin) error = %v, want ErrAdminTarget", err)
+	}
+
+	err = users.RestoreUser(
+		context.Background(), target.ID, model.UserRoleManager, time.Now().UTC())
+	if !errors.Is(err, repository.ErrStateConflict) {
+		// The live admin is not deleted, so the restore reports the state conflict
+		// before the boundary is consulted; close it first, then assert the
+		// boundary on the deleted row below.
+		t.Fatalf("RestoreUser(live) error = %v, want ErrStateConflict", err)
+	}
+
+	// An admin closes the target, then a manager tries to reopen it: the role
+	// survives the close, so the boundary still refuses.
+	if _, closeErr := users.SoftDeleteAndRevokeSessions(
+		context.Background(), target.ID, model.UserRoleAdmin, time.Now().UTC()); closeErr != nil {
+		t.Fatalf("admin close: %v", closeErr)
+	}
+	err = users.RestoreUser(
+		context.Background(), target.ID, model.UserRoleManager, time.Now().UTC())
+	if !errors.Is(err, repository.ErrAdminTarget) {
+		t.Fatalf("RestoreUser(manager on deleted admin) error = %v, want ErrAdminTarget", err)
+	}
+
+	// The grant refusal: a manager editing a member account cannot set admin.
+	member := adminSeed(t, database, "boundary-member@njupt.edu.cn", "普通成员乙",
+		model.UserRoleMember, model.UserStateNJUPTer, nil)
+	admin := model.UserRoleAdmin
+	_, _, err = users.UpdateAdminUser(context.Background(), member.ID,
+		repository.AdminUserUpdate{Role: &admin}, model.UserRoleManager, time.Now().UTC())
+	if !errors.Is(err, repository.ErrAdminGrant) {
+		t.Fatalf("UpdateAdminUser(manager grants admin) error = %v, want ErrAdminGrant", err)
+	}
+
+	// The same grant from an admin caller lands.
+	if _, _, err := users.UpdateAdminUser(context.Background(), member.ID,
+		repository.AdminUserUpdate{Role: &admin}, model.UserRoleAdmin, time.Now().UTC()); err != nil {
+		t.Fatalf("admin grants admin: %v", err)
 	}
 }

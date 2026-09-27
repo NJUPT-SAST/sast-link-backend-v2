@@ -914,6 +914,23 @@ func TestUpdateUserManagerBoundary(t *testing.T) {
 		}
 	})
 
+	t.Run("manager cannot change own role (self-protection is role-independent)", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleManager, model.UserStateNJUPTer)
+		h.users.findResult.ID = testAdminID
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.AdminRole = string(model.UserRoleManager)
+			input.UserID = testAdminID
+			input.Role = stringPtr(string(model.UserRoleMember))
+		}))
+
+		assertKind(t, err, KindProtected)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+	})
+
 	t.Run("empty caller role falls to the restricted branch", func(t *testing.T) {
 		h := newHarness(t)
 		h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)

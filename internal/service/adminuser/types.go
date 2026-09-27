@@ -34,19 +34,23 @@ type UserRepository interface {
 	// UpdateAdminUser decides for itself whether the edit demotes an administrator,
 	// from the row locked inside its transaction. It takes no flag for that: a
 	// caller's comparison reads from before the transaction and could let a demotion
-	// commit unguarded and unrevoked.
+	// commit unguarded and unrevoked. callerRole is re-judged the same way — a
+	// non-admin caller is refused on an admin's row and on an admin-role grant
+	// under the same lock.
 	UpdateAdminUser(
 		ctx context.Context,
 		userID int64,
 		update repository.AdminUserUpdate,
+		callerRole model.UserRole,
 		revokedAt time.Time,
 	) (entries []model.BlacklistEntry, sessionsRevoked bool, err error)
 	SoftDeleteAndRevokeSessions(
 		ctx context.Context,
 		userID int64,
+		callerRole model.UserRole,
 		revokedAt time.Time,
 	) ([]model.BlacklistEntry, error)
-	RestoreUser(ctx context.Context, userID int64, now time.Time) error
+	RestoreUser(ctx context.Context, userID int64, callerRole model.UserRole, now time.Time) error
 	// Stats returns the aggregate account counts for the console overview.
 	Stats(ctx context.Context) (repository.UserStats, error)
 	// NamesByIDs returns display names for the given user ids.

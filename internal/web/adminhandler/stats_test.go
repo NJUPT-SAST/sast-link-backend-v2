@@ -28,11 +28,17 @@ type statsEnvelope struct {
 // newStatsRouter mounts the admin routes with a stub authentication step, standing
 // in for RequireAuth plus the admin role gate on GET /admin/stats.
 func newStatsRouter(t *testing.T, users UserService, clients ClientService, auditLogs AuditLogService) *gin.Engine {
+	return newStatsRouterWithRole(t, users, clients, auditLogs, "admin")
+}
+
+// newStatsRouterWithRole mounts the overview with a configurable principal role,
+// so the manager's trimmed view can be exercised against the same wiring.
+func newStatsRouterWithRole(t *testing.T, users UserService, clients ClientService, auditLogs AuditLogService, role string) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	injectPrincipal := func(c *gin.Context) {
-		middleware.SetPrincipal(c, middleware.Principal{UserID: 99, Role: "admin", JTI: "jti-99"})
+		middleware.SetPrincipal(c, middleware.Principal{UserID: 99, Role: role, JTI: "jti-99"})
 		c.Next()
 	}
 	allow := func(c *gin.Context) { c.Next() }
@@ -144,5 +150,30 @@ func TestStatsDegradesWhenOptionalDependenciesNil(t *testing.T) {
 	if payload.Users.Total != 5 || payload.Clients.Total != 0 || len(payload.Audit.Recent) != 0 {
 		t.Fatalf("users/clients/recent = %d/%d/%d, want 5/0/0",
 			payload.Users.Total, payload.Clients.Total, len(payload.Audit.Recent))
+	}
+}
+
+// The overview's clients and audit legs carry the two technical surfaces, so a
+// manager — admitted for the account aggregates — gets the users leg only and
+// the other two keys are absent from the response entirely, the same
+// "not disclosed rather than empty" posture the phone field uses.
+func TestStatsTrimsTechnicalLegsForManager(t *testing.T) {
+	users := &fakeUsers{statsResult: repository.UserStats{Total: 1450}}
+	clients := &fakeClients{listResult: []adminclient.Client{sampleClient()}}
+	audit := &fakeAuditLogs{result: &adminuser.ListAuditLogsResult{Logs: []adminuser.AuditLogItem{{ID: 1}}}}
+	router := newStatsRouterWithRole(t, users, clients, audit, "manager")
+
+	recorder := doRequest(t, router, http.MethodGet, "/admin/stats", "", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, forbidden := range []string{"clients", "audit", "client_ip", "actor_client_id"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("manager overview contains %q: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, `"total":1450`) {
+		t.Fatalf("manager overview missing users aggregate: %s", body)
 	}
 }

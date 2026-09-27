@@ -86,6 +86,7 @@ func (f *fakeUsers) UpdateAdminUser(
 	_ context.Context,
 	userID int64,
 	update repository.AdminUserUpdate,
+	_ model.UserRole,
 	_ time.Time,
 ) ([]model.BlacklistEntry, bool, error) {
 	f.updateCalls++
@@ -109,6 +110,7 @@ func (f *fakeUsers) UpdateAdminUser(
 func (f *fakeUsers) SoftDeleteAndRevokeSessions(
 	_ context.Context,
 	userID int64,
+	_ model.UserRole,
 	_ time.Time,
 ) ([]model.BlacklistEntry, error) {
 	f.deleteCalls++
@@ -119,7 +121,7 @@ func (f *fakeUsers) SoftDeleteAndRevokeSessions(
 	return f.deleteEntries, nil
 }
 
-func (f *fakeUsers) RestoreUser(_ context.Context, userID int64, _ time.Time) error {
+func (f *fakeUsers) RestoreUser(_ context.Context, userID int64, _ model.UserRole, _ time.Time) error {
 	f.restoredUserID = userID
 	return f.restoreErr
 }
