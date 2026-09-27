@@ -217,7 +217,7 @@ func TestRenderStartsWithXMLDeclaration(t *testing.T) {
 	if !strings.HasPrefix(string(svg), `<?xml version="1.0" encoding="UTF-8"?>`) {
 		t.Fatalf("body does not start with the XML declaration: %q", svg[:40])
 	}
-	if body := string(renderErrorCard()); !strings.HasPrefix(body, `<?xml version="1.0" encoding="UTF-8"?>`) {
+	if body := string(renderErrorCard(ThemeLight)); !strings.HasPrefix(body, `<?xml version="1.0" encoding="UTF-8"?>`) {
 		t.Fatalf("error card does not start with the XML declaration: %q", body[:40])
 	}
 }
@@ -535,5 +535,35 @@ func TestRenderProfileChangeInvalidatesCache(t *testing.T) {
 		if !strings.Contains(string(result.SVG), "新签名") {
 			t.Fatalf("theme %s still serves the stale cached render after a profile change", theme)
 		}
+	}
+}
+
+// TestErrorCardMatchesCompactCardStyle pins the closed-card consistency: the
+// not-found card must render on the same compact canvas with the same
+// class-based palette (theme-aware) and the same contrast border as the live
+// card — a closed badge on a dark page reads as "off", not as a foreign
+// white object, and never stretches to a retired canvas size.
+func TestErrorCardMatchesCompactCardStyle(t *testing.T) {
+	for _, theme := range []Theme{ThemeLight, ThemeDark, ThemeAuto} {
+		body := string(renderErrorCard(theme))
+		if !strings.Contains(body, `width="320"`) || !strings.Contains(body, `height="72"`) {
+			t.Fatalf("%s error card is not on the compact canvas", theme)
+		}
+		if !strings.Contains(body, `class="card-border"`) {
+			t.Fatalf("%s error card missing the class-based border", theme)
+		}
+		if !strings.Contains(body, "徽标不存在或已关闭") || !strings.Contains(body, "SAST Link") {
+			t.Fatalf("%s error card lost its copy", theme)
+		}
+	}
+	if body := string(renderErrorCard(ThemeLight)); !strings.Contains(body, ".card-border{stroke:#1c1f23}") {
+		t.Fatalf("light error card missing the dark contrast border")
+	}
+	if body := string(renderErrorCard(ThemeDark)); !strings.Contains(body, ".card-border{stroke:#e8eaed}") {
+		t.Fatalf("dark error card missing the light contrast border")
+	}
+	auto := string(renderErrorCard(ThemeAuto))
+	if !strings.Contains(auto, "prefers-color-scheme: dark") || !strings.Contains(auto, ".card-border{stroke:#e8eaed}") {
+		t.Fatalf("auto error card missing the dark media-query palette")
 	}
 }

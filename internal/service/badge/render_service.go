@@ -157,7 +157,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 
 	// Bound cache-key memory before any database lookup or cache insertion.
 	if input.Key == "" || len(input.Key) > base64.RawURLEncoding.EncodedLen(badgeKeyBytes) {
-		return &RenderResult{SVG: renderErrorCard(), NotFound: true}, nil
+		return &RenderResult{SVG: renderErrorCard(theme), NotFound: true}, nil
 	}
 	s.renderCacheOnce.Do(func() {
 		if s.renderCache == nil {
@@ -177,7 +177,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	badge, err := s.Badges.FindBadgeTarget(ctx, input.Key)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
-			return &RenderResult{SVG: renderErrorCard(), NotFound: true}, nil
+			return &RenderResult{SVG: renderErrorCard(theme), NotFound: true}, nil
 		}
 		return nil, newError(ErrInternal, "render badge: resolve key", err)
 	}
@@ -200,7 +200,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	// to this request and must never be shared with the preceding fill.
 	if _, visibilityErr := s.Badges.FindBadgeTarget(ctx, input.Key); visibilityErr != nil {
 		if errors.Is(visibilityErr, repository.ErrNotFound) {
-			return &RenderResult{SVG: renderErrorCard(), NotFound: true}, nil
+			return &RenderResult{SVG: renderErrorCard(theme), NotFound: true}, nil
 		}
 		return nil, newError(ErrInternal, "render badge: final visibility", visibilityErr)
 	}
@@ -229,7 +229,7 @@ func (s *Service) renderCold(ctx context.Context, userID int64, theme Theme, cac
 			// The badge row outlived the user's visibility (deleted between
 			// the two reads, or data drift); the error card is the honest
 			// answer.
-			result := &RenderResult{SVG: renderErrorCard(), NotFound: true}
+			result := &RenderResult{SVG: renderErrorCard(theme), NotFound: true}
 			return result, nil
 		}
 		return nil, newError(ErrInternal, "render badge: load card", err)
