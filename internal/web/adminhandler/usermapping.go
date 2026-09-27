@@ -153,13 +153,14 @@ type auditLogListResponse struct {
 }
 
 // mapAdminUser maps one list row. The phone field rides on the caller's role:
-// an admin sees the stored value (an empty string stays an empty string — it is
-// the true "not filled in" state), every other role gets nil, which drops the
-// field from the response entirely. qq_number is visible to every role.
+// an admin or a manager sees the stored value (an empty string stays an empty
+// string — it is the true "not filled in" state), every other role gets nil,
+// which drops the field from the response entirely. qq_number is visible to
+// every role.
 func mapAdminUser(user adminuser.UserListItem, role string) adminUserDTO {
-	isAdmin := role == string(model.UserRoleAdmin)
+	seesPhone := role == string(model.UserRoleAdmin) || role == string(model.UserRoleManager)
 	var phoneNumber *string
-	if isAdmin {
+	if seesPhone {
 		phoneNumber = &user.PhoneNumber
 	}
 	return adminUserDTO{
@@ -186,14 +187,14 @@ func mapAdminUser(user adminuser.UserListItem, role string) adminUserDTO {
 }
 
 // mapUserDetail maps one full record. Same phone rule as mapAdminUser: an admin
-// sees the stored value (an empty string stays an empty string), every other role
-// gets nil so the field is absent. qq_number, identities and the profile ride
-// along for every role — the same view the detail endpoint always offered before
-// the phone restriction.
+// or a manager sees the stored value (an empty string stays an empty string),
+// every other role gets nil so the field is absent. qq_number, identities and the
+// profile ride along for every role — the same view the detail endpoint always
+// offered before the phone restriction.
 func mapUserDetail(detail adminuser.UserDetail, role string) userDetailDTO {
-	isAdmin := role == string(model.UserRoleAdmin)
+	seesPhone := role == string(model.UserRoleAdmin) || role == string(model.UserRoleManager)
 	var phoneNumber *string
-	if isAdmin {
+	if seesPhone {
 		phoneNumber = &detail.PhoneNumber
 	}
 	dto := userDetailDTO{

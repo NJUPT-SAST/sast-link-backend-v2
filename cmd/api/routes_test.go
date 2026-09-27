@@ -37,6 +37,7 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 	adminhandler.RegisterRoutes(router, adminhandler.Handler{}, adminhandler.Gates{
 		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
 		RequireAdmin: passthrough, RequireReader: passthrough,
+		RequireUserWriter: passthrough,
 	})
 	alumnihandler.RegisterRoutes(router, alumnihandler.Handler{}, alumnihandler.Gates{
 		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
@@ -192,6 +193,7 @@ func TestAdminRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 		RequireWriteScope: step("write-scope"),
 		RequireAdmin:      rejectingStep("admin"),
 		RequireReader:     rejectingStep("reader"),
+		RequireUserWriter: rejectingStep("user-writer"),
 	})
 
 	for _, route := range []struct {
@@ -200,14 +202,17 @@ func TestAdminRoutesAreGatedByAuthScopeAndRole(t *testing.T) {
 		{http.MethodGet, "/admin/oauth-clients", "read-scope", "admin"},
 		{http.MethodPost, "/admin/oauth-clients", "write-scope", "admin"},
 		{http.MethodPut, "/admin/oauth-clients/5", "write-scope", "admin"},
-		// PRD §4.12: the directory list and the detail records are open to lecturers,
-		// with the phone field dropped for them inside the mapping; writes are admin-only.
+		// PRD §4.12: the directory list and the detail records are open to lecturers
+		// and managers, with the phone field limited to admin and manager inside the
+		// mapping; user writes and the overview admit the user-writer roles (admin
+		// and manager), while the technical surfaces stay admin-only.
 		{http.MethodGet, "/admin/users", "read-scope", "reader"},
 		{http.MethodGet, "/admin/users/5", "read-scope", "reader"},
 		{http.MethodGet, "/admin/users/batch", "read-scope", "reader"},
-		{http.MethodPut, "/admin/users/5", "write-scope", "admin"},
-		{http.MethodDelete, "/admin/users/5", "write-scope", "admin"},
-		{http.MethodPut, "/admin/users/5/restore", "write-scope", "admin"},
+		{http.MethodPut, "/admin/users/5", "write-scope", "user-writer"},
+		{http.MethodDelete, "/admin/users/5", "write-scope", "user-writer"},
+		{http.MethodPut, "/admin/users/5/restore", "write-scope", "user-writer"},
+		{http.MethodGet, "/admin/stats", "read-scope", "user-writer"},
 		{http.MethodGet, "/admin/audit-logs", "read-scope", "admin"},
 	} {
 		order = nil
@@ -236,13 +241,15 @@ func TestRegisterAdminRoutesRejectsIncompleteGates(t *testing.T) {
 	full := adminhandler.Gates{
 		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
 		RequireAdmin: passthrough, RequireReader: passthrough,
+		RequireUserWriter: passthrough,
 	}
 	for name, mutate := range map[string]func(*adminhandler.Gates){
-		"auth":        func(g *adminhandler.Gates) { g.RequireAuth = nil },
-		"read scope":  func(g *adminhandler.Gates) { g.RequireReadScope = nil },
-		"write scope": func(g *adminhandler.Gates) { g.RequireWriteScope = nil },
-		"admin role":  func(g *adminhandler.Gates) { g.RequireAdmin = nil },
-		"reader role": func(g *adminhandler.Gates) { g.RequireReader = nil },
+		"auth":             func(g *adminhandler.Gates) { g.RequireAuth = nil },
+		"read scope":       func(g *adminhandler.Gates) { g.RequireReadScope = nil },
+		"write scope":      func(g *adminhandler.Gates) { g.RequireWriteScope = nil },
+		"admin role":       func(g *adminhandler.Gates) { g.RequireAdmin = nil },
+		"reader role":      func(g *adminhandler.Gates) { g.RequireReader = nil },
+		"user-writer role": func(g *adminhandler.Gates) { g.RequireUserWriter = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			gates := full
@@ -266,17 +273,34 @@ func TestAdminRoleIsAdmin(t *testing.T) {
 	}
 }
 
-// The read-only gate must admit exactly admin and lecturer. A drift that added
-// member here would open the whole user directory, and the route test above cannot
-// see it: it only checks which gate ran, not which roles that gate accepts.
-func TestReaderRolesAreAdminAndLecturer(t *testing.T) {
-	want := []model.UserRole{model.UserRoleAdmin, model.UserRoleLecturer}
+// The read-only gate must admit exactly admin, manager and lecturer. A drift that
+// added member here would open the whole user directory, and the route test above
+// cannot see it: it only checks which gate ran, not which roles that gate accepts.
+func TestReaderRolesAreAdminManagerAndLecturer(t *testing.T) {
+	want := []model.UserRole{model.UserRoleAdmin, model.UserRoleManager, model.UserRoleLecturer}
 	if len(adminhandler.ReaderRoles) != len(want) {
 		t.Fatalf("ReaderRoles = %v, want %v", adminhandler.ReaderRoles, want)
 	}
 	for index, role := range want {
 		if adminhandler.ReaderRoles[index] != role {
 			t.Fatalf("ReaderRoles = %v, want %v", adminhandler.ReaderRoles, want)
+		}
+	}
+}
+
+// The user-write gate must admit exactly admin and manager — not lecturer, whose
+// reach ends at reading, and not admin alone, which would lock managers out of
+// the member management the role exists for. The service layer keeps the
+// manager bounded (no admin targets, no admin grants); this pin is what keeps
+// the gate itself from drifting.
+func TestUserWriterRolesAreAdminAndManager(t *testing.T) {
+	want := []model.UserRole{model.UserRoleAdmin, model.UserRoleManager}
+	if len(adminhandler.UserWriterRoles) != len(want) {
+		t.Fatalf("UserWriterRoles = %v, want %v", adminhandler.UserWriterRoles, want)
+	}
+	for index, role := range want {
+		if adminhandler.UserWriterRoles[index] != role {
+			t.Fatalf("UserWriterRoles = %v, want %v", adminhandler.UserWriterRoles, want)
 		}
 	}
 }

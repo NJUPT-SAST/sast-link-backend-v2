@@ -831,3 +831,187 @@ func TestUpdateUserStatePassesPinToRepository(t *testing.T) {
 		t.Fatalf("State = %v, want on_sast passed down", h.users.updateInput.State)
 	}
 }
+
+// The manager boundary: a manager runs every member-management write — promoting
+// to manager included, self-replication being the point of the role — but never
+// writes an admin's account and never grants the admin role. An admin caller is
+// unaffected on every path below.
+func TestUpdateUserManagerBoundary(t *testing.T) {
+	t.Run("manager cannot edit an admin account", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.AdminRole = string(model.UserRoleManager)
+			name := "改名"
+			input.Name = &name
+		}))
+
+		assertKind(t, err, KindProtected)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+		assertAudited(t, h, actionUpdateUser, false, errcode.CodeForbidden)
+	})
+
+	t.Run("manager cannot grant the admin role", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.AdminRole = string(model.UserRoleManager)
+			input.Role = stringPtr(string(model.UserRoleAdmin))
+		}))
+
+		assertKind(t, err, KindProtected)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+	})
+
+	t.Run("manager may promote a member to manager (self-replication)", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.AdminRole = string(model.UserRoleManager)
+			input.Role = stringPtr(string(model.UserRoleManager))
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(promote to manager): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
+	})
+
+	t.Run("manager may edit and demote a lecturer account", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleLecturer, model.UserStateOnSAST)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.AdminRole = string(model.UserRoleManager)
+			input.Role = stringPtr(string(model.UserRoleMember))
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(demote lecturer): %v", err)
+		}
+	})
+
+	t.Run("admin caller edits an admin account through", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
+		h.users.findResult.ID = testTargetID
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.Role = stringPtr(string(model.UserRoleMember))
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(admin demotes another admin): %v", err)
+		}
+	})
+
+	t.Run("empty caller role falls to the restricted branch", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.AdminRole = ""
+			name := "改名"
+			input.Name = &name
+		}))
+
+		// A wiring slip must narrow a manager's reach, never widen it: the
+		// unattributed caller is treated as the weaker role.
+		assertKind(t, err, KindProtected)
+	})
+}
+
+// The batch endpoint routes through UpdateUser, so the manager boundary holds
+// per item: admin targets fail with the boundary reason, everything else
+// proceeds.
+func TestUpdateUserRolesManagerBoundary(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
+
+	result, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+		IDs:  []int64{testTargetID, testAdminID},
+		Role: string(model.UserRoleManager),
+		// The fake returns the same row for every id; the second id differs, so
+		// the two items exercise the boundary through one shared findResult by
+		// making the target an admin and observing both items refused.
+		AdminUserID:   testAdminID + 100,
+		AdminRole:     string(model.UserRoleManager),
+		ActorClientID: "",
+	})
+	if err != nil {
+		t.Fatalf("UpdateUserRoles: %v", err)
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("results = %d, want 2", len(result.Results))
+	}
+	for _, item := range result.Results {
+		if item.Success || item.Reason != "无权操作管理员账号" {
+			t.Fatalf("item = %+v, want the admin-target refusal", item)
+		}
+	}
+}
+
+// The manager boundary on the close/reopen paths: both are writes on the
+// account, and the role survives a close (DELETE flips state, not role), so a
+// deleted administrator cannot be reopened behind the boundary either.
+func TestDeleteAndRestoreManagerBoundary(t *testing.T) {
+	t.Run("manager cannot close an admin account", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
+
+		err := h.service.DeleteUser(context.Background(), TargetUserInput{
+			UserID: testTargetID, AdminUserID: testAdminID + 100,
+			AdminRole: string(model.UserRoleManager),
+			ClientIP:  testClientIP, UserAgent: testUserAgent,
+		})
+
+		assertKind(t, err, KindProtected)
+		if h.users.deletedUserID != 0 {
+			t.Fatalf("deleted user = %d, want no delete", h.users.deletedUserID)
+		}
+		assertAudited(t, h, actionDeleteUser, false, errcode.CodeForbidden)
+	})
+
+	t.Run("manager cannot restore a closed admin account", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateDeleted)
+
+		err := h.service.RestoreUser(context.Background(), TargetUserInput{
+			UserID: testTargetID, AdminUserID: testAdminID + 100,
+			AdminRole: string(model.UserRoleManager),
+			ClientIP:  testClientIP, UserAgent: testUserAgent,
+		})
+
+		assertKind(t, err, KindProtected)
+		if h.users.restoredUserID != 0 {
+			t.Fatalf("restored user = %d, want no restore", h.users.restoredUserID)
+		}
+		assertAudited(t, h, actionRestoreUser, false, errcode.CodeForbidden)
+	})
+
+	t.Run("manager closes and reopens a member account through", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+
+		managerInput := TargetUserInput{
+			UserID: testTargetID, AdminUserID: testAdminID + 100,
+			AdminRole: string(model.UserRoleManager),
+			ClientIP:  testClientIP, UserAgent: testUserAgent,
+		}
+		if err := h.service.DeleteUser(context.Background(), managerInput); err != nil {
+			t.Fatalf("DeleteUser(manager on member): %v", err)
+		}
+		if err := h.service.RestoreUser(context.Background(), managerInput); err != nil {
+			t.Fatalf("RestoreUser(manager on member): %v", err)
+		}
+	})
+}

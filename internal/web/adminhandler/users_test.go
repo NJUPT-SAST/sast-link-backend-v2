@@ -223,16 +223,23 @@ func TestListUsersPassesQueryParameters(t *testing.T) {
 	}
 }
 
-// The keyword predicate admits phone_number only for an admin principal: a
-// lecturer must not be able to probe an account by phone, since the response
-// mapping hides the field from them ("admin or hidden" applies to the match the
-// same way it applies to the output).
-func TestListUsersScopesPhoneKeywordToAdmins(t *testing.T) {
+// The keyword predicate admits phone_number only for the roles that may see the
+// field (admin and manager): a lecturer must not be able to probe an account by
+// phone, since the response mapping hides the field from them ("whoever sees it
+// may match on it" applies to the match the same way it applies to the output).
+func TestListUsersScopesPhoneKeywordToAdminsAndManagers(t *testing.T) {
 	users := &fakeUsers{}
 	router := newUserRouter(t, users, nil)
 	doRequest(t, router, http.MethodGet, "/admin/users?keyword=138", "", "")
 	if !users.listInput.IncludePhoneColumn {
 		t.Fatalf("admin principal: IncludePhoneColumn = false, want true")
+	}
+
+	manager := &fakeUsers{}
+	router = newUserRouterWithRole(t, manager, nil, "manager")
+	doRequest(t, router, http.MethodGet, "/admin/users?keyword=138", "", "")
+	if !manager.listInput.IncludePhoneColumn {
+		t.Fatalf("manager principal: IncludePhoneColumn = false, want true")
 	}
 
 	lecturer := &fakeUsers{}
@@ -339,14 +346,20 @@ func TestListUsersHidesContactFieldsFromLecturer(t *testing.T) {
 		}
 	}
 
-	// The admin view: both values ride along, and an empty string stays an empty
-	// string — it is the real "not filled in" marker.
-	admin := newUserRouter(t, &fakeUsers{listResult: listResult, getResult: detail, getByIDsResult: []adminuser.UserDetail{*detail}}, nil)
-	for _, path := range paths {
-		body := doRequest(t, admin, http.MethodGet, path, "", "").Body.String()
-		for _, want := range []string{`"phone_number":"13800138000"`, `"qq_number":"123456"`} {
-			if !strings.Contains(body, want) {
-				t.Fatalf("admin response for %s missing %s: %s", path, want, body)
+	// The admin and manager views: both values ride along, and an empty string
+	// stays an empty string — it is the real "not filled in" marker. The manager
+	// is the member-management half of the console; contacting members is its
+	// job, so it sees the stored number on every read surface.
+	for name, router := range map[string]*gin.Engine{
+		"admin":   newUserRouter(t, &fakeUsers{listResult: listResult, getResult: detail, getByIDsResult: []adminuser.UserDetail{*detail}}, nil),
+		"manager": newUserRouterWithRole(t, &fakeUsers{listResult: listResult, getResult: detail, getByIDsResult: []adminuser.UserDetail{*detail}}, nil, "manager"),
+	} {
+		for _, path := range paths {
+			body := doRequest(t, router, http.MethodGet, path, "", "").Body.String()
+			for _, want := range []string{`"phone_number":"13800138000"`, `"qq_number":"123456"`} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("%s response for %s missing %s: %s", name, path, want, body)
+				}
 			}
 		}
 	}

@@ -173,6 +173,7 @@ func setupAdminE2E(t *testing.T) *adminE2EHarness {
 		RequireWriteScope: allow,
 		RequireAdmin:      allow,
 		RequireReader:     allow,
+		RequireUserWriter: allow,
 	})
 
 	return &adminE2EHarness{router: router, database: database, user: user, admin: admin}

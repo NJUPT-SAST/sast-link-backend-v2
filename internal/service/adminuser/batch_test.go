@@ -277,6 +277,7 @@ func TestUpdateUserRolesMapsProtectedAndStateKinds(t *testing.T) {
 			IDs:         []int64{testAdminID},
 			Role:        "member",
 			AdminUserID: testAdminID,
+			AdminRole:   string(model.UserRoleAdmin),
 		})
 		if err != nil {
 			t.Fatalf("UpdateUserRoles: %v", err)
@@ -294,6 +295,7 @@ func TestUpdateUserRolesMapsProtectedAndStateKinds(t *testing.T) {
 			IDs:         []int64{testTargetID},
 			Role:        "member",
 			AdminUserID: testAdminID,
+			AdminRole:   string(model.UserRoleAdmin),
 		})
 		if err != nil {
 			t.Fatalf("UpdateUserRoles: %v", err)
@@ -312,6 +314,7 @@ func TestUpdateUserRolesMapsProtectedAndStateKinds(t *testing.T) {
 			IDs:         []int64{testTargetID},
 			Role:        "member",
 			AdminUserID: testAdminID,
+			AdminRole:   string(model.UserRoleAdmin),
 		})
 		if err != nil {
 			t.Fatalf("UpdateUserRoles: %v", err)

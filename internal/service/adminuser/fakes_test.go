@@ -287,8 +287,11 @@ func updateInput(mutate func(*UpdateUserInput)) UpdateUserInput {
 	input := UpdateUserInput{
 		UserID:      testTargetID,
 		AdminUserID: testAdminID,
-		ClientIP:    testClientIP,
-		UserAgent:   testUserAgent,
+		// Existing cases exercise the administrator's view; the manager boundary
+		// has its own cases that override this through the mutate hook.
+		AdminRole: string(model.UserRoleAdmin),
+		ClientIP:  testClientIP,
+		UserAgent: testUserAgent,
 	}
 	if mutate != nil {
 		mutate(&input)
@@ -300,6 +303,7 @@ func targetInput() TargetUserInput {
 	return TargetUserInput{
 		UserID:      testTargetID,
 		AdminUserID: testAdminID,
+		AdminRole:   string(model.UserRoleAdmin),
 		ClientIP:    testClientIP,
 		UserAgent:   testUserAgent,
 	}

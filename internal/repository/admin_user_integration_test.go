@@ -1010,6 +1010,18 @@ func TestUserRepositoryStatsIncompleteBuckets(t *testing.T) {
 		t.Fatalf("seed unfinished lecturer: %v", err)
 	}
 
+	// unfinished manager - a student-role account, so unlike lecturer/admin it
+	// counts in incomplete_by_role: the department head is a follow-up target for
+	// profile completion exactly like the members it manages.
+	unfinishedManager := testUser("inc-008@njupt.edu.cn")
+	unfinishedManager.Name = "未补全部长"
+	unfinishedManager.Role = model.UserRoleManager
+	unfinishedManager.State = model.UserStateNJUPTer
+	if err := users.CreateWithProfile(context.Background(), unfinishedManager,
+		&model.Profile{}); err != nil {
+		t.Fatalf("seed unfinished manager: %v", err)
+	}
+
 	// unfinished admin - excluded from incomplete_by_role
 	unfinishedAdmin := testUser("inc-004@njupt.edu.cn")
 	unfinishedAdmin.Name = "未补全管理员"
@@ -1076,13 +1088,19 @@ func TestUserRepositoryStatsIncompleteBuckets(t *testing.T) {
 	if got := stats.IncompleteByRole[model.UserRoleAdmin]; got != 0 {
 		t.Errorf("IncompleteByRole[admin] = %d, want 0", got)
 	}
+	// The manager is not excluded by role (nor by state — it derives njupter), so
+	// both follow-up buckets count it.
+	if got := stats.IncompleteByRole[model.UserRoleManager]; got != 1 {
+		t.Errorf("IncompleteByRole[manager] = %d, want 1", got)
+	}
 
-	// incomplete_by_state: njupter only. The unfinished freshman counts; the
-	// on_sast member / lecturer / admin, the retired member and the deleted
-	// account do not, so this stays the mirror image of incomplete_by_role's
-	// "staff are not follow-up targets" rule rather than a second, wider net.
-	if got := stats.IncompleteByState[model.UserStateNJUPTer]; got != 1 {
-		t.Errorf("IncompleteByState[njupter] = %d, want 1", got)
+	// incomplete_by_state: njupter only. The unfinished freshman and the
+	// unfinished manager count (both derive njupter); the on_sast member /
+	// lecturer / admin, the retired member and the deleted account do not, so
+	// this stays the mirror image of incomplete_by_role's "staff are not
+	// follow-up targets" rule rather than a second, wider net.
+	if got := stats.IncompleteByState[model.UserStateNJUPTer]; got != 2 {
+		t.Errorf("IncompleteByState[njupter] = %d, want 2", got)
 	}
 	if got := stats.IncompleteByState[model.UserStateOnSAST]; got != 0 {
 		t.Errorf("IncompleteByState[on_sast] = %d, want 0", got)

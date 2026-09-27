@@ -141,6 +141,24 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		return nil, selfErr
 	}
 
+	// The manager boundary: a manager may run every member-management write —
+	// promote to manager or lecturer included, self-replication is the point of
+	// the role — but never touch an admin's account and never grant the admin
+	// role. Checked against the freshly loaded row, and the batch endpoint routes
+	// through here too, so it cannot bypass the boundary either.
+	if !callerIsAdmin(input.AdminRole) {
+		if current.Role == model.UserRoleAdmin {
+			adminTargetErr := newError(ErrProtected, "无权操作管理员账号", nil)
+			s.auditUpdate(ctx, input, false, errorCode(adminTargetErr), nil)
+			return nil, adminTargetErr
+		}
+		if validated.role != nil && *validated.role == model.UserRoleAdmin {
+			grantErr := newError(ErrProtected, "不可授予 admin 角色", nil)
+			s.auditUpdate(ctx, input, false, errorCode(grantErr), nil)
+			return nil, grantErr
+		}
+	}
+
 	entries, sessionsRevoked, err := s.Users.UpdateAdminUser(ctx, input.UserID, repository.AdminUserUpdate{
 		Name:          validated.name,
 		PhoneNumber:   validated.phoneNumber,
@@ -237,6 +255,7 @@ func (s Service) UpdateUserRoles(ctx context.Context, input UpdateUserRolesInput
 			Role:          &requestedRole,
 			Batch:         true,
 			AdminUserID:   input.AdminUserID,
+			AdminRole:     input.AdminRole,
 			ActorClientID: input.ActorClientID,
 			ClientIP:      input.ClientIP,
 			UserAgent:     input.UserAgent,
@@ -289,6 +308,11 @@ func (s Service) DeleteUser(ctx context.Context, input TargetUserInput) error {
 		s.auditTarget(ctx, input, actionDeleteUser, false, errorCode(err))
 		return err
 	}
+	// A manager cannot close an administrator's account; the row is read before
+	// the write so the refusal is judged against the live role.
+	if targetErr := s.refuseManagerOnAdminTarget(ctx, input.AdminRole, input.UserID, actionDeleteUser, input); targetErr != nil {
+		return targetErr
+	}
 	entries, err := s.Users.SoftDeleteAndRevokeSessions(ctx, input.UserID, s.now())
 	if err != nil {
 		mapped := s.mapDeleteError(ctx, err)
@@ -316,6 +340,12 @@ func (s Service) RestoreUser(ctx context.Context, input TargetUserInput) error {
 	}
 	if input.UserID <= 0 {
 		return newError(ErrNotFound, "用户不存在", nil)
+	}
+	// A manager cannot reopen an administrator's account either: restoring is a
+	// write on the account, and the role survives the close (DELETE flips state,
+	// not role).
+	if targetErr := s.refuseManagerOnAdminTarget(ctx, input.AdminRole, input.UserID, actionRestoreUser, input); targetErr != nil {
+		return targetErr
 	}
 	err := s.Users.RestoreUser(ctx, input.UserID, s.now())
 	if err != nil {
@@ -348,6 +378,43 @@ func (s Service) loadTarget(ctx context.Context, userID int64) (*model.User, err
 		return nil, newError(ErrNotFound, "用户不存在", nil)
 	}
 	return user, nil
+}
+
+// callerIsAdmin reports whether the acting principal holds the admin role. Only
+// the literal unlocks the admin-only writes; anything else — empty, a manager,
+// a value a future role adds — stays on the restricted side of the boundary.
+func callerIsAdmin(role string) bool {
+	return role == string(model.UserRoleAdmin)
+}
+
+// refuseManagerOnAdminTarget rejects a non-admin caller's action against an
+// administrator's account. Used by the delete and restore paths, whose write
+// goes straight to the repository; the role is read from the live row (which a
+// close does not change) so a deleted admin cannot be reopened behind the
+// boundary either.
+func (s Service) refuseManagerOnAdminTarget(
+	ctx context.Context,
+	callerRole string,
+	userID int64,
+	action string,
+	input TargetUserInput,
+) error {
+	if callerIsAdmin(callerRole) {
+		return nil
+	}
+	target, err := s.loadTarget(ctx, userID)
+	if err != nil {
+		// Missing or unreadable targets keep their existing mapping below: the
+		// repository reports not-found, and an unreadable row is an internal error.
+		// Refusing here with a different code would only mask it.
+		return nil
+	}
+	if target.Role != model.UserRoleAdmin {
+		return nil
+	}
+	refused := newError(ErrProtected, "无权操作管理员账号", nil)
+	s.auditTarget(ctx, input, action, false, errorCode(refused))
+	return refused
 }
 
 // mapWriteError translates a repository failure from the update path.

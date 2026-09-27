@@ -173,6 +173,12 @@ type UpdateUserInput struct {
 	// AdminUserID is the authenticated administrator, for the audit trail and for
 	// the self-demotion guard.
 	AdminUserID int64
+	// AdminRole is the caller's role as the role gate read it from the database
+	// row. Only the literal "admin" unlocks the admin-only writes inside these
+	// use cases (touching an admin's account, granting the admin role); empty or
+	// any other value falls to the restricted branch, so a wiring slip can only
+	// narrow a manager's reach, never widen it.
+	AdminRole string
 	// ActorClientID is the azp of the token that authorized this call. Empty means a
 	// console session, which the audit records as ConsoleClientID.
 	ActorClientID string
@@ -194,6 +200,9 @@ type UpdateUserResult struct {
 type TargetUserInput struct {
 	UserID      int64
 	AdminUserID int64
+	// AdminRole is the caller's role; only "admin" may close or reopen an
+	// administrator's account. See UpdateUserInput.AdminRole.
+	AdminRole string
 	// ActorClientID is the azp of the token that authorized this call. Empty means a
 	// console session, which the audit records as ConsoleClientID.
 	ActorClientID string
@@ -218,6 +227,9 @@ type UpdateUserRolesInput struct {
 	// the self-demotion guard (an administrator cannot change their own role
 	// through the batch either).
 	AdminUserID int64
+	// AdminRole is the caller's role; only "admin" may target an administrator's
+	// account or grant the admin role. See UpdateUserInput.AdminRole.
+	AdminRole string
 	// ActorClientID is the azp of the token that authorized this call. Empty means a
 	// console session, which the audit records as ConsoleClientID.
 	ActorClientID string
@@ -354,6 +366,9 @@ type CreateUserInput struct {
 	PersonalEmail *string
 	// AdminUserID is the authenticated administrator, for the audit trail.
 	AdminUserID int64
+	// AdminRole is the caller's role; only "admin" may provision an account
+	// with the admin role. See UpdateUserInput.AdminRole.
+	AdminRole string
 	// ActorClientID is the azp of the token that authorized the call. Empty means a
 	// console session, which the audit records as ConsoleClientID.
 	ActorClientID string

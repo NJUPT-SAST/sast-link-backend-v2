@@ -119,6 +119,7 @@ func run() error {
 		RequireWriteScope: runtime.Auth.RequireDelegatedScope(adminhandler.WriteScopes...),
 		RequireAdmin:      runtime.Auth.RequireRole(adminhandler.AdminRole),
 		RequireReader:     runtime.Auth.RequireRole(adminhandler.ReaderRoles...),
+		RequireUserWriter: runtime.Auth.RequireRole(adminhandler.UserWriterRoles...),
 	})
 	// The account-request routes mount their own /admin group behind the same gates.
 	// POST /alumni-requests stays outside it: applicants have no account, so the

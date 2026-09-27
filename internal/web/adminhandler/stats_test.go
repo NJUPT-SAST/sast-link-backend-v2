@@ -42,6 +42,7 @@ func newStatsRouter(t *testing.T, users UserService, clients ClientService, audi
 		RequireWriteScope: allow,
 		RequireAdmin:      allow,
 		RequireReader:     allow,
+		RequireUserWriter: allow,
 	})
 	return r
 }
