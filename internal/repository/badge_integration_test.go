@@ -198,10 +198,7 @@ func TestBadgeRepositoryFindBadgeTargetWithoutProfileRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindBadgeTarget without profile row error = %v, want zero-version target", err)
 	}
-	if target.Version.IsZero() {
-		t.Logf("version is zero time as expected")
-	} else if !target.Version.IsZero() {
-		// Either zero or a value is acceptable as long as no error; log what we got.
-		t.Logf("version = %v", target.Version)
+	if !target.Version.IsZero() {
+		t.Fatalf("missing profile row yielded version %v, want the zero time", target.Version)
 	}
 }
