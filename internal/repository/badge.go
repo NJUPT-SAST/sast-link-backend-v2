@@ -95,23 +95,35 @@ func (r *BadgeRepository) Disable(ctx context.Context, userID int64, now time.Ti
 	return result.RowsAffected > 0, nil
 }
 
+// BadgeTarget is one resolved public badge: the row plus the owner's
+// profile.updated_at, which versions the render cache — any profile change
+// (avatar upload, nickname or signature edit) produces a new cache identity
+// and the next render picks it up immediately instead of after the TTL.
+type BadgeTarget struct {
+	model.Badge
+	Version time.Time `gorm:"column:version"`
+}
+
 // FindBadgeTarget resolves a public badge key to its owner's row, refusing
 // soft-deleted accounts and paused badges the way FindPublicCardByUserID
 // hides deleted users: a closed badge must render the neutral card, and a
 // user the owner asked to have removed must not keep a live public badge.
 // ErrNotFound when the key is unknown, paused, the owner is deleted, or the
 // id is non-positive.
-func (r *BadgeRepository) FindBadgeTarget(ctx context.Context, badgeKey string) (*model.Badge, error) {
+func (r *BadgeRepository) FindBadgeTarget(ctx context.Context, badgeKey string) (*BadgeTarget, error) {
 	if badgeKey == "" {
 		return nil, ErrInvalidArgument
 	}
-	var badge model.Badge
+	var target BadgeTarget
 	err := r.database.WithContext(ctx).
+		Table("badge").
+		Select("badge.*", "profile.updated_at AS version").
 		Joins(`JOIN "user" ON "user".id = badge.user_id`).
+		Joins(`LEFT JOIN profile ON profile.user_id = badge.user_id`).
 		Where("badge.badge_key = ? AND badge.disabled_at IS NULL AND \"user\".state <> ?", badgeKey, model.UserStateDeleted).
-		Take(&badge).Error
+		Take(&target).Error
 	if err == nil {
-		return &badge, nil
+		return &target, nil
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound

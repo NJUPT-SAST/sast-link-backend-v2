@@ -273,7 +273,7 @@ func BenchmarkAvatarColdBurst(b *testing.B) {
 						if coalesce {
 							_, renderErr = service.Render(context.Background(), RenderInput{Key: "burst-key"})
 						} else {
-							_, renderErr = service.renderCold(context.Background(), 7, ThemeAuto, renderCacheKey("burst-key", ThemeAuto))
+							_, renderErr = service.renderCold(context.Background(), 7, ThemeAuto, renderCacheKey("v1", "burst-key", ThemeAuto))
 						}
 						if renderErr != nil {
 							b.Error(renderErr)
