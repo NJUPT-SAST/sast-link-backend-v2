@@ -48,11 +48,9 @@ type AdminUserFilter struct {
 	// joins the match only when IncludePhoneColumn is set, below.
 	Keyword string
 	// IncludePhoneColumn admits phone_number into the keyword predicate.
-	// phone_number is the one field the admin-surface tightening hides from
-	// non-admin roles, and the search predicate must not leak it through
-	// existence probing: the caller (the handler) sets this only for an admin
-	// principal, mirroring the "admin or hidden" rule the response mapping
-	// applies.
+	// The handler enables it only for admin and manager principals, matching
+	// response visibility so lecturers cannot infer a hidden phone number by
+	// searching for it.
 	IncludePhoneColumn bool
 	// NeedsCompletion filters on V010's generated flag: true lists only accounts
 	// still carrying migration debris, false only the healthy ones, nil applies
@@ -678,16 +676,17 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 // wants the account pinned again re-PUTs state after the restore. Revoked
 // tokens are deliberately not restored — the owner signs in again.
 //
-// The row read and the UPDATE both target state = is_deleted, and no other
-// writer touches a closed row, so a plain read plus a guarded UPDATE is enough;
-// the RowsAffected guard still distinguishes "missing" from "already live".
+// Lock the target before checking its role and deriving its state. Otherwise an
+// administrator could restore, promote and close it between the read and UPDATE,
+// allowing a manager's stale role check to reopen an administrator's account.
 func (r *UserRepository) RestoreUser(ctx context.Context, userID int64, callerRole model.UserRole, now time.Time) error {
 	if userID <= 0 {
 		return fmt.Errorf("%w: user id must be positive", ErrInvalidArgument)
 	}
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
 		var stored model.User
-		if err := transaction.Select("id", "role", "student_id").
+		if err := transaction.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "role", "student_id").
 			Where("id = ? AND state = ?", userID, model.UserStateDeleted).
 			First(&stored).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -696,9 +695,7 @@ func (r *UserRepository) RestoreUser(ctx context.Context, userID int64, callerRo
 			}
 			return fmt.Errorf("load user for restore: %w", err)
 		}
-		// Deleted accounts cannot change role (every role-writing path requires a
-		// live row), so the read above is stable; the boundary check is kept here
-		// anyway so all three write transactions judge it the same way.
+		// The target remains locked through the role check and restore commit.
 		if callerRole != model.UserRoleAdmin && stored.Role == model.UserRoleAdmin {
 			return ErrAdminTarget
 		}

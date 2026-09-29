@@ -285,8 +285,8 @@ Body: { "password": "current_password" }
 
 | 表 | 字段 | 可修改途径 |
 | ---- | ------ | ----------- |
-| `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin） |
-| `user` | login_email, role, state, email_type | 仅 `PUT /admin/users/:id`（admin） |
+| `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号） |
+| `user` | login_email, role, state, email_type | `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号或授予 admin） |
 | `profile` | nickname, department, intro, email, blog_url, github_url | `PUT /user/profile`（本人，department 仅 software/media 有值可设） |
 | `profile` | avatar | `PUT /user/avatar`（multipart/form-data，≤1MB 且任一维 ≤4096，jpg/png/webp；前端压缩后上传） |
 
@@ -452,9 +452,9 @@ Payload: {
 | `/admin/oauth-clients` | POST | admin | admin:write | 注册新客户端（第三方返回 client_secret，第一方不返回） |
 | `/admin/oauth-clients/:id` | PUT | admin | admin:write | 更新客户端（名称/回调地址/授权模式/scope/启用状态；`client_id`/`client_secret`/`id`/`client_type` 不可改）。收窄 scope 或新授予能力 scope 会撤销该客户端存量 token，扩大 scope 不会（见 §4.12） |
 | `/admin/audit-logs` | GET | admin | admin:read | 分页查询，支持按 user_id / action / resource / success / actor_client_id / 时间范围 筛选；响应含 best-effort 的 `user_name` 显示名 |
-| `/admin/stats` | GET | admin / manager | admin:read | 概览统计：账户聚合（total / by_role / by_state / by_department / no_department / incomplete_by_role / incomplete_by_state）+ 客户端数 + 最近审计 |
+| `/admin/stats` | GET | admin / manager | admin:read | 概览统计：账户聚合（total / by_role / by_state / by_department / no_department / incomplete_by_role / incomplete_by_state）；manager 仅用户聚合，客户端数与最近审计仅 admin 可见 |
 
-**管理面**：`/admin/*` 是管理本服务数据的端点组，只有携带 admin scope 的 token 且主体为 admin 角色时可达——admin scope 仅 `third_party`（机密客户端）可持有（§4.10）。角色门与 scope 门互不蕴含，缺任一均 `403`：角色门回答「这个用户是否被允许」（角色读数据库行，降权下一请求生效），scope 门回答「这个凭证是否被授权」——内置控制台 token 豁免 scope 门，其上限即角色门。「管理 scope」列中 `admin:read` 处 `admin:write` 亦可通行（写蕴含读）。
+**管理面**：`/admin/*` 是管理本服务数据的端点组，按端点分别要求 admin scope 与 admin / manager / lecturer 角色门；内置控制台 token 豁免 scope 门但仍检查角色——admin scope 仅 `third_party`（机密客户端）可持有（§4.10）。角色门与 scope 门互不蕴含，缺任一均 `403`：角色门回答「这个用户是否被允许」（角色读数据库行，降权下一请求生效），scope 门回答「这个凭证是否被授权」——内置控制台 token 豁免 scope 门，其上限即角色门。「管理 scope」列中 `admin:read` 处 `admin:write` 亦可通行（写蕴含读）。
 
 能力身份**只由注册表的 `scopes` 决定**：任何 `third_party` 客户端的注册持有 admin scope，其 token 即可到达 `/admin/*`。代码中不存在被硬编码的客户端名单——`scope.ContainsAll` 把可请求 scope 钉死在注册值内，而 `first_party` 无论注册值如何都拿不到 admin scope（§4.10），所以「token 携带 admin scope」本身就证明了「控制台为该注册授予过它」。授予是一次控制台操作（`POST`/`PUT /admin/oauth-clients`），不需要改代码或写迁移。
 
@@ -473,7 +473,7 @@ Payload: {
 - `RequireUserAuth`（`Authenticator.AuthenticateUserScoped`）无条件放行内置控制台 token，放行**任何携带 user scope 的 token**。不查客户端类型——`/user/*` 每个端点都只操作 token 主体本人的记录，应用持有 user scope 不会是查他人凭据，因此无需按客户端类型设限。「token 携带 user scope」即证明「该注册被授予过自助能力」。`user:read` 门禁读端点（`GET /user/profile`、`GET /user/identities`、`GET /user/devices`），`user:write` 门禁写端点（`PUT /user/profile`、`PUT /user/avatar`、身份绑定/解绑、`POST /auth/change-password`、`POST /auth/logout`、`DELETE /user/devices/:id`）；写蕴含读（`sessionhandler.ReadScopes` 接受两者），内置控制台 token 豁免两门。
 - 授予 user scope 是控制台动作（`POST`/`PUT /admin/oauth-clients`），`checkCapabilityScopeGrant` 把守：发起凭证必须是控制台；不得与改写 `redirect_uris` 同请求；**允许 `refresh_token`**（自助访问是会话，需要长期保活，与 admin scope 一致）。均基于合并后状态。user scope 不设客户端类型约束。
 - 收窄能力 scope 或新授予能力 scope 在同一事务内撤销该客户端存量 token，扩大不撤销。
-- **权限边界**：user scope 的 token 的 `sub` 是用户本人，所有 `/user/*` 端点都只操作该本人记录，不存在查他人视图；`sub` 的角色不参与 `/user/*` 的判定（自助是本人的事，与角色无关）。`/user/*` 与 `/admin/*` 的门禁分离：同一客户端可同时持有两组 scope，但 `user:*` 只开 `/user/*`、`admin:*` 只开 `/admin/*`，且 `/admin/*` 另有角色门（普通用户即使持 admin scope 也进不去）。管理员/讲师对他人数据的操作走 §4.12 的 admin 面（讲师可读列表，只有管理员可改）。
+- **权限边界**：user scope 的 token 的 `sub` 是用户本人，所有 `/user/*` 端点都只操作该本人记录，不存在查他人视图；`sub` 的角色不参与 `/user/*` 的判定（自助是本人的事，与角色无关）。`/user/*` 与 `/admin/*` 的门禁分离：同一客户端可同时持有两组 scope，但 `user:*` 只开 `/user/*`、`admin:*` 只开 `/admin/*`，且 `/admin/*` 另有角色门（普通用户即使持 admin scope 也进不去）。admin / manager / lecturer 对他人数据的操作走 §4.12 的 admin 面；lecturer 只读，manager 可管理非 admin 账号。
 
 `client_type` 不可通过更新接口修改：它同时决定客户端的凭据模型（是否持有 client_secret）与 admin scope 的可授予性（仅 `third_party` 可持有）。就地翻转类型而不同步 secret 会产出凭据模型与类型不符的客户端；需要换类型时重新注册一个客户端。
 
