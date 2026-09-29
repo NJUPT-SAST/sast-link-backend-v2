@@ -37,6 +37,65 @@ func TestUpdateUserRefusesSelfRoleChange(t *testing.T) {
 	assertAudited(t, h, actionUpdateUser, false, errcode.CodeForbidden)
 }
 
+// A department edit reaches the repository with the validated value: the
+// administrative path exists so the existing member base can be migrated
+// without one self-edit at a time, so the field must survive validation intact.
+func TestUpdateUserPassesDepartmentThrough(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+
+	_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.Department = stringPtr("electronics")
+	}))
+	if err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	if h.users.updateInput.Department == nil || *h.users.updateInput.Department != model.DepartmentElectronics {
+		t.Fatalf("department = %v, want electronics", h.users.updateInput.Department)
+	}
+	entry := assertAudited(t, h, actionUpdateUser, true, 0)
+	if !strings.Contains(string(entry.Detail), "department") {
+		t.Fatalf("audit detail = %s, want it to name department", string(entry.Detail))
+	}
+	if strings.Contains(string(entry.Detail), "electronics") {
+		t.Fatalf("audit detail = %s, want it to omit the submitted value", string(entry.Detail))
+	}
+}
+
+// An unknown department is a field error, not a database rejection: PostgreSQL
+// would refuse an unknown enum member as a 500.
+func TestUpdateUserRefusesInvalidDepartment(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+
+	_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.Department = stringPtr("hardware")
+	}))
+
+	assertKind(t, err, KindInvalidInput)
+	if h.users.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want the write refused before reaching the repository", h.users.updateCalls)
+	}
+}
+
+// The empty string clears the department (NULL), matching PUT /user/profile;
+// it must reach the repository as a present-but-empty value rather than being
+// dropped as "no change".
+func TestUpdateUserClearsDepartmentWithEmptyString(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+
+	_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.Department = stringPtr(" ")
+	}))
+	if err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	if h.users.updateInput.Department == nil || *h.users.updateInput.Department != "" {
+		t.Fatalf("department = %v, want a present empty value", h.users.updateInput.Department)
+	}
+}
+
 // Editing your own non-role fields is allowed: the guard is about surrendering
 // access, not about self-service.
 func TestUpdateUserAllowsSelfNonRoleEdit(t *testing.T) {

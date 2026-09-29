@@ -24,6 +24,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/alumnihandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/badgehandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/departmenthandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/sessionhandler"
@@ -97,6 +98,10 @@ func run() error {
 		"db":    func() error { return pingDB(database) },
 		"redis": func() error { return pingRedis(rdb) },
 	}).Register(router)
+	// The department catalogue is as public as /health: an integrator needs the
+	// key→label list before any sign-in, and the seven names are organizational
+	// facts rather than personal data.
+	departmenthandler.RegisterRoutes(router)
 	// The /user group authenticates through RequireUserAuth so a registered client
 	// can act on a user's own behalf within the scopes its token holds.
 	sessionhandler.RegisterRoutes(router, runtime.Handler, sessionhandler.Gates{

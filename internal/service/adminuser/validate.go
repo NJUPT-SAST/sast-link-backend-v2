@@ -53,6 +53,7 @@ func normalizeBatchIDs(ids []int64, limit int, tooManyMessage string) ([]int64, 
 var userFieldOrder = []string{
 	"name", "phone_number", "qq_number", "student_id", "college", "major",
 	"login_email", "role", "state", "state_auto", "email_type", "personal_email",
+	"department",
 }
 
 // validatedUpdate is the outcome of checking an UpdateUserInput.
@@ -69,6 +70,7 @@ type validatedUpdate struct {
 	stateAuto     bool
 	emailType     *model.EmailType
 	personalEmail *string
+	department    *model.Department
 	changed       []string
 }
 
@@ -131,6 +133,18 @@ func validateUpdate(input UpdateUserInput) (validatedUpdate, error) {
 		}
 		result.college = &college
 		present["college"] = true
+	}
+	// department lives on the profile row, but its edit semantics match the
+	// self-service path exactly: a value sets it, an empty string clears it to
+	// NULL, and omission leaves it alone. TrimSpace mirrors PUT /user/profile so
+	// the two paths accept byte-identical bodies.
+	if input.Department != nil {
+		department := model.Department(strings.TrimSpace(*input.Department))
+		if department != "" && !department.Valid() {
+			return validatedUpdate{}, newError(ErrInvalidInput, "department 取值非法", nil)
+		}
+		result.department = &department
+		present["department"] = true
 	}
 	if input.Role != nil {
 		role := model.UserRole(strings.TrimSpace(*input.Role))

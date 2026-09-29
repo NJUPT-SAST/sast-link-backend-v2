@@ -475,6 +475,45 @@ func TestUpdateUserPassesPrincipalAndFields(t *testing.T) {
 	}
 }
 
+// department arrives as a top-level field (not under profile, which the strict
+// decoder refuses) and rides through to the service with set/clear/omit
+// semantics: a value sets, an empty string clears, omission leaves alone.
+func TestUpdateUserPassesDepartmentThrough(t *testing.T) {
+	users := &fakeUsers{}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodPut, "/admin/users/5", "application/json",
+		`{"department":"electronics"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if input := users.updateInput; input.Department == nil || *input.Department != "electronics" {
+		t.Fatalf("department = %v, want electronics", input.Department)
+	}
+
+	users2 := &fakeUsers{}
+	router2 := newUserRouter(t, users2, nil)
+	recorder2 := doRequest(t, router2, http.MethodPut, "/admin/users/5", "application/json",
+		`{"name":"张三","department":""}`)
+	if recorder2.Code != http.StatusOK {
+		t.Fatalf("clear status = %d, want 200: %s", recorder2.Code, recorder2.Body.String())
+	}
+	if input := users2.updateInput; input.Department == nil || *input.Department != "" {
+		t.Fatalf("department = %v, want a present empty value", input.Department)
+	}
+
+	users3 := &fakeUsers{}
+	router3 := newUserRouter(t, users3, nil)
+	recorder3 := doRequest(t, router3, http.MethodPut, "/admin/users/5", "application/json",
+		`{"name":"张三"}`)
+	if recorder3.Code != http.StatusOK {
+		t.Fatalf("omit status = %d, want 200: %s", recorder3.Code, recorder3.Body.String())
+	}
+	if input := users3.updateInput; input.Department != nil {
+		t.Fatalf("department = %v, want nil when omitted", input.Department)
+	}
+}
+
 // Cutting every session is a larger consequence than "updated" conveys, so the
 // message says so.
 func TestUpdateUserReportsSessionRevocation(t *testing.T) {

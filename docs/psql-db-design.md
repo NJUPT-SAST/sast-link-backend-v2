@@ -12,10 +12,16 @@ CREATE TYPE user_role_enum AS ENUM (
     'admin'       -- 管理员
 );
 
--- 部门
+-- 部门（V021 扩至七部门，见迁移与 issue #99；展示顺序由 model.Departments 决定，
+-- 枚举成员位置无排序语义）
 CREATE TYPE department_enum AS ENUM (
-    'software',   -- 软件部
-    'media'       -- 媒体部
+    'software',     -- 软件研发部
+    'media',        -- 多媒体部
+    'electronics',  -- 电子部
+    'office',       -- 办公室
+    'liaison',      -- 外联部
+    'publicity',    -- 科宣部
+    'competition'   -- 赛事部
 );
 
 -- 第三方登录方式
@@ -259,7 +265,7 @@ CREATE TABLE profile (
 |id|主键|
 |user_id|一对一关联 user 表|
 |nickname|昵称|
-|department|enum {'software','media'}（可用于权限隔离）|
+|department|department_enum 全量七值（software/media/electronics/office/liaison/publicity/competition；可用于权限隔离，公开目录见 GET /departments）|
 |intro|自我介绍|
 |email|对外展示邮箱|
 |avatar|头像url|

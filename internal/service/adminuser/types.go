@@ -173,7 +173,13 @@ type UpdateUserInput struct {
 	// alumnus whose school mailbox died: one bound address lets the reset flow
 	// reach them again.
 	PersonalEmail *string
-	Batch         bool
+	// Department, when set, writes the profile row's department column with the
+	// same semantics as PUT /user/profile: a value sets it, an empty string clears
+	// it to NULL, and omission leaves it alone. The administrative write path for
+	// an association whose members number in the hundreds — telling each one to
+	// self-edit was never going to migrate the existing accounts (issue #99).
+	Department *string
+	Batch      bool
 	// AdminUserID is the authenticated administrator, for the audit trail and for
 	// the self-demotion guard.
 	AdminUserID int64

@@ -165,8 +165,11 @@ func (h Handler) GetUser(c *gin.Context) {
 // field is left alone rather than read as "clear it". There is no password,
 // token_version or profile field: a credential rewrite is not an edit, the
 // version counter is the service's to bump, and display fields belong to the
-// user's own PUT /user/profile. The strict decoder turns an attempt to send one
-// into a 400.
+// user's own PUT /user/profile — department excepted, which rides here as a
+// top-level field with the same set/clear/omit semantics the self-service path
+// gives it, because the department migration for the existing member base
+// cannot be done one self-edit at a time. The strict decoder turns an attempt
+// to send any other profile field into a 400.
 type updateUserRequest struct {
 	Name          *string `json:"name"`
 	PhoneNumber   *string `json:"phone_number"`
@@ -180,6 +183,7 @@ type updateUserRequest struct {
 	StateAuto     *bool   `json:"state_auto"`
 	EmailType     *string `json:"email_type"`
 	PersonalEmail *string `json:"personal_email"`
+	Department    *string `json:"department"`
 }
 
 // UpdateUser applies a partial administrative edit.
@@ -213,6 +217,7 @@ func (h Handler) UpdateUser(c *gin.Context) {
 		StateAuto:     req.StateAuto,
 		EmailType:     req.EmailType,
 		PersonalEmail: req.PersonalEmail,
+		Department:    req.Department,
 		AdminUserID:   principal.UserID,
 		AdminRole:     principal.Role,
 		ActorClientID: principal.ClientID,

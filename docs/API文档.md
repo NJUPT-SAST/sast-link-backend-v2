@@ -810,7 +810,7 @@ PUT /user/profile
 - 未传的键与传空字符串语义不同：前者保持不变，后者对可空字段表示清空
 - 传 `null` 等同于未传该键（保持不变），**不表示清空**；清空请用空字符串
 - `college` 必须是 `college_enum` 完整枚举值（见附录 A），简称如「计算机学院」会被拒绝
-- `department` 仅接受 `software` / `media` 或空字符串
+- `department` 仅接受 `department_enum` 完整枚举值（见 `GET /departments` 与附录 A）或空字符串
 - `blog_url` / `github_url` 必须是 http/https 绝对 URL——这两个字段会渲染为链接，故拒绝 `javascript:`、`data:` 等 scheme
 - 所有文本字段拒绝控制字符（NUL、CR、LF、Tab 及其他 C0/C1），返回 `40000`；字段内部的空格保留，仅首尾被裁剪
 - 字段长度上限按数据库列宽校验（`name`/`nickname`/`intro`/`email` 255，`phone_number`/`qq_number` 20，`student_id`/`major` 50，两个 URL 512）
@@ -955,6 +955,42 @@ DELETE /user/devices/{device_id}
 - Redis 不可用时拒绝执行（fail-closed：无法校验归属时不执行撤销）
 
 **错误码**: `40102`（未认证）、`40301`（账号已注销）、`40400`（设备不存在或不属于当前用户）、`42900`（操作过于频繁）、`50300`（设备服务暂不可用）、`50000`（服务器内部错误）
+
+---
+
+### 3.7 部门目录（公开）
+
+```
+GET /departments
+```
+
+**认证**：无需认证（公开只读）
+
+**Response** `200`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "departments": [
+      { "key": "software", "label": "软件研发部" },
+      { "key": "media", "label": "多媒体部" },
+      { "key": "electronics", "label": "电子部" },
+      { "key": "office", "label": "办公室" },
+      { "key": "liaison", "label": "外联部" },
+      { "key": "publicity", "label": "科宣部" },
+      { "key": "competition", "label": "赛事部" }
+    ]
+  }
+}
+```
+
+**说明**：
+
+- 全量部门清单，`key` 即 `department_enum` 枚举值（写入 `profile.department` 的就是它），`label` 为中文展示名，按控制台展示顺序排列
+- 与后端枚举同源，新增部门时目录同步更新——集成方不应在本地维护 key→展示名映射，那会在下一次扩枚举时漂移
+- 七个部门名称是组织公开事实，无需认证也无个人数据，不限流（纯静态响应）
 
 ---
 
@@ -1647,7 +1683,7 @@ GET /admin/users
 | `page_size` | 每页条数，默认 20，最大 100 |
 | `role` | 筛选角色：freshman / member / manager / lecturer / admin |
 | `state` | 筛选状态：on_sast / retired_sast / njupter / is_deleted |
-| `department` | 筛选部门：software / media |
+| `department` | 筛选部门：software / media / electronics / office / liaison / publicity / competition（附录 A，目录见 `GET /departments`） |
 | `student_id` | 筛选学号 |
 | `keyword` | 搜索关键词（账号 ID/姓名/学号/邮箱/QQ/昵称/博客/仓库链接模糊匹配，大小写不敏感；另匹配姓名拼音首字母，如 `lhq` 命中 `刘华强`（多音字取默认读音，姓氏异读请改用汉字搜）；手机号仅 admin 角色参与匹配；`%`、`_`、`\` 按字面量处理，不作通配符） |
 | `needs_completion` | 筛选资料待补全账号（§3.0）：`true` 只列出待补全的，`false` 只列出已完整的，不传则不筛选 |
@@ -1820,7 +1856,8 @@ PUT /admin/users/:id
   "role": "member",
   "state": "on_sast",
   "email_type": "njupt_email",
-  "personal_email": "zhangsan@qq.com"
+  "personal_email": "zhangsan@qq.com",
+  "department": "electronics"
 }
 ```
 
@@ -1833,8 +1870,10 @@ PUT /admin/users/:id
 - `state` 可在 `njupter` / `on_sast` / `retired_sast` 之间任意修改（供管理员纠错），但不接受 `is_deleted`。**手写的 state 是钉住（pin）**：该账号从此由管理员接管，自动推导与定时清算批次一律跳过它。
 - `state_auto`（布尔，可选）：恢复该账号的自动状态机——按 role + 学号入学年份 + 当前学年重新推导 `state` 并解除钉住，同一事务内完成。与 `state` 互斥，同时提交返回 `400`。用于误钉后的恢复；留级 / 延毕等例外账号不传此字段、保持手写钉住即可。
 - `personal_email` 提供时，在**同一事务**内将地址直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（与建号时的绑定同一语义，是已有账号的救援通道，§1.8/1.9）。不可与 `login_email` 相同（含本次修改后的值），不得已被其他账号占用，且每账号 `other_mail` 绑定总数不超过 2 个；不可对已注销用户绑定。
+- `department` 写入 `profile` 行，语义与 `PUT /user/profile` 的同名字段完全一致：传值即设置，传空字符串清空为 `null`，缺省不修改；取值见附录 A（目录见 `GET /departments`）。与其它字段同一事务提交，不触动 `token_version` 也不撤销会话——部门不是授权输入。这是管理员归置存量账号部门的通道，自助修改之外的另一条路；审计 `detail` 记录字段名 `department`，不记录其值。
+- 其余 `profile` 表展示字段（`nickname`、`intro` 等）不在本接口：它们只应归属用户自己的 `PUT /user/profile`，传入会被严格解码器拒绝（40000）。
 
-**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
+**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同 / `department` 取值非法）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
 
 **Response** `200`:
 
@@ -2286,7 +2325,7 @@ GET /admin/stats
       "total": 1450,
       "by_role": { "freshman": 300, "member": 900, "manager": 40, "lecturer": 250, "admin": 50 },
       "by_state": { "njupter": 400, "on_sast": 900, "retired_sast": 150, "is_deleted": 50 },
-      "by_department": { "software": 400, "media": 300 },
+      "by_department": { "software": 400, "media": 300, "electronics": 150, "office": 50, "liaison": 60, "publicity": 40, "competition": 100 },
       "no_department": 800,
       "incomplete_by_role": { "freshman": 120, "member": 30 },
       "incomplete_by_state": { "njupter": 110 }
@@ -2306,7 +2345,7 @@ GET /admin/stats
 
 - `users` 为账户聚合，枚举见附录 A。本仓软删除是状态位而非 `deleted_at` 列，因此口径为：**`total` / `by_role` / `by_department` / `no_department` 均只统计未注销账户**（`state ≠ is_deleted`），避免「账户总数」被已注销账户虚增；`by_state` 保留全部状态，`is_deleted` 作为独立 bucket 可见注销数。
   - `by_role` / `by_state` 按 `user` 表分组统计（`by_state` 含 `is_deleted`，其余两个维度不含）
-  - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
+  - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计，键为 `department_enum` 全量枚举值（按写入数据动态分桶，非固定七桶）；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
   - `incomplete_by_role` / `incomplete_by_state` 是资料未补全（`profile_needs_completion = true`，见 V010 生成列）账户的分组计数，供控制台概览把迁移残留账户单独归为「未补全」扇区：
     - `incomplete_by_role`：未补全**且**角色 ∉ {`lecturer`, `admin`} 的未注销账户，按角色分组（讲师 / 管理员视为组织内成员，不列为待跟进对象；`manager` 是学生角色账号，**计入**该桶——部长与所辖成员一样是资料补全跟进对象，其状态也推导为 `njupter`）
     - `incomplete_by_state`：未补全**且**状态 = `njupter` 的未注销账户，按状态分组（`on_sast` / `retired_sast` 同理不列入）
@@ -2988,7 +3027,7 @@ GET /badge/:key
 | ---------- | ----- |
 | `user_role` | `freshman` / `member` / `manager` / `lecturer` / `admin` |
 | `state` | `njupter` / `on_sast` / `retired_sast` / `is_deleted` |
-| `department` | `software` / `media` |
+| `department` | `software` / `media` / `electronics` / `office` / `liaison` / `publicity` / `competition` |
 | `email_type` | `njupt_email` / `sast_email` |
 | `login_method` | `github` / `lark` / `other_mail` |
 | `client_type` | `first_party` / `third_party` |

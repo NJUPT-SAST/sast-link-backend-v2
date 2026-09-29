@@ -172,6 +172,7 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		StateAuto:     validated.stateAuto,
 		EmailType:     validated.emailType,
 		PersonalEmail: validated.personalEmail,
+		Department:    validated.department,
 		// A role change invalidates sessions: a demoted account's live refresh tokens
 		// must not keep minting tokens for a session meant to end.
 	}, model.UserRole(input.AdminRole), s.now())
