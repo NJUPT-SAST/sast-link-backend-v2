@@ -100,6 +100,7 @@
 | `40010` | 验证码错误 |
 | `40011` | 验证码已过期 |
 | `40020` | 邮箱域名不允许（仅限 `@njupt.edu.cn` / `@sast.fun`） |
+| `40022` | 邮箱前缀格式错误（`@njupt.edu.cn` 前缀须为学号样式：1 位字母 + 8 位数字，或纯 8 位数字） |
 | `40021` | 人机校验未通过（Turnstile token 缺失、无效、已使用或 action 不符） |
 
 > 参数类错误统一为 `40000`，不再细分「缺少参数」与「格式错误」：请求体解码是一次严格反序列化，缺字段与类型不符走同一条失败路径，拆成两个码只会让客户端依赖一个服务端无法稳定区分的差别。验证码发送超频返回 `42900`（与其他限流一致），不使用独立业务码。
@@ -227,7 +228,7 @@ POST /auth/register/send-code
 }
 ```
 
-**校验**: 邮箱域名必须为 `@njupt.edu.cn` 或 `@sast.fun`
+**校验**: 邮箱域名必须为 `@njupt.edu.cn` 或 `@sast.fun`；`@njupt.edu.cn` 地址的前缀必须是学号样式（1 位字母 + 8 位数字，或纯 8 位数字），否则返回 `40022`。`@sast.fun` 前缀不限。
 
 ---
 
@@ -261,7 +262,7 @@ POST /auth/register/verify-code
 
 - Register-Ticket 存储在 Redis，有效期 5 分钟，一次性使用
 - Ticket 内携带已验证的邮箱，第二步凭 Ticket 完成注册，无需再次传入 `login_email`
-- 校验邮箱域名必须为 `@njupt.edu.cn` 或 `@sast.fun`
+- 校验邮箱域名必须为 `@njupt.edu.cn` 或 `@sast.fun`；`@njupt.edu.cn` 地址的前缀必须是学号样式（1 位字母 + 8 位数字，或纯 8 位数字），否则返回 `40022`
 
 ---
 
@@ -337,7 +338,7 @@ POST /auth/register
 
 未配置第三方 provider（`OAUTH_*_ENABLED` 均为 false）时传入这对字段返回 `40000`；Redis 不可用时返回 `50300` 而非降级为无绑定注册。
 
-**错误码**: 400xx（参数错误、`registration_state` 无效/已过期/与 `oauth_state` 不匹配/只提供其中一个）、40020（邮箱域名不允许）、40103（Register-Ticket 无效或已过期）、40901（邮箱已被注册）、40902（学号已被占用）、40900（其他唯一性冲突）、42201（密码长度不足）、50300（`registration_state` 存储不可用）
+**错误码**: 400xx（参数错误、`registration_state` 无效/已过期/与 `oauth_state` 不匹配/只提供其中一个）、40020（邮箱域名不允许）、40022（邮箱前缀格式错误）、40103（Register-Ticket 无效或已过期）、40901（邮箱已被注册）、40902（学号已被占用）、40900（其他唯一性冲突）、42201（密码长度不足）、50300（`registration_state` 存储不可用）
 
 Register-Ticket 在建号成功后才消费。返回 40901/40902/40900 时 ticket 仍然有效，客户端可修正对应字段用同一 ticket 重试，不必重新发送验证码。`registration_state` 的消费排在这些可拒绝校验**之后**，因此邮箱或学号冲突同样不会消耗它，带 OAuth 双值的请求可以用同一对值重试；只有走到双重校验本身才会消费（无论匹配与否）。
 
@@ -1768,7 +1769,7 @@ POST /admin/users
 | `student_id` | ✓ | 学号（≤50 字，全库唯一） |
 | `phone_number` | ✓ | 手机号（≤20 字） |
 | `qq_number` | ✓ | QQ 号（≤20 字） |
-| `login_email` | ✓ | 主登录邮箱，仅接受注册白名单域名（`@njupt.edu.cn` / `sast.fun`），全库唯一；`email_type` 由服务端按域名派生，无需也不可自行指定 |
+| `login_email` | ✓ | 主登录邮箱，仅接受注册白名单域名（`@njupt.edu.cn` / `sast.fun`），全库唯一；`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字）；`email_type` 由服务端按域名派生，无需也不可自行指定 |
 | `major` | – | 专业（≤50 字），缺省空串 |
 | `college` | – | 学院（college_enum 枚举），缺省「其他」 |
 | `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（§1.8/1.9）。不可与 `login_email` 相同，且不得已被其他账号占用（作为主登录邮箱或已绑身份） |
@@ -1792,7 +1793,7 @@ POST /admin/users
 - 严格新建：同一 `login_email` / `student_id` 重复建号因唯一约束返回 `409`，服务端不静默复用旧账号；存量账号的补充绑定不归本接口管。
 - 本接口只建账号与绑定，不签发 token；初始会话由成员首次登录时建立。
 
-**错误码**: `40000`（必填缺失 / 格式 / 域白名单 / 枚举非法、`personal_email` 与 `login_email` 相同）、`40901`（主邮箱或绑定邮箱已被占用）、`40902`（学号已被占用）、`42200`（`state` 为 `is_deleted`）、`40100`、`40300`。
+**错误码**: `40000`（必填缺失 / 格式 / 域白名单 / 枚举非法、`personal_email` 与 `login_email` 相同）、`40022`（`login_email` 前缀非学号样式）、`40901`（主邮箱或绑定邮箱已被占用）、`40902`（学号已被占用）、`42200`（`state` 为 `is_deleted`）、`40100`、`40300`。
 
 ---
 
@@ -1826,7 +1827,7 @@ PUT /admin/users/:id
 
 - 至少传一个字段，否则返回 `400`。未知字段（含 `password`、`token_version`、`id`、`profile`）一律返回 `400`，不静默忽略。
 - `name` / `phone_number` / `qq_number` / `student_id` 不可传空串（列为 `NOT NULL`）；`major` 可置空。长度按 V001 列宽校验，中文按字符数而非字节数计。
-- `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。
+- `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字），否则返回 `40022`。
 - `role` 实际发生变化时，同一事务内递增 `token_version` 并撤销该用户全部 Token，响应 `message` 变为 `"用户信息更新成功，已撤销该用户的全部 Token"`。仅提交与当前值相同的 `role` 不算变化，不触发撤销。
 - `state` 可在 `njupter` / `on_sast` / `retired_sast` 之间任意修改（供管理员纠错），但不接受 `is_deleted`。**手写的 state 是钉住（pin）**：该账号从此由管理员接管，自动推导与定时清算批次一律跳过它。
 - `state_auto`（布尔，可选）：恢复该账号的自动状态机——按 role + 学号入学年份 + 当前学年重新推导 `state` 并解除钉住，同一事务内完成。与 `state` 互斥，同时提交返回 `400`。用于误钉后的恢复；留级 / 延毕等例外账号不传此字段、保持手写钉住即可。
@@ -2403,6 +2404,7 @@ POST /alumni-requests
 |--------|------|------|
 | `40000` | 400 | 字段缺失/超长/含控制字符、未知字段、Content-Type 非 JSON、`name` 与 `student_id` 相同、`personal_email` 与 `login_email` 相同、`intent` 取值非法 |
 | `40020` | 400 | `login_email` 域名不在白名单 |
+| `40022` | 400 | `login_email` 前缀非学号样式（`@njupt.edu.cn`：1 位字母 + 8 位数字，或纯 8 位数字） |
 | `40021` | 400 | 人机校验未通过——**重新完成验证后可重试** |
 | `40901` | 409 | `login_email` 或 `personal_email` 已被占用（复用登录邮箱已注册码，客户端处理方式相同） |
 | `40902` | 409 | 学号已有账号（响应文案引导切换为「恢复已有账号访问」，即 `intent=recover` 重提交，或联系 support） |

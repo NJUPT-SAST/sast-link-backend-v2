@@ -15,6 +15,13 @@ const (
 	// other limiter; a dedicated 40012 is never emitted for the same reason as the
 	// two codes above.
 	CodeEmailDomainNotAllowed = 40020 // 邮箱域名不允许
+	// CodeNjuptEmailPrefixNotAllowed reports an @njupt.edu.cn address whose local
+	// part is not the student-ID shape (one letter + eight digits, or eight
+	// digits). Distinct from 40020 because the remedy differs: there the domain
+	// is wrong, here the mailbox name is wrong. Every domain that writes a
+	// login_email (register, admin, alumni intake) enforces it, so one code
+	// serves all three surfaces.
+	CodeNjuptEmailPrefixNotAllowed = 40022 // 邮箱前缀格式错误
 	// CodeCaptchaFailed is a human-verification failure on an unauthenticated write
 	// endpoint: a missing or malformed Turnstile token, a token the siteverify API
 	// rejects, or one issued for a different action. It is distinct from
@@ -116,11 +123,12 @@ const (
 //
 //nolint:gosec // Localized error copy, not credentials; G101 flags the map shape.
 var Messages = map[int]string{
-	CodeBadRequest:              "请求参数错误",
-	CodeVerificationCodeWrong:   "验证码错误",
-	CodeVerificationCodeExpired: "验证码已过期",
-	CodeEmailDomainNotAllowed:   "邮箱域名不允许",
-	CodeCaptchaFailed:           "人机校验未通过",
+	CodeBadRequest:                 "请求参数错误",
+	CodeVerificationCodeWrong:      "验证码错误",
+	CodeVerificationCodeExpired:    "验证码已过期",
+	CodeEmailDomainNotAllowed:      "邮箱域名不允许",
+	CodeNjuptEmailPrefixNotAllowed: "邮箱前缀格式错误",
+	CodeCaptchaFailed:              "人机校验未通过",
 
 	CodeUnauthenticated:       "未登录",
 	CodeAccessTokenExpired:    "Access Token 已过期",

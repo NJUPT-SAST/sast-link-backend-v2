@@ -161,3 +161,43 @@ func TestStripSubaddress(t *testing.T) {
 		}
 	}
 }
+
+// The NJUPT mailbox prefix is the student ID: one letter + eight digits, or
+// bare eight digits. Only that domain constrains the prefix — @sast.fun and
+// every non-login domain stay free-form, so the check can chain unconditionally
+// after IsLoginEmailDomain. Inputs are expected lowercased (normalizeIdentifier),
+// so an uppercase letter is refused here rather than case-folded.
+func TestIsNjuptEmailLocalAllowed(t *testing.T) {
+	for _, testCase := range []struct {
+		email string
+		want  bool
+	}{
+		{"b24040525@njupt.edu.cn", true},
+		{"z12345678@njupt.edu.cn", true},
+		{"24040525@njupt.edu.cn", true},
+		// Exactly eight digits: seven or nine both miss the rule.
+		{"2404052@njupt.edu.cn", false},
+		{"240405256@njupt.edu.cn", false},
+		{"b2404052@njupt.edu.cn", false},
+		{"b240405256@njupt.edu.cn", false},
+		{"ab24040525@njupt.edu.cn", false},
+		{"1b2404052@njupt.edu.cn", false},
+		{"b2404052x@njupt.edu.cn", false},
+		// The full local part is judged, so subaddressing breaks the shape.
+		{"b24040525+x@njupt.edu.cn", false},
+		// normalizeIdentifier lowercases before this runs; the rule itself does
+		// not case-fold.
+		{"B24040525@njupt.edu.cn", false},
+		{"@njupt.edu.cn", false},
+		// Any other domain is unconstrained, whatever the local part.
+		{"president@sast.fun", true},
+		{"xyz123@sast.fun", true},
+		{"foo@hotmail.com", true},
+		// A domain that merely contains the NJUPT one is not it.
+		{"abc@snjupt.edu.cn", true},
+	} {
+		if got := IsNjuptEmailLocalAllowed(testCase.email); got != testCase.want {
+			t.Errorf("IsNjuptEmailLocalAllowed(%q) = %v, want %v", testCase.email, got, testCase.want)
+		}
+	}
+}

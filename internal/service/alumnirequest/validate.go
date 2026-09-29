@@ -184,6 +184,9 @@ func validateLoginEmail(raw string) (string, error) {
 	if !validate.IsLoginEmailDomain(email) {
 		return "", newError(ErrEmailDomain, "login_email 必须是学校或社团邮箱", nil)
 	}
+	if !validate.IsNjuptEmailLocalAllowed(email) {
+		return "", newError(ErrEmailPrefix, "邮箱前缀格式错误", nil)
+	}
 	return email, nil
 }
 
