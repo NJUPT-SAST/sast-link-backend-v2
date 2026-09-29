@@ -576,6 +576,42 @@ func TestSubmitRecoveryIntent(t *testing.T) {
 		return input
 	}
 
+	t.Run("a matching legacy mailbox remains recoverable", func(t *testing.T) {
+		t.Parallel()
+		input := recoverInput()
+		input.LoginEmail = "  SOMEONE.ELSE@Njupt.edu.cn  "
+		users := &fakeUsers{}
+		users.seedAccount(input.StudentID, "someone.else@njupt.edu.cn")
+		requests := &fakeRequests{}
+		service := newService(requests, users, &fakeAudit{}, &fakeCaptcha{})
+		if _, err := service.Submit(context.Background(), input); err != nil {
+			t.Fatalf("legacy recovery: %v", err)
+		}
+		if requests.created == nil || requests.created.Intent != model.AlumniRequestIntentRecover ||
+			requests.created.LoginEmail != "someone.else@njupt.edu.cn" {
+			t.Fatalf("ticket = %+v, want normalized legacy recovery", requests.created)
+		}
+	})
+
+	t.Run("a legacy mailbox must still match the target account", func(t *testing.T) {
+		t.Parallel()
+		input := recoverInput()
+		input.LoginEmail = "wrong.legacy@njupt.edu.cn"
+		users := &fakeUsers{}
+		users.seedAccount(input.StudentID, "someone.else@njupt.edu.cn")
+		requests := &fakeRequests{}
+		service := newService(requests, users, &fakeAudit{}, &fakeCaptcha{})
+		_, err := service.Submit(context.Background(), input)
+		var typed *Error
+		if !errors.As(err, &typed) || typed.Code != errcode.CodeBadRequest ||
+			typed.Message != "login_email 与该学号登记的登录邮箱不一致" {
+			t.Fatalf("recovery error = %v, want target mailbox mismatch", err)
+		}
+		if requests.created != nil {
+			t.Fatal("mismatched recovery created a ticket")
+		}
+	})
+
 	t.Run("an unknown intent is refused", func(t *testing.T) {
 		t.Parallel()
 		input := validSubmit()

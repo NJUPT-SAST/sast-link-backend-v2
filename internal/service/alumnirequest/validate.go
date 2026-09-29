@@ -136,6 +136,11 @@ func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 	if err != nil {
 		return validatedSubmit{}, err
 	}
+	// Recovery matches an existing login identity and never replaces it.
+	// Only provisioning must satisfy the current mailbox-prefix policy.
+	if intent == model.AlumniRequestIntentProvision && !validate.IsNjuptEmailLocalAllowed(loginEmail) {
+		return validatedSubmit{}, newError(ErrEmailPrefix, "邮箱前缀格式错误", nil)
+	}
 	result.loginEmail = loginEmail
 
 	personalEmail, err := validatePersonalEmail(input.PersonalEmail, loginEmail)
@@ -166,10 +171,10 @@ func validateSubmit(input SubmitInput) (validatedSubmit, error) {
 	return result, nil
 }
 
-// validateLoginEmail checks the school address that becomes the account's login
-// identity. The domain allow-list is not relaxed: login_email is what the V001
-// trigger derives email_type from, and the applicant's reachable address is
-// carried separately as personal_email.
+// validateLoginEmail checks the school address used to provision or match the
+// account's login identity. The domain allow-list is not relaxed: the V001
+// trigger derives email_type from login_email. The applicant's reachable
+// address is carried separately as personal_email.
 func validateLoginEmail(raw string) (string, error) {
 	email := strings.ToLower(strings.TrimSpace(raw))
 	if email == "" {
@@ -183,9 +188,6 @@ func validateLoginEmail(raw string) (string, error) {
 	}
 	if !validate.IsLoginEmailDomain(email) {
 		return "", newError(ErrEmailDomain, "login_email 必须是学校或社团邮箱", nil)
-	}
-	if !validate.IsNjuptEmailLocalAllowed(email) {
-		return "", newError(ErrEmailPrefix, "邮箱前缀格式错误", nil)
 	}
 	return email, nil
 }

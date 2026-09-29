@@ -2369,7 +2369,7 @@ POST /alumni-requests
 | `name` | 是 | **不能与 `student_id` 相同**（大小写与空白归一后比较），见下 |
 | `student_id` | 是 | 同一学号同时只允许一条待审申请（无论 intent） |
 | `intent` | 否 | `provision`（缺省，开新号）或 `recover`（给该学号现有账号绑定 personal_email 恢复访问）。其余取值返回 400 |
-| `login_email` | 是 | 原学号邮箱，仍限 `@njupt.edu.cn` / `@sast.fun`；provision 时成为新账号登录身份，recover 时必须与该学号现有账号登记的登录邮箱一致 |
+| `login_email` | 是 | 原学号邮箱，仍限 `@njupt.edu.cn` / `@sast.fun`；provision 时成为新账号登录身份，`@njupt.edu.cn` 前缀须为学号样式；recover 时必须与该学号现有账号登记的登录邮箱一致，允许存量非学号样式前缀 |
 | `personal_email` | 是 | 可正常收信的第三方邮箱，审批通过后直绑为 `other_mail` 登录身份，也是通知与自助改密的收件地址；不能与 `login_email` 相同 |
 | `phone_number` | 是 | |
 | `qq_number` | 是 | |
@@ -2404,7 +2404,7 @@ POST /alumni-requests
 |--------|------|------|
 | `40000` | 400 | 字段缺失/超长/含控制字符、未知字段、Content-Type 非 JSON、`name` 与 `student_id` 相同、`personal_email` 与 `login_email` 相同、`intent` 取值非法 |
 | `40020` | 400 | `login_email` 域名不在白名单 |
-| `40022` | 400 | `login_email` 前缀非学号样式（`@njupt.edu.cn`：1 位字母 + 8 位数字，或纯 8 位数字） |
+| `40022` | 400 | provision 申请的 `login_email` 前缀非学号样式（`@njupt.edu.cn`：1 位字母 + 8 位数字，或纯 8 位数字）；recover 不应用此规则 |
 | `40021` | 400 | 人机校验未通过——**重新完成验证后可重试** |
 | `40901` | 409 | `login_email` 或 `personal_email` 已被占用（复用登录邮箱已注册码，客户端处理方式相同） |
 | `40902` | 409 | 学号已有账号（响应文案引导切换为「恢复已有账号访问」，即 `intent=recover` 重提交，或联系 support） |

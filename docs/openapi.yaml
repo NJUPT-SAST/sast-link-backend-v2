@@ -3825,7 +3825,8 @@ components:
           format: email
           maxLength: 255
           description: |
-            原学号邮箱，将成为账号的登录身份。仍限 @njupt.edu.cn / @sast.fun：
+            原学号邮箱，provision 时成为新账号的登录身份，@njupt.edu.cn 前缀须为学号样式。
+            recover 时必须匹配现有账号的登录邮箱，允许存量非学号样式前缀。仍限 @njupt.edu.cn / @sast.fun：
             V001 触发器 auto_set_email_type 依赖该域名派生 email_type。
           example: b20040525@njupt.edu.cn
         personal_email:
