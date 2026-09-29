@@ -265,7 +265,7 @@ CREATE TABLE profile (
 |id|主键|
 |user_id|一对一关联 user 表|
 |nickname|昵称|
-|department|department_enum 全量七值（software/media/electronics/office/liaison/publicity/competition；可用于权限隔离，公开目录见 GET /departments）|
+|department|department_enum 全量七值（software/media/electronics/office/liaison/publicity/competition；本人可修改的展示资料，不能作为授权依据；公开目录见 GET /departments）|
 |intro|自我介绍|
 |email|对外展示邮箱|
 |avatar|头像url|

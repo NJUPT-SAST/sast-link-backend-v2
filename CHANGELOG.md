@@ -103,6 +103,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **部门字段信任边界**（2026-09-30）：明确 `profile.department` 是本人可修改的展示资料，下游授权必须依据独立核验的成员归属；同步 manager 的成员管理权限说明。
+
 - **恢复账号事务锁定目标角色**（2026-09-30）：读取已关闭账号时加行锁，防止 manager 的恢复请求在并发恢复、升为 admin、再次关闭后用旧角色判断重新开放 admin 账号。
 
 - **紧急回滚：admin scope 授权用户角色门**（2026-09-26）：回滚 `721d849`（`checkScopeForUser`，consent-info / consent / 兑现三段把 admin scope 绑定到授权用户实时角色）。该门使注册了 admin scope 的应用对非 admin 用户在 consent-info 阶段直接 400，前端兜底文案误导为「授权请求已失效，请重新发起授权」，第三方登录被完全阻断且重试无解。回滚后恢复登录；安全底线不受影响——`/admin` 角色门每请求从数据库行读角色，非 admin 用户拿到的 admin-scoped token 在使用处仍被拒。

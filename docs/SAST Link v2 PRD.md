@@ -286,14 +286,14 @@ Body: { "password": "current_password" }
 | 表 | 字段 | 可修改途径 |
 | ---- | ------ | ----------- |
 | `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager） |
-| `user` | login_email, role, state, email_type | 仅 `PUT /admin/users/:id`（admin） |
+| `user` | login_email, role, state, email_type | `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号或授予 admin） |
 | `profile` | department | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager，批量归置存量账号部门的通道）；语义一致：传值设置、空串清空、缺省不改 |
 | `profile` | nickname, intro, email, blog_url, github_url | `PUT /user/profile`（本人） |
 | `profile` | avatar | `PUT /user/avatar`（multipart/form-data，≤1MB 且任一维 ≤4096，jpg/png/webp；前端压缩后上传） |
 
 #### 部门值域与公开目录（V021）
 
-`department_enum` 从迁移期的 software / media 两值扩到协会七部门（software 软件研发部 / media 多媒体部 / electronics 电子部 / office 办公室 / liaison 外联部 / publicity 科宣部 / competition 赛事部），下游（SAST People）按 `profile.department` 做部门间数据权限隔离。公开只读端点 `GET /departments` 返回全量 key + 中文展示名（与后端枚举同源，无需认证、不限流——七个组织公开名称非个人数据），集成方不再本地维护 key→label 映射，避免下次扩枚举时漂移。管理端批量归置存量账号走 `PUT /admin/users/:id` 的 `department` 字段。
+`department_enum` 从迁移期的 software / media 两值扩到协会七部门（software 软件研发部 / media 多媒体部 / electronics 电子部 / office 办公室 / liaison 外联部 / publicity 科宣部 / competition 赛事部），`profile.department` 是所有角色均可自行修改的展示资料，不能单独作为部门归属证明或数据权限依据。下游（SAST People）的部门间数据权限必须依据独立核验的成员归属，不能信任这个自填字段。公开只读端点 `GET /departments` 返回全量 key + 中文展示名（与后端枚举同源，无需认证、不限流——七个组织公开名称非个人数据），集成方不再本地维护 key→label 映射，避免下次扩枚举时漂移。管理端批量归置存量账号走 `PUT /admin/users/:id` 的 `department` 字段。
 
 #### 迁移账号资料补全标志（V010）
 
@@ -457,9 +457,9 @@ Payload: {
 | `/admin/oauth-clients` | POST | admin | admin:write | 注册新客户端（第三方返回 client_secret，第一方不返回） |
 | `/admin/oauth-clients/:id` | PUT | admin | admin:write | 更新客户端（名称/回调地址/授权模式/scope/启用状态；`client_id`/`client_secret`/`id`/`client_type` 不可改）。收窄 scope 或新授予能力 scope 会撤销该客户端存量 token，扩大 scope 不会（见 §4.12） |
 | `/admin/audit-logs` | GET | admin | admin:read | 分页查询，支持按 user_id / action / resource / success / actor_client_id / 时间范围 筛选；响应含 best-effort 的 `user_name` 显示名 |
-| `/admin/stats` | GET | admin / manager | admin:read | 概览统计：账户聚合（total / by_role / by_state / by_department / no_department / incomplete_by_role / incomplete_by_state）+ 客户端数 + 最近审计 |
+| `/admin/stats` | GET | admin / manager | admin:read | 概览统计：账户聚合（total / by_role / by_state / by_department / no_department / incomplete_by_role / incomplete_by_state）；manager 仅用户聚合，客户端数与最近审计仅 admin 可见 |
 
-**管理面**：`/admin/*` 是管理本服务数据的端点组，只有携带 admin scope 的 token 且主体为 admin 角色时可达——admin scope 仅 `third_party`（机密客户端）可持有（§4.10）。角色门与 scope 门互不蕴含，缺任一均 `403`：角色门回答「这个用户是否被允许」（角色读数据库行，降权下一请求生效），scope 门回答「这个凭证是否被授权」——内置控制台 token 豁免 scope 门，其上限即角色门。「管理 scope」列中 `admin:read` 处 `admin:write` 亦可通行（写蕴含读）。
+**管理面**：`/admin/*` 是管理本服务数据的端点组，按端点分别要求 admin scope 与 admin / manager / lecturer 角色门；内置控制台 token 豁免 scope 门但仍检查角色——admin scope 仅 `third_party`（机密客户端）可持有（§4.10）。角色门与 scope 门互不蕴含，缺任一均 `403`：角色门回答「这个用户是否被允许」（角色读数据库行，降权下一请求生效），scope 门回答「这个凭证是否被授权」——内置控制台 token 豁免 scope 门，其上限即角色门。「管理 scope」列中 `admin:read` 处 `admin:write` 亦可通行（写蕴含读）。
 
 能力身份**只由注册表的 `scopes` 决定**：任何 `third_party` 客户端的注册持有 admin scope，其 token 即可到达 `/admin/*`。代码中不存在被硬编码的客户端名单——`scope.ContainsAll` 把可请求 scope 钉死在注册值内，而 `first_party` 无论注册值如何都拿不到 admin scope（§4.10），所以「token 携带 admin scope」本身就证明了「控制台为该注册授予过它」。授予是一次控制台操作（`POST`/`PUT /admin/oauth-clients`），不需要改代码或写迁移。
 
@@ -478,7 +478,7 @@ Payload: {
 - `RequireUserAuth`（`Authenticator.AuthenticateUserScoped`）无条件放行内置控制台 token，放行**任何携带 user scope 的 token**。不查客户端类型——`/user/*` 每个端点都只操作 token 主体本人的记录，应用持有 user scope 不会是查他人凭据，因此无需按客户端类型设限。「token 携带 user scope」即证明「该注册被授予过自助能力」。`user:read` 门禁读端点（`GET /user/profile`、`GET /user/identities`、`GET /user/devices`），`user:write` 门禁写端点（`PUT /user/profile`、`PUT /user/avatar`、身份绑定/解绑、`POST /auth/change-password`、`POST /auth/logout`、`DELETE /user/devices/:id`）；写蕴含读（`sessionhandler.ReadScopes` 接受两者），内置控制台 token 豁免两门。
 - 授予 user scope 是控制台动作（`POST`/`PUT /admin/oauth-clients`），`checkCapabilityScopeGrant` 把守：发起凭证必须是控制台；不得与改写 `redirect_uris` 同请求；**允许 `refresh_token`**（自助访问是会话，需要长期保活，与 admin scope 一致）。均基于合并后状态。user scope 不设客户端类型约束。
 - 收窄能力 scope 或新授予能力 scope 在同一事务内撤销该客户端存量 token，扩大不撤销。
-- **权限边界**：user scope 的 token 的 `sub` 是用户本人，所有 `/user/*` 端点都只操作该本人记录，不存在查他人视图；`sub` 的角色不参与 `/user/*` 的判定（自助是本人的事，与角色无关）。`/user/*` 与 `/admin/*` 的门禁分离：同一客户端可同时持有两组 scope，但 `user:*` 只开 `/user/*`、`admin:*` 只开 `/admin/*`，且 `/admin/*` 另有角色门（普通用户即使持 admin scope 也进不去）。管理员/讲师对他人数据的操作走 §4.12 的 admin 面（讲师可读列表，只有管理员可改）。
+- **权限边界**：user scope 的 token 的 `sub` 是用户本人，所有 `/user/*` 端点都只操作该本人记录，不存在查他人视图；`sub` 的角色不参与 `/user/*` 的判定（自助是本人的事，与角色无关）。`/user/*` 与 `/admin/*` 的门禁分离：同一客户端可同时持有两组 scope，但 `user:*` 只开 `/user/*`、`admin:*` 只开 `/admin/*`，且 `/admin/*` 另有角色门（普通用户即使持 admin scope 也进不去）。admin / manager / lecturer 对他人数据的操作走 §4.12 的 admin 面；lecturer 只读，manager 可管理非 admin 账号。
 
 `client_type` 不可通过更新接口修改：它同时决定客户端的凭据模型（是否持有 client_secret）与 admin scope 的可授予性（仅 `third_party` 可持有）。就地翻转类型而不同步 secret 会产出凭据模型与类型不符的客户端；需要换类型时重新注册一个客户端。
 
@@ -577,7 +577,7 @@ Payload: {
 | 表 | 用途 | 关键设计 |
 | ---- | ------ | ---------- |
 | `user` | 用户主表 | `token_version` 支持全局 Token 失效；`state` 状态机驱动 |
-| `profile` | 用户展示资料 | 1:1 关联 user，department 用于权限隔离 |
+| `profile` | 用户展示资料 | 1:1 关联 user，department 为本人可修改的展示资料，不是授权依据 |
 | `identities` | 第三方账号绑定 | provider + provider_id 全局唯一；github/lark 每用户仅 1 条（partial unique index）；other_mail 最多 2 条（触发器 + 应用层双重校验） |
 | `oauth_clients` | OAuth 客户端注册 | first_party 的 client_secret 为 NULL；redirect_uris/grant_types/scopes 数组存储 |
 | `oauth_authorizations` | 授权码 | PKCE 参数（code_challenge + method）+ OIDC nonce；`family_id` 支持重放检测级联撤销；无 updated_at；V009 起仅承载一次性授权码，不再是「已授权应用」列表的数据源 |
