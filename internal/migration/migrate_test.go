@@ -190,7 +190,7 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 // a failing build instead of a production 500.
 func assertDepartmentEnumLabels(t *testing.T, database *sql.DB) {
 	t.Helper()
-	rows, err := database.Query(
+	rows, err := database.QueryContext(context.Background(),
 		`SELECT e.enumlabel FROM pg_catalog.pg_enum e
 		JOIN pg_catalog.pg_type t ON t.oid = e.enumtypid
 		WHERE t.typname = 'department_enum'
@@ -198,6 +198,7 @@ func assertDepartmentEnumLabels(t *testing.T, database *sql.DB) {
 	if err != nil {
 		t.Fatalf("query department_enum labels: %v", err)
 	}
+	defer rows.Close()
 	var got []string
 	for rows.Next() {
 		var label string
