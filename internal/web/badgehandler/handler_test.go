@@ -238,7 +238,7 @@ func TestServeSVGReturnsSVGWithCacheHeaders(t *testing.T) {
 	router := newTestRouter(Handler{Service: service}, 0)
 
 	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/badge/somekey.svg?size=lg&theme=dark", nil))
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/badge/somekey.svg?size=lg&theme=dark&target=github", nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
@@ -252,7 +252,7 @@ func TestServeSVGReturnsSVGWithCacheHeaders(t *testing.T) {
 	if got := recorder.Header().Get("ETag"); got != `"abc123"` {
 		t.Fatalf("ETag = %q", got)
 	}
-	if service.renderInput.Key != "somekey" || service.renderInput.Theme != "dark" {
+	if service.renderInput.Key != "somekey" || service.renderInput.Theme != "dark" || service.renderInput.Target != "github" {
 		t.Fatalf("Render input = %#v", service.renderInput)
 	}
 }

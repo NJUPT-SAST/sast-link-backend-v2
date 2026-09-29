@@ -32,6 +32,17 @@ const (
 	ThemeDark  Theme = "dark"
 )
 
+// Target selects which of the member's own pages the card's click-through
+// lands on. It rides the URL like theme — the embedder may override the
+// member's default by hand — and unknown values normalize to the blog
+// default.
+type Target string
+
+const (
+	TargetBlog   Target = "blog"
+	TargetGithub Target = "github"
+)
+
 // layout carries every geometry and truncation bound the template consumes.
 // Fixed canvas, fixed slots. Y values are text baselines; the vertical
 // divider is only drawn when its X is non-zero.
