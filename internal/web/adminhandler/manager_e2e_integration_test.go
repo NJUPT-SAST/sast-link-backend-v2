@@ -106,7 +106,7 @@ func TestManagerE2EBoundary(t *testing.T) {
 	// The member the boundary is exercised against, created by the manager
 	// itself — the ordinary recruitment path.
 	created := h.do(t, http.MethodPost, "/admin/users", "application/json",
-		`{"name":"测试成员","student_id":"B24040321","login_email":"member-e2e@njupt.edu.cn",
+		`{"name":"测试成员","student_id":"B24040321","login_email":"b24040321@njupt.edu.cn",
 		  "phone_number":"13900139001","qq_number":"24040321","major":"软件工程"}`)
 	if created.Code != http.StatusOK {
 		t.Fatalf("create status = %d: %s", created.Code, created.Body.String())
@@ -168,7 +168,7 @@ func TestManagerE2EBoundary(t *testing.T) {
 
 	t.Run("cannot provision an admin directly", func(t *testing.T) {
 		refused := h.do(t, http.MethodPost, "/admin/users", "application/json",
-			`{"name":"越权账号","student_id":"B24040331","login_email":"admin-e2e-grant@njupt.edu.cn",
+			`{"name":"越权账号","student_id":"B24040331","login_email":"b24040331@njupt.edu.cn",
 		  "phone_number":"13900139002","qq_number":"24040331","role":"admin"}`)
 		if refused.Code != http.StatusForbidden {
 			t.Fatalf("create-admin status = %d, want 403: %s", refused.Code, refused.Body.String())
