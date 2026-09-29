@@ -285,10 +285,15 @@ Body: { "password": "current_password" }
 
 | 表 | 字段 | 可修改途径 |
 | ---- | ------ | ----------- |
-| `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin） |
+| `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager） |
 | `user` | login_email, role, state, email_type | 仅 `PUT /admin/users/:id`（admin） |
-| `profile` | nickname, department, intro, email, blog_url, github_url | `PUT /user/profile`（本人，department 仅 software/media 有值可设） |
+| `profile` | department | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager，批量归置存量账号部门的通道）；语义一致：传值设置、空串清空、缺省不改 |
+| `profile` | nickname, intro, email, blog_url, github_url | `PUT /user/profile`（本人） |
 | `profile` | avatar | `PUT /user/avatar`（multipart/form-data，≤1MB 且任一维 ≤4096，jpg/png/webp；前端压缩后上传） |
+
+#### 部门值域与公开目录（V021）
+
+`department_enum` 从迁移期的 software / media 两值扩到协会七部门（software 软件研发部 / media 多媒体部 / electronics 电子部 / office 办公室 / liaison 外联部 / publicity 科宣部 / competition 赛事部），下游（SAST People）按 `profile.department` 做部门间数据权限隔离。公开只读端点 `GET /departments` 返回全量 key + 中文展示名（与后端枚举同源，无需认证、不限流——七个组织公开名称非个人数据），集成方不再本地维护 key→label 映射，避免下次扩枚举时漂移。管理端批量归置存量账号走 `PUT /admin/users/:id` 的 `department` 字段。
 
 #### 迁移账号资料补全标志（V010）
 
@@ -443,7 +448,7 @@ Payload: {
 | `/admin/users` | GET | admin / manager / lecturer | admin:read | 分页列表，支持按 role / state / department / student_id / keyword 筛选（phone 视角：admin / manager 返回，lecturer 无） |
 | `/admin/users` | POST | admin / manager | admin:write | 创建账号（管理员建号；manager 不可建 role=admin，403）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份，无需邮箱验证；绑定后可用于登录和密码重置（见 §4.13）；role 缺省 member，state 缺省由自动状态机推导（role + 学号入学年份 + 当前学年），显式传 state 则钉住；系统生成随机初始密码，仅在响应中返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
 | `/admin/users/:id` | GET | admin / manager / lecturer | admin:read | 用户详情（含 profile + identities） |
-| `/admin/users/:id` | PUT | admin / manager | admin:write | 更新用户信息（含 role / state / state_auto / email_type；manager 不可写 admin 角色账号、不可设 role=admin） |
+| `/admin/users/:id` | PUT | admin / manager | admin:write | 更新用户信息（含 role / state / state_auto / email_type / department；department 写 profile 行，语义同 `PUT /user/profile`（传值设置 / 空串清空 / 缺省不改）；manager 不可写 admin 角色账号、不可设 role=admin） |
 | `/admin/users/:id` | DELETE | admin / manager | admin:write | 软删除（state → is_deleted），级联撤销所有 token（manager 不可删 admin 角色账号） |
 | `/admin/users/:id/restore` | PUT | admin / manager | admin:write | 恢复已注销用户（manager 不可恢复 admin 角色账号）：state 按自动状态机重新推导并解除钉住（注销时 is_deleted 覆盖了一切旧值，钉住无从保留；恢复即回到自动推导，需重新钉住者再提交一次 state） |
 | `/admin/users/batch` | GET | admin / manager / lecturer | admin:read | 批量查询：`ids` 逗号分隔（≤100），按请求顺序返回详情（字段同 `/admin/users/:id`），缺失 id 缺席，重复 id 只返回一次 |
@@ -769,9 +774,9 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 
 | 枚举 | 值 |
 | ------ | ----- |
-| `user_role` | `freshman` / `member` / `lecturer` / `admin` |
+| `user_role` | `freshman` / `member` / `manager` / `lecturer` / `admin` |
 | `state` | `njupter` / `on_sast` / `retired_sast` / `is_deleted` |
-| `department` | `software` / `media` |
+| `department` | `software` / `media` / `electronics` / `office` / `liaison` / `publicity` / `competition` |
 | `email_type` | `njupt_email` / `sast_email` |
 | `login_method` | `github` / `lark` / `other_mail` |
 | `client_type` | `first_party` / `third_party` |
