@@ -124,8 +124,8 @@ type cardData struct {
 	Nickname      string
 	Intro         string
 	Brand         string
-	// LinkTarget is the member's own page the whole card links to — blog
-	// first, GitHub as the fallback, empty when neither exists. An <img>
+	// LinkTarget is the member's own page the whole card links to — the
+	// requested target first, the other page as fallback, empty when neither exists. An <img>
 	// embed ignores links inside the SVG (camo strips them anyway); the
 	// target matters where the SVG is inlined or shown via <object>, and the
 	// frontend preview builds its own <a> from the same rule.
