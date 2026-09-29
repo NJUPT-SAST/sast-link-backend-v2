@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	migrations "github.com/NJUPT-SAST/sast-link-backend-v2/migrations"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/migration"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/testutil"
 )
 
@@ -177,6 +179,43 @@ func TestUpCreatesLatestSchema(t *testing.T) {
 	assertRefreshTokenFamilySequenceUnique(t, database, userID)
 	assertRejectsPlainPKCEChallengeMethod(t, database, userID)
 	assertBuiltinOAuthClient(t, database)
+	assertDepartmentEnumLabels(t, database)
+}
+
+// assertDepartmentEnumLabels pins the SQL enum's membership to model.Departments.
+// The write paths validate against the Go constants, so a label misspelled in a
+// migration (e.g. 'offce') would otherwise pass every test: the Go side never
+// reads the SQL label until a real write rejects a value the catalogue promised.
+// Migrations and the catalogue must move together — this turns that promise into
+// a failing build instead of a production 500.
+func assertDepartmentEnumLabels(t *testing.T, database *sql.DB) {
+	t.Helper()
+	rows, err := database.Query(
+		`SELECT e.enumlabel FROM pg_catalog.pg_enum e
+		JOIN pg_catalog.pg_type t ON t.oid = e.enumtypid
+		WHERE t.typname = 'department_enum'
+		ORDER BY e.enumsortorder`)
+	if err != nil {
+		t.Fatalf("query department_enum labels: %v", err)
+	}
+	var got []string
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			t.Fatalf("scan department_enum label: %v", err)
+		}
+		got = append(got, label)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate department_enum labels: %v", err)
+	}
+	want := make([]string, 0, len(model.Departments))
+	for _, entry := range model.Departments {
+		want = append(want, entry.Key)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("department_enum labels = %v, want %v (model.Departments order)", got, want)
+	}
 }
 
 func TestV5RejectsExistingCrossTableEmailConflict(t *testing.T) {
