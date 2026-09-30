@@ -949,7 +949,7 @@ func TestAlumniRequestRecoveryApproval(t *testing.T) {
 		if err := database.Create(existing).Error; err != nil {
 			t.Fatalf("seed user: %v", err)
 		}
-		if _, err := users.SoftDeleteAndRevokeSessions(ctx, existing.ID, time.Now().UTC()); err != nil {
+		if _, err := users.SoftDeleteAndRevokeSessions(ctx, existing.ID, model.UserRoleAdmin, time.Now().UTC()); err != nil {
 			t.Fatalf("close account: %v", err)
 		}
 

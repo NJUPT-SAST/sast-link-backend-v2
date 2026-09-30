@@ -17,6 +17,14 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 		s.auditCreate(ctx, input, 0, false, errorCode(err), attemptedCreateDetail(input))
 		return nil, err
 	}
+	// The manager boundary on the provision path: creating an account is a write,
+	// and a manager's writes stop short of the admin role. The default (member)
+	// and every other role are within its reach.
+	if !callerIsAdmin(input.AdminRole) && validated.role == model.UserRoleAdmin {
+		refused := newError(ErrProtected, "不可授予 admin 角色", nil)
+		s.auditCreate(ctx, input, 0, false, errorCode(refused), attemptedCreateDetail(input))
+		return nil, refused
+	}
 
 	var boundEmail *string
 	if validated.personalEmail != nil {

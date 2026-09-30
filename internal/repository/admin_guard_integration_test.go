@@ -28,7 +28,7 @@ func TestUpdateAdminUserRefusesDemotingTheLastAdmin(t *testing.T) {
 
 	role := model.UserRoleMember
 	_, _, err := users.UpdateAdminUser(context.Background(), admin.ID,
-		repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
+		repository.AdminUserUpdate{Role: &role}, model.UserRoleAdmin, time.Now().UTC())
 	if !errors.Is(err, repository.ErrLastAdmin) {
 		t.Fatalf("error = %v, want ErrLastAdmin", err)
 	}
@@ -52,7 +52,7 @@ func TestSoftDeleteRefusesClosingTheLastAdmin(t *testing.T) {
 	admin := adminSeed(t, database, "solo2@sast.fun", "唯一管理员",
 		model.UserRoleAdmin, model.UserStateOnSAST, nil)
 
-	_, err := users.SoftDeleteAndRevokeSessions(context.Background(), admin.ID, time.Now().UTC())
+	_, err := users.SoftDeleteAndRevokeSessions(context.Background(), admin.ID, model.UserRoleAdmin, time.Now().UTC())
 	if !errors.Is(err, repository.ErrLastAdmin) {
 		t.Fatalf("error = %v, want ErrLastAdmin", err)
 	}
@@ -77,7 +77,7 @@ func TestUpdateAdminUserAllowsDemotionWhenAnotherAdminRemains(t *testing.T) {
 
 	role := model.UserRoleMember
 	if _, _, err := users.UpdateAdminUser(context.Background(), first.ID,
-		repository.AdminUserUpdate{Role: &role}, time.Now().UTC()); err != nil {
+		repository.AdminUserUpdate{Role: &role}, model.UserRoleAdmin, time.Now().UTC()); err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
 	}
 }
@@ -92,7 +92,7 @@ func TestSoftDeleteAllowsNonAdminWithNoAdminPresent(t *testing.T) {
 		model.UserRoleMember, model.UserStateOnSAST, nil)
 
 	if _, err := users.SoftDeleteAndRevokeSessions(context.Background(),
-		member.ID, time.Now().UTC()); err != nil {
+		member.ID, model.UserRoleAdmin, time.Now().UTC()); err != nil {
 		t.Fatalf("SoftDeleteAndRevokeSessions: %v", err)
 	}
 }
@@ -118,7 +118,7 @@ func TestConcurrentDemotionsCannotRemoveEveryAdmin(t *testing.T) {
 			defer waitGroup.Done()
 			<-start
 			_, _, err := users.UpdateAdminUser(context.Background(), userID,
-				repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
+				repository.AdminUserUpdate{Role: &role}, model.UserRoleAdmin, time.Now().UTC())
 			results[index] = err
 		}(index, target)
 	}
@@ -172,13 +172,13 @@ func TestConcurrentDemotionAndSoftDeleteKeepOneAdmin(t *testing.T) {
 		defer waitGroup.Done()
 		<-start
 		_, _, err := users.UpdateAdminUser(context.Background(), first.ID,
-			repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
+			repository.AdminUserUpdate{Role: &role}, model.UserRoleAdmin, time.Now().UTC())
 		results[0] = err
 	}()
 	go func() {
 		defer waitGroup.Done()
 		<-start
-		_, err := users.SoftDeleteAndRevokeSessions(context.Background(), second.ID, time.Now().UTC())
+		_, err := users.SoftDeleteAndRevokeSessions(context.Background(), second.ID, model.UserRoleAdmin, time.Now().UTC())
 		results[1] = err
 	}()
 	close(start)
@@ -216,7 +216,7 @@ func TestUpdateAdminUserGuardsDemotionEvenWhenCallerSaysOtherwise(t *testing.T) 
 
 	role := model.UserRoleMember
 	_, _, err := users.UpdateAdminUser(context.Background(), admin.ID,
-		repository.AdminUserUpdate{Role: &role}, time.Now().UTC())
+		repository.AdminUserUpdate{Role: &role}, model.UserRoleAdmin, time.Now().UTC())
 	if !errors.Is(err, repository.ErrLastAdmin) {
 		t.Fatalf("error = %v, want ErrLastAdmin: the transaction must judge the stored "+
 			"role, not the flag the caller derived from a stale read", err)
@@ -251,7 +251,7 @@ func TestUpdateAdminUserRevokesOnRoleChangeTheCallerDidNotExpect(t *testing.T) {
 	role := model.UserRoleMember
 	// revokeSessions=false is what a caller computes after reading the row as a member.
 	entries, _, err := users.UpdateAdminUser(context.Background(), target.ID,
-		repository.AdminUserUpdate{Role: &role}, revokedAt)
+		repository.AdminUserUpdate{Role: &role}, model.UserRoleAdmin, revokedAt)
 	if err != nil {
 		t.Fatalf("UpdateAdminUser: %v", err)
 	}

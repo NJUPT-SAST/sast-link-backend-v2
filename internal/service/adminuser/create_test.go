@@ -22,8 +22,10 @@ func createProbeInput() CreateUserInput {
 		StudentID:   "B24040525",
 		LoginEmail:  "b24040525@njupt.edu.cn",
 		// The authenticated administrator, the same actor every console write
-		// attributes to.
+		// attributes to; the admin role so the provisioning cases run on the
+		// unrestricted side of the manager boundary.
 		AdminUserID: testAdminID,
+		AdminRole:   string(model.UserRoleAdmin),
 		ClientIP:    testClientIP,
 		UserAgent:   testUserAgent,
 	}
@@ -287,4 +289,42 @@ func TestCreateUserDerivesStateAndTracksPin(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The manager boundary on the provision path: a manager's writes stop short of
+// the admin role. The default (member) and every other role are within reach,
+// so a manager can staff a department — including appointing another manager —
+// but never manufacture an administrator.
+func TestCreateUserManagerBoundary(t *testing.T) {
+	t.Run("manager cannot provision an admin", func(t *testing.T) {
+		h := newHarness(t)
+		input := createProbeInput()
+		input.AdminRole = string(model.UserRoleManager)
+		adminRole := string(model.UserRoleAdmin)
+		input.Role = &adminRole
+
+		_, err := h.service.CreateUser(context.Background(), input)
+
+		assertKind(t, err, KindProtected)
+		if h.users.createCalls != 0 {
+			t.Fatalf("create calls = %d, want no write", h.users.createCalls)
+		}
+	})
+
+	t.Run("manager may provision a manager", func(t *testing.T) {
+		h := newHarness(t)
+		input := createProbeInput()
+		input.AdminRole = string(model.UserRoleManager)
+		managerRole := string(model.UserRoleManager)
+		input.Role = &managerRole
+
+		result, err := h.service.CreateUser(context.Background(), input)
+
+		if err != nil {
+			t.Fatalf("CreateUser(manager on manager): %v", err)
+		}
+		if h.users.createCalls != 1 || result.UserID == 0 {
+			t.Fatalf("create calls = %d, result = %+v, want the write through", h.users.createCalls, result)
+		}
+	})
 }

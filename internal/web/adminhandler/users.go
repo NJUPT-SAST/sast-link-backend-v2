@@ -22,6 +22,15 @@ func principalRole(c *gin.Context) string {
 	return principal.Role
 }
 
+// seesCallerPhone reports whether the caller's role may see phone numbers, for
+// the keyword predicate (IncludePhoneColumn). It delegates to seesPhone — the
+// same predicate the response mappings use — so the search and the trimmed view
+// can never drift apart: a role that cannot see the field must not be able to
+// probe for its existence with keyword matches either.
+func seesCallerPhone(c *gin.Context) bool {
+	return seesPhone(principalRole(c))
+}
+
 // ListUsers returns a filtered page of accounts.
 func (h Handler) ListUsers(c *gin.Context) {
 	page, pageSize, err := web.ParsePaging(c)
@@ -45,7 +54,7 @@ func (h Handler) ListUsers(c *gin.Context) {
 		Department:         c.Query("department"),
 		StudentID:          c.Query("student_id"),
 		Keyword:            c.Query("keyword"),
-		IncludePhoneColumn: principalRole(c) == string(AdminRole),
+		IncludePhoneColumn: seesCallerPhone(c),
 		NeedsCompletion:    needsCompletion,
 	})
 	if err != nil {
@@ -118,6 +127,7 @@ func (h Handler) CreateUser(c *gin.Context) {
 		Role:          req.Role,
 		State:         req.State,
 		AdminUserID:   principal.UserID,
+		AdminRole:     principal.Role,
 		ActorClientID: principal.ClientID,
 		ClientIP:      c.ClientIP(),
 		UserAgent:     c.Request.UserAgent(),
@@ -204,6 +214,7 @@ func (h Handler) UpdateUser(c *gin.Context) {
 		EmailType:     req.EmailType,
 		PersonalEmail: req.PersonalEmail,
 		AdminUserID:   principal.UserID,
+		AdminRole:     principal.Role,
 		ActorClientID: principal.ClientID,
 		ClientIP:      c.ClientIP(),
 		UserAgent:     c.Request.UserAgent(),
@@ -289,6 +300,7 @@ func (h Handler) UpdateUsersRole(c *gin.Context) {
 		IDs:           req.IDs,
 		Role:          req.Role,
 		AdminUserID:   principal.UserID,
+		AdminRole:     principal.Role,
 		ActorClientID: principal.ClientID,
 		ClientIP:      c.ClientIP(),
 		UserAgent:     c.Request.UserAgent(),
@@ -324,6 +336,7 @@ func (h Handler) DeleteUser(c *gin.Context) {
 	err := h.Users.DeleteUser(c.Request.Context(), adminuser.TargetUserInput{
 		UserID:        userID,
 		AdminUserID:   principal.UserID,
+		AdminRole:     principal.Role,
 		ActorClientID: principal.ClientID,
 		ClientIP:      c.ClientIP(),
 		UserAgent:     c.Request.UserAgent(),
@@ -350,6 +363,7 @@ func (h Handler) RestoreUser(c *gin.Context) {
 	err := h.Users.RestoreUser(c.Request.Context(), adminuser.TargetUserInput{
 		UserID:        userID,
 		AdminUserID:   principal.UserID,
+		AdminRole:     principal.Role,
 		ActorClientID: principal.ClientID,
 		ClientIP:      c.ClientIP(),
 		UserAgent:     c.Request.UserAgent(),

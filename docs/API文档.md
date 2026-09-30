@@ -122,7 +122,7 @@
 
 | 业务码 | 说明 |
 | -------- | ------ |
-| `40300` | 无权限。情形包括：角色不足（需 admin / lecturer 角色）；token 打能力接口但无对应 scope（入口门 `该 Access Token 未携带管理接口所需的 scope` / `该 Access Token 未携带访问用户接口所需的 scope`）；路由级 scope 门未通过（`Access Token 缺少所需 scope`）；第三方 token 打严格内部接口（`该 Access Token 由第三方客户端签发，不可用于内部接口`） |
+| `40300` | 无权限。情形包括：角色不足（需 admin / manager / lecturer 角色，或 manager 试图写 admin 角色账号 / 授予 admin 角色）；token 打能力接口但无对应 scope（入口门 `该 Access Token 未携带管理接口所需的 scope` / `该 Access Token 未携带访问用户接口所需的 scope`）；路由级 scope 门未通过（`Access Token 缺少所需 scope`）；第三方 token 打严格内部接口（`该 Access Token 由第三方客户端签发，不可用于内部接口`） |
 | `40301` | 账号已注销（`state = is_deleted`） |
 | `40302` | 非 SAST 企业飞书用户 |
 
@@ -1606,7 +1606,9 @@ DELETE /oauth/grants/:client_id
 > 6. **批量接口单次上限**：`GET /admin/users/batch` 的 `ids` 最多 100 个、`PUT /admin/users` 的 `ids` 最多 500 个，超出返回 `400`（不截断——静默截断会让调用方拿到的结果无法与其输入对齐）。
 > 7. **审批建号工单时学号必须可解析出入学年份**：`POST /admin/alumni-requests/:id/approve` 遇到无法解析的 `student_id` 返回 `400`（`40000`，文案「学号无法解析入学年份，请驳回该申请」），并记一条 `slog` 错误。提交侧只校验该字段非空与长度，因此审核人是第一个看到此类值的人；`400` 而非 `500`：问题出在工单数据上，审核人有一个明确动作（驳回），而 `500` 会把一张数据有问题的工单报成服务故障。控制台建号路径（`POST /admin/users`）对同一条件本就返回 `400`，两条路径现在一致。
 >
-> 另有三条契约未写明的管理员自我保护规则，均返回 `403`：不可修改自己的 `role`；不可注销自己的账号；不可将系统中最后一名活跃管理员降权或注销（「活跃」指 `role = admin` 且 `state <> is_deleted`）。三者都会让自己失去撤销该操作的权限，因此无法自行恢复。
+> 另有三条契约未写明的管理员自我保护规则，均返回 `403`：不可修改自己的 `role`；不可注销自己的账号；不可将系统中最后一名活跃管理员降权或注销（「活跃」指 `role = admin` 且 `state <> is_deleted`）。三者都会让自己失去撤销该操作的权限，因此无法自行恢复。前两条对 manager 同样适用（manager 亦不可改自己的 `role`、注销自己的账号）。
+>
+> manager（部长）角色的边界也在此层：可写除 admin 角色账号之外的一切用户（升降 lecturer / manager / member / freshman，含自我复制——把他人升为 manager），但**不可写 admin 角色账号**（编辑 / 升降 / 注销 / 恢复均 403）且**不可授予 admin 角色**（建号 / 编辑 / 批量，403 或逐项失败）——管理分层的下级不能触碰上级、不能制造上级。OAuth 客户端、审计日志与校友工单对 manager 一律 403（技术信息面）。
 >
 > `department` 筛选跨表关联 `profile`，采用 `LEFT JOIN`，因此无 `profile` 行的用户在**不带** `department` 筛选时正常出现在列表中（`department` 为 `null`）；带该筛选时自然被排除。
 
@@ -1635,7 +1637,7 @@ DELETE /oauth/grants/:client_id
 GET /admin/users
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / manager / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
 **Query Parameters**:
 
@@ -1643,7 +1645,7 @@ GET /admin/users
 | ------ | ------ |
 | `page` | 页码，默认 1，最小 1，最大 2^30（超出范围或溢出返回 `40000`） |
 | `page_size` | 每页条数，默认 20，最大 100 |
-| `role` | 筛选角色：freshman / member / lecturer / admin |
+| `role` | 筛选角色：freshman / member / manager / lecturer / admin |
 | `state` | 筛选状态：on_sast / retired_sast / njupter / is_deleted |
 | `department` | 筛选部门：software / media |
 | `student_id` | 筛选学号 |
@@ -1652,14 +1654,14 @@ GET /admin/users
 
 **说明**：
 
-- 角色视图：`phone_number` 仅 **admin** 视角返回；lecturer 视角该字段**不存在**（既不 null 也不空串——"未披露"不能读成"未填写"）。`qq_number` 与其余字段所有角色一致。`keyword` 匹配遵循同一规则：`phone_number` 列仅在 admin 调用时参与匹配，lecturer 的关键词不会命中手机号——搜索谓词与响应裁剪同边界，避免通过搜索对不可见字段做存在性探测。
+- 角色视图：`phone_number` 仅 **admin / manager** 视角返回；lecturer 视角该字段**不存在**（既不 null 也不空串——"未披露"不能读成"未填写"）。`qq_number` 与其余字段所有角色一致。`keyword` 匹配遵循同一规则：`phone_number` 列仅在 admin / manager 调用时参与匹配，lecturer 的关键词不会命中手机号——搜索谓词与响应裁剪同边界，避免通过搜索对不可见字段做存在性探测。
 - 不带 `state` 筛选时列表包含已注销用户（`state = is_deleted`），否则无法找到并恢复它们。
 
 `needs_completion` 只接受 `true` / `false` 字面量，其他值返回 `40000` 而非按 `false` 处理——`needs_completion=ture` 若被静默当作 `false`，会列出与调用者意图完全相反的结果且看不出错。该筛选用于清理旧库迁移遗留数据，配合响应里的 `incomplete_fields` 可直接看出每个账号缺哪些字段。
 
 **错误码**：`40000`（分页参数非法 / `role`、`state`、`department`、`needs_completion` 取值非法）、`40100`、`40300`。
 
-**Response** `200`（admin 视角；lecturer 视角无 `phone_number`）:
+**Response** `200`（admin / manager 视角；lecturer 视角无 `phone_number`）:
 
 ```json
 {
@@ -1698,13 +1700,13 @@ GET /admin/users
 GET /admin/users/:id
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / manager / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
 **说明**：`id` 非数字或非正整数一律返回 `404`（与用户不存在同一响应），不区分两者。
 
-- 完整档案（含联系方式与第三方绑定）；`phone_number` 仅 **admin** 视角返回，lecturer 视角该字段**不存在**（既不 null 也不空串）。其余字段（`qq_number` / 第三方绑定 / `profile.email` 等）所有角色可见。
+- 完整档案（含联系方式与第三方绑定）；`phone_number` 仅 **admin / manager** 视角返回，lecturer 视角该字段**不存在**（既不 null 也不空串）。其余字段（`qq_number` / 第三方绑定 / `profile.email` 等）所有角色可见。
 - `identities` 不含第三方 `access_token` / `refresh_token`，也不含 `identity_data`——该字段存的是第三方返回的完整用户对象（飞书含 `mobile`、`email`、`enterprise_email`、`employee_no`），列出绑定不等于交出绑定背后的联系方式。
-- `state_manual` 说明 `state` 的来源：`true` = 管理员手写钉住（该账号跳过自动推导与清算批次，值是人做的判断），`false` = 由状态机按 role + 学号入学年份 + 当前学年推导。`GET /admin/users`、`GET /admin/users/:id` 与 `GET /admin/users/batch` 同带此字段，admin / lecturer 视角一致——能看见 `state` 就必须能看见它是事实还是裁决，否则「要不要发 `state_auto` 解除钉住」这个判断无从做出。
+- `state_manual` 说明 `state` 的来源：`true` = 管理员手写钉住（该账号跳过自动推导与清算批次，值是人做的判断），`false` = 由状态机按 role + 学号入学年份 + 当前学年推导。`GET /admin/users`、`GET /admin/users/:id` 与 `GET /admin/users/batch` 同带此字段，admin / manager / lecturer 视角一致——能看见 `state` 就必须能看见它是事实还是裁决，否则「要不要发 `state_auto` 解除钉住」这个判断无从做出。
 
 **错误码**：`40100`、`40300`、`40401`。
 
@@ -1743,7 +1745,7 @@ POST /admin/users
 
 为无法自助注册的人员建号，例如已毕业成员：他们没有 sast.fun 邮箱，学生邮箱也已不可用，注册白名单（§1.6/1.7）会阻止其自助注册。管理员在此建号，`login_email` 填其学生邮箱；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份。
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / manager 角色），委派调用需 `admin:write` scope
 
 **Request**:
 
@@ -1772,8 +1774,8 @@ POST /admin/users
 | `major` | – | 专业（≤50 字），缺省空串 |
 | `college` | – | 学院（college_enum 枚举），缺省「其他」 |
 | `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（§1.8/1.9）。不可与 `login_email` 相同，且不得已被其他账号占用（作为主登录邮箱或已绑身份） |
-| `role` | – | freshman / member / lecturer / admin，缺省 member |
-| `state` | – | njupter / on_sast / retired_sast；不接受 `is_deleted`（新建即注销无意义，返回 `42200`）。**缺省由自动状态机推导**（role + 学号入学年份 + 当前学年；毕业生学号旧 → retired_sast，在校 lecturer/admin → on_sast，在校 freshman/member → njupter）；显式传 `state` 则作为钉住值写入，该账号从此跳过自动推导与清算批次 |
+| `role` | – | freshman / member / manager / lecturer / admin，缺省 member；manager 调用时不可为 admin（403） |
+| `state` | – | njupter / on_sast / retired_sast；不接受 `is_deleted`（新建即注销无意义，返回 `42200`）。**缺省由自动状态机推导**（role + 学号入学年份 + 当前学年；毕业生学号旧 → retired_sast，在校 lecturer/admin → on_sast，在校 freshman/member/manager → njupter）；显式传 `state` 则作为钉住值写入，该账号从此跳过自动推导与清算批次 |
 
 **Response** `200`:
 
@@ -1802,7 +1804,7 @@ POST /admin/users
 PUT /admin/users/:id
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / manager 角色），委派调用需 `admin:write` scope
 
 **Request**（所有字段可选，仅传需要修改的字段）:
 
@@ -1850,7 +1852,7 @@ PUT /admin/users/:id
 DELETE /admin/users/:id
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / manager 角色），委派调用需 `admin:write` scope
 
 **Response** `200`:
 
@@ -1874,7 +1876,7 @@ DELETE /admin/users/:id
 PUT /admin/users/:id/restore
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / manager 角色），委派调用需 `admin:write` scope
 
 **Response** `200`:
 
@@ -1898,7 +1900,7 @@ PUT /admin/users/:id/restore
 GET /admin/users/batch?ids=1,2,3
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / manager / lecturer 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
 **Query Parameters**:
 
@@ -1910,7 +1912,7 @@ GET /admin/users/batch?ids=1,2,3
 
 - 返回的 `users` 数组**按请求顺序**排列（People 的邮件批次目标 / 阅卷列表需要与输入对齐），重复 ID 只返回一次（按首次出现位置）。
 - **不存在的 ID 直接缺席**（不报错，调用方自行 diff 重试）；已注销用户照常返回（与 `GET /admin/users/:id` 一致）。
-- 每条记录字段与 `GET /admin/users/:id` 完全一致（含 `profile` / `identities`），People 可直接复用现有转换逻辑。`phone_number` 同样按视角返回：仅 **admin** 可见，lecturer 视角该字段**不存在**（既不 null 也不空串），与 `:id` 一致。
+- 每条记录字段与 `GET /admin/users/:id` 完全一致（含 `profile` / `identities`），People 可直接复用现有转换逻辑。`phone_number` 同样按视角返回：仅 **admin / manager** 可见，lecturer 视角该字段**不存在**（既不 null 也不空串），与 `:id` 一致。
 - `ids` 缺失、含非数字/非正整数段（如 `1,abc,2`、`1,,2`）、超过 100 个，均返回 `400`——静默丢弃非法段会返回一个无法与输入对齐的列表。
 
 **错误码**：`40000`（ids 缺失 / 非法 / 超上限）、`40100`、`40300`。
@@ -1952,7 +1954,7 @@ GET /admin/users/batch?ids=1,2,3
 PUT /admin/users
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / manager 角色），委派调用需 `admin:write` scope
 
 **Request**:
 
@@ -1965,7 +1967,7 @@ PUT /admin/users
 
 **说明**：
 
-- `ids` 单次最多 **500** 个（招新录取批量升级一次可覆盖），重复 ID 去重后只执行一次；`role` 枚举与单条接口一致：freshman / member / lecturer / admin。
+- `ids` 单次最多 **500** 个（招新录取批量升级一次可覆盖），重复 ID 去重后只执行一次；`role` 枚举与单条接口一致：freshman / member / manager / lecturer / admin。manager 调用时逐项拒绝 admin 目标账号与 `role=admin`（`无权操作管理员账号` / `不可授予 admin 角色`）；升 / 降 lecturer、manager（自我复制）与其余组合允许。
 - **逐条独立执行（非原子）**：每个 ID 走与 `PUT /admin/users/:id` 完全相同的守卫与事务——不可修改自己的角色（403 语义）、系统至少保留一名管理员、已注销用户拒绝（需先恢复）；角色实际变化时同一事务递增 `token_version` 并撤销该用户全部 Token。**freshman→member 批量录取后，被录取者需重新登录一次**（与单条行为一致）。
 - 请求本身合法即返回 `200`，**失败是逐条数据而非传输错误**：`results` 与去重后的 ids 一一对应，调用方对失败项重试或告警。
 - 未知字段 / 尾部多余内容返回 `400`（strict 解码）。
@@ -2269,9 +2271,9 @@ GET /admin/audit-logs
 GET /admin/stats
 ```
 
-**Headers**: `Authorization: Bearer <access_token>`（需 admin 角色），委派调用需 `admin:read` 或 `admin:write` scope
+**Headers**: `Authorization: Bearer <access_token>`（需 admin / manager 角色），委派调用需 `admin:read` 或 `admin:write` scope
 
-控制台概览页的一次性数据源，聚合账户、客户端与最近审计三条视图。
+控制台概览页的一次性数据源，聚合账户、客户端与最近审计三条视图。manager 调用时响应仅含 `users` 一路——`clients` 与 `audit` 两键整体缺席（不返回 null/空值），与 phone 字段「未披露而非未填写」的裁剪口径一致：OAuth 注册计数与审计行（含 `client_ip` / `actor_client_id`）属于技术信息面。
 
 **Response** `200`:
 
@@ -2282,7 +2284,7 @@ GET /admin/stats
   "data": {
     "users": {
       "total": 1450,
-      "by_role": { "freshman": 300, "member": 900, "lecturer": 250, "admin": 50 },
+      "by_role": { "freshman": 300, "member": 900, "manager": 40, "lecturer": 250, "admin": 50 },
       "by_state": { "njupter": 400, "on_sast": 900, "retired_sast": 150, "is_deleted": 50 },
       "by_department": { "software": 400, "media": 300 },
       "no_department": 800,
@@ -2306,7 +2308,7 @@ GET /admin/stats
   - `by_role` / `by_state` 按 `user` 表分组统计（`by_state` 含 `is_deleted`，其余两个维度不含）
   - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
   - `incomplete_by_role` / `incomplete_by_state` 是资料未补全（`profile_needs_completion = true`，见 V010 生成列）账户的分组计数，供控制台概览把迁移残留账户单独归为「未补全」扇区：
-    - `incomplete_by_role`：未补全**且**角色 ∉ {`lecturer`, `admin`} 的未注销账户，按角色分组（讲师 / 管理员视为组织内成员，不列为待跟进对象）
+    - `incomplete_by_role`：未补全**且**角色 ∉ {`lecturer`, `admin`} 的未注销账户，按角色分组（讲师 / 管理员视为组织内成员，不列为待跟进对象；`manager` 是学生角色账号，**计入**该桶——部长与所辖成员一样是资料补全跟进对象，其状态也推导为 `njupter`）
     - `incomplete_by_state`：未补全**且**状态 = `njupter` 的未注销账户，按状态分组（`on_sast` / `retired_sast` 同理不列入）
     - 两个桶的排除口径**刻意对称**：`incomplete_by_role` 按角色排除讲师 / 管理员，`incomplete_by_state` 按状态排除 `on_sast` / `retired_sast`，两侧都是「组织内成员与已退休者不作为待跟进对象」这同一条判断，因此不可只放宽其中一维——否则同一概览页会出现两个不相等的「未补全」数。注意两维度的集合并不相同（一个未补全的 `retired_sast` 普通成员计入角色维度但不计入状态维度），各自只对自己的真实桶做减法
     - 自动状态机带来一处需运维留意的口径后果：入学满 4 学年会在 9/1 把账号从 `njupter` 推走，**留级 / 延毕者若无人把其 state 钉在 `njupter`，就会从 `incomplete_by_state` 消失**（仍在 `by_state` 与角色桶里，只是不再单独标为待跟进）
@@ -2984,7 +2986,7 @@ GET /badge/:key
 
 | 枚举类型 | 值 |
 | ---------- | ----- |
-| `user_role` | `freshman` / `member` / `lecturer` / `admin` |
+| `user_role` | `freshman` / `member` / `manager` / `lecturer` / `admin` |
 | `state` | `njupter` / `on_sast` / `retired_sast` / `is_deleted` |
 | `department` | `software` / `media` |
 | `email_type` | `njupt_email` / `sast_email` |
