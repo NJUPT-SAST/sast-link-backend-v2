@@ -2217,9 +2217,9 @@ paths:
       summary: 用户列表
       deprecated: false
       description: |
-        需 admin 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
-        lecturer 视角下 `phone_number` 字段不存在；`qq_number` 与其余字段对所有
-        角色一致返回。
+        需 admin、manager 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
+        lecturer 视角下 `phone_number` 字段不存在；admin 与 manager 视角返回；
+        `qq_number` 与其余字段对所有角色一致返回。
       operationId: adminListUsers
       tags:
         - Admin
@@ -2315,9 +2315,10 @@ paths:
       summary: 创建用户（管理员建号）
       deprecated: false
       description: |
-        需 admin 角色。委派调用需 `admin:write` scope。
+        需 admin 或 manager 角色。委派调用需 `admin:write` scope。
         为无法自助注册的人员建号，例如已毕业成员（没有 sast.fun 邮箱且
-        学生邮箱已不可用）。login_email 仅接受注册白名单域名
+        学生邮箱已不可用）。manager 调用时 role 不可为 admin（403）——
+        管理分层的下级不能制造上级。login_email 仅接受注册白名单域名
         （@njupt.edu.cn / sast.fun），email_type 由服务端按域名派生；
         可选的 personal_email 在同一事务内直绑为 other_mail 登录身份，
         无需邮箱验证，绑定后可用于登录和密码重置，不可与 login_email
@@ -2359,11 +2360,13 @@ paths:
       summary: 批量修改用户角色
       deprecated: false
       description: |
-        需 admin 角色。委派调用需 `admin:write` scope。
+        需 admin 或 manager 角色。委派调用需 `admin:write` scope。
         对每个 id 独立执行一次角色更新（非原子）：单条失败不影响其余项，
         失败原因在 results 中逐条返回，便于调用方重试或告警。
         每个 id 走与 `PUT /admin/users/{id}` 相同的守卫：不可修改自己的角色、
-        系统至少保留一名管理员、已注销用户拒绝；角色实际发生变化时同事务递增
+        系统至少保留一名管理员、已注销用户拒绝；manager 调用时逐项拒绝
+        admin 目标与 role=admin（含升 lecturer/manager 在内的其余升降权允许，
+        自我复制是角色设计的本意）；角色实际发生变化时同事务递增
         token_version 并撤销该用户全部 Token（freshman→member 批量录取后需重新登录）。
         单次最多 500 个 id，重复 id 去重后执行一次。
       operationId: adminBatchUpdateUsersRole
@@ -2402,8 +2405,9 @@ paths:
       summary: 批量查询用户（按 ID）
       deprecated: false
       description: |
-        需 admin 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
-        lecturer 视角下 `phone_number` 字段不存在（与 `GET /admin/users/{id}` 一致）。
+        需 admin、manager 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
+        lecturer 视角下 `phone_number` 字段不存在；admin 与 manager 视角返回
+        （与 `GET /admin/users/{id}` 一致）。
         按请求顺序返回与 `GET /admin/users/{id}` 相同结构的完整记录；
         重复 id 只返回一次，不存在的 id 直接缺席（不报错，调用方自行 diff）。
         已注销用户照常返回（与单条详情一致）。
@@ -2443,9 +2447,9 @@ paths:
       summary: 用户详情
       deprecated: false
       description: |
-        需 admin 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
+        需 admin、manager 或 lecturer 角色。委派调用需 `admin:read` 或 `admin:write` scope。
         完整档案（含联系方式与第三方绑定）；lecturer 视角无 `phone_number`
-        字段，其余字段（qq / 绑定 / 邮箱等）可见。
+        字段，admin 与 manager 视角返回，其余字段（qq / 绑定 / 邮箱等）可见。
       operationId: adminGetUserDetail
       tags:
         - Admin
@@ -2479,7 +2483,10 @@ paths:
     put:
       summary: 更新用户
       deprecated: false
-      description: 需 admin 角色。委派调用需 `admin:write` scope。
+      description: >-
+        需 admin 或 manager 角色。委派调用需 `admin:write` scope。manager 不可
+        写 admin 角色账号、不可设置 role=admin（403）；其余账号的全部字段
+        （含 role 升降至 lecturer/manager）正常。
       operationId: adminUpdateUser
       tags:
         - Admin
@@ -2604,11 +2611,12 @@ paths:
       summary: 注销用户（软删除）
       deprecated: false
       description: |
-        需 admin 角色，委派调用需 `admin:write` scope。将 user.state 设为 is_deleted，保留数据；同一事务内递增
+        需 admin 或 manager 角色，委派调用需 `admin:write` scope。将 user.state 设为 is_deleted，保留数据；同一事务内递增
         token_version 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，
         非 DB 级联删除），撤销的 JTI 写入 outbox，由 worker 失效对应 auth-state 缓存。
 
-        不可注销自己的账号，也不可注销系统中最后一名活跃管理员（均 403）。
+        不可注销自己的账号，也不可注销系统中最后一名活跃管理员（均 403）；
+        manager 亦不可注销 admin 角色账号（403）。
       operationId: adminDeleteUser
       tags:
         - Admin
@@ -2647,7 +2655,7 @@ paths:
       summary: 恢复已注销用户
       deprecated: false
       description: |
-        需 admin 角色，委派调用需 `admin:write` scope。将 user.state 从 is_deleted
+        需 admin 或 manager 角色，委派调用需 `admin:write` scope。将 user.state 从 is_deleted
         恢复，并按自动状态机重新推导（role + 学号入学年份 + 当前学年），同时解除钉住——
         注销时的 is_deleted 覆盖了此前的手写值，钉住无从保留，恢复即回到自动推导；
         需要重新钉住的管理员在恢复后再提交一次 state 即可。已撤销的 token 不恢复，
@@ -3166,7 +3174,10 @@ paths:
       deprecated: false
       description: |
         控制台概览页的一次性数据源，聚合账户、客户端与最近审计三条视图。
-        需 admin 角色。
+        需 admin 或 manager 角色。manager 调用时响应仅含 users 一路——
+        clients 与 audit 两键整体缺席（不返回 null/空值），与 phone 字段
+        「未披露而非未填写」的裁剪口径一致：OAuth 注册计数与审计行
+        （含 client_ip / actor_client_id）属于技术信息面。
 
         users 或 clients 聚合失败返回 500；audit.recent 读取失败静默返回
         空列表（best-effort），不影响其余两路。
@@ -3734,9 +3745,10 @@ components:
       enum:
         - freshman
         - member
+        - manager
         - lecturer
         - admin
-      description: 用户角色 — freshman（大一新生）/ member（正式成员）/ lecturer（讲师）/ admin（管理员）
+      description: 用户角色 — freshman（大一新生）/ member（正式成员）/ manager（部长）/ lecturer（讲师）/ admin（管理员）
     OAuthScope:
       type: string
       enum:
@@ -3982,7 +3994,7 @@ components:
           description: 未注销账户总数（state ≠ is_deleted；已注销的见 by_state.is_deleted）
         by_role:
           type: object
-          description: 按角色分组计数（freshman / member / lecturer / admin），不含已注销账户
+          description: 按角色分组计数（freshman / member / manager / lecturer / admin），不含已注销账户
           additionalProperties:
             type: integer
         by_state:
@@ -4004,7 +4016,8 @@ components:
           type: object
           description: |
             资料未补全（profile_needs_completion = true）且角色 ∉ {lecturer, admin}
-            的未注销账户，按角色分组。是 by_role 的子集而非独立桶：前端从对应真实桶
+            的未注销账户，按角色分组——manager 是学生角色账号，计入该桶
+            （部长与所辖成员一样是资料补全跟进对象）。是 by_role 的子集而非独立桶：前端从对应真实桶
             减去后合并成一个「未补全」扇区，total 不变。
           additionalProperties:
             type: integer
@@ -4186,8 +4199,8 @@ components:
     AdminUserItem:
       type: object
       description: >-
-        列表项。`phone_number` 仅 admin 视角返回；lecturer 视角该字段不存在
-        （既不 null 也不空串）。`qq_number` 对所有角色返回。
+        列表项。`phone_number` 仅 admin 与 manager 视角返回；lecturer 视角该字段
+        不存在（既不 null 也不空串）。`qq_number` 对所有角色返回。
       properties:
         id:
           type: integer
@@ -4210,7 +4223,7 @@ components:
           $ref: "#/components/schemas/EmailType"
         phone_number:
           type: string
-          description: 手机号。仅 admin 视角返回，lecturer 视角无此字段。
+          description: 手机号。admin 与 manager 视角返回，lecturer 视角无此字段。
         qq_number:
           type: string
           description: QQ 号。所有角色可见。
@@ -4674,9 +4687,9 @@ components:
         phone_number:
           type: string
           description: >-
-            手机号。管理接口（GET /admin/users/{id}、/admin/users/batch）中仅 admin
-            视角返回，lecturer 视角该字段不存在；自服务接口（GET /user/profile、
-            PUT /user/profile）始终返回本人手机号。
+            手机号。管理接口（GET /admin/users/{id}、/admin/users/batch）中 admin
+            与 manager 视角返回，lecturer 视角该字段不存在；自服务接口
+            （GET /user/profile、PUT /user/profile）始终返回本人手机号。
         qq_number:
           type: string
           description: QQ 号。所有角色可见。
@@ -4995,8 +5008,8 @@ components:
           $ref: "#/components/schemas/UserState"
           description: >-
             缺省由自动状态机推导（role + 学号入学年份 + 当前学年：毕业生学号旧 →
-            retired_sast，在校 lecturer/admin → on_sast，在校 freshman/member →
-            njupter）。显式传值则作为钉住值写入，该账号跳过自动推导与清算批次。
+            retired_sast，在校 lecturer/admin → on_sast，在校 freshman/member/
+            manager → njupter）。显式传值则作为钉住值写入，该账号跳过自动推导与清算批次。
             不接受 is_deleted。
     AdminCreateUserResponse:
       type: object
@@ -5631,7 +5644,7 @@ components:
               summary: no_permission
               value:
                 code: 40300
-                message: 无权限（需 admin / lecturer 角色）
+                message: 无权限（需 admin / manager / lecturer 角色）
                 data: null
             third_party_token:
               summary: third_party_token（第三方 token 打内部接口）

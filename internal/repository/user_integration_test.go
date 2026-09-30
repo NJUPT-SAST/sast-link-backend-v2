@@ -784,7 +784,7 @@ func TestAdminUserUpdateBindsPersonalEmail(t *testing.T) {
 	t.Run("binds and survives a field-only empty columns path", func(t *testing.T) {
 		email := "alumni.rescue@example.com"
 		_, sessionsRevoked, err := users.UpdateAdminUser(ctx, user.ID,
-			repository.AdminUserUpdate{PersonalEmail: &email}, time.Now().UTC())
+			repository.AdminUserUpdate{PersonalEmail: &email}, model.UserRoleAdmin, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("UpdateAdminUser(personal email only) error = %v", err)
 		}
@@ -809,7 +809,7 @@ func TestAdminUserUpdateBindsPersonalEmail(t *testing.T) {
 		_, _, err := users.UpdateAdminUser(ctx, user.ID, repository.AdminUserUpdate{
 			Name:          &name,
 			PersonalEmail: &email,
-		}, time.Now().UTC())
+		}, model.UserRoleAdmin, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("UpdateAdminUser(name + personal email) error = %v", err)
 		}
@@ -831,7 +831,7 @@ func TestAdminUserUpdateBindsPersonalEmail(t *testing.T) {
 		// trigger's unnamed P0001.
 		third := "alumni.rescue3@example.com"
 		_, _, err := users.UpdateAdminUser(ctx, user.ID,
-			repository.AdminUserUpdate{PersonalEmail: &third}, time.Now().UTC())
+			repository.AdminUserUpdate{PersonalEmail: &third}, model.UserRoleAdmin, time.Now().UTC())
 		if !errors.Is(err, repository.ErrIdentityLimitExceeded) {
 			t.Fatalf("third bind error = %v, want ErrIdentityLimitExceeded", err)
 		}
@@ -847,11 +847,11 @@ func TestAdminUserUpdateBindsPersonalEmail(t *testing.T) {
 		}
 		email := "alumni.rescue.fresh@example.com"
 		if _, _, err := users.UpdateAdminUser(ctx, fresh.ID,
-			repository.AdminUserUpdate{PersonalEmail: &email}, time.Now().UTC()); err != nil {
+			repository.AdminUserUpdate{PersonalEmail: &email}, model.UserRoleAdmin, time.Now().UTC()); err != nil {
 			t.Fatalf("first bind on fresh user error = %v", err)
 		}
 		_, _, err := users.UpdateAdminUser(ctx, fresh.ID,
-			repository.AdminUserUpdate{PersonalEmail: &email}, time.Now().UTC())
+			repository.AdminUserUpdate{PersonalEmail: &email}, model.UserRoleAdmin, time.Now().UTC())
 		if err == nil {
 			t.Fatal("second bind of the same address error = nil")
 		}
@@ -866,7 +866,7 @@ func TestAdminUserUpdateBindsPersonalEmail(t *testing.T) {
 			t.Fatalf("create fresh user: %v", err)
 		}
 		_, _, err := users.UpdateAdminUser(ctx, fresh.ID,
-			repository.AdminUserUpdate{PersonalEmail: &fresh.LoginEmail}, time.Now().UTC())
+			repository.AdminUserUpdate{PersonalEmail: &fresh.LoginEmail}, model.UserRoleAdmin, time.Now().UTC())
 		if err == nil {
 			t.Fatal("binding a login email error = nil")
 		}

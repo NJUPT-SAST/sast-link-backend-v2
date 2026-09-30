@@ -86,6 +86,7 @@ func (f *fakeUsers) UpdateAdminUser(
 	_ context.Context,
 	userID int64,
 	update repository.AdminUserUpdate,
+	_ model.UserRole,
 	_ time.Time,
 ) ([]model.BlacklistEntry, bool, error) {
 	f.updateCalls++
@@ -109,6 +110,7 @@ func (f *fakeUsers) UpdateAdminUser(
 func (f *fakeUsers) SoftDeleteAndRevokeSessions(
 	_ context.Context,
 	userID int64,
+	_ model.UserRole,
 	_ time.Time,
 ) ([]model.BlacklistEntry, error) {
 	f.deleteCalls++
@@ -119,7 +121,7 @@ func (f *fakeUsers) SoftDeleteAndRevokeSessions(
 	return f.deleteEntries, nil
 }
 
-func (f *fakeUsers) RestoreUser(_ context.Context, userID int64, _ time.Time) error {
+func (f *fakeUsers) RestoreUser(_ context.Context, userID int64, _ model.UserRole, _ time.Time) error {
 	f.restoredUserID = userID
 	return f.restoreErr
 }
@@ -287,8 +289,11 @@ func updateInput(mutate func(*UpdateUserInput)) UpdateUserInput {
 	input := UpdateUserInput{
 		UserID:      testTargetID,
 		AdminUserID: testAdminID,
-		ClientIP:    testClientIP,
-		UserAgent:   testUserAgent,
+		// Existing cases exercise the administrator's view; the manager boundary
+		// has its own cases that override this through the mutate hook.
+		AdminRole: string(model.UserRoleAdmin),
+		ClientIP:  testClientIP,
+		UserAgent: testUserAgent,
 	}
 	if mutate != nil {
 		mutate(&input)
@@ -300,6 +305,7 @@ func targetInput() TargetUserInput {
 	return TargetUserInput{
 		UserID:      testTargetID,
 		AdminUserID: testAdminID,
+		AdminRole:   string(model.UserRoleAdmin),
 		ClientIP:    testClientIP,
 		UserAgent:   testUserAgent,
 	}

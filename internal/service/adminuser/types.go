@@ -34,19 +34,23 @@ type UserRepository interface {
 	// UpdateAdminUser decides for itself whether the edit demotes an administrator,
 	// from the row locked inside its transaction. It takes no flag for that: a
 	// caller's comparison reads from before the transaction and could let a demotion
-	// commit unguarded and unrevoked.
+	// commit unguarded and unrevoked. callerRole is re-judged the same way — a
+	// non-admin caller is refused on an admin's row and on an admin-role grant
+	// under the same lock.
 	UpdateAdminUser(
 		ctx context.Context,
 		userID int64,
 		update repository.AdminUserUpdate,
+		callerRole model.UserRole,
 		revokedAt time.Time,
 	) (entries []model.BlacklistEntry, sessionsRevoked bool, err error)
 	SoftDeleteAndRevokeSessions(
 		ctx context.Context,
 		userID int64,
+		callerRole model.UserRole,
 		revokedAt time.Time,
 	) ([]model.BlacklistEntry, error)
-	RestoreUser(ctx context.Context, userID int64, now time.Time) error
+	RestoreUser(ctx context.Context, userID int64, callerRole model.UserRole, now time.Time) error
 	// Stats returns the aggregate account counts for the console overview.
 	Stats(ctx context.Context) (repository.UserStats, error)
 	// NamesByIDs returns display names for the given user ids.
@@ -173,6 +177,12 @@ type UpdateUserInput struct {
 	// AdminUserID is the authenticated administrator, for the audit trail and for
 	// the self-demotion guard.
 	AdminUserID int64
+	// AdminRole is the caller's role as the role gate read it from the database
+	// row. Only the literal "admin" unlocks the admin-only writes inside these
+	// use cases (touching an admin's account, granting the admin role); empty or
+	// any other value falls to the restricted branch, so a wiring slip can only
+	// narrow a manager's reach, never widen it.
+	AdminRole string
 	// ActorClientID is the azp of the token that authorized this call. Empty means a
 	// console session, which the audit records as ConsoleClientID.
 	ActorClientID string
@@ -194,6 +204,9 @@ type UpdateUserResult struct {
 type TargetUserInput struct {
 	UserID      int64
 	AdminUserID int64
+	// AdminRole is the caller's role; only "admin" may close or reopen an
+	// administrator's account. See UpdateUserInput.AdminRole.
+	AdminRole string
 	// ActorClientID is the azp of the token that authorized this call. Empty means a
 	// console session, which the audit records as ConsoleClientID.
 	ActorClientID string
@@ -218,6 +231,9 @@ type UpdateUserRolesInput struct {
 	// the self-demotion guard (an administrator cannot change their own role
 	// through the batch either).
 	AdminUserID int64
+	// AdminRole is the caller's role; only "admin" may target an administrator's
+	// account or grant the admin role. See UpdateUserInput.AdminRole.
+	AdminRole string
 	// ActorClientID is the azp of the token that authorized this call. Empty means a
 	// console session, which the audit records as ConsoleClientID.
 	ActorClientID string
@@ -354,6 +370,9 @@ type CreateUserInput struct {
 	PersonalEmail *string
 	// AdminUserID is the authenticated administrator, for the audit trail.
 	AdminUserID int64
+	// AdminRole is the caller's role; only "admin" may provision an account
+	// with the admin role. See UpdateUserInput.AdminRole.
+	AdminRole string
 	// ActorClientID is the azp of the token that authorized the call. Empty means a
 	// console session, which the audit records as ConsoleClientID.
 	ActorClientID string

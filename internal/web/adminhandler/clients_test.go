@@ -123,7 +123,7 @@ func testGates(requireAuth gin.HandlerFunc) Gates {
 	allow := func(c *gin.Context) { c.Next() }
 	return Gates{
 		RequireAuth: requireAuth, RequireReadScope: allow, RequireWriteScope: allow,
-		RequireAdmin: allow, RequireReader: allow,
+		RequireAdmin: allow, RequireReader: allow, RequireUserWriter: allow,
 	}
 }
 
