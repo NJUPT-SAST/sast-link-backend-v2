@@ -10,7 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **manager 不再可绑定 personal_email**（fix/manager-personal-email-bind）：`POST /admin/users` 与 `PUT /admin/users/:id` 的 `personal_email` 直绑改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可绑定 personal_email」）。直绑是免验证的身份断言：绑定后控制该邮箱即可登录并重置账号密码，manager 若能自选邮箱即可绑定自己控制的邮箱对任意成员账号构成持久静默接管（成员改密也不切断）；建号路径同理，绑定比初始密码存活得更久。自助面 `POST /user/identities/email`（需邮箱验证）不受影响，admin 直绑与校友工单审批直绑（本就 admin-only）不变。
+- **manager 不再可改写既有账号的 login_email**（fix/admin-identity-boundaries）：`PUT /admin/users/:id` 的 `login_email` 改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可修改 login_email」），`email_type` 只能随 `login_email` 提交放带受限。与 personal_email 同判：忘记密码验证码发往 login_email 且 `@sast.fun` 前缀无格式约束，manager 把成员主邮箱改写为自己可读的 sast.fun 地址（部门共用箱/别名，唯一约束只挡精确重复）即构成对既有账号的静默持久接管。建号路径（`POST /admin/users`）不拦——manager 建号本就持有初始密码，无额外提权。
+
+- **manager 不再可绑定 personal_email**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的 `personal_email` 直绑改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可绑定 personal_email」）。直绑是免验证的身份断言：绑定后控制该邮箱即可登录并重置账号密码，manager 若能自选邮箱即可绑定自己控制的邮箱对任意成员账号构成持久静默接管（成员改密也不切断）；建号路径同理，绑定比初始密码存活得更久。自助面 `POST /user/identities/email`（需邮箱验证）不受影响，admin 直绑与校友工单审批直绑（本就 admin-only）不变。
+
+### Fixed
+
+- **管理台学号占用判定补齐大小写折叠**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的学号占用预检改为 `lower(btrim())` 折叠比较（新增 `ExistsByStudentIDExcluding`，排除目标自身行），返回 `40902`。V001 的 `user_student_id_key` 约束在默认 collation 下大小写敏感，此前 `b24040525` 可在 `B24040525` 旁再建一号——正是注册与校友路径早已堵掉的导入期形状，控制台两条路一直漏着。折叠窗口内的并发（两个控制台同时建变体号）仍无数据库层硬保证，需表达式唯一索引才可彻底封死，本次按预检方案收敛。
 
 ### Added
 

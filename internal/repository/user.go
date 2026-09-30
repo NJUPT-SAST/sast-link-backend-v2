@@ -389,6 +389,26 @@ func (r *UserRepository) ExistsByStudentID(ctx context.Context, studentID string
 	return count > 0, nil
 }
 
+// ExistsByStudentIDExcluding is ExistsByStudentID with one row left out, so an
+// edit can re-submit (or case-normalize) the target account's own student ID
+// without colliding against itself. Pass 0 to exclude nothing — the provision
+// path, where every existing row counts. Same folded comparison, because the
+// console's writes ride the same case-sensitive unique constraint the
+// registration and alumni paths guard against.
+func (r *UserRepository) ExistsByStudentIDExcluding(
+	ctx context.Context,
+	studentID string,
+	excludeUserID int64,
+) (bool, error) {
+	var count int64
+	if err := r.database.WithContext(ctx).Model(&model.User{}).
+		Where("lower(btrim(student_id)) = lower(btrim(?)) AND id <> ?", studentID, excludeUserID).
+		Count(&count).Error; err != nil {
+		return false, fmt.Errorf("count user by student id excluding %d: %w", excludeUserID, err)
+	}
+	return count > 0, nil
+}
+
 // ExistsAsEmailAnywhere reports whether the email is already used as a login
 // email or as an other_mail identity provider_id. Both columns are unique, so
 // this is the single pre-flight guard against the same address living in both

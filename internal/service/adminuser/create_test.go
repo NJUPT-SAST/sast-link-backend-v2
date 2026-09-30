@@ -344,3 +344,32 @@ func TestCreateUserManagerBoundary(t *testing.T) {
 		}
 	})
 }
+
+// The provision path guards student-id occupancy with the folded comparison,
+// because user_student_id_key is case-sensitive: a case-variant of an existing
+// ID must refuse to provision, the same B24040525/b24040525 shape the import
+// produced once and the registration and alumni paths already refuse.
+func TestCreateUserStudentIDOccupancyFoldsCase(t *testing.T) {
+	h := newHarness(t)
+	h.users.studentIDOwners = map[string]int64{"b24040525": 999}
+	input := createProbeInput()
+	input.StudentID = "B24040525"
+
+	_, err := h.service.CreateUser(context.Background(), input)
+
+	assertKind(t, err, KindConflict)
+	if h.users.createCalls != 0 {
+		t.Fatalf("create calls = %d, want no write", h.users.createCalls)
+	}
+	assertAudited(t, h, actionCreateUser, false, errcode.CodeStudentIDOccupied)
+
+	// A genuinely free id still provisions — the folded pre-check must not
+	// refuse an untouched namespace.
+	h2 := newHarness(t)
+	if _, err := h2.service.CreateUser(context.Background(), createProbeInput()); err != nil {
+		t.Fatalf("CreateUser(free id): %v", err)
+	}
+	if h2.users.createCalls != 1 {
+		t.Fatalf("create calls = %d, want the write through", h2.users.createCalls)
+	}
+}

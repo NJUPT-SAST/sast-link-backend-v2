@@ -2546,7 +2546,11 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 50
-                  description: 学号（不可传空串）
+                  description: |
+                    学号（不可传空串）。占用判定不区分大小写与首尾空白
+                    （lower(btrim())）：b24040525 与 B24040525 视为同一学号，
+                    避免在既有账号旁开立变体重复号；本账号自身的学号
+                    （含仅大小写归一）不算冲突。
                 role:
                   $ref: "#/components/schemas/UserRole"
                   description: |
@@ -2577,7 +2581,10 @@ paths:
                   maxLength: 255
                   description: |
                     登录邮箱。域名限 @njupt.edu.cn / @sast.fun，会被规范化为小写；
-                    修改后触发器 auto_set_email_type 自动重算 email_type。
+                    修改后触发器 auto_set_email_type 自动重算 email_type。仅 admin
+                    角色可修改（403）：忘记密码验证码发往该地址且 @sast.fun 前缀
+                    无格式约束，manager 改写即接管原语；email_type 只能随本字段
+                    提交，连带同样受限。建号路径不受限（manager 本就持有初始密码）。
                 personal_email:
                   type: string
                   format: email
@@ -4989,7 +4996,10 @@ components:
         student_id:
           type: string
           maxLength: 50
-          description: 学号（全库唯一）
+          description: |
+            学号（全库唯一，占用判定不区分大小写与首尾空白：
+            b24040525 与 B24040525 视为同一学号，变体拼写不能在既有
+            账号旁开立重复号）
           example: B24040525
         login_email:
           type: string

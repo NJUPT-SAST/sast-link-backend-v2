@@ -36,6 +36,23 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 		}
 	}
 
+	// The student-id occupancy guard folds case and whitespace, unlike the
+	// user_student_id_key constraint: the previous database's import produced
+	// both B24040525 and b24040525 once already, and the registration and alumni
+	// paths guard the same way. Pass 0 — on the provision path every existing
+	// row counts.
+	studentIDTaken, existsErr := s.Users.ExistsByStudentIDExcluding(ctx, validated.studentID, 0)
+	if existsErr != nil {
+		internalErr := newError(ErrInternal, "查询学号占用情况失败", existsErr)
+		s.auditCreate(ctx, input, 0, false, errorCode(internalErr), attemptedCreateDetail(input))
+		return nil, internalErr
+	}
+	if studentIDTaken {
+		occupiedErr := newError(ErrStudentIDOccupied, "学号已被占用", nil)
+		s.auditCreate(ctx, input, 0, false, errorCode(occupiedErr), attemptedCreateDetail(input))
+		return nil, occupiedErr
+	}
+
 	var boundEmail *string
 	if validated.personalEmail != nil {
 		// A bound personal email becomes a login handle and a reset target, so it must
