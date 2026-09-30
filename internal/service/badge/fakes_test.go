@@ -28,12 +28,13 @@ func (f *fakeUserRepository) FindPublicCardByUserID(_ context.Context, userID in
 // fakeBadgeRepository mirrors the row semantics: one row per user, kept
 // across the sharing pause, keyed by both user id and badge key.
 type fakeBadgeRepository struct {
-	mu   sync.Mutex
-	rows map[int64]*model.Badge
+	mu       sync.Mutex
+	rows     map[int64]*model.Badge
+	versions map[int64]time.Time
 }
 
 func newFakeBadgeRepository() *fakeBadgeRepository {
-	return &fakeBadgeRepository{rows: make(map[int64]*model.Badge)}
+	return &fakeBadgeRepository{rows: make(map[int64]*model.Badge), versions: make(map[int64]time.Time)}
 }
 
 func (f *fakeBadgeRepository) Create(_ context.Context, badge *model.Badge) error {
@@ -57,16 +58,24 @@ func (f *fakeBadgeRepository) FindByUserID(_ context.Context, userID int64) (*mo
 	return nil, repository.ErrNotFound
 }
 
-func (f *fakeBadgeRepository) FindBadgeTarget(_ context.Context, badgeKey string) (*model.Badge, error) {
+func (f *fakeBadgeRepository) FindBadgeTarget(_ context.Context, badgeKey string) (*repository.BadgeTarget, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, row := range f.rows {
+	for userID, row := range f.rows {
 		if row.BadgeKey == badgeKey && row.DisabledAt == nil {
 			stored := *row
-			return &stored, nil
+			return &repository.BadgeTarget{Badge: stored, Version: f.versions[userID]}, nil
 		}
 	}
 	return nil, repository.ErrNotFound
+}
+
+// bumpVersion simulates a profile update: the next FindBadgeTarget returns a
+// fresh cache version, exactly what profile.updated_at does in production.
+func (f *fakeBadgeRepository) bumpVersion(userID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.versions[userID] = f.versions[userID].Add(time.Second)
 }
 
 func (f *fakeBadgeRepository) DeleteByUserID(_ context.Context, userID int64) (bool, error) {

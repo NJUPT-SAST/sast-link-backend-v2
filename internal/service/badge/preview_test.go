@@ -29,7 +29,7 @@ func TestWritePreviewFiles(t *testing.T) {
 		}
 	}
 	// The not-found card too.
-	if err := os.WriteFile(dir+"/badge-error.svg", renderErrorCard(), 0o600); err != nil { // #nosec G703 -- dev-only preview helper, dir is operator-controlled
+	if err := os.WriteFile(dir+"/badge-error.svg", renderErrorCard(ThemeAuto), 0o600); err != nil { // #nosec G703 -- dev-only preview helper, dir is operator-controlled
 		t.Fatalf("write error card: %v", err)
 	}
 }
