@@ -207,6 +207,22 @@ func TestManagerE2EBoundary(t *testing.T) {
 		}
 	})
 
+	t.Run("cannot rewrite the login email", func(t *testing.T) {
+		refused := h.do(t, http.MethodPut, "/admin/users/"+memberTarget, "application/json",
+			`{"login_email":"shared-box@sast.fun"}`)
+		if refused.Code != http.StatusForbidden {
+			t.Fatalf("login-email status = %d, want 403: %s", refused.Code, refused.Body.String())
+		}
+		if !strings.Contains(refused.Body.String(), "仅管理员可修改 login_email") {
+			t.Fatalf("missing login-email refusal: %s", refused.Body.String())
+		}
+		var login string
+		if err := h.database.Model(&model.User{}).Where("id = ?", createdBody.Data.ID).
+			Pluck("login_email", &login).Error; err != nil || login != "b24040321@njupt.edu.cn" {
+			t.Fatalf("login email after refusal = %q err = %v, want the original", login, err)
+		}
+	})
+
 	t.Run("cannot edit or close an admin account", func(t *testing.T) {
 		var adminID int64
 		if err := h.database.Model(&model.User{}).

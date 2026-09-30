@@ -132,6 +132,25 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		return nil, equalErr
 	}
 
+	// The student-id occupancy guard folds case and whitespace, unlike the
+	// user_student_id_key constraint it backs: a case-variant spelling of another
+	// account's ID would slip past the constraint exactly the way the import's
+	// B24040525/b24040525 pair once did. The target's own row is excluded, so
+	// re-submitting or case-normalizing its own ID is not a collision.
+	if validated.studentID != nil {
+		taken, takenErr := s.Users.ExistsByStudentIDExcluding(ctx, *validated.studentID, input.UserID)
+		if takenErr != nil {
+			internalErr := newError(ErrInternal, "查询学号占用情况失败", takenErr)
+			s.auditUpdate(ctx, input, false, errorCode(internalErr), nil)
+			return nil, internalErr
+		}
+		if taken {
+			occupiedErr := newError(ErrStudentIDOccupied, "学号已被占用", nil)
+			s.auditUpdate(ctx, input, false, errorCode(occupiedErr), nil)
+			return nil, occupiedErr
+		}
+	}
+
 	// The role-change test here exists only to refuse self-demotion outright; the
 	// repository re-judges the change against the locked row and arms the last-admin
 	// guard and the session revocation itself.
@@ -144,8 +163,9 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 	// The manager boundary: a manager may run every member-management write —
 	// promote to manager or lecturer included, self-replication is the point of
 	// the role — but never touch an admin's account, never grant the admin role,
-	// and never bind a personal email. Checked against the freshly loaded row, and
-	// the batch endpoint routes through here too, so it cannot bypass the boundary
+	// and never assert an identity onto an account (personal_email bind,
+	// login_email rewrite). Checked against the freshly loaded row, and the
+	// batch endpoint routes through here too, so it cannot bypass the boundary
 	// either.
 	if !callerIsAdmin(input.AdminRole) {
 		if current.Role == model.UserRoleAdmin {
@@ -158,15 +178,21 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 			s.auditUpdate(ctx, input, false, errorCode(grantErr), nil)
 			return nil, grantErr
 		}
-		// A bound personal email is an identity assertion the administrator answers
-		// for, not a field edit: the address becomes a login handle and a reset
-		// target with no mailbox verification, so a manager who could pick it could
-		// bind a mailbox they control and reset this account's password through it
-		// long after the member has set their own.
+		// A login-email rewrite is the same unverified identity assertion as a
+		// personal-email bind, aimed at the primary identifier: the reset flow
+		// delivers to login_email, and @sast.fun local parts are free-form, so a
+		// manager rewriting a member's address to a mailbox they read (a shared
+		// or aliased sast.fun box — uniqueness only blocks exact reuse) owns the
+		// account from then on, surviving the member setting a new password.
 		if validated.personalEmail != nil {
 			bindErr := newError(ErrProtected, "仅管理员可绑定 personal_email", nil)
 			s.auditUpdate(ctx, input, false, errorCode(bindErr), nil)
 			return nil, bindErr
+		}
+		if validated.loginEmail != nil {
+			loginErr := newError(ErrProtected, "仅管理员可修改 login_email", nil)
+			s.auditUpdate(ctx, input, false, errorCode(loginErr), nil)
+			return nil, loginErr
 		}
 	}
 
