@@ -199,15 +199,18 @@ func (c *LarkClient) fetchAppAccessToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encode lark app_access_token request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, larkAppAccessTokenURL,
-		bytes.NewReader(payload))
-	if err != nil {
-		return "", fmt.Errorf("build lark app_access_token request: %w", err)
+	buildRequest := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, larkAppAccessTokenURL,
+			bytes.NewReader(payload))
+		if err != nil {
+			return nil, fmt.Errorf("build lark app_access_token request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+		return req, nil
 	}
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
 	var response larkAppAccessTokenResponse
-	if err := doJSON(ctx, c.client, req, "lark app_access_token", &response); err != nil {
+	if err := doJSONRetry(ctx, c.client, buildRequest, "lark app_access_token", &response); err != nil {
 		return "", err
 	}
 	if response.Code != 0 {
@@ -254,16 +257,19 @@ func (c *LarkClient) exchangeCode(ctx context.Context, appToken, code, redirectU
 	if err != nil {
 		return nil, fmt.Errorf("encode lark token request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, larkUserTokenURL,
-		bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("build lark token request: %w", err)
+	buildTokenRequest := func() (*http.Request, error) {
+		req, buildErr := http.NewRequestWithContext(ctx, http.MethodPost, larkUserTokenURL,
+			bytes.NewReader(payload))
+		if buildErr != nil {
+			return nil, fmt.Errorf("build lark token request: %w", buildErr)
+		}
+		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+		req.Header.Set("Authorization", "Bearer "+appToken)
+		return req, nil
 	}
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("Authorization", "Bearer "+appToken)
 
 	var token larkUserTokenResponse
-	err = doJSON(ctx, c.client, req, "lark token exchange", &token)
+	err = doJSONRetry(ctx, c.client, buildTokenRequest, "lark token exchange", &token)
 	if err != nil {
 		// This endpoint reports a spent or forged code with a non-2xx status,
 		// which doJSON surfaces as ErrUnexpectedResponse. Reclassify it: the
@@ -285,14 +291,17 @@ func (c *LarkClient) exchangeCode(ctx context.Context, appToken, code, redirectU
 }
 
 func (c *LarkClient) fetchUserInfo(ctx context.Context, userAccessToken string) (*larkUserData, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, larkUserInfoURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build lark user_info request: %w", err)
+	buildUserRequest := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, larkUserInfoURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build lark user_info request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+userAccessToken)
+		return req, nil
 	}
-	req.Header.Set("Authorization", "Bearer "+userAccessToken)
 
 	var response larkUserInfoResponse
-	if err := doJSON(ctx, c.client, req, "lark fetch user_info", &response); err != nil {
+	if err := doJSONRetry(ctx, c.client, buildUserRequest, "lark fetch user_info", &response); err != nil {
 		return nil, err
 	}
 	if response.Code != 0 {
