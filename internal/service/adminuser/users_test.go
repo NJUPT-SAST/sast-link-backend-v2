@@ -931,6 +931,41 @@ func TestUpdateUserManagerBoundary(t *testing.T) {
 		}
 	})
 
+	t.Run("manager cannot bind a personal email", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.AdminRole = string(model.UserRoleManager)
+			input.PersonalEmail = stringPtr("manager-picked@qq.com")
+		}))
+
+		assertKind(t, err, KindProtected)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+		assertAudited(t, h, actionUpdateUser, false, errcode.CodeForbidden)
+	})
+
+	t.Run("admin binds a personal email through", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.PersonalEmail = stringPtr("rescue@qq.com")
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(admin binds): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
+		if h.users.updateInput.PersonalEmail == nil || *h.users.updateInput.PersonalEmail != "rescue@qq.com" {
+			t.Fatalf("personal email = %v, want rescue@qq.com passed down", h.users.updateInput.PersonalEmail)
+		}
+	})
+
 	t.Run("empty caller role falls to the restricted branch", func(t *testing.T) {
 		h := newHarness(t)
 		h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)

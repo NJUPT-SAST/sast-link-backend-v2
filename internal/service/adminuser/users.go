@@ -143,9 +143,10 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 
 	// The manager boundary: a manager may run every member-management write —
 	// promote to manager or lecturer included, self-replication is the point of
-	// the role — but never touch an admin's account and never grant the admin
-	// role. Checked against the freshly loaded row, and the batch endpoint routes
-	// through here too, so it cannot bypass the boundary either.
+	// the role — but never touch an admin's account, never grant the admin role,
+	// and never bind a personal email. Checked against the freshly loaded row, and
+	// the batch endpoint routes through here too, so it cannot bypass the boundary
+	// either.
 	if !callerIsAdmin(input.AdminRole) {
 		if current.Role == model.UserRoleAdmin {
 			adminTargetErr := newError(ErrProtected, "无权操作管理员账号", nil)
@@ -156,6 +157,16 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 			grantErr := newError(ErrProtected, "不可授予 admin 角色", nil)
 			s.auditUpdate(ctx, input, false, errorCode(grantErr), nil)
 			return nil, grantErr
+		}
+		// A bound personal email is an identity assertion the administrator answers
+		// for, not a field edit: the address becomes a login handle and a reset
+		// target with no mailbox verification, so a manager who could pick it could
+		// bind a mailbox they control and reset this account's password through it
+		// long after the member has set their own.
+		if validated.personalEmail != nil {
+			bindErr := newError(ErrProtected, "仅管理员可绑定 personal_email", nil)
+			s.auditUpdate(ctx, input, false, errorCode(bindErr), nil)
+			return nil, bindErr
 		}
 	}
 

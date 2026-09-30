@@ -2327,7 +2327,9 @@ paths:
         需 admin 或 manager 角色。委派调用需 `admin:write` scope。
         为无法自助注册的人员建号，例如已毕业成员（没有 sast.fun 邮箱且
         学生邮箱已不可用）。manager 调用时 role 不可为 admin（403）——
-        管理分层的下级不能制造上级。login_email 仅接受注册白名单域名
+        管理分层的下级不能制造上级；manager 亦不可提交 personal_email
+        （403）：直绑是免验证的身份断言，绑定后控制该邮箱即可重置账号
+        密码。login_email 仅接受注册白名单域名
         （@njupt.edu.cn / sast.fun），email_type 由服务端按域名派生；
         可选的 personal_email 在同一事务内直绑为 other_mail 登录身份，
         无需邮箱验证，绑定后可用于登录和密码重置，不可与 login_email
@@ -2585,6 +2587,8 @@ paths:
                     验证），绑定后可用于登录与密码重置——已有账号的救援通道。不可与
                     login_email 相同（含本次修改后的值），不得已被其他账号占用，且每
                     账号 other_mail 绑定总数不超过 2 个（40905）；不可对已注销用户绑定。
+                    仅 admin 角色可提交（403）：直绑是免验证的身份断言，绑定后控制
+                    该邮箱即可重置账号密码。
         required: true
       responses:
         "200":
@@ -5009,6 +5013,8 @@ components:
             可选。同一事务内直绑为 other_mail 登录身份，无需邮箱验证，
             绑定后可用于登录和密码重置。不可与 login_email 相同，
             也不得已被其他账号占用（作为主登录邮箱或已绑身份）。
+            仅 admin 角色可提交，manager 提交返回 403（40300）：直绑是
+            免验证的身份断言，绑定后控制该邮箱即可重置账号密码。
           example: zhangsan@qq.com
         role:
           $ref: "#/components/schemas/UserRole"

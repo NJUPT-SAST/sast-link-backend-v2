@@ -294,7 +294,8 @@ func TestCreateUserDerivesStateAndTracksPin(t *testing.T) {
 // The manager boundary on the provision path: a manager's writes stop short of
 // the admin role. The default (member) and every other role are within reach,
 // so a manager can staff a department — including appointing another manager —
-// but never manufacture an administrator.
+// but never manufacture an administrator, and never pick the mailbox an
+// account's password resets would later go to.
 func TestCreateUserManagerBoundary(t *testing.T) {
 	t.Run("manager cannot provision an admin", func(t *testing.T) {
 		h := newHarness(t)
@@ -309,6 +310,21 @@ func TestCreateUserManagerBoundary(t *testing.T) {
 		if h.users.createCalls != 0 {
 			t.Fatalf("create calls = %d, want no write", h.users.createCalls)
 		}
+	})
+
+	t.Run("manager cannot bind a personal email", func(t *testing.T) {
+		h := newHarness(t)
+		input := createProbeInput()
+		input.AdminRole = string(model.UserRoleManager)
+		input.PersonalEmail = stringPtr("manager-picked@qq.com")
+
+		_, err := h.service.CreateUser(context.Background(), input)
+
+		assertKind(t, err, KindProtected)
+		if h.users.createCalls != 0 {
+			t.Fatalf("create calls = %d, want no write", h.users.createCalls)
+		}
+		assertAudited(t, h, actionCreateUser, false, errcode.CodeForbidden)
 	})
 
 	t.Run("manager may provision a manager", func(t *testing.T) {
