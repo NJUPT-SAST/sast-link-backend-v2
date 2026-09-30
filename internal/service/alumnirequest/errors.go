@@ -77,7 +77,12 @@ func (e *Error) Is(target error) bool {
 var (
 	ErrInvalidInput = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
 	ErrEmailDomain  = &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed}
-	ErrNotFound     = &Error{Kind: KindNotFound, Code: errcode.CodeAlumniRequestNotFound}
+	// ErrEmailPrefix is an @njupt.edu.cn address whose local part is not the
+	// student-ID shape (one letter + eight digits, or eight digits); @sast.fun
+	// stays free-form. Same rule as registration and admin provisioning, so it
+	// shares CodeNjuptEmailPrefixNotAllowed.
+	ErrEmailPrefix = &Error{Kind: KindInvalidInput, Code: errcode.CodeNjuptEmailPrefixNotAllowed}
+	ErrNotFound    = &Error{Kind: KindNotFound, Code: errcode.CodeAlumniRequestNotFound}
 	// ErrEmailOccupied reuses the console's CodeEmailAlreadyRegistered rather than
 	// taking a code of its own: the outcome a client must handle is identical, and
 	// two codes for one observable outcome is drift waiting to happen.

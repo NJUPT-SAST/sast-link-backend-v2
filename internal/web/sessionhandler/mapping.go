@@ -28,6 +28,8 @@ func mapServiceError(err error) error {
 		message = errcode.Messages[errcode.CodeVerificationCodeExpired]
 	case errcode.CodeEmailDomainNotAllowed:
 		message = errcode.Messages[errcode.CodeEmailDomainNotAllowed]
+	case errcode.CodeNjuptEmailPrefixNotAllowed:
+		message = errcode.Messages[errcode.CodeNjuptEmailPrefixNotAllowed]
 	case errcode.CodeEmailAlreadyRegistered:
 		message = errcode.Messages[errcode.CodeEmailAlreadyRegistered]
 	case errcode.CodeStudentIDOccupied:

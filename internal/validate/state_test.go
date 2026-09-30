@@ -79,6 +79,9 @@ func TestDeriveState(t *testing.T) {
 		// Student roles with a recent enrollment year are njupter.
 		{"freshman current year", model.UserRoleFreshman, "B26040525", retirementBoundary, model.UserStateNJUPTer, false},
 		{"member current year", model.UserRoleMember, "B26040525", retirementBoundary, model.UserStateNJUPTer, false},
+		// A manager is a student-role account: the department head derives like the
+		// members it manages, so the completion follow-up buckets cover it too.
+		{"manager current year", model.UserRoleManager, "B26040525", retirementBoundary, model.UserStateNJUPTer, false},
 		// Staff roles with a recent enrollment year are on_sast.
 		{"lecturer current year", model.UserRoleLecturer, "B26040525", retirementBoundary, model.UserStateOnSAST, false},
 		{"admin current year", model.UserRoleAdmin, "B26040525", retirementBoundary, model.UserStateOnSAST, false},

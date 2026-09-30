@@ -7,6 +7,7 @@
 CREATE TYPE user_role_enum AS ENUM (
     'freshman',   -- 大一新生
     'member',     -- 正式成员（大一过 woc/soc/面试）
+    'manager',    -- 部长（V020 新增：成员管理半边，不接触技术信息）
     'lecturer',   -- 讲师
     'admin'       -- 管理员
 );

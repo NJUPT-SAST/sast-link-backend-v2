@@ -161,6 +161,7 @@ func setupDelegated(t *testing.T) *delegatedHarness {
 		RequireWriteScope: authenticator.RequireDelegatedScope(adminhandler.WriteScopes...),
 		RequireAdmin:      authenticator.RequireRole(adminhandler.AdminRole),
 		RequireReader:     authenticator.RequireRole(adminhandler.ReaderRoles...),
+		RequireUserWriter: authenticator.RequireRole(adminhandler.UserWriterRoles...),
 	})
 
 	return &delegatedHarness{

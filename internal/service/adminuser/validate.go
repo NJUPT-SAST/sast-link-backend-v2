@@ -220,6 +220,9 @@ func validateLoginEmail(raw *string) (*string, error) {
 	if !validate.IsLoginEmailDomain(email) {
 		return nil, newError(ErrInvalidInput, "login_email 域名不允许", nil)
 	}
+	if !validate.IsNjuptEmailLocalAllowed(email) {
+		return nil, newError(ErrEmailPrefix, "邮箱前缀格式错误", nil)
+	}
 	return &email, nil
 }
 
@@ -281,7 +284,8 @@ func validateUpdatePersonalEmail(raw, newLoginEmail *string) (*string, error) {
 
 func validRole(role model.UserRole) bool {
 	switch role {
-	case model.UserRoleFreshman, model.UserRoleMember, model.UserRoleLecturer, model.UserRoleAdmin:
+	case model.UserRoleFreshman, model.UserRoleMember, model.UserRoleManager,
+		model.UserRoleLecturer, model.UserRoleAdmin:
 		return true
 	default:
 		return false

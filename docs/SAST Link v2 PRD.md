@@ -31,8 +31,8 @@ SAST Link 是南京邮电大学校大学生科学技术协会（SAST）的统一
 
 | 模块 | 功能 | 角色要求 |
 | ------ | ------ | ---------- |
-| 用户管理 | 用户列表（分页/筛选/搜索）、查看详情、编辑信息、创建账号（可直绑个人邮箱为登录身份）、软删除、恢复已注销用户 | admin / lecturer（只读）；admin（写） |
-| OAuth 客户端管理 | 注册/查看/更新/停用 OAuth 客户端 | admin |
+| 用户管理 | 用户列表（分页/筛选/搜索）、查看详情、编辑信息、创建账号（可直绑个人邮箱为登录身份）、软删除、恢复已注销用户 | admin / manager / lecturer（读，lecturer 无 phone 视角）；admin / manager（写；manager 不可写 admin 角色账号、不可授予 admin 角色，其余升降权含 manager/lecturer 均可） |
+| OAuth 客户端管理 | 注册/查看/更新/停用 OAuth 客户端 | admin（manager 不接触技术信息） |
 | 审计日志 | 分页查询，按用户/操作/时间/成功状态筛选 | admin |
 | 限流与防刷 | 全局 + 按端点 + 按 IP 的多级限流中间件 | — |
 | 头像内容审核 | 接入腾讯云 COS 内容审核（已实现，`STORAGE_AUDIT_ENABLED` 默认开启） | — |
@@ -285,8 +285,8 @@ Body: { "password": "current_password" }
 
 | 表 | 字段 | 可修改途径 |
 | ---- | ------ | ----------- |
-| `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin） |
-| `user` | login_email, role, state, email_type | 仅 `PUT /admin/users/:id`（admin） |
+| `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号） |
+| `user` | login_email, role, state, email_type | `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号或授予 admin） |
 | `profile` | nickname, department, intro, email, blog_url, github_url | `PUT /user/profile`（本人，department 仅 software/media 有值可设） |
 | `profile` | avatar | `PUT /user/avatar`（multipart/form-data，≤1MB 且任一维 ≤4096，jpg/png/webp；前端压缩后上传） |
 
@@ -440,27 +440,29 @@ Payload: {
 
 | 端点 | 方法 | 角色 | 委派 scope | 说明 |
 | ------ | ------ | ------ | ------ | ------ |
-| `/admin/users` | GET | admin / lecturer | admin:read | 分页列表，支持按 role / state / department / student_id / keyword 筛选 |
-| `/admin/users` | POST | admin | admin:write | 创建账号（管理员建号）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份，无需邮箱验证；绑定后可用于登录和密码重置（见 §4.13）；role 缺省 member，state 缺省由自动状态机推导（role + 学号入学年份 + 当前学年），显式传 state 则钉住；系统生成随机初始密码，仅在响应中返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
-| `/admin/users/:id` | GET | admin / lecturer | admin:read | 用户详情（含 profile + identities） |
-| `/admin/users/:id` | PUT | admin | admin:write | 更新用户信息（含 role / state / state_auto / email_type） |
-| `/admin/users/:id` | DELETE | admin | admin:write | 软删除（state → is_deleted），级联撤销所有 token |
-| `/admin/users/:id/restore` | PUT | admin | admin:write | 恢复已注销用户：state 按自动状态机重新推导并解除钉住（注销时 is_deleted 覆盖了一切旧值，钉住无从保留；恢复即回到自动推导，需重新钉住者再提交一次 state） |
-| `/admin/users/batch` | GET | admin / lecturer | admin:read | 批量查询：`ids` 逗号分隔（≤100），按请求顺序返回详情（字段同 `/admin/users/:id`），缺失 id 缺席，重复 id 只返回一次 |
-| `/admin/users` | PUT | admin | admin:write | 批量改角色：`ids`（≤500，去重）+ `role`（同单条枚举），逐条独立执行并复用单条全部守卫（自查角色 / 最后一名管理员 / 已注销），响应逐条 `results`（success / reason），审计逐条 `admin_user_update` 且 detail 带 `batch: true` |
+| `/admin/users` | GET | admin / manager / lecturer | admin:read | 分页列表，支持按 role / state / department / student_id / keyword 筛选（phone 视角：admin / manager 返回，lecturer 无） |
+| `/admin/users` | POST | admin / manager | admin:write | 创建账号（管理员建号；manager 不可建 role=admin，403）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份，无需邮箱验证；绑定后可用于登录和密码重置（见 §4.13）；role 缺省 member，state 缺省由自动状态机推导（role + 学号入学年份 + 当前学年），显式传 state 则钉住；系统生成随机初始密码，仅在响应中返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
+| `/admin/users/:id` | GET | admin / manager / lecturer | admin:read | 用户详情（含 profile + identities） |
+| `/admin/users/:id` | PUT | admin / manager | admin:write | 更新用户信息（含 role / state / state_auto / email_type；manager 不可写 admin 角色账号、不可设 role=admin） |
+| `/admin/users/:id` | DELETE | admin / manager | admin:write | 软删除（state → is_deleted），级联撤销所有 token（manager 不可删 admin 角色账号） |
+| `/admin/users/:id/restore` | PUT | admin / manager | admin:write | 恢复已注销用户（manager 不可恢复 admin 角色账号）：state 按自动状态机重新推导并解除钉住（注销时 is_deleted 覆盖了一切旧值，钉住无从保留；恢复即回到自动推导，需重新钉住者再提交一次 state） |
+| `/admin/users/batch` | GET | admin / manager / lecturer | admin:read | 批量查询：`ids` 逗号分隔（≤100），按请求顺序返回详情（字段同 `/admin/users/:id`），缺失 id 缺席，重复 id 只返回一次 |
+| `/admin/users` | PUT | admin / manager | admin:write | 批量改角色：`ids`（≤500，去重）+ `role`（同单条枚举），逐条独立执行并复用单条全部守卫（自查角色 / 最后一名管理员 / 已注销 / manager 的 admin 边界），响应逐条 `results`（success / reason），审计逐条 `admin_user_update` 且 detail 带 `batch: true` |
 | `/admin/oauth-clients` | GET | admin | admin:read | 客户端列表 |
 | `/admin/oauth-clients` | POST | admin | admin:write | 注册新客户端（第三方返回 client_secret，第一方不返回） |
 | `/admin/oauth-clients/:id` | PUT | admin | admin:write | 更新客户端（名称/回调地址/授权模式/scope/启用状态；`client_id`/`client_secret`/`id`/`client_type` 不可改）。收窄 scope 或新授予能力 scope 会撤销该客户端存量 token，扩大 scope 不会（见 §4.12） |
 | `/admin/audit-logs` | GET | admin | admin:read | 分页查询，支持按 user_id / action / resource / success / actor_client_id / 时间范围 筛选；响应含 best-effort 的 `user_name` 显示名 |
-| `/admin/stats` | GET | admin | admin:read | 概览统计：账户聚合（total / by_role / by_state / by_department / no_department / incomplete_by_role / incomplete_by_state）+ 客户端数 + 最近审计 |
+| `/admin/stats` | GET | admin / manager | admin:read | 概览统计：账户聚合（total / by_role / by_state / by_department / no_department / incomplete_by_role / incomplete_by_state）；manager 仅用户聚合，客户端数与最近审计仅 admin 可见 |
 
-**管理面**：`/admin/*` 是管理本服务数据的端点组，只有携带 admin scope 的 token 且主体为 admin 角色时可达——admin scope 仅 `third_party`（机密客户端）可持有（§4.10）。角色门与 scope 门互不蕴含，缺任一均 `403`：角色门回答「这个用户是否被允许」（角色读数据库行，降权下一请求生效），scope 门回答「这个凭证是否被授权」——内置控制台 token 豁免 scope 门，其上限即角色门。「管理 scope」列中 `admin:read` 处 `admin:write` 亦可通行（写蕴含读）。
+**管理面**：`/admin/*` 是管理本服务数据的端点组，按端点分别要求 admin scope 与 admin / manager / lecturer 角色门；内置控制台 token 豁免 scope 门但仍检查角色——admin scope 仅 `third_party`（机密客户端）可持有（§4.10）。角色门与 scope 门互不蕴含，缺任一均 `403`：角色门回答「这个用户是否被允许」（角色读数据库行，降权下一请求生效），scope 门回答「这个凭证是否被授权」——内置控制台 token 豁免 scope 门，其上限即角色门。「管理 scope」列中 `admin:read` 处 `admin:write` 亦可通行（写蕴含读）。
 
 能力身份**只由注册表的 `scopes` 决定**：任何 `third_party` 客户端的注册持有 admin scope，其 token 即可到达 `/admin/*`。代码中不存在被硬编码的客户端名单——`scope.ContainsAll` 把可请求 scope 钉死在注册值内，而 `first_party` 无论注册值如何都拿不到 admin scope（§4.10），所以「token 携带 admin scope」本身就证明了「控制台为该注册授予过它」。授予是一次控制台操作（`POST`/`PUT /admin/oauth-clients`），不需要改代码或写迁移。
 
 授予由 `adminclient.checkCapabilityScopeGrant` 在注册与更新两扇门上把守：目标若是 `admin:*` 必须 `third_party`（公开客户端不得持有通往 `/admin` 的 scope）；发起请求的凭证必须是内置控制台客户端（能力客户端不能授予或维护其他能力客户端，否则能力集合会脱离运维批准自行增长）；不得与改写 `redirect_uris` 同请求完成。均基于**合并后的状态**判定而非本次提交的字段，否则「先授 scope、再单独改某个兄弟字段」的拆包写法即可绕过。refresh 允许——`/admin` 的角色门从数据库行读取主体角色，刷新一个 admin-scoped token 不会拓宽谁能用它（能力 family 受 `JWT_REFRESH_CAPABILITY_MAX_LIFETIME` 生命周期封顶，见 §4.10）。
 
-能力 token 的 `sub` 是用户本人，故权限上限始终是该用户角色——普通成员持 admin scope 被角色门拒绝，admin 角色用户才能让 admin scope 生效，降权下一请求即失效。收回是即时的：收窄 scope 或新授予能力 scope 都在同一事务内撤销该客户端存量 token，且 consent 与授权码兑换两处都会对活注册重新校验 scope，因此不留「已签发未兑换」的时间窗口。停用（`is_active = false`）仍是 kill switch，同一操作撤销其全部存活 token。
+`/admin` 面内部再按角色分三层：**lecturer** 只读用户目录（无 phone 视角）；**manager**（部长）拥有成员管理半边——用户读写与概览统计，但**不接触技术信息**（OAuth 客户端注册与密钥、审计日志、校友工单均 403），且在服务层被进一步约束：不可写 admin 角色账号、不可授予 admin 角色（含建号与批量，逐项拒绝），其余一切升降权（升 / 降 lecturer、manager——含把他人升为 manager 的自我复制）均可行；**admin** 不受限。manager 是学生角色账号：状态推导与资料补全跟进（`incomplete_by_role`）都把它当学生对待。
+
+能力 token 的 `sub` 是用户本人，故权限上限始终是该用户角色——普通成员持 admin scope 被角色门拒绝，admin / manager 角色用户才能让对应角色门放行，降权下一请求即失效。收回是即时的：收窄 scope 或新授予能力 scope 都在同一事务内撤销该客户端存量 token，且 consent 与授权码兑换两处都会对活注册重新校验 scope，因此不留「已签发未兑换」的时间窗口。停用（`is_active = false`）仍是 kill switch，同一操作撤销其全部存活 token。
 
 一个接入方（如 SAST People，注册为 `third_party` 机密客户端）用一个客户端即可承载全部能力：`{openid profile email user:* admin:*}` + refresh。普通用户经它自助读/改自己的资料，admin 角色用户经它查人/改角色/封禁——能力由 `/admin` 的角色门按 token 主体区分，无需拆客户端。第三方应用读当前登录用户只能经 `/userinfo`（§4.11）。
 
@@ -471,21 +473,22 @@ Payload: {
 - `RequireUserAuth`（`Authenticator.AuthenticateUserScoped`）无条件放行内置控制台 token，放行**任何携带 user scope 的 token**。不查客户端类型——`/user/*` 每个端点都只操作 token 主体本人的记录，应用持有 user scope 不会是查他人凭据，因此无需按客户端类型设限。「token 携带 user scope」即证明「该注册被授予过自助能力」。`user:read` 门禁读端点（`GET /user/profile`、`GET /user/identities`、`GET /user/devices`），`user:write` 门禁写端点（`PUT /user/profile`、`PUT /user/avatar`、身份绑定/解绑、`POST /auth/change-password`、`POST /auth/logout`、`DELETE /user/devices/:id`）；写蕴含读（`sessionhandler.ReadScopes` 接受两者），内置控制台 token 豁免两门。
 - 授予 user scope 是控制台动作（`POST`/`PUT /admin/oauth-clients`），`checkCapabilityScopeGrant` 把守：发起凭证必须是控制台；不得与改写 `redirect_uris` 同请求；**允许 `refresh_token`**（自助访问是会话，需要长期保活，与 admin scope 一致）。均基于合并后状态。user scope 不设客户端类型约束。
 - 收窄能力 scope 或新授予能力 scope 在同一事务内撤销该客户端存量 token，扩大不撤销。
-- **权限边界**：user scope 的 token 的 `sub` 是用户本人，所有 `/user/*` 端点都只操作该本人记录，不存在查他人视图；`sub` 的角色不参与 `/user/*` 的判定（自助是本人的事，与角色无关）。`/user/*` 与 `/admin/*` 的门禁分离：同一客户端可同时持有两组 scope，但 `user:*` 只开 `/user/*`、`admin:*` 只开 `/admin/*`，且 `/admin/*` 另有角色门（普通用户即使持 admin scope 也进不去）。管理员/讲师对他人数据的操作走 §4.12 的 admin 面（讲师可读列表，只有管理员可改）。
+- **权限边界**：user scope 的 token 的 `sub` 是用户本人，所有 `/user/*` 端点都只操作该本人记录，不存在查他人视图；`sub` 的角色不参与 `/user/*` 的判定（自助是本人的事，与角色无关）。`/user/*` 与 `/admin/*` 的门禁分离：同一客户端可同时持有两组 scope，但 `user:*` 只开 `/user/*`、`admin:*` 只开 `/admin/*`，且 `/admin/*` 另有角色门（普通用户即使持 admin scope 也进不去）。admin / manager / lecturer 对他人数据的操作走 §4.12 的 admin 面；lecturer 只读，manager 可管理非 admin 账号。
 
 `client_type` 不可通过更新接口修改：它同时决定客户端的凭据模型（是否持有 client_secret）与 admin scope 的可授予性（仅 `third_party` 可持有）。就地翻转类型而不同步 secret 会产出凭据模型与类型不符的客户端；需要换类型时重新注册一个客户端。
 
 #### 角色权限矩阵
 
-| 操作 | freshman | member | lecturer | admin |
-| ------ | ---------- | -------- | ---------- | ------- |
-| 本人信息读写 | ✓ | ✓ | ✓ | ✓ |
-| 绑定/解绑 | ✓ | ✓ | ✓ | ✓ |
-| 查看用户列表/详情 | — | — | ✓ | ✓ |
-| 编辑用户信息 | — | — | — | ✓ |
-| 注销/恢复用户 | — | — | — | ✓ |
-| 管理 OAuth 客户端 | — | — | — | ✓ |
-| 查看审计日志 | — | — | — | ✓ |
+| 操作 | freshman | member | lecturer | manager | admin |
+| ------ | ---------- | -------- | ---------- | ---------- | ------- |
+| 本人信息读写 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 绑定/解绑 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 查看用户列表/详情 | — | — | ✓（无 phone） | ✓（含 phone） | ✓ |
+| 编辑用户信息 / 创建账号 / 批量角色 | — | — | — | ✓（不可写 admin 账号、不可授 admin） | ✓ |
+| 注销/恢复用户 | — | — | — | ✓（不含 admin 账号） | ✓ |
+| 概览统计 | — | — | — | ✓（仅用户聚合） | ✓ |
+| 管理 OAuth 客户端 | — | — | — | — | ✓ |
+| 查看审计日志 | — | — | — | — | ✓ |
 
 **角色变更**：`PUT /admin/users/:id` 实际修改 `role` 时，必须在同一事务内递增 `user.token_version` 并撤销该用户的全部 token family。`role` 未变化或仅修改普通资料时，不递增 `token_version`。旧 Access Token 继续携带签发时的 `role`，但会因版本不匹配在认证阶段失效。另外角色鉴权本身读 DB `role`（见 §4.1「角色鉴权」），因此即使未递增 `token_version`，降权也在下一个请求立即生效。
 

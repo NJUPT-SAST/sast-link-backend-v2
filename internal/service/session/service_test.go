@@ -1785,6 +1785,41 @@ func TestSendRegisterCodeRejectsWhenEmailLimitExceeded(t *testing.T) {
 	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
 }
 
+// An @njupt.edu.cn mailbox is the student ID: one letter + eight digits, or bare
+// eight digits. The mailer must not be charged for an address the rule refuses,
+// so the check runs before the send.
+func TestSendRegisterCodeRejectsNonStudentNjuptPrefix(t *testing.T) {
+	service := newRegisterService(t)
+	_, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "xyz123@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeNjuptEmailPrefixNotAllowed)
+	if len(service.Mailer.(*fakeMailer).sent) != 0 {
+		t.Fatal("verification email was sent for a refused address")
+	}
+
+	// The same local part on @sast.fun is unconstrained.
+	service = newRegisterService(t)
+	if _, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: "xyz123@sast.fun", ClientIP: "127.0.0.1"}); err != nil {
+		t.Fatalf("SendRegisterCode(sast.fun free-form prefix) = %v, want acceptance", err)
+	}
+}
+
+// The V001 varchar(255) is the hard column width; the alumni and admin paths
+// already enforce it and the register flow used to leave it to the database.
+func TestSendRegisterCodeRejectsOverlongEmail(t *testing.T) {
+	service := newRegisterService(t)
+	email := strings.Repeat("a", 256) + "@sast.fun"
+	_, err := service.SendRegisterCode(context.Background(), SendRegisterCodeInput{Email: email})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+}
+
+// The prefix check runs ahead of code verification, so a refused address never
+// consumes the one-time code.
+func TestVerifyRegisterCodeRejectsNonStudentNjuptPrefix(t *testing.T) {
+	service := newRegisterService(t)
+	_, err := service.VerifyRegisterCode(context.Background(), VerifyRegisterCodeInput{Email: "xyz123@njupt.edu.cn", Code: "123456"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeNjuptEmailPrefixNotAllowed)
+}
+
 // Fail-closed stores (verification codes, tickets) must surface their outage as
 // dependency_unavailable (503), never as a bare internal error (500): the PRD
 // §6.0 policy rejects the request so the user can retry, while 500 would read
@@ -2161,7 +2196,13 @@ func TestRegisterWithoutOAuthPairCreatesNoIdentity(t *testing.T) {
 func TestRegisterRejectsExistingEmail(t *testing.T) {
 	service := newRegisterService(t)
 	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
-	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "user@njupt.edu.cn", time.Minute); err != nil {
+	// The colliding login email carries a student-ID-shaped prefix: an njupt
+	// address without one is refused by the prefix rule before the existence
+	// check, which is a different outcome than this test pins.
+	const taken = "b24040098@njupt.edu.cn"
+	users := service.Users.(*fakeUsers)
+	users.byLogin[taken] = &model.User{ID: 43, LoginEmail: taken}
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", taken, time.Minute); err != nil {
 		t.Fatalf("save register ticket: %v", err)
 	}
 
@@ -2200,6 +2241,30 @@ func TestRegisterRejectsEmailBoundAsOtherMailIdentity(t *testing.T) {
 		Major:          "CS",
 	})
 	assertKind(t, err, KindConflict, errcode.CodeEmailAlreadyRegistered)
+}
+
+// The Register-Ticket carries the address send-code already validated, but the
+// ticket store is the registration path's only input for the email: re-checking
+// keeps a stale or foreign ticket from minting an account with an off-rule
+// mailbox name.
+func TestRegisterRejectsNonStudentNjuptTicketEmail(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_xxx", "xyz123@njupt.edu.cn", time.Minute); err != nil {
+		t.Fatalf("save register ticket: %v", err)
+	}
+
+	_, err := service.Register(context.Background(), RegisterInput{
+		RegisterTicket: "reg_xxx",
+		Password:       "newpassword",
+		Name:           "张三",
+		StudentID:      "B24040099",
+		PhoneNumber:    "13800138000",
+		QQNumber:       "10000",
+		College:        string(model.CollegeOther),
+		Major:          "CS",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeNjuptEmailPrefixNotAllowed)
 }
 
 func TestRegisterRejectsShortPassword(t *testing.T) {

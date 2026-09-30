@@ -19,6 +19,12 @@ type statsClientSummary struct {
 // overview dashboard. Users is the authoritative leg and must be wired; Clients
 // and AuditLogs are optional and degrade to zeroed aggregates when nil, so the
 // endpoint stays up rather than 500ing over a best-effort view.
+//
+// The clients and audit legs carry the two technical surfaces (the OAuth
+// registry and the audit trail), so a manager — admitted to the overview for
+// its account aggregates — gets the users leg only: the keys are absent from
+// the response entirely, the same "not disclosed rather than empty" posture
+// the phone field uses.
 func (h Handler) Stats(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -28,6 +34,11 @@ func (h Handler) Stats(c *gin.Context) {
 		// is gone entirely.
 		slog.ErrorContext(ctx, "load overview user stats", "error", err)
 		response.Error(c, internalError())
+		return
+	}
+
+	if principalRole(c) != string(AdminRole) {
+		response.Ok(c, gin.H{"users": users})
 		return
 	}
 
