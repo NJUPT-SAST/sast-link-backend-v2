@@ -18,12 +18,39 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 		return nil, err
 	}
 	// The manager boundary on the provision path: creating an account is a write,
-	// and a manager's writes stop short of the admin role. The default (member)
-	// and every other role are within its reach.
-	if !callerIsAdmin(input.AdminRole) && validated.role == model.UserRoleAdmin {
-		refused := newError(ErrProtected, "不可授予 admin 角色", nil)
-		s.auditCreate(ctx, input, 0, false, errorCode(refused), attemptedCreateDetail(input))
-		return nil, refused
+	// and a manager's writes stop short of the admin role and of personal-email
+	// binding. The default (member) and every other role are within its reach; a
+	// bound address, however, outlives the initial password the manager already
+	// sees — once the member sets their own password, a manager-chosen other_mail
+	// would keep granting password resets through a mailbox the manager picked.
+	if !callerIsAdmin(input.AdminRole) {
+		if validated.role == model.UserRoleAdmin {
+			refused := newError(ErrProtected, "不可授予 admin 角色", nil)
+			s.auditCreate(ctx, input, 0, false, errorCode(refused), attemptedCreateDetail(input))
+			return nil, refused
+		}
+		if validated.personalEmail != nil {
+			refused := newError(ErrProtected, "仅管理员可绑定 personal_email", nil)
+			s.auditCreate(ctx, input, 0, false, errorCode(refused), attemptedCreateDetail(input))
+			return nil, refused
+		}
+	}
+
+	// The student-id occupancy guard folds case and whitespace, unlike the
+	// user_student_id_key constraint: the previous database's import produced
+	// both B24040525 and b24040525 once already, and the registration and alumni
+	// paths guard the same way. Pass 0 — on the provision path every existing
+	// row counts.
+	studentIDTaken, existsErr := s.Users.ExistsByStudentIDExcluding(ctx, validated.studentID, 0)
+	if existsErr != nil {
+		internalErr := newError(ErrInternal, "查询学号占用情况失败", existsErr)
+		s.auditCreate(ctx, input, 0, false, errorCode(internalErr), attemptedCreateDetail(input))
+		return nil, internalErr
+	}
+	if studentIDTaken {
+		occupiedErr := newError(ErrStudentIDOccupied, "学号已被占用", nil)
+		s.auditCreate(ctx, input, 0, false, errorCode(occupiedErr), attemptedCreateDetail(input))
+		return nil, occupiedErr
 	}
 
 	var boundEmail *string
