@@ -573,7 +573,7 @@ POST /auth/reset-password
 >
 > **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
 >
-> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`GET /oauth/{github,lark}/callback` 另有**独立**的 per-IP 配额（默认 120 次/60s，`RATE_LIMIT_OAUTH_CALLBACK_RPM`）：callback 是公开入口，扫描与 state 重放都打在这里，而 authorize 的配额管不到它，每次无效调用仍要读一次 state 并写一条审计。限流在读取 state **之前**生效，被限流的请求不消费 state、不写审计、不调用 provider。阈值刻意高于其他名额：出口 NAT 后每个用户每次登录只发一次 callback，配额定得太低会一次性锁死整个宿舍或社团；它刹住的是单一来源重放，**挡不住多 IP 分布式洪峰**——后者要靠边缘层，因为每个来源的成本本来就不高。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。三处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`GET /oauth/{github,lark}/callback` 另有**独立**的 per-IP 配额（默认 120 次/60s，`RATE_LIMIT_OAUTH_CALLBACK_RPM`）：callback 是公开入口，扫描与 state 重放都打在这里，而 authorize 的配额管不到它，每次无效调用仍要读一次 state 并写一条审计。限流在读取 state **之前**生效，被限流的请求不消费 state、不写审计、不调用 provider。阈值刻意高于其他名额：出口 NAT 后每个用户每次登录只发一次 callback，配额定得太低会一次性锁死整个宿舍或社团；它刹住的是单一来源重放，**挡不住多 IP 分布式洪峰**——后者要靠边缘层，因为每个来源的成本本来就不高。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。`POST /oauth/lark/app-code` 同样按 IP 限流（与 `RATE_LIMIT_OAUTH_CALLBACK_RPM` 同档、独立桶）：每次被接受的调用消耗一次飞书侧兑换与若干 Redis 写，与 callback 同成本，但两条入口互不挤兑。限流排在 provider 兑换之前，被限流的请求不触达 provider。四处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 >
 > **登录 CSRF 防护**（OAuth 2.0 §10.12）：`GET /oauth/{github,lark}` 响应同时下发 `sl_oauth_state` cookie（HttpOnly、SameSite=Lax、值为 `state` 的 SHA-256 摘要、Path/Secure 与 `sl_session` 相同、有效期与 state TTL 一致）。回调要求浏览器携带与 `state` 匹配的该 cookie，缺失或不匹配按 state 无效处理（重定向到错误页）；state 单次消费，回调结束后 cookie 即清除。
 
@@ -630,7 +630,79 @@ GET /oauth/lark/callback?code=...&state=...
 
 ---
 
-### 2.5 交换登录码
+### 2.5 飞书客户端内免登
+
+```
+POST /oauth/lark/app-code
+```
+
+飞书客户端内嵌网页（H5）的免登录入口。前端在飞书客户端内通过 JSSDK 调用 `tt.requestAccess`（客户端 <6.9.0 或 JSSDK 过旧时回退 `tt.requestAuthCode`）拿到一次性预授权 code（3 分钟、单次使用），POST 给本端点，后端兑换出用户身份后与 §2.4 回调走同一套分支与同一道租户闸门。普通浏览器不受影响：检测不到 `window.h5sdk` 时仍走 §2.3 授权页流程。
+
+**Request**:
+
+```json
+{
+  "code": "1d34ef4fdfdf12332fffd"
+}
+```
+
+**Response**（已绑定，`bound=true`）：字段与 §2.4 回调 302 的 query 参数一一对应，`login_code` 续走 §2.6 兑换会话。
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "bound": true,
+    "login_code": "lc_abc123...",
+    "provider": "lark"
+  }
+}
+```
+
+**Response**（未绑定，`bound=false`）：前端跳注册补全页，提交 `POST /auth/register` 时同时携带 `registration_state` 与 `oauth_state`（双绑定校验与 §2.4 相同；此处的 `oauth_state` 由本端点签发，无需前端另行获取）。`name`/`avatar` 为预填提示。
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "bound": false,
+    "registration_state": "rs_...",
+    "oauth_state": "os_...",
+    "provider": "lark",
+    "name": "张三",
+    "avatar": "https://..."
+  }
+}
+```
+
+**约束**：
+
+- 仅限 SAST 企业内飞书用户（`40302`），与 §2.4 同一租户闸门；`union_id` 与 §2.3/§2.4 一致，已有飞书绑定的账号在两条入口间互通，无需重复绑定
+- 预授权 code 被飞书拒绝（已使用/过期）→ `40000`「第三方授权码无效或已过期」
+- 注册补全仍受注册侧全部约束（邮箱域名白名单与前缀规则 `40020`/`40022` 等）
+- 按 IP 固定窗口限流：默认 120 次/60s（`RATE_LIMIT_OAUTH_CALLBACK_RPM` 同档配额、独立桶）
+
+**飞书侧前置配置**（非本服务代码）：同一自建应用加「网页应用」能力并配置桌面/移动端主页 URL；`tt.requestAccess` 传 `scopeList: []`（仅授予「获取登录用户信息」，无需新申请 API 权限）；`requestAccess`/`requestAuthCode` 无需网页应用鉴权（JSSDK 鉴权）。前端接入要点：
+
+```js
+if (window.h5sdk) {
+  window.h5sdk.ready(() => {
+    tt.requestAccess({
+      appID, scopeList: [],
+      success: ({code}) => api.post('/oauth/lark/app-code', {code}),
+      fail: ({errno}) => { if (errno === 103) callRequestAuthCode(); } // 旧客户端回退
+    });
+  });
+} else {
+  // 普通浏览器走 §2.3 GET /oauth/lark 授权页流程
+}
+```
+
+---
+
+### 2.6 交换登录码
 
 用 OAuth 回调中的一次性 `login_code` 换取 token。
 
@@ -691,7 +763,7 @@ POST /oauth/exchange-code
 | `profile_needs_completion` | `bool` | 仍有必填字段为空、超长、含控制字符，`name` 含字符集规则（汉字 + 间隔号）之外的值，或 `name` 等于 `student_id` |
 | `incomplete_fields` | `string[]` | 待补全的字段名，取值为 `name` / `phone_number` / `qq_number` / `major`；无待补全时为 `[]`（**不是** `null`） |
 
-**出现位置**：密码登录（§1.4）、完成注册（§1.3）、交换登录码（§2.5，GitHub / 飞书登录）的 `user` 对象，以及 `GET`/`PUT /user/profile`（§3.1 / §3.2）的顶层。登录响应就带着它，所以前端无需额外请求即可判定是否跳转补全页。
+**出现位置**：密码登录（§1.4）、完成注册（§1.3）、交换登录码（§2.6，GitHub / 飞书登录）的 `user` 对象，以及 `GET`/`PUT /user/profile`（§3.1 / §3.2）的顶层。登录响应就带着它，所以前端无需额外请求即可判定是否跳转补全页。
 
 **语义边界**：
 

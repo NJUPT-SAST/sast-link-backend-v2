@@ -28,6 +28,7 @@ import (
 type Service interface {
 	Authorize(ctx context.Context, input oauthlogin.AuthorizeInput) (*oauthlogin.AuthorizeResult, error)
 	Callback(ctx context.Context, input oauthlogin.CallbackInput) (*oauthlogin.CallbackResult, error)
+	AppCodeLogin(ctx context.Context, input oauthlogin.AppCodeLoginInput) (*oauthlogin.CallbackResult, error)
 	ExchangeCode(ctx context.Context, input oauthlogin.ExchangeCodeInput) (*oauthlogin.ExchangeCodeResult, error)
 	Bind(ctx context.Context, input oauthlogin.BindInput) (*oauthlogin.BindResult, error)
 }
@@ -101,6 +102,10 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	r.GET("/oauth/github/callback", h.callback(model.LoginMethodGitHub))
 	r.GET("/oauth/lark", h.authorize(model.LoginMethodLark))
 	r.GET("/oauth/lark/callback", h.callback(model.LoginMethodLark))
+	// The login-free entrance for pages embedded in the Feishu client: the
+	// page posts the JSAPI pre-authorization code instead of riding the
+	// authorize-page redirect.
+	r.POST("/oauth/lark/app-code", h.AppCodeLogin)
 	r.POST("/oauth/exchange-code", h.ExchangeCode)
 
 	// The binding routes name a write scope gate explicitly: a stolen token
@@ -248,6 +253,42 @@ func (h Handler) redirectFailure(c *gin.Context, err error) {
 // exchangeCodeRequest redeems a login_code.
 type exchangeCodeRequest struct {
 	Code string `json:"code" binding:"required"`
+}
+
+// appCodeRequest submits the Feishu client JSAPI pre-authorization code the
+// embedded web app obtained through tt.requestAccess / tt.requestAuthCode.
+type appCodeRequest struct {
+	Code string `json:"code" binding:"required"`
+}
+
+// AppCodeLogin redeems a Feishu client JSAPI pre-authorization code: the
+// login-free leg for pages opened inside the Feishu client. Unlike the
+// callback it answers in the envelope, because the caller is the page's own
+// fetch rather than a top-level navigation a redirect could serve.
+func (h Handler) AppCodeLogin(c *gin.Context) {
+	var request appCodeRequest
+	if err := webutil.DecodeStrictJSON(c, &request); err != nil {
+		response.Error(c, webutil.BadRequest())
+		return
+	}
+	result, err := h.Service.AppCodeLogin(c.Request.Context(), oauthlogin.AppCodeLoginInput{
+		Code:      request.Code,
+		ClientIP:  c.ClientIP(),
+		UserAgent: c.Request.UserAgent(),
+	})
+	if err != nil {
+		response.Error(c, mapServiceError(err))
+		return
+	}
+	response.Ok(c, appCodeLoginDTO{
+		Bound:             result.Bound,
+		LoginCode:         result.LoginCode,
+		RegistrationState: result.RegistrationState,
+		OAuthState:        result.OAuthState,
+		Provider:          result.Provider,
+		DisplayName:       result.DisplayName,
+		AvatarURL:         result.AvatarURL,
+	})
 }
 
 // ExchangeCode swaps a one-time login_code for a session.

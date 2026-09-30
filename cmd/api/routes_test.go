@@ -72,6 +72,7 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 		http.MethodGet + " /oauth/github/callback",
 		http.MethodGet + " /oauth/lark",
 		http.MethodGet + " /oauth/lark/callback",
+		http.MethodPost + " /oauth/lark/app-code",
 		http.MethodPost + " /oauth/exchange-code",
 		http.MethodPost + " /user/identities/github",
 		http.MethodPost + " /user/identities/lark",

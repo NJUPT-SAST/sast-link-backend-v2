@@ -17,7 +17,13 @@ const (
 	larkAuthorizeURL      = "https://open.feishu.cn/open-apis/authen/v1/authorize"
 	larkAppAccessTokenURL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal" // #nosec G101 // Public Lark endpoint URL, not a credential.
 	larkUserTokenURL      = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"             // #nosec G101 // Public Lark endpoint URL, not a credential.
-	larkUserInfoURL       = "https://open.feishu.cn/open-apis/authen/v1/user_info"
+	// larkOIDCTokenURL exchanges the login-free pre-authorization code the
+	// Feishu client hands an embedded web app through the tt.requestAccess /
+	// tt.requestAuthCode JSAPI. The authorize-page flow's codes
+	// (larkUserTokenURL) and these are two families: each endpoint rejects the
+	// other's codes.
+	larkOIDCTokenURL = "https://open.feishu.cn/open-apis/authen/v1/oidc/access_token" // #nosec G101 // Public Lark endpoint URL, not a credential.
+	larkUserInfoURL  = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 )
 
 // LarkConfig holds the app credentials, the registered callback, and the tenant
@@ -100,6 +106,23 @@ type larkUserTokenResponse struct {
 	Scope            string `json:"scope"`
 }
 
+// larkOIDCTokenResponse is the v1 OIDC token reply used by the login-free
+// flow. Like the app_access_token endpoint it reports application errors in
+// the body's code field with HTTP 200, and wraps the payload in data.
+type larkOIDCTokenResponse struct {
+	Code int                  `json:"code"`
+	Msg  string               `json:"msg"`
+	Data larkOIDCTokenPayload `json:"data"`
+}
+
+// larkOIDCTokenPayload is the token subset inside the v1 OIDC reply.
+type larkOIDCTokenPayload struct {
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	ExpiresIn        int    `json:"expires_in"`
+	RefreshExpiresIn int    `json:"refresh_expires_in"`
+}
+
 // larkUserInfoResponse wraps the user payload in Lark's envelope.
 type larkUserInfoResponse struct {
 	Code int          `json:"code"`
@@ -147,7 +170,37 @@ func (c *LarkClient) Exchange(ctx context.Context, code, redirectURI string) (*I
 	if err != nil {
 		return nil, err
 	}
+	return c.identityFromUser(user, userToken.AccessToken, userToken.RefreshToken, userToken.ExpiresIn)
+}
 
+// ExchangeAppCode turns a login-free pre-authorization code — the one the
+// Feishu client hands an embedded web app through the tt.requestAccess /
+// tt.requestAuthCode JSAPI — into a normalized Identity, rejecting accounts
+// outside the configured tenant.
+//
+// The token request carries neither redirect_uri nor client_secret: the
+// endpoint authenticates the app through the app_access_token in the
+// Authorization header, and the code never rode a redirect.
+func (c *LarkClient) ExchangeAppCode(ctx context.Context, code string) (*Identity, error) {
+	appToken, err := c.fetchAppAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	userToken, err := c.exchangeAppCode(ctx, appToken, code)
+	if err != nil {
+		return nil, err
+	}
+	user, err := c.fetchUserInfo(ctx, userToken.AccessToken)
+	if err != nil {
+		return nil, err
+	}
+	return c.identityFromUser(user, userToken.AccessToken, userToken.RefreshToken, userToken.ExpiresIn)
+}
+
+// identityFromUser normalizes a fetched Lark user into an Identity. Exchange
+// and ExchangeAppCode share this tail so the union_id demand and the tenant
+// gate cannot drift between the authorize-page flow and the login-free one.
+func (c *LarkClient) identityFromUser(user *larkUserData, accessToken, refreshToken string, expiresIn int) (*Identity, error) {
 	unionID := strings.TrimSpace(user.UnionID)
 	if unionID == "" {
 		// Without a union_id there is no stable key to bind. Falling back to
@@ -182,9 +235,9 @@ func (c *LarkClient) Exchange(ctx context.Context, code, redirectURI string) (*I
 			"union_id":   unionID,
 			"tenant_key": user.TenantKey,
 		},
-		AccessToken:    userToken.AccessToken,
-		RefreshToken:   userToken.RefreshToken,
-		TokenExpiresAt: expiryFromSeconds(c.now(), userToken.ExpiresIn),
+		AccessToken:    accessToken,
+		RefreshToken:   refreshToken,
+		TokenExpiresAt: expiryFromSeconds(c.now(), expiresIn),
 	}, nil
 }
 
@@ -282,6 +335,44 @@ func (c *LarkClient) exchangeCode(ctx context.Context, appToken, code, redirectU
 		return nil, fmt.Errorf("lark token exchange returned no access token: %w", ErrUnexpectedResponse)
 	}
 	return &token, nil
+}
+
+func (c *LarkClient) exchangeAppCode(ctx context.Context, appToken, code string) (*larkOIDCTokenPayload, error) {
+	payload, err := json.Marshal(map[string]string{
+		"grant_type": "authorization_code",
+		"code":       code,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode lark oidc token request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, larkOIDCTokenURL,
+		bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("build lark oidc token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Authorization", "Bearer "+appToken)
+
+	var response larkOIDCTokenResponse
+	if err := doJSON(ctx, c.client, req, "lark oidc token exchange", &response); err != nil {
+		return nil, err
+	}
+	if response.Code != 0 {
+		// 20003/20004 mean the pre-authorization code was spent or expired — the
+		// only input the caller controls, so they read as invalid_grant rather
+		// than an app-side fault. Everything else is a credential or provider
+		// problem the caller cannot fix by retrying with a new code.
+		if response.Code == 20003 || response.Code == 20004 {
+			return nil, fmt.Errorf("lark oidc token exchange rejected the code (code %d: %s): %w",
+				response.Code, response.Msg, ErrInvalidGrant)
+		}
+		return nil, fmt.Errorf("lark oidc token exchange failed (code %d: %s): %w",
+			response.Code, response.Msg, ErrUnexpectedResponse)
+	}
+	if strings.TrimSpace(response.Data.AccessToken) == "" {
+		return nil, fmt.Errorf("lark oidc token exchange returned no access token: %w", ErrUnexpectedResponse)
+	}
+	return &response.Data, nil
 }
 
 func (c *LarkClient) fetchUserInfo(ctx context.Context, userAccessToken string) (*larkUserData, error) {
