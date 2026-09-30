@@ -79,6 +79,13 @@ func IsLoginEmailDomain(email string) bool {
 	return false
 }
 
+// IsNjuptEmailDomain reports whether email ends in the NJUPT school domain.
+// The prefix-vs-student-ID consistency rule and the other_mail domain ban both
+// key off this one suffix; pair it with EmailFormat.
+func IsNjuptEmailDomain(email string) bool {
+	return strings.HasSuffix(email, njuptEmailDomain)
+}
+
 // IsNjuptEmailLocalAllowed reports whether the local part of an @njupt.edu.cn
 // address is a student-ID shape: one ASCII letter followed by eight digits, or
 // bare eight digits. The caller is expected to have lowercased the address

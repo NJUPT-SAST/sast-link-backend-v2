@@ -156,6 +156,21 @@ func TestCreateUserRejectsDeletedState(t *testing.T) {
 // A personal email already serving another account (as its login email or as a
 // bound identity) is refused with the column-naming conflict code, and the
 // failure audit names the login email that was attempted.
+// A school mailbox is a login identity, never an other_mail: binding one puts
+// a reset handle for the account in whatever student's mailbox the prefix names.
+func TestCreateUserRejectsSchoolDomainPersonalEmail(t *testing.T) {
+	h := newHarness(t)
+	input := createProbeInput()
+	input.PersonalEmail = stringPtr("zhangsan@njupt.edu.cn")
+
+	_, err := h.service.CreateUser(context.Background(), input)
+
+	assertKind(t, err, KindInvalidInput)
+	if h.users.createCalls != 0 {
+		t.Fatalf("create calls = %d, want no write", h.users.createCalls)
+	}
+}
+
 func TestCreateUserFailsWhenPersonalEmailOccupied(t *testing.T) {
 	h := newHarness(t)
 	h.users.existsEmails = map[string]bool{"zhangsan@qq.com": true}

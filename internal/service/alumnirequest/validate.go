@@ -194,11 +194,13 @@ func validateLoginEmail(raw string) (string, error) {
 
 // validatePersonalEmail checks the reachable third-party address.
 //
-// No domain restriction: being outside the school domains is the entire reason it
-// is here. It must differ from the login email because V005's two triggers forbid
-// one address from being both a login_email and an other_mail identity, and
-// rejecting it now names the field instead of surfacing a constraint violation at
-// approval time.
+// The school mailbox domain is refused outright: a school mailbox is a login
+// identity, never an other_mail — binding one as personal puts a reset handle
+// for the account in whatever student's mailbox the prefix names, and V005
+// only guards addresses another row already claims. It must also differ from
+// the login email because V005's two triggers forbid one address from being
+// both a login_email and an other_mail identity, and rejecting it now names
+// the field instead of surfacing a constraint violation at approval time.
 func validatePersonalEmail(raw, loginEmail string) (string, error) {
 	email := strings.ToLower(strings.TrimSpace(raw))
 	if email == "" {
@@ -209,6 +211,9 @@ func validatePersonalEmail(raw, loginEmail string) (string, error) {
 	}
 	if !validate.EmailFormat(email) {
 		return "", newError(ErrInvalidInput, "personal_email 格式非法", nil)
+	}
+	if validate.IsNjuptEmailDomain(email) {
+		return "", newError(ErrEmailDomain, "personal_email 不接受校园邮箱域名", nil)
 	}
 	if email == loginEmail {
 		return "", newError(ErrInvalidInput, "personal_email 不能与 login_email 相同", nil)

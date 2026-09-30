@@ -167,6 +167,24 @@ func TestStripSubaddress(t *testing.T) {
 // every non-login domain stay free-form, so the check can chain unconditionally
 // after IsLoginEmailDomain. Inputs are expected lowercased (normalizeIdentifier),
 // so an uppercase letter is refused here rather than case-folded.
+func TestIsNjuptEmailDomain(t *testing.T) {
+	for _, testCase := range []struct {
+		email string
+		want  bool
+	}{
+		{"b24040525@njupt.edu.cn", true},
+		{"president@sast.fun", false},
+		{"zhangsan@qq.com", false},
+		// A domain that merely contains the NJUPT one is not it.
+		{"abc@snjupt.edu.cn", false},
+		{"", false},
+	} {
+		if got := IsNjuptEmailDomain(testCase.email); got != testCase.want {
+			t.Errorf("IsNjuptEmailDomain(%q) = %v, want %v", testCase.email, got, testCase.want)
+		}
+	}
+}
+
 func TestIsNjuptEmailLocalAllowed(t *testing.T) {
 	for _, testCase := range []struct {
 		email string

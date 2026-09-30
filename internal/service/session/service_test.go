@@ -2287,6 +2287,31 @@ func TestRegisterRejectsShortPassword(t *testing.T) {
 	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
 }
 
+// A school mailbox is a login identity, never an other_mail: binding one would
+// put a reset handle for the account in whatever student's mailbox the prefix
+// names, verification or not.
+func TestBindEmailSendCodeRejectsSchoolDomain(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{
+		UserID: 42,
+		Email:  "b24040525@njupt.edu.cn",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if _, ok := codes.codes[codeKey(string(mailer.VerificationPurposeBindEmail), "b24040525@njupt.edu.cn")]; ok {
+		t.Fatal("verification code was saved for a school-domain bind")
+	}
+
+	// A third-party mailbox still binds through.
+	if _, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{
+		UserID: 42,
+		Email:  "extra@gmail.com",
+	}); err != nil {
+		t.Fatalf("BindEmailSendCode(third-party): %v", err)
+	}
+}
+
 func TestBindEmailSendCodeIssuesTicket(t *testing.T) {
 	service := newRegisterService(t)
 	codes := service.VerificationCode.(*fakeVerificationCodeStore)
