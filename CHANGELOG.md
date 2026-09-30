@@ -103,6 +103,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The department catalogue OpenAPI response now includes the standard `code`, `message`, and `data.departments` envelope (2026-09-30).
+
+- Administrative user updates recheck self-role changes inside the locked transaction, preventing a queued manager self-update from restoring privileges after demotion (2026-09-30).
+
 - **部门字段信任边界**（2026-09-30）：明确 `profile.department` 是本人可修改的展示资料，下游授权必须依据独立核验的成员归属；同步 manager 的成员管理权限说明。
 
 - **恢复账号事务锁定目标角色**（2026-09-30）：读取已关闭账号时加行锁，防止 manager 的恢复请求在并发恢复、升为 admin、再次关闭后用旧角色判断重新开放 admin 账号。

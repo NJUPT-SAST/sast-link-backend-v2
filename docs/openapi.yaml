@@ -5257,29 +5257,38 @@ components:
       type: object
       description: 部门目录响应。key 为 Department 枚举值，label 为中文展示名。
       properties:
-        departments:
-          type: array
-          items:
-            type: object
-            required:
-              - key
-              - label
-            properties:
-              key:
-                type: string
-                enum: [software, media, electronics, office, liaison, publicity, competition]
-                description: 部门键，即 Department 枚举值
-              label:
-                type: string
-                description: 中文展示名
-          example:
-            - { key: software, label: 软件研发部 }
-            - { key: media, label: 多媒体部 }
-            - { key: electronics, label: 电子部 }
-            - { key: office, label: 办公室 }
-            - { key: liaison, label: 外联部 }
-            - { key: publicity, label: 科宣部 }
-            - { key: competition, label: 赛事部 }
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          type: object
+          properties:
+            departments:
+              type: array
+              items:
+                type: object
+                required:
+                  - key
+                  - label
+                properties:
+                  key:
+                    type: string
+                    enum: [software, media, electronics, office, liaison, publicity, competition]
+                    description: 部门键，即 Department 枚举值
+                  label:
+                    type: string
+                    description: 中文展示名
+              example:
+                - { key: software, label: 软件研发部 }
+                - { key: media, label: 多媒体部 }
+                - { key: electronics, label: 电子部 }
+                - { key: office, label: 办公室 }
+                - { key: liaison, label: 外联部 }
+                - { key: publicity, label: 科宣部 }
+                - { key: competition, label: 赛事部 }
     HealthResponse:
       type: object
       description: |
