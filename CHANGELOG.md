@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **管理台学号占用判定补齐大小写折叠**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的学号占用预检改为 `lower(btrim())` 折叠比较（新增 `ExistsByStudentIDExcluding`，排除目标自身行），返回 `40902`。V001 的 `user_student_id_key` 约束在默认 collation 下大小写敏感，此前 `b24040525` 可在 `B24040525` 旁再建一号——正是注册与校友路径早已堵掉的导入期形状，控制台两条路一直漏着。折叠窗口内的并发（两个控制台同时建变体号）仍无数据库层硬保证，需表达式唯一索引才可彻底封死，本次按预检方案收敛。
+- **管理台学号占用判定补齐大小写折叠**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的学号占用预检改为 `lower(btrim())` 折叠比较（新增 `ExistsByStudentIDExcluding`，排除目标自身行），返回 `40902`。V001 的 `user_student_id_key` 约束在默认 collation 下大小写敏感，此前 `b24040525` 可在 `B24040525` 旁再建一号——正是注册与校友路径早已堵掉的导入期形状，控制台两条路一直漏着。折叠窗口内的并发（两个控制台同时建变体号）仍无数据库层硬保证，需表达式唯一索引才可彻底封死。
 
 ### Added
 
