@@ -964,3 +964,203 @@ func TestCallbackRejectsMismatchedStateCookie(t *testing.T) {
 		t.Fatalf("provider exchange ran %d times for a mismatched cookie", doubles.GitHub.calls)
 	}
 }
+
+// enableLarkAppCode installs a Lark provider whose JSAPI leg answers with a
+// stable union_id identity, and returns it so a test can fail or observe it.
+func enableLarkAppCode(service Service) *fakeAppCodeProvider {
+	lark := &fakeAppCodeProvider{
+		fakeProvider: fakeProvider{authorizeURL: "https://lark.test/authorize"},
+		appCodeIdentity: &provider.Identity{
+			ProviderID:  "on_union",
+			DisplayName: "张三",
+			AvatarURL:   "https://lark.test/avatar.png",
+			Data:        map[string]any{"union_id": "on_union"},
+			AccessToken: "u-token",
+		},
+	}
+	service.Providers[model.LoginMethodLark] = lark
+	return lark
+}
+
+func TestAppCodeLoginBoundUserIssuesLoginCode(t *testing.T) {
+	service, doubles := newTestService(t)
+	enableLarkAppCode(service)
+	doubles.Users.byID[42] = activeUser(42)
+	doubles.Identities.put(&model.Identity{
+		UserID: 42, Provider: model.LoginMethodLark, ProviderID: "on_union",
+	})
+
+	result, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	if err != nil {
+		t.Fatalf("AppCodeLogin: %v", err)
+	}
+	if !result.Bound {
+		t.Fatal("Bound = false, want true for an already-bound account")
+	}
+	if !strings.HasPrefix(result.LoginCode, loginCodePrefix) {
+		t.Fatalf("LoginCode = %q, want the %q prefix", result.LoginCode, loginCodePrefix)
+	}
+	if got := doubles.LoginCodes.codes[result.LoginCode]; got != 42 {
+		t.Fatalf("login_code maps to user %d, want 42", got)
+	}
+	// A re-login refreshes the stored provider credentials, same as the callback leg.
+	if _, ok := doubles.Identities.updated[1]; !ok {
+		t.Fatal("provider credentials were not refreshed on login")
+	}
+	// No redirect exists on this leg; an accidental non-empty value would send
+	// the handler looking for a frontend URL to 302 to.
+	if result.Redirect != "" {
+		t.Fatalf("Redirect = %q, want empty on the login-free leg", result.Redirect)
+	}
+}
+
+func TestAppCodeLoginUnboundUserIssuesRegistrationStatePair(t *testing.T) {
+	service, doubles := newTestService(t)
+	enableLarkAppCode(service)
+
+	result, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	if err != nil {
+		t.Fatalf("AppCodeLogin: %v", err)
+	}
+	if result.Bound {
+		t.Fatal("Bound = true, want false for an unbound provider account")
+	}
+	if !strings.HasPrefix(result.RegistrationState, registrationStatePrefix) {
+		t.Fatalf("RegistrationState = %q, want the %q prefix",
+			result.RegistrationState, registrationStatePrefix)
+	}
+	// The oauth_state half is minted here: no provider authorization rode this
+	// flow, so nothing else could have produced it.
+	if !strings.HasPrefix(result.OAuthState, oauthStatePrefix) {
+		t.Fatalf("OAuthState = %q, want the %q prefix", result.OAuthState, oauthStatePrefix)
+	}
+	if result.Provider != "lark" || result.DisplayName != "张三" {
+		t.Fatalf("hints = %q/%q, want lark/张三", result.Provider, result.DisplayName)
+	}
+
+	stored, ok := doubles.Registration.states[result.RegistrationState]
+	if !ok {
+		t.Fatal("registration state was not persisted")
+	}
+	// POST /auth/register requires both halves; the result must hand back the
+	// same oauth_state the payload carries or the pair can never be satisfied.
+	if stored.OAuthState != result.OAuthState {
+		t.Fatalf("stored oauth_state %q != result oauth_state %q",
+			stored.OAuthState, result.OAuthState)
+	}
+	if stored.ProviderID != "on_union" || stored.Provider != model.LoginMethodLark {
+		t.Fatalf("stored = %q/%q, want on_union/lark", stored.ProviderID, stored.Provider)
+	}
+	// The minted state must not live in the OAuthStateStore: nothing will ever
+	// consume it there, and an unconsumed key would read like an attack surface
+	// that never expires.
+	if _, exists := doubles.States.states[result.OAuthState]; exists {
+		t.Fatal("minted oauth_state was persisted in the OAuthStateStore")
+	}
+}
+
+func TestAppCodeLoginAuditsTheEntrance(t *testing.T) {
+	service, doubles := newTestService(t)
+	enableLarkAppCode(service)
+	doubles.Users.byID[42] = activeUser(42)
+	doubles.Identities.put(&model.Identity{
+		UserID: 42, Provider: model.LoginMethodLark, ProviderID: "on_union",
+	})
+
+	if _, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"}); err != nil {
+		t.Fatalf("AppCodeLogin: %v", err)
+	}
+	found := false
+	for _, entry := range doubles.Audits.entries {
+		if entry.Action == "oauth_login" && strings.Contains(string(entry.Detail), `"source":"app_code"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no oauth_login audit row tagged source=app_code")
+	}
+}
+
+func TestAppCodeLoginRejectsEmptyCode(t *testing.T) {
+	service, _ := newTestService(t)
+	lark := enableLarkAppCode(service)
+
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if lark.appCodeCalls != 0 {
+		t.Fatalf("provider exchange ran %d times for an empty code", lark.appCodeCalls)
+	}
+}
+
+func TestAppCodeLoginRejectsDisabledProvider(t *testing.T) {
+	service, _ := newTestService(t) // Lark not installed
+
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+}
+
+// A Lark registration without the JSAPI leg is a wiring fault; it must surface
+// as the same "entrance unavailable" outcome rather than panic on the
+// interface assertion.
+func TestAppCodeLoginRejectsProviderWithoutAppCodeLeg(t *testing.T) {
+	service, _ := newTestService(t)
+	service.Providers[model.LoginMethodLark] = &fakeProvider{
+		authorizeURL: "https://lark.test/authorize",
+		identity:     &provider.Identity{ProviderID: "on_union", Data: map[string]any{}},
+	}
+
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+}
+
+func TestAppCodeLoginMapsSpentCodeToRestartableFailure(t *testing.T) {
+	service, _ := newTestService(t)
+	lark := enableLarkAppCode(service)
+	lark.appCodeErr = provider.ErrInvalidGrant
+
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "spent"})
+	assertKind(t, err, KindInvalidState, errcode.CodeBadRequest)
+	assertDisplayMessage(t, err, "第三方授权码")
+}
+
+func TestAppCodeLoginMapsForeignTenantToBusinessCode(t *testing.T) {
+	service, _ := newTestService(t)
+	lark := enableLarkAppCode(service)
+	lark.appCodeErr = provider.ErrForeignTenant
+
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	assertKind(t, err, KindForbidden, errcode.CodeLarkTenantRequired)
+}
+
+func TestAppCodeLoginThrottlesPerIP(t *testing.T) {
+	service, _ := newTestService(t)
+	lark := enableLarkAppCode(service)
+	limiter := &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: 15 * time.Second}}
+	service.AppCodeLimiter = limiter
+
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{
+		Code:     "jsapi-code",
+		ClientIP: "203.0.113.9",
+	})
+	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
+	if got, want := limiter.calls[0], "oauth_login_app_code:ip:203.0.113.9"; got != want {
+		t.Fatalf("limiter call = %q, want %q", got, want)
+	}
+	if lark.appCodeCalls != 0 {
+		t.Fatal("throttled call reached the provider exchange")
+	}
+}
+
+// An empty code is the cheapest possible probe, so the cap has to apply to it
+// too — the expensive path is one provider exchange plus Redis writes.
+func TestAppCodeLoginThrottlesBeforeRejectingEmptyCode(t *testing.T) {
+	service, _ := newTestService(t)
+	limiter := &fakeLimiter{}
+	service.AppCodeLimiter = limiter
+
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{ClientIP: "203.0.113.9"})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if len(limiter.calls) != 1 {
+		t.Fatalf("limiter saw %d calls, want it consulted before the empty-code rejection", len(limiter.calls))
+	}
+}

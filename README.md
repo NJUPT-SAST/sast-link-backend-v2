@@ -32,7 +32,7 @@ curl http://127.0.0.1:8080/health
 
 ## Features
 
-- **Login & accounts**: password login, two-step email registration, password reset through the login email or a bound personal mailbox, GitHub and Feishu sign-in
+- **Login & accounts**: password login, two-step email registration, password reset through the login email or a bound personal mailbox, GitHub and Feishu sign-in (including login-free sign-in inside the Feishu client via the `tt.requestAccess` JSAPI code)
 - **Standard auth protocol**: OAuth 2.1 / OIDC for third-party apps to integrate login, token refresh, and user info
 - **Account security**: argon2id password hashing, Ed25519 token signing, revoke all sessions on password change
 - **Self-service**: profile management, third-party account binding, authorized-apps management, device management, avatar upload

@@ -293,12 +293,17 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 	}
 	oauthLoginAuthorizeLimiter := newOAuthLoginLimiter(cfg.RateLimitOAuthLoginRPM, cfg.RateLimitOAuthLoginWindow)
 	oauthLoginCallbackLimiter := newOAuthLoginLimiter(cfg.RateLimitOAuthCallbackRPM, cfg.RateLimitOAuthCallbackWindow)
+	// The JSAPI login-free entrance shares the callback tier's configured rate
+	// but gets its own bucket: either entrance flooding must not lock out the
+	// other, and no new env pair is worth a second dial to tune the same number.
+	oauthLoginAppCodeLimiter := newOAuthLoginLimiter(cfg.RateLimitOAuthCallbackRPM, cfg.RateLimitOAuthCallbackWindow)
 	oauthLoginExchangeLimiter := newOAuthLoginLimiter(cfg.RateLimitExchangeCodeRPM, cfg.RateLimitExchangeCodeWindow)
 	oauthLoginBindLimiter := newOAuthLoginLimiter(cfg.RateLimitOAuthBindRPM, cfg.RateLimitOAuthBindWindow)
 	oauthLoginService := oauthlogin.Service{
 		Providers:         loginProviders,
 		AuthorizeLimiter:  oauthLoginAuthorizeLimiter,
 		CallbackLimiter:   oauthLoginCallbackLimiter,
+		AppCodeLimiter:    oauthLoginAppCodeLimiter,
 		ExchangeLimiter:   oauthLoginExchangeLimiter,
 		BindLimiter:       oauthLoginBindLimiter,
 		Users:             users,

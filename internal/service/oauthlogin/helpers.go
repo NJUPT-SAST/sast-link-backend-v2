@@ -241,6 +241,9 @@ func (s Service) auditLogin(
 		"provider":    string(input.Provider),
 		"provider_id": providerID,
 	}
+	if input.Source != "" {
+		detail["source"] = input.Source
+	}
 	if !success {
 		if stage == "" {
 			stage = StageUnknown
