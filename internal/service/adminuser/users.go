@@ -160,6 +160,7 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 	}
 
 	entries, sessionsRevoked, err := s.Users.UpdateAdminUser(ctx, input.UserID, repository.AdminUserUpdate{
+		CallerUserID:  input.AdminUserID,
 		Name:          validated.name,
 		PhoneNumber:   validated.phoneNumber,
 		QQNumber:      validated.qqNumber,
@@ -430,6 +431,8 @@ func (s Service) mapWriteError(ctx context.Context, err error) error {
 		return newError(ErrStateConflict, "用户已注销，请先恢复后再编辑", nil)
 	case errors.Is(err, repository.ErrLastAdmin):
 		return newError(ErrProtected, "系统中至少需要保留一名管理员", nil)
+	case errors.Is(err, repository.ErrSelfRoleChange):
+		return newError(ErrProtected, "不可修改自己的角色", nil)
 	case errors.Is(err, repository.ErrAdminTarget):
 		return newError(ErrProtected, "无权操作管理员账号", nil)
 	case errors.Is(err, repository.ErrAdminGrant):

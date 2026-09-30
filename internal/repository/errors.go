@@ -16,6 +16,9 @@ var (
 	// administrator. Enforced inside the writing transaction, where a count over
 	// other rows can be serialized.
 	ErrLastAdmin = errors.New("repository: last active admin")
+	// ErrSelfRoleChange reports that an actor would change their own role,
+	// compared against the row locked inside the writing transaction.
+	ErrSelfRoleChange = errors.New("repository: cannot change own role")
 	// ErrAdminTarget reports that the caller's role may not write an
 	// administrator's account — the manager boundary, judged against the row
 	// locked inside the writing transaction so a promotion racing the write

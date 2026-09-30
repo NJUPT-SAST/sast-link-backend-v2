@@ -384,15 +384,18 @@ const (
 // pointer means "leave unchanged". token_version and password are deliberately
 // absent, so no request shape can rewrite a credential or forge a version bump.
 type AdminUserUpdate struct {
-	Name        *string
-	PhoneNumber *string
-	QQNumber    *string
-	StudentID   *string
-	Major       *string
-	College     *model.College
-	LoginEmail  *string
-	Role        *model.UserRole
-	State       *model.UserState
+	// CallerUserID is the authenticated actor, supplied by the service rather
+	// than the request body, for the transaction-time self-role guard.
+	CallerUserID int64
+	Name         *string
+	PhoneNumber  *string
+	QQNumber     *string
+	StudentID    *string
+	Major        *string
+	College      *model.College
+	LoginEmail   *string
+	Role         *model.UserRole
+	State        *model.UserState
 	// StateAuto, when true, re-derives state from the locked row's role and
 	// student_id (rule in internal/validate) and clears state_manual, instead of
 	// writing a pinned value. Mutually exclusive with State: the service layer
@@ -502,6 +505,11 @@ func (r *UserRepository) UpdateAdminUser(
 			}
 			return fmt.Errorf("load user for update: %w", err)
 		}
+		// Repeat the self-role guard after locking: a same-role request may have
+		// waited behind an administrator's demotion and must not undo it.
+		if update.CallerUserID == userID && update.Role != nil && *update.Role != stored.Role {
+			return ErrSelfRoleChange
+		}
 		// The manager boundary, re-judged against the locked row so a concurrent
 		// promotion cannot turn an already-authorized write into one on an admin.
 		// Only the literal admin role is unrestricted; anything else — a manager,
@@ -593,7 +601,7 @@ func (r *UserRepository) UpdateAdminUser(
 	})
 	if err != nil {
 		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrLastAdmin) ||
-			errors.Is(err, ErrAdminTarget) || errors.Is(err, ErrAdminGrant) {
+			errors.Is(err, ErrAdminTarget) || errors.Is(err, ErrAdminGrant) || errors.Is(err, ErrSelfRoleChange) {
 			return nil, false, err
 		}
 		return nil, false, fmt.Errorf("update admin user: %w", err)
