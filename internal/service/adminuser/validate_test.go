@@ -1,9 +1,11 @@
 package adminuser
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
@@ -65,6 +67,41 @@ func TestValidateLoginEmailEnforcesAllowedDomains(t *testing.T) {
 			}
 			if !testCase.wantErr && err != nil {
 				t.Fatalf("validateLoginEmail(%q) = %v, want acceptance", testCase.email, err)
+			}
+		})
+	}
+}
+
+// An @njupt.edu.cn address carries the student ID as its mailbox name: one
+// letter + eight digits, or bare eight digits. @sast.fun stays free-form. The
+// dedicated code lets the console point at the prefix instead of reading as a
+// generic format or domain error.
+func TestValidateLoginEmailEnforcesNjuptPrefix(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		email   string
+		wantErr bool
+	}{
+		{"letter plus eight digits", "b24040525@njupt.edu.cn", false},
+		{"bare eight digits", "24040525@njupt.edu.cn", false},
+		{"free-form sast prefix", "president@sast.fun", false},
+		{"two letters", "ab24040525@njupt.edu.cn", true},
+		{"seven digits", "b2404052@njupt.edu.cn", true},
+		{"nine digits", "240405256@njupt.edu.cn", true},
+		{"subaddressed local part", "b24040525+x@njupt.edu.cn", true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			email := testCase.email
+			_, err := validateLoginEmail(&email)
+			if !testCase.wantErr {
+				if err != nil {
+					t.Fatalf("validateLoginEmail(%q) = %v, want acceptance", email, err)
+				}
+				return
+			}
+			var typed *Error
+			if !errors.As(err, &typed) || typed.Code != errcode.CodeNjuptEmailPrefixNotAllowed {
+				t.Fatalf("validateLoginEmail(%q) = %v, want code %d", email, err, errcode.CodeNjuptEmailPrefixNotAllowed)
 			}
 		})
 	}

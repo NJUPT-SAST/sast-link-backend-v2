@@ -59,6 +59,33 @@ func TestSubmitRequiresMajor(t *testing.T) {
 	assertInvalidInput(t, err, "major")
 }
 
+// The NJUPT mailbox is the student ID; the intake provisions real accounts, so
+// its login_email obeys the same prefix rule as registration and the console.
+// @sast.fun stays free-form.
+func TestSubmitRejectsNonStudentNjuptPrefix(t *testing.T) {
+	t.Parallel()
+
+	input := validSubmit()
+	input.LoginEmail = "xyz123@njupt.edu.cn"
+	service := newService(&fakeRequests{}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+	_, err := service.Submit(context.Background(), input)
+	var typed *Error
+	if !errors.As(err, &typed) {
+		t.Fatalf("Submit() error = %v, want a typed error", err)
+	}
+	if typed.Code != errcode.CodeNjuptEmailPrefixNotAllowed {
+		t.Fatalf("code = %d, want %d", typed.Code, errcode.CodeNjuptEmailPrefixNotAllowed)
+	}
+
+	input = validSubmit()
+	input.LoginEmail = "president@sast.fun"
+	service = newService(&fakeRequests{}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+	if _, err := service.Submit(context.Background(), input); err != nil {
+		t.Fatalf("Submit(sast.fun free-form prefix) = %v, want acceptance", err)
+	}
+}
+
 // name == student_id is the previous database's placeholder for a missing name and
 // the second shape V010 treats as debris. The comparison is delegated to
 // validate.IncompleteProfileFields, so this also guards that the delegation stayed
@@ -548,6 +575,42 @@ func TestSubmitRecoveryIntent(t *testing.T) {
 		input.Intent = string(model.AlumniRequestIntentRecover)
 		return input
 	}
+
+	t.Run("a matching legacy mailbox remains recoverable", func(t *testing.T) {
+		t.Parallel()
+		input := recoverInput()
+		input.LoginEmail = "  SOMEONE.ELSE@Njupt.edu.cn  "
+		users := &fakeUsers{}
+		users.seedAccount(input.StudentID, "someone.else@njupt.edu.cn")
+		requests := &fakeRequests{}
+		service := newService(requests, users, &fakeAudit{}, &fakeCaptcha{})
+		if _, err := service.Submit(context.Background(), input); err != nil {
+			t.Fatalf("legacy recovery: %v", err)
+		}
+		if requests.created == nil || requests.created.Intent != model.AlumniRequestIntentRecover ||
+			requests.created.LoginEmail != "someone.else@njupt.edu.cn" {
+			t.Fatalf("ticket = %+v, want normalized legacy recovery", requests.created)
+		}
+	})
+
+	t.Run("a legacy mailbox must still match the target account", func(t *testing.T) {
+		t.Parallel()
+		input := recoverInput()
+		input.LoginEmail = "wrong.legacy@njupt.edu.cn"
+		users := &fakeUsers{}
+		users.seedAccount(input.StudentID, "someone.else@njupt.edu.cn")
+		requests := &fakeRequests{}
+		service := newService(requests, users, &fakeAudit{}, &fakeCaptcha{})
+		_, err := service.Submit(context.Background(), input)
+		var typed *Error
+		if !errors.As(err, &typed) || typed.Code != errcode.CodeBadRequest ||
+			typed.Message != "login_email 与该学号登记的登录邮箱不一致" {
+			t.Fatalf("recovery error = %v, want target mailbox mismatch", err)
+		}
+		if requests.created != nil {
+			t.Fatal("mismatched recovery created a ticket")
+		}
+	})
 
 	t.Run("an unknown intent is refused", func(t *testing.T) {
 		t.Parallel()

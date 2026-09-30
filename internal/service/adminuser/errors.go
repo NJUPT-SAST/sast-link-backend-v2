@@ -70,7 +70,12 @@ func (e *Error) Is(target error) bool {
 // Sentinels for each business outcome.
 var (
 	ErrInvalidInput = &Error{Kind: KindInvalidInput, Code: errcode.CodeBadRequest}
-	ErrNotFound     = &Error{Kind: KindNotFound, Code: errcode.CodeUserNotFound}
+	// ErrEmailPrefix is an @njupt.edu.cn address whose local part is not the
+	// student-ID shape (one letter + eight digits, or eight digits); @sast.fun
+	// stays free-form. Same rule as registration and the alumni intake, so it
+	// shares CodeNjuptEmailPrefixNotAllowed.
+	ErrEmailPrefix = &Error{Kind: KindInvalidInput, Code: errcode.CodeNjuptEmailPrefixNotAllowed}
+	ErrNotFound    = &Error{Kind: KindNotFound, Code: errcode.CodeUserNotFound}
 	// ErrStudentIDOccupied and ErrEmailOccupied name the colliding column rather
 	// than reporting a generic conflict: the administrator needs to know which field
 	// to change, and both columns are unique so either can lose a race.

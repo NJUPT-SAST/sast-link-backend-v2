@@ -55,6 +55,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **注册邮箱前缀收紧为学号样式**（feat/register-njupt-email-prefix，2026-09-28）：`@njupt.edu.cn` 地址的邮箱前缀必须是学号样式——1 位字母 + 8 位数字（`b24040525`）或纯 8 位数字（`24040525`），不符返回新业务码 `40022`（邮箱前缀格式错误）；`@sast.fun` 前缀维持自由格式。规则定义在 `internal/validate.IsNjuptEmailLocalAllowed`，接入全部写入 `login_email` 的路径：注册发码 / 验码 / 提交（ticket 邮箱防御性重查）、控制台建号与改 `login_email`（`POST`/`PUT /admin/users`）、校友建号申请——三条面同一结果同一码，客户端按 `40022` 定位到前缀字段。**只读匹配路径一律不加**：`POST /user/login`、忘记密码 / 重置密码、`IdentifyByRefreshToken` 不校验前缀，存量非匹配前缀账号照常登录，无迁移无清洗。顺手补齐注册发码 / 验码路径缺失的 `MaxLoginEmailLength`（255）上限检查（alumni / admin 路径本就有，注册路径此前靠数据库列宽兜底）。
 - **能力 scope refresh family 生命周期封顶的配套修正**（[PR #47](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/47)）：consent 提交限流（`RATE_LIMIT_CONSENT_RPM`）**只对 approve 路径计费**——`approve: false` 的拒绝不铸码、不消耗配额，且被限流的 approve 在消费暂存之前返回 `42900`，可用同一 `request_id` 重试。grants 列表与撤销拆成**独立预算**（`oauth_grants_list` / `oauth_grants_revoke`），读列表耗尽不了撤销的配额；两者超限现在返回 `429` + `Retry-After`（此前被 handler 折叠成 500，与 consent 不一致）。`adminclient.mergedRegistration` 不再静默吞 `scope.Normalize` 失败，守卫不再可能基于错误的合并状态做授权决定。
 - **rotate-secret 拒绝路径补审计**（[PR #47](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/47)）：`POST /admin/oauth-clients/:id/rotate-secret` 的公开客户端 `400`、非控制台 `403`、未知 id `404` 与写库失败现在都落审计（`admin_oauth_client_rotate_secret`，success=false + 错误码），兑现 API 文档 §6.9 的既有承诺——泄露后复盘要找的正是这些探针。审计 detail 不含新明文（与成功路径一致）。
 - **JWT 从 RS256 换 EdDSA（Ed25519）**（[PR #37](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/37)）：JWKS 变 `kty=OKP/crv=Ed25519/alg=EdDSA`、discovery `id_token_signing_alg_values_supported=["EdDSA"]`、ID Token 同算法；密钥解析改 PKCS8，部署需换 Ed25519 密钥；验签 leeway 缩到 5s。
@@ -100,6 +101,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **pg_cron 清理方案**（2026-08-01，[PR #33](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/33)）：被进程内 retention worker 取代；不用 pg_cron，因为生产库未安装该扩展且测试镜像无法加载。
 
 ### Fixed
+
+- **注册邮箱前缀错误文案**（2026-09-30）：注册发码、验码和提交的 `40022` 响应保留“邮箱前缀格式错误”，与业务错误码和 API 契约一致。
+
+- **存量邮箱找回**（2026-09-30）：alumni `recover` 匹配旧登录邮箱，不应用新账号前缀规则，仍核对学号与邮箱归属。
 
 - Administrative user updates recheck self-role changes inside the locked transaction, preventing a queued manager self-update from restoring privileges after demotion (2026-09-30).
 
