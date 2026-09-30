@@ -328,7 +328,6 @@ func (f *fakeUsers) UpdateProfile(_ context.Context, userID int64, update reposi
 	applyString(&user.Name, update.Name)
 	applyString(&user.PhoneNumber, update.PhoneNumber)
 	applyString(&user.QQNumber, update.QQNumber)
-	applyString(&user.StudentID, update.StudentID)
 	applyString(&user.Major, update.Major)
 	if update.College != nil {
 		user.College = *update.College

@@ -20,7 +20,6 @@ type updateProfileRequest struct {
 	Name        *string `json:"name"`
 	PhoneNumber *string `json:"phone_number"`
 	QQNumber    *string `json:"qq_number"`
-	StudentID   *string `json:"student_id"`
 	College     *string `json:"college"`
 	Major       *string `json:"major"`
 	Nickname    *string `json:"nickname"`
@@ -53,7 +52,6 @@ func (h Handler) UpdateProfile(c *gin.Context) {
 		Name:          req.Name,
 		PhoneNumber:   req.PhoneNumber,
 		QQNumber:      req.QQNumber,
-		StudentID:     req.StudentID,
 		College:       req.College,
 		Major:         req.Major,
 		Nickname:      req.Nickname,

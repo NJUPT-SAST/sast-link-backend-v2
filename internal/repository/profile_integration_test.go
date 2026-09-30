@@ -3,7 +3,6 @@ package repository_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -198,22 +197,28 @@ func TestUserRepositoryUpdateProfileRejectsEmptyUpdate(t *testing.T) {
 	}
 }
 
-// student_id is UNIQUE, so a colliding edit must surface the constraint name the
-// service dispatches on rather than a generic error.
-func TestUserRepositoryUpdateProfileSurfacesStudentIDConflict(t *testing.T) {
+// student_id has no entry on ProfileUpdate (admin-only since the self-service
+// edit was removed), so the self-service path can no longer collide on it. The
+// registration create-side constraint mapping is exercised in the register
+// tests; this spot pins that the repository update simply carries no such
+// column — the compile-time absence is the guard.
+func TestUserRepositoryUpdateProfileHasNoStudentIDColumn(t *testing.T) {
 	database := setupDatabase(t)
 	userRepository := repository.NewUser(database)
-	first := createUserWithProfile(t, userRepository, "first@njupt.edu.cn")
-	second := createUserWithProfile(t, userRepository, "second@njupt.edu.cn")
+	user := createUserWithProfile(t, userRepository, "noop@njupt.edu.cn")
 
-	_, err := userRepository.UpdateProfile(context.Background(), second.ID, repository.ProfileUpdate{
-		StudentID: &first.StudentID,
-	})
-	if err == nil {
-		t.Fatal("UpdateProfile() error = nil, want a unique violation")
+	before := user.StudentID
+	if _, err := userRepository.UpdateProfile(context.Background(), user.ID, repository.ProfileUpdate{
+		Name: stringPtr("仅改名"),
+	}); err != nil {
+		t.Fatalf("UpdateProfile(name only): %v", err)
 	}
-	if !strings.Contains(err.Error(), "user_student_id_key") {
-		t.Fatalf("UpdateProfile() error = %v, want the student_id constraint name", err)
+	reloaded, err := userRepository.FindByID(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if reloaded.StudentID != before {
+		t.Fatalf("student id = %q, want %q untouched", reloaded.StudentID, before)
 	}
 }
 
