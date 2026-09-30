@@ -309,6 +309,23 @@ func TestLarkExchangeAppCodeKeepsOtherApplicationErrorAsOutage(t *testing.T) {
 	}
 }
 
+func TestLarkExchangeAppCodeKeepsServerErrorAsOutage(t *testing.T) {
+	// A non-2xx from the OIDC endpoint must not be reclassified: unlike the v2
+	// leg there is no isClientRejection carve-out, so a 4xx/5xx stays an outage
+	// rather than reading as a spent code.
+	responses := larkAppCodeHappyResponses(testTenantKey)
+	responses[larkOIDCTokenURL] = fakeResponse{status: http.StatusBadGateway, body: `gateway down`}
+	doer := &fakeDoer{responses: responses}
+
+	_, err := larkTestClient(doer, testTenantKey).ExchangeAppCode(context.Background(), "code-app")
+	if errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("error = %v, want an outage rather than ErrInvalidGrant", err)
+	}
+	if !errors.Is(err, ErrUnexpectedResponse) {
+		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
+	}
+}
+
 func TestLarkExchangeAppCodeReusesCachedAppToken(t *testing.T) {
 	doer := &fakeDoer{responses: larkAppCodeHappyResponses(testTenantKey)}
 	client := larkTestClient(doer, testTenantKey)

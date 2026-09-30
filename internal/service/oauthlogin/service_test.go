@@ -1132,6 +1132,33 @@ func TestAppCodeLoginMapsForeignTenantToBusinessCode(t *testing.T) {
 	assertKind(t, err, KindForbidden, errcode.CodeLarkTenantRequired)
 }
 
+// The failure path synthesizes its own CallbackInput — the one place the
+// source tag could be silently dropped later — so a failure row's shape needs
+// its own pin: the entrance tag plus the step/cause pair, same as a failed
+// callback.
+func TestAppCodeLoginFailureAuditsTheEntrance(t *testing.T) {
+	service, doubles := newTestService(t)
+	lark := enableLarkAppCode(service)
+	lark.appCodeErr = provider.ErrInvalidGrant
+
+	if _, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "spent"}); err == nil {
+		t.Fatal("AppCodeLogin() error = nil, want a rejection")
+	}
+	entry := lastAuditEntry(t, doubles.Audits)
+	if entry.Success == nil || *entry.Success {
+		t.Fatal("failed login did not write success=false")
+	}
+	if got := detailString(t, entry, "source"); got != auditSourceAppCode {
+		t.Fatalf("source = %q, want %q", got, auditSourceAppCode)
+	}
+	if got := detailString(t, entry, "failure_stage"); got != StageProvider {
+		t.Fatalf("failure_stage = %q, want %q", got, StageProvider)
+	}
+	if got := detailString(t, entry, "failure_reason"); got != ReasonProviderInvalidGrant {
+		t.Fatalf("failure_reason = %q, want %q", got, ReasonProviderInvalidGrant)
+	}
+}
+
 func TestAppCodeLoginThrottlesPerIP(t *testing.T) {
 	service, _ := newTestService(t)
 	lark := enableLarkAppCode(service)
