@@ -132,6 +132,32 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		return nil, equalErr
 	}
 
+	// The NJUPT-prefix collision guard: a rewritten login_email whose prefix
+	// names another account's student ID hands that student a reset handle on
+	// this account, so the prefix is looked up whenever it is not the effective
+	// student ID (submitted or already on the row). Only an email write triggers
+	// the lookup — a student-id write pointing at someone's prefix creates no
+	// reset handle, because the mailbox is not on this row.
+	if validated.loginEmail != nil {
+		effectiveStudentID := current.StudentID
+		if validated.studentID != nil {
+			effectiveStudentID = *validated.studentID
+		}
+		if prefix, lookup := validate.UnmatchedNjuptPrefix(*validated.loginEmail, effectiveStudentID); lookup {
+			taken, lookupErr := s.Users.ExistsByStudentIDExcluding(ctx, prefix, input.UserID)
+			if lookupErr != nil {
+				internalErr := newError(ErrInternal, "查询邮箱前缀占用情况失败", lookupErr)
+				s.auditUpdate(ctx, input, false, errorCode(internalErr), nil)
+				return nil, internalErr
+			}
+			if taken {
+				occupiedErr := newError(ErrStudentIDOccupied, "login_email 前缀与其他账号学号冲突", nil)
+				s.auditUpdate(ctx, input, false, errorCode(occupiedErr), nil)
+				return nil, occupiedErr
+			}
+		}
+	}
+
 	// The role-change test here exists only to refuse self-demotion outright; the
 	// repository re-judges the change against the locked row and arms the last-admin
 	// guard and the session revocation itself.

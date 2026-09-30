@@ -86,6 +86,25 @@ func IsNjuptEmailDomain(email string) bool {
 	return strings.HasSuffix(email, njuptEmailDomain)
 }
 
+// UnmatchedNjuptPrefix returns the local part of an @njupt.edu.cn address when
+// it does not equal the account's student ID (case- and whitespace-folded), and
+// reports whether the caller should look that prefix up. The school issues one
+// mailbox per student ID, so a prefix naming another student's ID hands that
+// student a password-reset handle on whatever account carries the address — a
+// matching prefix is the account's own ID and needs no lookup, and any other
+// domain carries no per-student mapping at all. The email is expected already
+// normalized to lowercase, as every login-email write path does before calling.
+func UnmatchedNjuptPrefix(email, studentID string) (prefix string, lookup bool) {
+	if !IsNjuptEmailDomain(email) {
+		return "", false
+	}
+	local := email[:len(email)-len(njuptEmailDomain)]
+	if local == strings.ToLower(strings.TrimSpace(studentID)) {
+		return "", false
+	}
+	return local, true
+}
+
 // IsNjuptEmailLocalAllowed reports whether the local part of an @njupt.edu.cn
 // address is a student-ID shape: one ASCII letter followed by eight digits, or
 // bare eight digits. The caller is expected to have lowercased the address

@@ -74,6 +74,12 @@ type Users interface {
 	// transaction re-checks it. A recovery ticket requires the account to exist;
 	// a provision ticket requires that it does not.
 	FindLoginEmailByStudentID(ctx context.Context, studentID string) (string, bool, error)
+	// ExistsByStudentIDExcluding reports whether a student ID is taken by any
+	// account other than excludeUserID (0 = no exclusion), folding case and
+	// whitespace. Approval uses it for the NJUPT-prefix collision guard: a
+	// ticket email whose prefix names a registered student's ID would hand that
+	// student a reset handle on the account approval creates.
+	ExistsByStudentIDExcluding(ctx context.Context, studentID string, excludeUserID int64) (bool, error)
 }
 
 // AuditLogRepository records audit events.

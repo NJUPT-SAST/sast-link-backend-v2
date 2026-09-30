@@ -3,6 +3,7 @@ package alumnirequest
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -193,6 +194,10 @@ type fakeUsers struct {
 	// loginEmailByStudentID feeds FindLoginEmailByStudentID; a test seeds the
 	// exact ID string it expects the service to look up.
 	loginEmailByStudentID map[string]string
+	// studentIDOwners maps a folded student id to the account holding it, so the
+	// excluding lookup can tell "taken by another account" from a target's own
+	// id. Keys are folded by the method, mirroring the SQL comparison.
+	studentIDOwners map[string]int64
 	// emailQueries records every address asked about, so a test can assert that both
 	// the personal and the login address were checked.
 	emailQueries []string
@@ -204,6 +209,18 @@ func (f *fakeUsers) ExistsAsEmailAnywhere(_ context.Context, email string) (bool
 		return false, f.emailErr
 	}
 	return f.occupiedEmails[email], nil
+}
+
+func (f *fakeUsers) ExistsByStudentIDExcluding(
+	_ context.Context,
+	studentID string,
+	excludeUserID int64,
+) (bool, error) {
+	if f.studentErr != nil {
+		return false, f.studentErr
+	}
+	owner, taken := f.studentIDOwners[strings.ToLower(strings.TrimSpace(studentID))]
+	return taken && owner != excludeUserID, nil
 }
 
 func (f *fakeUsers) FindLoginEmailByStudentID(_ context.Context, studentID string) (string, bool, error) {

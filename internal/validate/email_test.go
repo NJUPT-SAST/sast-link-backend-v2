@@ -185,6 +185,35 @@ func TestIsNjuptEmailDomain(t *testing.T) {
 	}
 }
 
+func TestUnmatchedNjuptPrefix(t *testing.T) {
+	for _, testCase := range []struct {
+		email      string
+		studentID  string
+		wantPrefix string
+		wantLookup bool
+	}{
+		// A matching prefix is the account's own ID: no lookup.
+		{"b24040525@njupt.edu.cn", "B24040525", "", false},
+		{"b24040525@njupt.edu.cn", " b24040525 ", "", false},
+		{"24040525@njupt.edu.cn", "24040525", "", false},
+		// A mismatched NJUPT prefix names another student's mailbox: look it up.
+		{"b24040525@njupt.edu.cn", "B24040999", "b24040525", true},
+		{"b24040525@njupt.edu.cn", "", "b24040525", true},
+		// Any other domain carries no per-student mapping: never looked up.
+		{"president@sast.fun", "B24040999", "", false},
+		{"zhangsan@qq.com", "", "", false},
+		// A domain that merely contains the NJUPT one is not it.
+		{"b24040525@snjupt.edu.cn", "B24040525", "", false},
+	} {
+		prefix, lookup := UnmatchedNjuptPrefix(testCase.email, testCase.studentID)
+		if prefix != testCase.wantPrefix || lookup != testCase.wantLookup {
+			t.Errorf("UnmatchedNjuptPrefix(%q, %q) = (%q, %v), want (%q, %v)",
+				testCase.email, testCase.studentID, prefix, lookup,
+				testCase.wantPrefix, testCase.wantLookup)
+		}
+	}
+}
+
 func TestIsNjuptEmailLocalAllowed(t *testing.T) {
 	for _, testCase := range []struct {
 		email string

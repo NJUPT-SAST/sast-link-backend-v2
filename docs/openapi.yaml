@@ -2572,7 +2572,10 @@ paths:
                   maxLength: 255
                   description: |
                     登录邮箱。域名限 @njupt.edu.cn / @sast.fun，会被规范化为小写；
-                    修改后触发器 auto_set_email_type 自动重算 email_type。
+                    修改后触发器 auto_set_email_type 自动重算 email_type。改写时
+                    若前缀（大小写不敏感）不等于该账号生效学号（本次提交或行内
+                    现值），查表校验：前缀是其他账号的学号则 40902；仅改
+                    student_id 不触发此查表。
                 personal_email:
                   type: string
                   format: email
@@ -4991,7 +4994,8 @@ components:
           format: email
           description: |
             主登录邮箱，仅接受注册白名单域名（@njupt.edu.cn / sast.fun），全库唯一；
-            email_type 由服务端按域名派生，不可自指定。
+            email_type 由服务端按域名派生，不可自指定。前缀不等于提交学号时
+            查表校验：前缀是其他账号的学号则 40902（大小写不敏感）。
           example: b24040525@njupt.edu.cn
         major:
           type: string
