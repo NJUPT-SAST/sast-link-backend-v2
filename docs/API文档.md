@@ -780,14 +780,13 @@ PUT /user/profile
 
 **Headers**: `Authorization: Bearer <access_token>`
 
-更新当前登录用户可自助维护的个人信息。未传字段保持不变；`login_email`、`role`、`state`、`email_type` 等身份与权限字段不可通过此接口修改，传入未知字段返回 `40000`。
+更新当前登录用户可自助维护的个人信息。未传字段保持不变；`login_email`、`role`、`state`、`email_type`、`student_id` 等身份与权限字段不可通过此接口修改，传入未知字段（含 `student_id`）返回 `40000`——修改学号只能由管理员在 `PUT /admin/users/:id` 完成（§6.3）。
 
 **Request**（所有字段均可选，至少传一个）:
 
 ```json
 {
   "name": "张三",
-  "student_id": "B2404****",
   "phone_number": "13800138000",
   "qq_number": "1234567890",
   "college": "计算机学院、软件学院、网络空间安全学院",
@@ -806,7 +805,7 @@ PUT /user/profile
 | 字段组 | 归属 | 传空字符串 |
 | -------- | ------ | ----------- |
 | `nickname` / `department` / `intro` / `email` / `blog_url` / `github_url` | `profile`（可空） | 清空为 `null` |
-| `name` / `student_id` / `phone_number` / `qq_number` / `college` / `major` | `user`（NOT NULL） | 返回 `40000` |
+| `name` / `phone_number` / `qq_number` / `college` / `major` | `user`（NOT NULL） | 返回 `40000` |
 
 - 未传的键与传空字符串语义不同：前者保持不变，后者对可空字段表示清空
 - 传 `null` 等同于未传该键（保持不变），**不表示清空**；清空请用空字符串
@@ -814,11 +813,11 @@ PUT /user/profile
 - `department` 仅接受 `software` / `media` 或空字符串
 - `blog_url` / `github_url` 必须是 http/https 绝对 URL——这两个字段会渲染为链接，故拒绝 `javascript:`、`data:` 等 scheme
 - 所有文本字段拒绝控制字符（NUL、CR、LF、Tab 及其他 C0/C1），返回 `40000`；字段内部的空格保留，仅首尾被裁剪
-- 字段长度上限按数据库列宽校验（`name`/`nickname`/`intro`/`email` 255，`phone_number`/`qq_number` 20，`student_id`/`major` 50，两个 URL 512）
+- 字段长度上限按数据库列宽校验（`name`/`nickname`/`intro`/`email` 255，`phone_number`/`qq_number` 20，`major` 50，两个 URL 512）
 - `email` 为展示邮箱（非登录邮箱），非空时校验格式，不合法返回 `40000`
 - 可空字段传纯空白（如 `" "`）等同于传空字符串，首尾裁剪后为空即清空为 `NULL`；NOT NULL 字段传纯空白返回 `40000`
 
-**错误码**: `40000`（参数/枚举/长度/链接校验失败、未知字段、无任何待更新字段）、`40902`（学号已被占用）、`40900`（其他唯一性冲突）、`40102`（未认证）、`40301`（账号已注销）、`50000`（服务器内部错误）
+**错误码**: `40000`（参数/枚举/长度/链接校验失败、未知字段（含 `student_id`）、无任何待更新字段）、`40900`（其他唯一性冲突）、`40102`（未认证）、`40301`（账号已注销）、`50000`（服务器内部错误）
 
 审计日志 `update_profile` 的 `detail.changed_fields` 记录本次实际写入的字段名。
 
@@ -1120,7 +1119,7 @@ POST /user/identities/email
 }
 ```
 
-**说明**: Bind-Ticket 存储在 Redis，有效期 5 分钟，一次性使用，内部携带待绑定邮箱地址。
+**说明**: Bind-Ticket 存储在 Redis，有效期 5 分钟，一次性使用，内部携带待绑定邮箱地址。绑定目标不接受 `@njupt.edu.cn` 校园邮箱域（返回 `40000`）——校园邮箱是登录身份不是个人邮箱，`other_mail` 是第三方找回通道；域外任意可收信地址均可，仍需通过发往该地址的验证码确认可控。
 
 ---
 
@@ -1774,7 +1773,7 @@ POST /admin/users
 | `login_email` | ✓ | 主登录邮箱，仅接受注册白名单域名（`@njupt.edu.cn` / `sast.fun`），全库唯一；`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字）；`email_type` 由服务端按域名派生，无需也不可自行指定 |
 | `major` | – | 专业（≤50 字），缺省空串 |
 | `college` | – | 学院（college_enum 枚举），缺省「其他」 |
-| `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（§1.8/1.9）。不可与 `login_email` 相同，且不得已被其他账号占用（作为主登录邮箱或已绑身份） |
+| `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（§1.8/1.9）。不可与 `login_email` 相同，不得已被其他账号占用（作为主登录邮箱或已绑身份），且**不接受 `@njupt.edu.cn` 域**——校园邮箱是登录身份不是个人邮箱，绑定会把重置通道放进别人的邮箱 |
 | `role` | – | freshman / member / manager / lecturer / admin，缺省 member；manager 调用时不可为 admin（403） |
 | `state` | – | njupter / on_sast / retired_sast；不接受 `is_deleted`（新建即注销无意义，返回 `42200`）。**缺省由自动状态机推导**（role + 学号入学年份 + 当前学年；毕业生学号旧 → retired_sast，在校 lecturer/admin → on_sast，在校 freshman/member/manager → njupter）；显式传 `state` 则作为钉住值写入，该账号从此跳过自动推导与清算批次 |
 
@@ -1795,7 +1794,7 @@ POST /admin/users
 - 严格新建：同一 `login_email` / `student_id` 重复建号因唯一约束返回 `409`，服务端不静默复用旧账号；存量账号的补充绑定不归本接口管。
 - 本接口只建账号与绑定，不签发 token；初始会话由成员首次登录时建立。
 
-**错误码**: `40000`（必填缺失 / 格式 / 域白名单 / 枚举非法、`personal_email` 与 `login_email` 相同）、`40022`（`login_email` 前缀非学号样式）、`40901`（主邮箱或绑定邮箱已被占用）、`40902`（学号已被占用）、`42200`（`state` 为 `is_deleted`）、`40100`、`40300`。
+**错误码**: `40000`（必填缺失 / 格式 / 域白名单 / 枚举非法、`personal_email` 与 `login_email` 相同、`personal_email` 为校园邮箱域）、`40022`（`login_email` 前缀非学号样式）、`40901`（主邮箱或绑定邮箱已被占用）、`40902`（学号已被占用）、`42200`（`state` 为 `is_deleted`）、`40100`、`40300`。
 
 ---
 
@@ -1833,9 +1832,9 @@ PUT /admin/users/:id
 - `role` 实际发生变化时，同一事务内递增 `token_version` 并撤销该用户全部 Token，响应 `message` 变为 `"用户信息更新成功，已撤销该用户的全部 Token"`。仅提交与当前值相同的 `role` 不算变化，不触发撤销。
 - `state` 可在 `njupter` / `on_sast` / `retired_sast` 之间任意修改（供管理员纠错），但不接受 `is_deleted`。**手写的 state 是钉住（pin）**：该账号从此由管理员接管，自动推导与定时清算批次一律跳过它。
 - `state_auto`（布尔，可选）：恢复该账号的自动状态机——按 role + 学号入学年份 + 当前学年重新推导 `state` 并解除钉住，同一事务内完成。与 `state` 互斥，同时提交返回 `400`。用于误钉后的恢复；留级 / 延毕等例外账号不传此字段、保持手写钉住即可。
-- `personal_email` 提供时，在**同一事务**内将地址直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（与建号时的绑定同一语义，是已有账号的救援通道，§1.8/1.9）。不可与 `login_email` 相同（含本次修改后的值），不得已被其他账号占用，且每账号 `other_mail` 绑定总数不超过 2 个；不可对已注销用户绑定。
+- `personal_email` 提供时，在**同一事务**内将地址直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（与建号时的绑定同一语义，是已有账号的救援通道，§1.8/1.9）。不可与 `login_email` 相同（含本次修改后的值），不得已被其他账号占用，且每账号 `other_mail` 绑定总数不超过 2 个；不可对已注销用户绑定；**不接受 `@njupt.edu.cn` 域**——校园邮箱是登录身份不是个人邮箱。
 
-**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
+**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同、`personal_email` 为校园邮箱域）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
 
 **Response** `200`:
 
@@ -2372,7 +2371,7 @@ POST /alumni-requests
 | `student_id` | 是 | 同一学号同时只允许一条待审申请（无论 intent） |
 | `intent` | 否 | `provision`（缺省，开新号）或 `recover`（给该学号现有账号绑定 personal_email 恢复访问）。其余取值返回 400 |
 | `login_email` | 是 | 原学号邮箱，仍限 `@njupt.edu.cn` / `@sast.fun`；provision 时成为新账号登录身份，`@njupt.edu.cn` 前缀须为学号样式；recover 时必须与该学号现有账号登记的登录邮箱一致，允许存量非学号样式前缀 |
-| `personal_email` | 是 | 可正常收信的第三方邮箱，审批通过后直绑为 `other_mail` 登录身份，也是通知与自助改密的收件地址；不能与 `login_email` 相同 |
+| `personal_email` | 是 | 可正常收信的第三方邮箱，审批通过后直绑为 `other_mail` 登录身份，也是通知与自助改密的收件地址；不能与 `login_email` 相同，**不接受 `@njupt.edu.cn` 域**（校园邮箱是登录身份不是个人邮箱） |
 | `phone_number` | 是 | |
 | `qq_number` | 是 | |
 | `major` | 是 | **比 §6.2.1 更严**：管理员建号允许 `major` 为空，本端点必须填，理由见下 |
