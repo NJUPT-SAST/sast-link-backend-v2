@@ -139,6 +139,7 @@ func (h Handler) ServeSVG(c *gin.Context) {
 	result, err := h.Service.Render(c.Request.Context(), badge.RenderInput{
 		Key:      key,
 		Theme:    c.Query("theme"),
+		Target:   c.Query("target"),
 		ClientIP: c.ClientIP(),
 	})
 	if err != nil {

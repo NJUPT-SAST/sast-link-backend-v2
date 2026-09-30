@@ -32,6 +32,17 @@ const (
 	ThemeDark  Theme = "dark"
 )
 
+// Target selects which of the member's own pages the card's click-through
+// lands on. It rides the URL like theme — the embedder may override the
+// member's default by hand — and unknown values normalize to the blog
+// default.
+type Target string
+
+const (
+	TargetBlog   Target = "blog"
+	TargetGithub Target = "github"
+)
+
 // layout carries every geometry and truncation bound the template consumes.
 // Fixed canvas, fixed slots. Y values are text baselines; the vertical
 // divider is only drawn when its X is non-zero.
@@ -113,8 +124,8 @@ type cardData struct {
 	Nickname      string
 	Intro         string
 	Brand         string
-	// LinkTarget is the member's own page the whole card links to — blog
-	// first, GitHub as the fallback, empty when neither exists. An <img>
+	// LinkTarget is the member's own page the whole card links to — the
+	// requested target first, the other page as fallback, empty when neither exists. An <img>
 	// embed ignores links inside the SVG (camo strips them anyway); the
 	// target matters where the SVG is inlined or shown via <object>, and the
 	// frontend preview builds its own <a> from the same rule.

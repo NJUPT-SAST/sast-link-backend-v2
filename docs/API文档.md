@@ -2886,7 +2886,7 @@ RP (Relying Party)          浏览器 / 前端授权页          SAST Link v2 (O
 
 ## 9. 个人徽标（Badge）
 
-用户自主开启的公开身份徽标：一枚可嵌入任意网页（GitHub README、友链列表等）的紧凑 SVG 卡片，展示头像、昵称与「签名」，卡片可点击跳转成员个人页（blog 优先、github 兜底）。查看无需任何认证——**URL 本身就是凭证**（capability URL）：`badge_key` 为 256-bit 随机 base64url，不可枚举（这正是被移除的 `GET /card/:id` 的教训，见 §3.4）。开关只改变可见性、不轮换 key：关闭时该 key 渲染「已关闭」卡片，重新开启后原链接恢复可用；key 仅在首次开启时生成。
+用户自主开启的公开身份徽标：一枚可嵌入任意网页（GitHub README、友链列表等）的紧凑 SVG 卡片，展示头像、昵称与「签名」，卡片可点击跳转成员个人页（`?target=` 指定 blog/github：请求的目标优先、另一个兜底，默认 blog）。查看无需任何认证——**URL 本身就是凭证**（capability URL）：`badge_key` 为 256-bit 随机 base64url，不可枚举（这正是被移除的 `GET /card/:id` 的教训，见 §3.4）。开关只改变可见性、不轮换 key：关闭时该 key 渲染「已关闭」卡片，重新开启后原链接恢复可用；key 仅在首次开启时生成。
 
 ### 9.1 查询徽标状态
 
@@ -2968,6 +2968,7 @@ GET /badge/:key
 | ------ | ------ | ------ | ------ |
 | `size` | `sm`（当前唯一支持的档位） | `sm` | 紧凑画布 320×72：左侧头像，右侧昵称 + 「签名」。传任何值均按紧凑渲染；`md`/`lg` 为后续预留档位 |
 | `theme` | `auto` / `light` / `dark` | `auto` | auto 内嵌 `prefers-color-scheme` 双调色板；light/dark 固定单一调色板 |
+| `target` | `blog` / `github` | `blog` | 卡片锚点跳转的成员页面：请求的目标优先，未设置的另一个兜底；未知值归一化为 `blog` |
 
 **Response** `200` `image/svg+xml`:
 - `Cache-Control: public, no-cache` + 强 `ETag`；`If-None-Match` 命中返回 304

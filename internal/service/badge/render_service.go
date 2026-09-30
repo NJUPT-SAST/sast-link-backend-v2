@@ -130,6 +130,7 @@ func (c *renderCache) put(key string, entry renderCacheEntry) {
 type RenderInput struct {
 	Key      string
 	Theme    string
+	Target   string
 	ClientIP string
 }
 
@@ -138,10 +139,12 @@ type RenderInput struct {
 // nickname/signature edit) mints a fresh identity, so the next render picks
 // the change up immediately instead of after the TTL — per-theme keys alone
 // previously let a stale avatar-less auto render linger beside fresh
-// light/dark renders. The badge key stays last so the pause/resume purge,
-// which matches the "|key" suffix, keeps working across versions.
-func renderCacheKey(version, key string, theme Theme) string {
-	return version + "|" + string(theme) + "|" + key
+// light/dark renders. Target rides beside theme: two shares of the same key
+// with different click-throughs must never serve each other's card. The
+// badge key stays last so the pause/resume purge, which matches the "|key"
+// suffix, keeps working across versions.
+func renderCacheKey(version, key string, theme Theme, target Target) string {
+	return version + "|" + string(theme) + "|" + string(target) + "|" + key
 }
 
 // Render resolves a public badge key to its SVG. Unknown, closed or deleted
@@ -153,6 +156,13 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	case ThemeLight, ThemeDark, ThemeAuto:
 	default:
 		theme = ThemeAuto
+	}
+	// Same normalization contract as theme: anything but the two known
+	// values answers the default, so a hand-edited ?target=typo never 400s
+	// an img embed.
+	target := TargetBlog
+	if Target(input.Target) == TargetGithub {
+		target = TargetGithub
 	}
 
 	// Bound cache-key memory before any database lookup or cache insertion.
@@ -184,7 +194,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	if badge == nil {
 		return nil, newError(ErrInternal, "render badge: nil target", nil)
 	}
-	cacheKey = renderCacheKey(badge.Version.UTC().Format(time.RFC3339Nano), input.Key, theme)
+	cacheKey = renderCacheKey(badge.Version.UTC().Format(time.RFC3339Nano), input.Key, theme, target)
 
 	// Authorization is always live, including on a render-cache hit: another
 	// instance may have disabled sharing, or an admin may have closed the user.
@@ -192,7 +202,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 		return &RenderResult{SVG: entry.svg, ETag: entry.etag}, nil
 	}
 
-	result, err := s.fillRenderCache(ctx, badge.UserID, theme, cacheKey)
+	result, err := s.fillRenderCache(ctx, badge.UserID, theme, target, cacheKey)
 	if err != nil || result.NotFound {
 		return result, err
 	}
@@ -210,7 +220,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 // Only display work holds the lane. Followers revalidate outside it, allowing
 // their database round trips to overlap. Deferred release also survives panic
 // recovery by the HTTP middleware.
-func (s *Service) fillRenderCache(ctx context.Context, userID int64, theme Theme, cacheKey string) (*RenderResult, error) {
+func (s *Service) fillRenderCache(ctx context.Context, userID int64, theme Theme, target Target, cacheKey string) (*RenderResult, error) {
 	unlock, err := s.renderCache.lockFill(ctx, cacheKey)
 	if err != nil {
 		return nil, newError(ErrInternal, "render badge: wait for fill", err)
@@ -219,10 +229,10 @@ func (s *Service) fillRenderCache(ctx context.Context, userID int64, theme Theme
 	if entry, ok := s.renderCache.get(cacheKey); ok {
 		return &RenderResult{SVG: entry.svg, ETag: entry.etag}, nil
 	}
-	return s.renderCold(ctx, userID, theme, cacheKey)
+	return s.renderCold(ctx, userID, theme, target, cacheKey)
 }
 
-func (s *Service) renderCold(ctx context.Context, userID int64, theme Theme, cacheKey string) (*RenderResult, error) {
+func (s *Service) renderCold(ctx context.Context, userID int64, theme Theme, target Target, cacheKey string) (*RenderResult, error) {
 	card, err := s.Users.FindPublicCardByUserID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
@@ -235,7 +245,7 @@ func (s *Service) renderCold(ctx context.Context, userID int64, theme Theme, cac
 		return nil, newError(ErrInternal, "render badge: load card", err)
 	}
 
-	data := buildCardData(card)
+	data := buildCardData(card, target)
 	avatarURL := ""
 	if card.Avatar != nil {
 		avatarURL = strings.TrimSpace(*card.Avatar)
@@ -290,7 +300,9 @@ func httpLinkTarget(raw string) bool {
 
 // buildCardData projects public profile fields onto the compact canvas and
 // selects a safe link target without exposing identity or department fields.
-func buildCardData(card *repository.PublicCard) cardData {
+// The requested target leads and the other page backs it up, so a share
+// whose chosen page is missing still lands somewhere owned by the member.
+func buildCardData(card *repository.PublicCard, target Target) cardData {
 	data := cardData{Brand: "SAST Link"}
 
 	nickname := ""
@@ -317,16 +329,20 @@ func buildCardData(card *repository.PublicCard) cardData {
 	if card.GitHubURL != nil && strings.TrimSpace(*card.GitHubURL) != "" {
 		github = strings.TrimSpace(*card.GitHubURL)
 	}
-	// The card links to the member's own page — blog first, GitHub as the
-	// fallback, nothing when neither exists — and only over http(s): a
-	// scheme an escaper cannot neuter (javascript:) must not reach the
-	// anchor. The compact canvas has no social-host row, so the hosts are no
-	// longer displayed.
+	// The card links to the member's own page — the requested target first,
+	// the other one as the fallback, nothing when neither exists — and only
+	// over http(s): a scheme an escaper cannot neuter (javascript:) must not
+	// reach the anchor. The compact canvas has no social-host row, so the
+	// hosts are no longer displayed.
+	first, second := blog, github
+	if target == TargetGithub {
+		first, second = github, blog
+	}
 	data.LinkTarget = ""
-	if httpLinkTarget(blog) {
-		data.LinkTarget = blog
-	} else if httpLinkTarget(github) {
-		data.LinkTarget = github
+	if httpLinkTarget(first) {
+		data.LinkTarget = first
+	} else if httpLinkTarget(second) {
+		data.LinkTarget = second
 	}
 	return data
 }

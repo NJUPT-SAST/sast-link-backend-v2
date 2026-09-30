@@ -102,6 +102,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **个人徽标 `target` 参数生效**（2026-09-30）：前端分享 URL 早已携带 `?target=blog|github`，但渲染端从未读取该参数——`ServeSVG` 只解析 `theme`，卡片锚点固定 blog 优先、github 兜底，`?target=github` 的分享在两页都配置时永远跳博客。现在 `target` 与 `theme` 同一契约：随 `RenderInput` 下传、未知值归一化为 `blog`、锚点按「请求的目标优先，另一个兜底」解析（http(s) 白名单不变），并加入渲染缓存标识（version|theme|target|key），两个变体互不命中对方缓存。`docs/API文档.md` §9.4 与 `docs/openapi.yaml` 补记 `target` 参数。
+
 - **注册邮箱前缀错误文案**（2026-09-30）：注册发码、验码和提交的 `40022` 响应保留“邮箱前缀格式错误”，与业务错误码和 API 契约一致。
 
 - **存量邮箱找回**（2026-09-30）：alumni `recover` 匹配旧登录邮箱，不应用新账号前缀规则，仍核对学号与邮箱归属。
