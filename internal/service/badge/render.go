@@ -81,6 +81,11 @@ type palette struct {
 	Muted      string
 	Hairline   string
 	Accent     string
+	// Border is the outer frame's color: deliberately CONTRASTING with the
+	// background rather than tonal — the light card carries a dark line and
+	// the dark card a light one — so the frame stays visible on both themes
+	// and on pages of either shade.
+	Border string
 }
 
 var lightPalette = palette{
@@ -89,6 +94,7 @@ var lightPalette = palette{
 	Muted:      "#6b7280",
 	Hairline:   "#e5e7eb",
 	Accent:     "#0a96d6",
+	Border:     "#1c1f23",
 }
 
 var darkPalette = palette{
@@ -97,6 +103,7 @@ var darkPalette = palette{
 	Muted:      "#9aa0a6",
 	Hairline:   "#2a2d33",
 	Accent:     "#4db8f0",
+	Border:     "#e8eaed",
 }
 
 // cardData is the resolved, truncated, display-ready projection of one badge.
@@ -127,14 +134,14 @@ var svgTemplate = template.Must(template.New("badge").Funcs(template.FuncMap{
 }).Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" viewBox="0 0 {{.Layout.Width}} {{.Layout.Height}}" role="img" aria-label="{{esc .Data.Nickname}} 的 SAST Link 徽标">
 <style>
-.card-bg{fill:{{.Palette.Background}}}.card-fg{fill:{{.Palette.Foreground}}}.card-muted{fill:{{.Palette.Muted}}}.card-accent{fill:{{.Palette.Accent}}}.card-line{stroke:{{.Palette.Hairline}}}
-{{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-fg{fill:{{.Dark.Foreground}}}.card-muted{fill:{{.Dark.Muted}}}.card-accent{fill:{{.Dark.Accent}}}.card-line{stroke:{{.Dark.Hairline}}}}
+.card-bg{fill:{{.Palette.Background}}}.card-fg{fill:{{.Palette.Foreground}}}.card-muted{fill:{{.Palette.Muted}}}.card-accent{fill:{{.Palette.Accent}}}.card-line{stroke:{{.Palette.Hairline}}}.card-border{stroke:{{.Palette.Border}}}
+{{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-fg{fill:{{.Dark.Foreground}}}.card-muted{fill:{{.Dark.Muted}}}.card-accent{fill:{{.Dark.Accent}}}.card-line{stroke:{{.Dark.Hairline}}}.card-border{stroke:{{.Dark.Border}}}}
 {{end}}</style>{{if .Data.LinkTarget}}<a href="{{esc .Data.LinkTarget}}" target="_blank" rel="noopener noreferrer">{{end}}<rect class="card-bg" width="{{.Layout.Width}}" height="{{.Layout.Height}}" rx="10"/>
-<rect x="0.5" y="0.5" width="{{.DecWidth}}" fill="none" stroke="{{.Palette.Hairline}}" height="{{.DecHeight}}" rx="10" stroke-width="1"/>
+<rect x="0.5" y="0.5" width="{{.DecWidth}}" fill="none" class="card-border" height="{{.DecHeight}}" rx="10" stroke-width="1"/>
 {{if .Data.AvatarDataURI}}<image x="{{.Layout.AvatarX}}" y="{{.Layout.AvatarY}}" width="{{.Layout.AvatarSize}}" height="{{.Layout.AvatarSize}}" href="{{.Data.AvatarDataURI}}" clip-path="inset(0 round {{.Layout.AvatarRadius}}px)" preserveAspectRatio="xMidYMid slice"/>
 {{else if .Data.AvatarInitial}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-muted"/>
 <text x="{{.DecAvatarCX}}" y="{{.DecAvatarTextY}}" text-anchor="middle" class="card-bg" font-size="{{.DecAvatarFontSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.AvatarInitial}}</text>
-{{else}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-bg" stroke="{{.Palette.Hairline}}" stroke-width="1"/>
+{{else}}<circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.Layout.AvatarRadius}}" class="card-bg card-line" stroke-width="1"/>
 <circle cx="{{.DecAvatarCX}}" cy="{{.DecAvatarCY}}" r="{{.DecAvatarRadiusInner}}" class="card-accent" fill-opacity="0.25"/>
 {{end}}{{if .Layout.DividerX}}<line x1="{{.Layout.DividerX}}" y1="{{.Layout.DividerY1}}" x2="{{.Layout.DividerX}}" y2="{{.Layout.DividerY2}}" class="card-line" stroke-width="1"/>
 {{end}}<text x="{{.Layout.NameX}}" y="{{.Layout.NameY}}" class="card-fg" font-size="{{.Layout.NameSize}}" font-family="{{.FontStack}}" font-weight="600">{{esc .Data.Nickname}}</text>
@@ -203,24 +210,47 @@ func renderCard(theme Theme, data cardData) ([]byte, error) {
 
 // errorCardSVG is the 404 body: an img embed must not crack, so an unknown
 // key renders a neutral card instead of a JSON envelope.
+// errorCardSVG is the closed/unknown-key body: an img embed must not
+// crack, so it renders a neutral card instead of a JSON envelope. It mirrors
+// the compact card exactly — same 320×72 canvas, same class-based palette
+// (theme-aware, auto carries the media query), same contrast border and the
+// same avatar-slot visual language (muted circle with a bg-colored mark) —
+// so a closed badge reads as "this card is off", not as a foreign object.
 var errorCardSVG = template.Must(template.New("badge-error").Parse(`<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="460" height="120" viewBox="0 0 460 120" role="img" aria-label="徽标不存在">
-<rect width="460" height="120" rx="10" fill="#ffffff"/>
-<rect x="0.5" y="0.5" width="459" height="119" rx="10" fill="none" stroke="#e5e7eb" stroke-width="1"/>
-<circle cx="64" cy="60" r="28" fill="none" stroke="#e5e7eb" stroke-width="1.5"/>
-<path d="M 54 50 L 74 70 M 74 50 L 54 70" stroke="#6b7280" stroke-width="2" stroke-linecap="round"/>
-<text x="110" y="66" font-size="16" font-family="{{.FontStack}}" fill="#6b7280">徽标不存在或已关闭</text>
-<text x="448" y="18" text-anchor="end" font-size="9" font-family="{{.FontStack}}" fill="#6b7280" letter-spacing="1">SAST Link</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="72" viewBox="0 0 320 72" role="img" aria-label="徽标不存在或已关闭">
+<style>
+.card-bg{fill:{{.Palette.Background}}}.card-muted{fill:{{.Palette.Muted}}}.card-border{stroke:{{.Palette.Border}}}.card-mark{stroke:{{.Palette.Background}}}
+{{if .AutoTheme}}@media (prefers-color-scheme: dark){.card-bg{fill:{{.Dark.Background}}}.card-muted{fill:{{.Dark.Muted}}}.card-border{stroke:{{.Dark.Border}}}.card-mark{stroke:{{.Dark.Background}}}}
+{{end}}</style><rect class="card-bg" width="320" height="72" rx="10"/>
+<rect x="0.5" y="0.5" width="319" height="71" rx="10" fill="none" class="card-border" stroke-width="1"/>
+<circle cx="36" cy="36" r="28" class="card-muted"/>
+<path d="M 26 26 L 46 46 M 46 26 L 26 46" class="card-mark" stroke-width="3" stroke-linecap="round"/>
+<text x="78" y="41" class="card-muted" font-size="14" font-family="{{.FontStack}}">徽标不存在或已关闭</text>
+<text x="312" y="16" text-anchor="end" class="card-muted" font-size="9" font-family="{{.FontStack}}" letter-spacing="1">SAST Link</text>
 </svg>
 `))
 
-// renderErrorCard renders the not-found card.
-func renderErrorCard() []byte {
+// renderErrorCard renders the not-found card in the requested theme.
+func renderErrorCard(theme Theme) []byte {
+	view := struct {
+		Palette   palette
+		Dark      palette
+		AutoTheme bool
+		FontStack string
+	}{
+		Palette:   lightPalette,
+		Dark:      darkPalette,
+		AutoTheme: theme == ThemeAuto,
+		FontStack: fontStack,
+	}
+	if theme == ThemeDark {
+		view.Palette = darkPalette
+	}
 	var buf bytes.Buffer
-	if err := errorCardSVG.Execute(&buf, map[string]string{"FontStack": fontStack}); err != nil {
+	if err := errorCardSVG.Execute(&buf, view); err != nil {
 		// A template this static cannot fail; fall back to a minimal body so
 		// the endpoint still answers image/svg+xml.
-		return []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="460" height="120"></svg>`)
+		return []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="72"></svg>`)
 	}
 	return buf.Bytes()
 }
