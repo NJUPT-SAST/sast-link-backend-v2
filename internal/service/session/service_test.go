@@ -2382,7 +2382,12 @@ func TestBindEmailSendCodeSameConflictForSelfAndOtherBinding(t *testing.T) {
 
 func TestBindEmailSendCodeRejectsLoginEmail(t *testing.T) {
 	service := newRegisterService(t)
-	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "user@njupt.edu.cn"})
+	// The seeded account's login email is a school address, which the domain
+	// ban refuses before the occupancy check; a non-school login email isolates
+	// the uniform occupied refusal this test exists for.
+	users := service.Users.(*fakeUsers)
+	users.byLogin["taken@gmail.com"] = testUserWithHash(43, "taken@gmail.com", model.UserStateOnSAST, "hash")
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "taken@gmail.com"})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
 
