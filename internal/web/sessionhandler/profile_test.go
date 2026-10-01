@@ -87,11 +87,15 @@ func TestUpdateProfileDistinguishesAbsentFromEmpty(t *testing.T) {
 
 // Unknown fields are rejected rather than silently dropped, so a client that
 // misspells login_email does not believe it changed a protected column.
+// student_id joined that class when the self-service edit was removed: the
+// strict decoder answers the key with 400 instead of the field quietly
+// changing (or being ignored) — changing a student ID is an administrator's
+// correction.
 func TestUpdateProfileRejectsUnknownFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{updateProfileResult: &session.UpdateProfileResult{}}
 	router := authedRouter(service)
-	recorder := doJSON(router, http.MethodPut, "/user/profile", `{"login_email":"attacker@sast.fun"}`)
+	recorder := doJSON(router, http.MethodPut, "/user/profile", `{"login_email":"attacker@sast.fun", "student_id":"B24040999"}`)
 
 	body := decodeBody(t, recorder)
 	if recorder.Code != http.StatusBadRequest || body.Code != errcode.CodeBadRequest {

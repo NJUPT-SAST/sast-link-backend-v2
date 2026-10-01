@@ -131,7 +131,6 @@ func TestUpdateProfileRejectsControlCharacters(t *testing.T) {
 		"nul in name":         {UserID: 42, Name: stringPtr("张\x00三")},
 		"newline in intro":    {UserID: 42, Intro: stringPtr("line\nbreak")},
 		"cr in major":         {UserID: 42, Major: stringPtr("软件\r工程")},
-		"tab in student id":   {UserID: 42, StudentID: stringPtr("B24\t04")},
 		"del in phone":        {UserID: 42, PhoneNumber: stringPtr("138\x7f00138000")},
 		"c1 control in intro": {UserID: 42, Intro: stringPtr("intro\u0085next")},
 	}
@@ -219,18 +218,27 @@ func TestUpdateProfileRejectsEmptyRequest(t *testing.T) {
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 }
 
-// student_id is unique, so a racing edit must name the colliding field instead of
-// reporting a generic conflict the user cannot act on.
-func TestUpdateProfileMapsStudentIDConflict(t *testing.T) {
+// A self-service edit no longer carries student_id: the field is absent from
+// the input, the request DTO and the repository update alike, and the strict
+// decoder answers the key with 400 (unknown field). Changing a student ID is
+// an administrator's correction.
+func TestUpdateProfileNoLongerCarriesStudentID(t *testing.T) {
 	service := newRegisterService(t)
 	users := service.Users.(*fakeUsers)
-	users.updateProfileErr = uniqueViolation(userStudentIDConstraint)
 
-	_, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
-		UserID:    42,
-		StudentID: stringPtr("B20000001"),
-	})
-	assertKind(t, err, KindConflict, errcode.CodeStudentIDOccupied)
+	if _, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
+		UserID: 42,
+		Name:   stringPtr("张三"),
+	}); err != nil {
+		t.Fatalf("UpdateProfile(name only): %v", err)
+	}
+	if len(users.profileUpdates) != 1 {
+		t.Fatalf("profile updates = %d, want 1", len(users.profileUpdates))
+	}
+	update := users.profileUpdates[0]
+	if update.Name == nil || *update.Name != "张三" {
+		t.Fatalf("name = %v, want 张三 through", update.Name)
+	}
 }
 
 func TestUpdateProfileRecordsChangedFieldsAudit(t *testing.T) {

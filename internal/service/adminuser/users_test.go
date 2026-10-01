@@ -947,6 +947,62 @@ func TestUpdateUserManagerBoundary(t *testing.T) {
 	})
 }
 
+// The NJUPT-prefix collision guard on the edit: only a login_email write
+// triggers the lookup, judged against the effective student ID (submitted or
+// already on the row) and excluding the target's own row.
+func TestUpdateUserPrefixCollisionGuard(t *testing.T) {
+	t.Run("email rewrite naming another account's id is refused", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		h.users.studentIDOwners = map[string]int64{"b24040999": 777}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.LoginEmail = stringPtr("b24040999@njupt.edu.cn")
+		}))
+
+		assertKind(t, err, KindConflict)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+	})
+
+	t.Run("prefix equal to the effective student id passes unchecked", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		// The target itself owns the folded value: the exclusion keeps its own
+		// consistent pairing writable.
+		h.users.studentIDOwners = map[string]int64{"b24040101": testTargetID}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.LoginEmail = stringPtr("b24040101@njupt.edu.cn")
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(own effective id): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
+	})
+
+	t.Run("a student-id-only write never looks the prefix up", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		h.users.studentIDOwners = map[string]int64{"b24040101": 777}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.StudentID = stringPtr("B24040999")
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(student id only): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
+	})
+}
+
 // The batch endpoint routes through UpdateUser, so the manager boundary holds
 // per item: admin targets fail with the boundary reason, everything else
 // proceeds.

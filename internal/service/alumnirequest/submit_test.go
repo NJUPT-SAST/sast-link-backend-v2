@@ -90,6 +90,25 @@ func TestSubmitRejectsNonStudentNjuptPrefix(t *testing.T) {
 // the second shape V010 treats as debris. The comparison is delegated to
 // validate.IncompleteProfileFields, so this also guards that the delegation stayed
 // wired.
+// A school mailbox is a login identity, never an other_mail: the ticket's
+// reachable address is a third-party mailbox by definition.
+func TestSubmitRejectsSchoolDomainPersonalEmail(t *testing.T) {
+	t.Parallel()
+
+	input := validSubmit()
+	input.PersonalEmail = "zhangsan@njupt.edu.cn"
+	service := newService(&fakeRequests{}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+	_, err := service.Submit(context.Background(), input)
+	var typed *Error
+	if !errors.As(err, &typed) {
+		t.Fatalf("Submit() error = %v, want a typed error", err)
+	}
+	if typed.Code != errcode.CodeEmailDomainNotAllowed {
+		t.Fatalf("code = %d, want %d", typed.Code, errcode.CodeEmailDomainNotAllowed)
+	}
+}
+
 func TestSubmitRejectsNameEqualToStudentID(t *testing.T) {
 	t.Parallel()
 

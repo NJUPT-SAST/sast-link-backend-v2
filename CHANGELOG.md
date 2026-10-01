@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **`other_mail` 不再接受校园邮箱域**（fix/identity-pair-consistency）：`@njupt.edu.cn` 地址只能是 login_email，绑成 other_mail 是把重置句柄放进该前缀对应学生的邮箱。四处收紧：admin 建号/改号的 `personal_email`、校友工单的 `personal_email`、自助 `POST /user/identities/email` 绑定发码（有邮箱验证但属同类别错误，一并禁）。校园邮箱域提交返回 `40000`。
+
+- **admin 写入查表拦截 NJUPT 前缀撞号**（fix/identity-pair-consistency）：校园邮箱按学号一人一箱，`login_email` 前缀指向**其他账号学号**时，该邮箱的主人即持有此账号的重置句柄。三个 admin 写入面在写入前查表（`ExistsByStudentIDExcluding`，`lower(btrim())` 折叠，排除目标自身行）：`POST /admin/users`（前缀≠提交学号时查，撞返回 `40902`「login_email 前缀与其他账号学号冲突」）、`PUT /admin/users/:id`（仅 `login_email` 被写入时查，对生效学号判定；仅改学号不查——学号指向他人邮箱前缀不产生重置句柄）、校友 provision 审批（事务前查，撞返回 `40901` 提示驳回）。前缀等于本人学号不查表；前缀是未被注册的号仍放行——查表只能看见已注册账号，未注册学生的邮箱占用继续依赖人工核验。注册/自助面不查：两步流要求控箱，自己配错只伤自己。
+
+- **自助资料编辑移除 `student_id`**（fix/identity-pair-consistency）：`PUT /user/profile` 不再接受 `student_id`（严格 JSON 解码按未知字段返回 `40000`），`UpdateProfileInput` 与仓储 `ProfileUpdate` 同步移除该字段。此前该路径可自助改学号，且占用仅靠大小写敏感的 `user_student_id_key` 约束——同库已有 `B24040525` 时可自改成 `b24040525`；修改学号今后只能由管理员在 `PUT /admin/users/:id` 完成。响应与 `GET /user/profile` 仍返回 `student_id`（只读）。
+
 ### Added
 
 - **manager（部长）角色分层**（feat/manager-role，[PR #98](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/98)）：V020 向 `user_role_enum` 加入 `manager`。控制台分三层：lecturer 只读用户目录；manager 拥有成员管理半边——用户读写（建号 / 编辑 / 批量角色 / 软删 / 恢复）与概览统计（概览仅返回 users 聚合，clients/audit 两路对 manager 整体缺席），phone 视角同 admin（含 keyword 匹配），但不接触技术信息（OAuth 客户端、审计日志、校友工单均 403）；服务层与写事务内（锁定行重判）双重约束 manager 边界：不可写 admin 角色账号（编辑 / 升降 / 注销 / 恢复均 403）、不可授予 admin 角色（建号与批量逐项拒绝），其余一切升降权含把他人升为 manager（自我复制）与升 / 降 lecturer 均可行——并发场景下 admin 恰好把目标升为 admin 时，进行中的 manager 写入也会在提交前被事务内重判拒绝。manager 是学生角色账号：状态推导为 njupter、入学满 4 学年 retired_sast，计入 `incomplete_by_role` 资料补全跟进。管理员自保护规则（不可改自己角色、不可注销自己）对 manager 同样适用。

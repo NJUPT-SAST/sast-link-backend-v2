@@ -72,14 +72,34 @@ func (s Service) Approve(ctx context.Context, input ReviewInput) (*ApproveResult
 	if ticket.Intent == model.AlumniRequestIntentRecover {
 		return s.approveRecover(ctx, input)
 	}
-	return s.approveProvision(ctx, input)
+	return s.approveProvision(ctx, input, ticket)
 }
 
 // approveProvision is the original approval: mint an account with a discarded
 // password and a state derived from the ticket's student ID (internal/validate),
 // so a graduate's old cohort lands on retired_sast without the rule being
 // hardcoded here.
-func (s Service) approveProvision(ctx context.Context, input ReviewInput) (*ApproveResult, error) {
+func (s Service) approveProvision(ctx context.Context, input ReviewInput, ticket *model.AlumniRequest) (*ApproveResult, error) {
+	// The NJUPT-prefix collision guard: a ticket email whose prefix names a
+	// registered student's ID would hand that student a reset handle on the
+	// account approval creates (the reset flow resolves by identifier and
+	// delivers to the mailbox the prefix names), so the reviewer is told to
+	// reject instead of provisioning over someone else's mailbox. The ticket's
+	// own student ID needs no lookup — it was checked free at submission.
+	if prefix, lookup := validate.UnmatchedNjuptPrefix(ticket.LoginEmail, ticket.StudentID); lookup {
+		taken, existsErr := s.Users.ExistsByStudentIDExcluding(ctx, prefix, 0)
+		if existsErr != nil {
+			internalErr := internalError(ctx, "check alumni ticket prefix collision", "查询邮箱前缀占用情况失败", existsErr)
+			s.auditReview(ctx, input, actionApprove, false, errorCode(internalErr), nil)
+			return nil, internalErr
+		}
+		if taken {
+			refused := newError(ErrEmailOccupied, "工单邮箱前缀与现有账号学号冲突，请驳回", nil)
+			s.auditReview(ctx, input, actionApprove, false, errorCode(refused), nil)
+			return nil, refused
+		}
+	}
+
 	var provisioned *model.User
 	approved, err := s.Requests.ApproveAlumniRequest(ctx, input.RequestID, input.AdminUserID, s.now(),
 		func(request *model.AlumniRequest) (*model.User, *model.Profile, *model.Identity, error) {

@@ -822,12 +822,6 @@ paths:
                   maxLength: 50
                   description: 专业
                   example: 软件工程
-                student_id:
-                  type: string
-                  nullable: true
-                  maxLength: 50
-                  description: 学号
-                  example: B2404****
                 nickname:
                   type: string
                   nullable: true
@@ -1098,7 +1092,10 @@ paths:
     post:
       summary: 绑定其他邮箱（第一步）
       deprecated: false
-      description: 返回 Bind-Ticket（Redis，5 分钟，一次性），内部携带待绑定邮箱地址。
+      description: |
+        返回 Bind-Ticket（Redis，5 分钟，一次性），内部携带待绑定邮箱地址。
+        绑定目标不接受 @njupt.edu.cn 校园邮箱域（40000）——校园邮箱是登录身份
+        不是个人邮箱；域外任意可收信地址均可，仍需验证码确认可控。
       operationId: userRequestBindEmail
       tags:
         - Identities
@@ -2575,7 +2572,10 @@ paths:
                   maxLength: 255
                   description: |
                     登录邮箱。域名限 @njupt.edu.cn / @sast.fun，会被规范化为小写；
-                    修改后触发器 auto_set_email_type 自动重算 email_type。
+                    修改后触发器 auto_set_email_type 自动重算 email_type。改写时
+                    若前缀（大小写不敏感）不等于该账号生效学号（本次提交或行内
+                    现值），查表校验：前缀是其他账号的学号则 40902；仅改
+                    student_id 不触发此查表。
                 personal_email:
                   type: string
                   format: email
@@ -2584,7 +2584,8 @@ paths:
                     提供时在同一事务内直绑为 other_mail 登录身份（管理员背书、免邮箱
                     验证），绑定后可用于登录与密码重置——已有账号的救援通道。不可与
                     login_email 相同（含本次修改后的值），不得已被其他账号占用，且每
-                    账号 other_mail 绑定总数不超过 2 个（40905）；不可对已注销用户绑定。
+                    账号 other_mail 绑定总数不超过 2 个（40905）；不可对已注销用户绑定；
+                    不接受 @njupt.edu.cn 域（40000）——校园邮箱是登录身份不是个人邮箱。
         required: true
       responses:
         "200":
@@ -3858,6 +3859,7 @@ components:
             可正常收信的第三方邮箱。审批通过后在同一事务内直绑为 other_mail 登
             录身份，也是结果通知与自助改密的收件地址。不能与 login_email 相同：
             V005 的两个触发器禁止同一地址既是 login_email 又是 other_mail 身份。
+            不接受 @njupt.edu.cn 域（40000）——校园邮箱是登录身份不是个人邮箱。
           example: zhangsan@qq.com
         phone_number:
           type: string
@@ -4992,7 +4994,8 @@ components:
           format: email
           description: |
             主登录邮箱，仅接受注册白名单域名（@njupt.edu.cn / sast.fun），全库唯一；
-            email_type 由服务端按域名派生，不可自指定。
+            email_type 由服务端按域名派生，不可自指定。前缀不等于提交学号时
+            查表校验：前缀是其他账号的学号则 40902（大小写不敏感）。
           example: b24040525@njupt.edu.cn
         major:
           type: string
@@ -5008,7 +5011,8 @@ components:
           description: |
             可选。同一事务内直绑为 other_mail 登录身份，无需邮箱验证，
             绑定后可用于登录和密码重置。不可与 login_email 相同，
-            也不得已被其他账号占用（作为主登录邮箱或已绑身份）。
+            也不得已被其他账号占用（作为主登录邮箱或已绑身份）；
+            不接受 @njupt.edu.cn 域（40000）——校园邮箱是登录身份不是个人邮箱。
           example: zhangsan@qq.com
         role:
           $ref: "#/components/schemas/UserRole"

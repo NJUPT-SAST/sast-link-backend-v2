@@ -997,6 +997,13 @@ func (s Service) BindEmailSendCode(ctx context.Context, input BindEmailSendCodeI
 	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
+	// A school mailbox is a login identity, never an other_mail: binding one
+	// puts a reset handle for the account in whatever student's mailbox the
+	// prefix names. Verification does not soften this — the address belongs to
+	// the school's mailbox-per-student mapping, not to the binder.
+	if validate.IsNjuptEmailDomain(email) {
+		return nil, newError(ErrInvalidInput, "校园邮箱不能绑定为个人邮箱", nil)
+	}
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
 	}

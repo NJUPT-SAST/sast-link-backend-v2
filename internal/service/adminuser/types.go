@@ -62,6 +62,13 @@ type UserRepository interface {
 	// other_mail binding on some account, so the console can refuse a personal
 	// email up front instead of racing the unique indexes and V005 trigger.
 	ExistsAsEmailAnywhere(ctx context.Context, email string) (bool, error)
+	// ExistsByStudentIDExcluding reports whether a student ID is taken by any
+	// account other than excludeUserID (0 = no exclusion). The comparison folds
+	// case and whitespace because user.student_id's unique constraint does not.
+	// The console's NJUPT-prefix collision guard shares it: a login_email whose
+	// prefix names another account's student ID hands that student a reset
+	// handle on this account.
+	ExistsByStudentIDExcluding(ctx context.Context, studentID string, excludeUserID int64) (bool, error)
 }
 
 // AuditLogRepository records and queries audit events.

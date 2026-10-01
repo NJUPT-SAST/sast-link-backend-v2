@@ -156,6 +156,69 @@ func TestCreateUserRejectsDeletedState(t *testing.T) {
 // A personal email already serving another account (as its login email or as a
 // bound identity) is refused with the column-naming conflict code, and the
 // failure audit names the login email that was attempted.
+// A school mailbox is a login identity, never an other_mail: binding one puts
+// a reset handle for the account in whatever student's mailbox the prefix names.
+func TestCreateUserRejectsSchoolDomainPersonalEmail(t *testing.T) {
+	h := newHarness(t)
+	input := createProbeInput()
+	input.PersonalEmail = stringPtr("zhangsan@njupt.edu.cn")
+
+	_, err := h.service.CreateUser(context.Background(), input)
+
+	assertKind(t, err, KindInvalidInput)
+	if h.users.createCalls != 0 {
+		t.Fatalf("create calls = %d, want no write", h.users.createCalls)
+	}
+}
+
+// The NJUPT-prefix collision guard: a login_email whose prefix names another
+// account's student ID hands that student a reset handle on the new account.
+// A prefix equal to the submitted student ID is the account's own and never
+// looked up; a free prefix (nobody's student ID) passes.
+func TestCreateUserRejectsPrefixNamingAnotherAccount(t *testing.T) {
+	t.Run("mismatched prefix taken by another account", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.studentIDOwners = map[string]int64{"b24040999": 777}
+		input := createProbeInput()
+		input.LoginEmail = "b24040999@njupt.edu.cn"
+
+		_, err := h.service.CreateUser(context.Background(), input)
+
+		assertKind(t, err, KindConflict)
+		if h.users.createCalls != 0 {
+			t.Fatalf("create calls = %d, want no write", h.users.createCalls)
+		}
+	})
+
+	t.Run("prefix equal to the submitted student id is not looked up", func(t *testing.T) {
+		h := newHarness(t)
+		// Even a seeded collision on the same folded value must not fire: the
+		// prefix is the account's own ID, and the student-id occupancy the create
+		// path reports on its own terms.
+		h.users.studentIDOwners = map[string]int64{"b24040525": 777}
+
+		if _, err := h.service.CreateUser(context.Background(), createProbeInput()); err != nil {
+			t.Fatalf("CreateUser(own prefix): %v", err)
+		}
+		if h.users.createCalls != 1 {
+			t.Fatalf("create calls = %d, want the write through", h.users.createCalls)
+		}
+	})
+
+	t.Run("free prefix passes", func(t *testing.T) {
+		h := newHarness(t)
+		input := createProbeInput()
+		input.LoginEmail = "b24040999@njupt.edu.cn"
+
+		if _, err := h.service.CreateUser(context.Background(), input); err != nil {
+			t.Fatalf("CreateUser(free prefix): %v", err)
+		}
+		if h.users.createCalls != 1 {
+			t.Fatalf("create calls = %d, want the write through", h.users.createCalls)
+		}
+	})
+}
+
 func TestCreateUserFailsWhenPersonalEmailOccupied(t *testing.T) {
 	h := newHarness(t)
 	h.users.existsEmails = map[string]bool{"zhangsan@qq.com": true}

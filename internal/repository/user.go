@@ -389,6 +389,25 @@ func (r *UserRepository) ExistsByStudentID(ctx context.Context, studentID string
 	return count > 0, nil
 }
 
+// ExistsByStudentIDExcluding is ExistsByStudentID with one row left out, so an
+// edit can re-submit (or case-normalize) the target account's own student ID
+// without colliding against itself. Pass 0 to exclude nothing. Same folded
+// comparison: the console's writes ride the same case-sensitive unique
+// constraint the registration and alumni paths guard against.
+func (r *UserRepository) ExistsByStudentIDExcluding(
+	ctx context.Context,
+	studentID string,
+	excludeUserID int64,
+) (bool, error) {
+	var count int64
+	if err := r.database.WithContext(ctx).Model(&model.User{}).
+		Where("lower(btrim(student_id)) = lower(btrim(?)) AND id <> ?", studentID, excludeUserID).
+		Count(&count).Error; err != nil {
+		return false, fmt.Errorf("count user by student id excluding %d: %w", excludeUserID, err)
+	}
+	return count > 0, nil
+}
+
 // ExistsAsEmailAnywhere reports whether the email is already used as a login
 // email or as an other_mail identity provider_id. Both columns are unique, so
 // this is the single pre-flight guard against the same address living in both
@@ -430,13 +449,15 @@ func (r *UserRepository) FindLoginEmailByStudentID(ctx context.Context, studentI
 // ProfileUpdate carries the self-service field changes for one user. A nil
 // pointer means "leave unchanged"; a non-nil pointer to the zero value means
 // "write that value". Identity and permission columns (login_email, role, state,
-// email_type) are deliberately absent: they are admin-only (PRD §4.9), and
-// leaving them out makes that unreachable rather than merely unvalidated.
+// email_type, student_id) are deliberately absent: they are admin-only
+// (PUT /admin/users/:id), and leaving them out makes that unreachable rather
+// than merely unvalidated — student_id left when the self-service edit was
+// removed, since its only guard was a case-sensitive constraint a user could
+// sidestep with a case variant of another account's ID.
 type ProfileUpdate struct {
 	Name        *string
 	PhoneNumber *string
 	QQNumber    *string
-	StudentID   *string
 	College     *model.College
 	Major       *string
 
@@ -455,7 +476,6 @@ func (u ProfileUpdate) userColumns() map[string]any {
 	assign(columns, "name", u.Name)
 	assign(columns, "phone_number", u.PhoneNumber)
 	assign(columns, "qq_number", u.QQNumber)
-	assign(columns, "student_id", u.StudentID)
 	assign(columns, "major", u.Major)
 	if u.College != nil {
 		columns["college"] = *u.College
