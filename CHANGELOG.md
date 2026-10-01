@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **admin 写入查表拦截 NJUPT 前缀撞号**（fix/identity-pair-consistency）：校园邮箱按学号一人一箱，`login_email` 前缀指向**其他账号学号**时，该邮箱的主人即持有此账号的重置句柄。三个 admin 写入面在写入前查表（`ExistsByStudentIDExcluding`，`lower(btrim())` 折叠，排除目标自身行）：`POST /admin/users`（前缀≠提交学号时查，撞返回 `40902`「login_email 前缀与其他账号学号冲突」）、`PUT /admin/users/:id`（仅 `login_email` 被写入时查，对生效学号判定；仅改学号不查——学号指向他人邮箱前缀不产生重置句柄）、校友 provision 审批（事务前查，撞返回 `40901` 提示驳回）。前缀等于本人学号不查表；前缀是未被注册的号仍放行——查表只能看见已注册账号，未注册学生的邮箱占用继续依赖人工核验。注册/自助面不查：两步流要求控箱，自己配错只伤自己。
 
-- **自助资料编辑移除 `student_id`**（fix/identity-pair-consistency）：`PUT /user/profile` 不再接受 `student_id`（严格 JSON 解码按未知字段返回 `40000`），`UpdateProfileInput` 与仓储 `ProfileUpdate` 同步移除该字段。此前该路径可自助改学号，且占用仅靠大小写敏感的 `user_student_id_key` 约束——同库已有 `B24040525` 时可自改成 `b24040525`，还能破坏前缀/学号配对；修改学号今后只能由管理员在 `PUT /admin/users/:id` 完成。响应与 `GET /user/profile` 仍返回 `student_id`（只读）。
+- **自助资料编辑移除 `student_id`**（fix/identity-pair-consistency）：`PUT /user/profile` 不再接受 `student_id`（严格 JSON 解码按未知字段返回 `40000`），`UpdateProfileInput` 与仓储 `ProfileUpdate` 同步移除该字段。此前该路径可自助改学号，且占用仅靠大小写敏感的 `user_student_id_key` 约束——同库已有 `B24040525` 时可自改成 `b24040525`；修改学号今后只能由管理员在 `PUT /admin/users/:id` 完成。响应与 `GET /user/profile` 仍返回 `student_id`（只读）。
 
 ### Added
 
