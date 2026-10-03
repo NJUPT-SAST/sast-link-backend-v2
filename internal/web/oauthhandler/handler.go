@@ -362,8 +362,18 @@ func (h Handler) UserInfo(c *gin.Context) {
 	}
 	principal, err := h.Auth.AuthenticateAnyClient(c.Request.Context(), c.GetHeader("Authorization"))
 	if err != nil {
-		// RFC 6750 has exactly one code for every rejected token, so the middleware
-		// error's finer reason is deliberately collapsed here.
+		// RFC 6750 has exactly one code for every rejected token, so a token
+		// verdict's finer reason is deliberately collapsed here. A backend fault
+		// is not a token verdict: the authenticator answers 500 when the
+		// auth-state cache misses and the database fallback fails too, and
+		// folding that into invalid_token would tell every relying party to
+		// refresh or re-authenticate — a token churn storm during exactly the
+		// outage it would amplify. server_error answers 500 without the challenge.
+		var business *response.BusinessError
+		if errors.As(err, &business) && business.HTTPStatus >= http.StatusInternalServerError {
+			writeBearerError(c, oauth.ErrInternal)
+			return
+		}
 		writeBearerError(c, invalidToken("Access Token 无效或已过期"))
 		return
 	}

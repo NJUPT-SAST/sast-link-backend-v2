@@ -44,6 +44,10 @@ func (f *fakeClients) List(_ context.Context) ([]model.OAuthClient, error) {
 	return f.listed, nil
 }
 
+func (f *fakeClients) CountClients(_ context.Context) (repository.ClientCountSummary, error) {
+	return repository.ClientCountSummary{}, nil
+}
+
 func (f *fakeClients) Create(_ context.Context, client *model.OAuthClient) error {
 	if f.createErr != nil {
 		return f.createErr

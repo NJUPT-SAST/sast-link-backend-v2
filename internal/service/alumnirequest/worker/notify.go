@@ -81,18 +81,64 @@ func (w *Notifier) EnqueueAlumniNotification(job alumnirequest.NotificationJob) 
 	}
 }
 
+// notifyDrainTimeout bounds how long shutdown waits for an in-flight SMTP
+// delivery to finish: a send already talking to the relay is best allowed to
+// land (markNotified then runs), while an indefinite wait would trade the API's
+// shutdown budget for one email.
+const notifyDrainTimeout = 5 * time.Second
+
 // Run consumes the queue until ctx is cancelled. The consumer starts before
 // the startup reconcile so a backlog larger than the queue can drain while it
 // is being re-queued; a full queue then parks the reconcile loop, never the
-// send loop.
+// send loop. The reconcile retries with backoff rather than giving up on its
+// first database hiccup — without the retry, one transient error at boot left
+// every untouched verdict unnotified for the process's whole lifetime — and
+// shutdown waits (bounded) for the in-flight delivery to complete.
 func (w *Notifier) Run(ctx context.Context) error {
 	if w == nil || w.jobs == nil || w.Requests == nil || w.Mailer == nil {
 		return fmt.Errorf("alumni notification worker requires queue, requests and mailer")
 	}
-	go w.consume(ctx)
-	w.reconcileBacklog(ctx)
+	consumed := make(chan struct{})
+	go func() {
+		defer close(consumed)
+		w.consume(ctx)
+	}()
+	w.reconcileWithRetry(ctx)
 	<-ctx.Done()
+	select {
+	case <-consumed:
+	case <-time.After(notifyDrainTimeout):
+		slog.WarnContext(ctx, "alumni notification drain timed out; in-flight delivery interrupted",
+			"operation", "alumni_request_notify", "stage", "drain")
+	}
 	return nil
+}
+
+// reconcileWithRetry runs the backlog walk and, when it fails, retries with a
+// capped backoff until it succeeds or the worker stops. Success ends the loop:
+// the walk stays a startup concern, not a periodic re-walk, because re-walking
+// while the queue still holds un-started jobs would duplicate their emails for
+// no new information.
+func (w *Notifier) reconcileWithRetry(ctx context.Context) {
+	delay := time.Minute
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := w.reconcileBacklog(ctx); err == nil {
+			return
+		} else if ctx.Err() == nil {
+			slog.WarnContext(ctx, "alumni notification reconcile failed, retrying",
+				"operation", "alumni_request_notify", "stage", "reconcile_retry",
+				"retry_in", delay.String(), "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		delay = min(delay*5, 30*time.Minute)
+	}
 }
 
 // consume delivers queued jobs until ctx is cancelled.
@@ -139,7 +185,7 @@ func (w *Notifier) enqueueWaiting(ctx context.Context, job alumnirequest.Notific
 // both enqueue; the window is a cold-start millisecond with an un-consumed
 // job in one queue, and a duplicate email beats a permanent off-by-two
 // counter.
-func (w *Notifier) reconcileBacklog(ctx context.Context) {
+func (w *Notifier) reconcileBacklog(ctx context.Context) error {
 	const reconcileBatch = 32
 	seen := make(map[int64]struct{})
 	for {
@@ -149,15 +195,21 @@ func (w *Notifier) reconcileBacklog(ctx context.Context) {
 		}
 		rows, err := w.Requests.ListUnnotifiedReviewed(ctx, reconcileBatch, exclude)
 		if err != nil {
-			slog.ErrorContext(ctx, "alumni notification reconcile failed",
-				"operation", "alumni_request_notify", "stage", "reconcile", "error", err)
-			return
+			return fmt.Errorf("list unnotified reviewed: %w", err)
 		}
 		if len(rows) == 0 {
-			return
+			return nil
 		}
 		for _, row := range rows {
 			seen[row.ID] = struct{}{}
+			// The seen set feeds the exclusion list one parameter per row; past
+			// this bound it resets rather than growing toward PostgreSQL's
+			// parameter ceiling. A reset may re-list rows still queued but
+			// un-started — the same duplicate-email tradeoff the restart race
+			// already accepts, and only reachable with a backlog of thousands.
+			if len(seen) > 10_000 {
+				seen = map[int64]struct{}{row.ID: {}}
+			}
 			if !w.enqueueWaiting(ctx, alumnirequest.NotificationJob{
 				RequestID:    row.ID,
 				Recipient:    row.PersonalEmail,
@@ -166,7 +218,7 @@ func (w *Notifier) reconcileBacklog(ctx context.Context) {
 				Recovered:    row.Intent == model.AlumniRequestIntentRecover,
 				RejectReason: row.RejectReason,
 			}) {
-				return
+				return ctx.Err()
 			}
 		}
 	}

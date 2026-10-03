@@ -2,6 +2,7 @@ package adminclient
 
 import (
 	"context"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
@@ -13,6 +14,7 @@ const auditResource = "oauth_client"
 // ClientRepository persists OAuth client registrations.
 type ClientRepository interface {
 	List(ctx context.Context) ([]model.OAuthClient, error)
+	CountClients(ctx context.Context) (repository.ClientCountSummary, error)
 	Create(ctx context.Context, client *model.OAuthClient) error
 	// FindByID resolves a client regardless of active state, so the update path can
 	// see the current is_active value.

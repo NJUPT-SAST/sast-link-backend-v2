@@ -72,11 +72,23 @@ type Doer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
+// providerTransport is shared by every provider client: the default transport
+// keeps only MaxIdleConnsPerHost=2 idle connections per host, so a login burst
+// against one provider rebuilt a TCP+TLS handshake per request beyond the
+// second. The pool below matches the deployment's concurrency class without
+// pretending to be a frontend tier.
+var providerTransport = func() *http.Transport {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.MaxIdleConns = 100
+	base.MaxIdleConnsPerHost = 16
+	return base
+}()
+
 // NewHTTPClient returns the HTTP client the provider clients use by default.
 // The timeout is a backstop for the whole request including body reads; each
 // request additionally derives a per-call context deadline.
 func NewHTTPClient() *http.Client {
-	return &http.Client{Timeout: httpIOTimeout}
+	return &http.Client{Timeout: httpIOTimeout, Transport: providerTransport}
 }
 
 // contextError reclassifies a transport failure. A caller that went away did

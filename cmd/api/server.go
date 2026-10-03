@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -53,6 +54,17 @@ func serve(ctx context.Context, address string, handler http.Handler, workers []
 		background := background
 		go func() {
 			defer workerGroup.Done()
+			// Fail fast, but legibly: a panic in a worker's loop is a bug, and the
+			// raw crash takes the whole API process with a stack no one tied to a
+			// worker. Converting it to an error keeps the fail-fast exit (serve
+			// returns it, main exits non-zero) while naming the worker's cause and
+			// preserving the stack in the log. Restarting silently in-process is
+			// deliberately NOT done: a panic-looping worker would flap unseen.
+			defer func() {
+				if r := recover(); r != nil {
+					workerErrors <- fmt.Errorf("background worker panicked: %v\n%s", r, debug.Stack())
+				}
+			}()
 			if err := background.Run(workerCtx); err != nil {
 				workerErrors <- err
 			}

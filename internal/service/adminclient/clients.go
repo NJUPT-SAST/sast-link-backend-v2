@@ -42,6 +42,19 @@ func (s Service) ListClients(ctx context.Context) ([]Client, error) {
 	return clients, nil
 }
 
+// CountClients returns the registry counts for the console overview: two
+// integers via one aggregate, instead of decoding every registration whole.
+func (s Service) CountClients(ctx context.Context) (repository.ClientCountSummary, error) {
+	if s.Clients == nil {
+		return repository.ClientCountSummary{}, newError(ErrInternal, "客户端仓储未配置", nil)
+	}
+	summary, err := s.Clients.CountClients(ctx)
+	if err != nil {
+		return repository.ClientCountSummary{}, newError(ErrInternal, "查询 OAuth 客户端统计失败", err)
+	}
+	return summary, nil
+}
+
 // CreateClient registers a new OAuth client. A third_party client gets a generated
 // secret returned exactly once, only its hash persisted; a first_party client is
 // public with no secret. PKCE is required of both — the secret is an additional

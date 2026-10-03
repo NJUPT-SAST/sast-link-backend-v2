@@ -44,18 +44,17 @@ func (h Handler) Stats(c *gin.Context) {
 
 	var clients statsClientSummary
 	if h.Clients != nil {
-		list, err := h.Clients.ListClients(ctx)
+		// Two integers from one aggregate: decoding every registration whole
+		// (redirect URIs, grant types, scopes) only to count them grew with the
+		// registry for no reason.
+		summary, err := h.Clients.CountClients(ctx)
 		if err != nil {
 			slog.ErrorContext(ctx, "load overview client stats", "error", err)
 			response.Error(c, internalError())
 			return
 		}
-		clients.Total = int64(len(list))
-		for _, item := range list {
-			if item.IsActive {
-				clients.Active++
-			}
-		}
+		clients.Total = summary.Total
+		clients.Active = summary.Active
 	}
 
 	recent := make([]auditLogDTO, 0, 5)
