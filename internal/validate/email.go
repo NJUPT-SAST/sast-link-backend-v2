@@ -17,11 +17,16 @@ const (
 	byteOrderMark      = '\ufeff'
 )
 
+// njuptEmailDomain is the NJUPT mailbox domain whose local part is constrained
+// to the student-ID shape (IsNjuptEmailLocalAllowed). Named beside
+// loginEmailDomains so the suffix is never spelled twice.
+const njuptEmailDomain = "@njupt.edu.cn"
+
 // loginEmailDomains are the only domains an account's login address may use. The
 // V001 trigger auto_set_email_type derives email_type from these two and raises for
 // anything else, so a write that gets past this check fails in the database with a
 // bare exception instead of a message naming the rule.
-var loginEmailDomains = []string{"@njupt.edu.cn", "@sast.fun"}
+var loginEmailDomains = []string{njuptEmailDomain, "@sast.fun"}
 
 // EmailFormat is the input-layer guard against SMTP header injection and key/audit
 // corruption: it rejects control characters (notably CR/LF), address separators,
@@ -72,6 +77,47 @@ func IsLoginEmailDomain(email string) bool {
 		}
 	}
 	return false
+}
+
+// IsNjuptEmailLocalAllowed reports whether the local part of an @njupt.edu.cn
+// address is a student-ID shape: one ASCII letter followed by eight digits, or
+// bare eight digits. The caller is expected to have lowercased the address
+// (normalizeIdentifier) first, as every login-email write path does. Addresses
+// on any other domain are unconstrained — only the NJUPT mailbox carries a
+// student-ID prefix, @sast.fun stays free-form — so the check is safe to chain
+// right after IsLoginEmailDomain. The full local part is judged, so a
+// subaddressed form like b24040525+x@njupt.edu.cn is refused: login_email is
+// the account's own address, not a delivery alias.
+func IsNjuptEmailLocalAllowed(email string) bool {
+	if !strings.HasSuffix(email, njuptEmailDomain) {
+		return true
+	}
+	local := email[:len(email)-len(njuptEmailDomain)]
+	switch len(local) {
+	case 8: // eight digits
+		return asciiDigits(local)
+	case 9: // one letter + eight digits
+		if local[0] < 'a' || local[0] > 'z' {
+			return false
+		}
+		return asciiDigits(local[1:])
+	default:
+		return false
+	}
+}
+
+// asciiDigits reports whether s is non-empty and every byte is an ASCII digit.
+// Local parts reaching here are already EmailFormat-clean, so bytes are runes.
+func asciiDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // HasControlCharacter reports whether value contains a C0 or C1 control character

@@ -53,7 +53,7 @@ paths:
     post:
       summary: 发送注册验证码
       deprecated: false
-      description: 向指定邮箱发送注册验证码。邮箱域名必须为 `@njupt.edu.cn` 或 `@sast.fun`。
+      description: 向指定邮箱发送注册验证码。邮箱域名必须为 `@njupt.edu.cn` 或 `@sast.fun`；`@njupt.edu.cn` 地址的前缀必须是学号样式（1 位字母 + 8 位数字，或纯 8 位数字，40022）。
       operationId: authSendRegisterCode
       tags:
         - Auth
@@ -92,7 +92,7 @@ paths:
     post:
       summary: 验证注册验证码
       deprecated: false
-      description: 注册第一步。验证邮箱验证码，返回 Register-Ticket（Redis，5 分钟，一次性）。
+      description: 注册第一步。验证邮箱验证码，返回 Register-Ticket（Redis，5 分钟，一次性）。`@njupt.edu.cn` 地址的前缀必须是学号样式（1 位字母 + 8 位数字，或纯 8 位数字，40022）。
       operationId: authVerifyRegisterCode
       tags:
         - Auth
@@ -1414,7 +1414,7 @@ paths:
         无需认证——URL 的 capability key 就是凭证（256-bit 随机 base64url，不可枚举）。
         返回固定紧凑画布的 SVG（320×72）：左侧头像，右侧昵称与「签名」；头像从 COS 拉取
         并缩至 128px 后以 base64 data URI 内嵌，拉取失败降级为首字标记。卡片可点击，
-        跳转成员个人页（blog 优先、github 兜底）。
+        跳转成员个人页（?target= 指定 blog/github：请求的目标优先、另一个兜底，默认 blog）。
         key 未知/已关闭/用户已注销时返回 404 与「徽标不存在或已关闭」错误卡片
         （保证 img 嵌入不裂图）。每 IP 限流 120 次/分钟。末尾可带 .svg 后缀（被剥离）。
       operationId: renderBadge
@@ -1446,6 +1446,15 @@ paths:
             type: string
             enum: [auto, light, dark]
             default: auto
+        - name: target
+          in: query
+          description: |
+            卡片锚点跳转的成员页面。请求的目标优先，未设置的另一个兜底；
+            未知值归一化为 blog。
+          schema:
+            type: string
+            enum: [blog, github]
+            default: blog
       responses:
         "200":
           description: 徽标 SVG
@@ -3294,6 +3303,7 @@ paths:
         "400":
           description: |
             参数错误（40000）、邮箱域名不允许（40020）、
+            邮箱前缀格式错误（40022）、
             人机校验未通过（40021 —— 重新完成验证后可重试）
           content:
             application/json:
@@ -3878,7 +3888,8 @@ components:
           format: email
           maxLength: 255
           description: |
-            原学号邮箱，将成为账号的登录身份。仍限 @njupt.edu.cn / @sast.fun：
+            原学号邮箱，provision 时成为新账号的登录身份，@njupt.edu.cn 前缀须为学号样式。
+            recover 时必须匹配现有账号的登录邮箱，允许存量非学号样式前缀。仍限 @njupt.edu.cn / @sast.fun：
             V001 触发器 auto_set_email_type 依赖该域名派生 email_type。
           example: b20040525@njupt.edu.cn
         personal_email:
@@ -5649,6 +5660,12 @@ components:
               value:
                 code: 40020
                 message: 邮箱域名不允许（仅限 @njupt.edu.cn / @sast.fun）
+                data: null
+            invalid_email_prefix:
+              summary: invalid_email_prefix
+              value:
+                code: 40022
+                message: 邮箱前缀格式错误
                 data: null
     Unauthorized:
       description: 未认证（401xx）

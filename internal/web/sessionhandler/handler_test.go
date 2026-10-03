@@ -807,6 +807,37 @@ func TestSendRegisterCodeReturnsMessageAndExpiry(t *testing.T) {
 	}
 }
 
+func TestRegistrationPreservesPrefixErrorMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		path string
+		body string
+	}{
+		{"/auth/register/send-code", `{"login_email":"xyz123@njupt.edu.cn"}`},
+		{"/auth/register/verify-code", `{"login_email":"xyz123@njupt.edu.cn","code":"123456"}`},
+		{"/auth/register", `{"register_ticket":"ticket","password":"Password123","name":"张三","phone_number":"13800138000","qq_number":"123456","college":"其他","major":"软件工程","student_id":"B24040001"}`},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			prefixErr := &session.Error{Kind: session.KindInvalidInput,
+				Code: errcode.CodeNjuptEmailPrefixNotAllowed, Message: "邮箱前缀格式错误"}
+			service := &fakeService{sendRegisterCodeErr: prefixErr,
+				verifyRegisterCodeErr: prefixErr, registerErr: prefixErr}
+			router := gin.New()
+			RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuth()))
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+				test.path, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+			body := decodeBody(t, recorder)
+			if recorder.Code != http.StatusBadRequest || body.Code != errcode.CodeNjuptEmailPrefixNotAllowed ||
+				body.Message != "邮箱前缀格式错误" {
+				t.Fatalf("prefix response = %d %+v", recorder.Code, body)
+			}
+		})
+	}
+}
+
 func TestSendRegisterCodeMapsDomainError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeService{sendRegisterCodeErr: &session.Error{Kind: session.KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}}

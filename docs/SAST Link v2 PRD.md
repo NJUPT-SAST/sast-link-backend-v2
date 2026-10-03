@@ -285,7 +285,7 @@ Body: { "password": "current_password" }
 
 | 表 | 字段 | 可修改途径 |
 | ---- | ------ | ----------- |
-| `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager） |
+| `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号） |
 | `user` | login_email, role, state, email_type | `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号或授予 admin） |
 | `profile` | department | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager，批量归置存量账号部门的通道）；语义一致：传值设置、空串清空、缺省不改 |
 | `profile` | nickname, intro, email, blog_url, github_url | `PUT /user/profile`（本人） |

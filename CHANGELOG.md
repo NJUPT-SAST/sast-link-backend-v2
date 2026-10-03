@@ -57,6 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **注册邮箱前缀收紧为学号样式**（feat/register-njupt-email-prefix，2026-09-28）：`@njupt.edu.cn` 地址的邮箱前缀必须是学号样式——1 位字母 + 8 位数字（`b24040525`）或纯 8 位数字（`24040525`），不符返回新业务码 `40022`（邮箱前缀格式错误）；`@sast.fun` 前缀维持自由格式。规则定义在 `internal/validate.IsNjuptEmailLocalAllowed`，接入全部写入 `login_email` 的路径：注册发码 / 验码 / 提交（ticket 邮箱防御性重查）、控制台建号与改 `login_email`（`POST`/`PUT /admin/users`）、校友建号申请——三条面同一结果同一码，客户端按 `40022` 定位到前缀字段。**只读匹配路径一律不加**：`POST /user/login`、忘记密码 / 重置密码、`IdentifyByRefreshToken` 不校验前缀，存量非匹配前缀账号照常登录，无迁移无清洗。顺手补齐注册发码 / 验码路径缺失的 `MaxLoginEmailLength`（255）上限检查（alumni / admin 路径本就有，注册路径此前靠数据库列宽兜底）。
 - **能力 scope refresh family 生命周期封顶的配套修正**（[PR #47](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/47)）：consent 提交限流（`RATE_LIMIT_CONSENT_RPM`）**只对 approve 路径计费**——`approve: false` 的拒绝不铸码、不消耗配额，且被限流的 approve 在消费暂存之前返回 `42900`，可用同一 `request_id` 重试。grants 列表与撤销拆成**独立预算**（`oauth_grants_list` / `oauth_grants_revoke`），读列表耗尽不了撤销的配额；两者超限现在返回 `429` + `Retry-After`（此前被 handler 折叠成 500，与 consent 不一致）。`adminclient.mergedRegistration` 不再静默吞 `scope.Normalize` 失败，守卫不再可能基于错误的合并状态做授权决定。
 - **rotate-secret 拒绝路径补审计**（[PR #47](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/47)）：`POST /admin/oauth-clients/:id/rotate-secret` 的公开客户端 `400`、非控制台 `403`、未知 id `404` 与写库失败现在都落审计（`admin_oauth_client_rotate_secret`，success=false + 错误码），兑现 API 文档 §6.9 的既有承诺——泄露后复盘要找的正是这些探针。审计 detail 不含新明文（与成功路径一致）。
 - **JWT 从 RS256 换 EdDSA（Ed25519）**（[PR #37](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/37)）：JWKS 变 `kty=OKP/crv=Ed25519/alg=EdDSA`、discovery `id_token_signing_alg_values_supported=["EdDSA"]`、ID Token 同算法；密钥解析改 PKCS8，部署需换 Ed25519 密钥；验签 leeway 缩到 5s。
@@ -103,12 +104,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- The department catalogue OpenAPI response now includes the standard `code`, `message`, and `data.departments` envelope (2026-09-30).
+- **个人徽标 `target` 参数生效**（2026-09-30）：前端分享 URL 早已携带 `?target=blog|github`，但渲染端从未读取该参数——`ServeSVG` 只解析 `theme`，卡片锚点固定 blog 优先、github 兜底，`?target=github` 的分享在两页都配置时永远跳博客。现在 `target` 与 `theme` 同一契约：随 `RenderInput` 下传、未知值归一化为 `blog`、锚点按「请求的目标优先，另一个兜底」解析（http(s) 白名单不变），并加入渲染缓存标识（version|theme|target|key），两个变体互不命中对方缓存。`docs/API文档.md` §9.4 与 `docs/openapi.yaml` 补记 `target` 参数。
+
+- **注册邮箱前缀错误文案**（2026-09-30）：注册发码、验码和提交的 `40022` 响应保留“邮箱前缀格式错误”，与业务错误码和 API 契约一致。
+
+- **存量邮箱找回**（2026-09-30）：alumni `recover` 匹配旧登录邮箱，不应用新账号前缀规则，仍核对学号与邮箱归属。
 
 - Administrative user updates recheck self-role changes inside the locked transaction, preventing a queued manager self-update from restoring privileges after demotion (2026-09-30).
 
-- **部门字段信任边界**（2026-09-30）：明确 `profile.department` 是本人可修改的展示资料，下游授权必须依据独立核验的成员归属；同步 manager 的成员管理权限说明。
+- The department catalogue OpenAPI response now includes the standard `code`, `message`, and `data.departments` envelope (2026-09-30).
 
+- **部门字段信任边界**（2026-09-30）：明确 `profile.department` 是本人可修改的展示资料，下游授权必须依据独立核验的成员归属；同步 manager 的成员管理权限说明。
 - **恢复账号事务锁定目标角色**（2026-09-30）：读取已关闭账号时加行锁，防止 manager 的恢复请求在并发恢复、升为 admin、再次关闭后用旧角色判断重新开放 admin 账号。
 
 - **紧急回滚：admin scope 授权用户角色门**（2026-09-26）：回滚 `721d849`（`checkScopeForUser`，consent-info / consent / 兑现三段把 admin scope 绑定到授权用户实时角色）。该门使注册了 admin scope 的应用对非 admin 用户在 consent-info 阶段直接 400，前端兜底文案误导为「授权请求已失效，请重新发起授权」，第三方登录被完全阻断且重试无解。回滚后恢复登录；安全底线不受影响——`/admin` 角色门每请求从数据库行读角色，非 admin 用户拿到的 admin-scoped token 在使用处仍被拒。

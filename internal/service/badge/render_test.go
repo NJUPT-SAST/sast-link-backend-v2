@@ -274,17 +274,29 @@ func TestBuildCardDataResolvesLinkTarget(t *testing.T) {
 	blog := "https://blog.example.com"
 	github := "https://github.com/alice"
 
-	withBoth := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &blog, GitHubURL: &github})
+	// The blog default keeps its historical order: blog first, github backstop.
+	withBoth := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &blog, GitHubURL: &github}, TargetBlog)
 	if withBoth.LinkTarget != blog {
 		t.Fatalf("LinkTarget = %q, want the blog url", withBoth.LinkTarget)
 	}
-	githubOnly := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), GitHubURL: &github})
+	githubOnly := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), GitHubURL: &github}, TargetBlog)
 	if githubOnly.LinkTarget != github {
 		t.Fatalf("LinkTarget = %q, want the github fallback", githubOnly.LinkTarget)
 	}
-	neither := buildCardData(&repository.PublicCard{Nickname: strPtr("张三")})
+	neither := buildCardData(&repository.PublicCard{Nickname: strPtr("张三")}, TargetBlog)
 	if neither.LinkTarget != "" {
 		t.Fatalf("LinkTarget = %q, want empty", neither.LinkTarget)
+	}
+
+	// The github target flips the order: requested page leads, the other
+	// one backs it up when the member never configured it.
+	githubAsked := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &blog, GitHubURL: &github}, TargetGithub)
+	if githubAsked.LinkTarget != github {
+		t.Fatalf("LinkTarget = %q, want the github url", githubAsked.LinkTarget)
+	}
+	blogBackstop := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &blog}, TargetGithub)
+	if blogBackstop.LinkTarget != blog {
+		t.Fatalf("LinkTarget = %q, want the blog backstop", blogBackstop.LinkTarget)
 	}
 }
 
@@ -308,21 +320,32 @@ func TestBuildCardDataRefusesNonHTTPLinkTarget(t *testing.T) {
 		"",
 	}
 	for _, raw := range refused {
-		data := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &raw})
+		data := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &raw}, TargetBlog)
 		if data.LinkTarget != "" {
 			t.Fatalf("LinkTarget for blog %q = %q, want it dropped", raw, data.LinkTarget)
+		}
+		// The scheme whitelist must hold for the github target too.
+		githubAsked := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), GitHubURL: &raw}, TargetGithub)
+		if githubAsked.LinkTarget != "" {
+			t.Fatalf("LinkTarget for github %q = %q, want it dropped", raw, githubAsked.LinkTarget)
 		}
 	}
 	// A refused blog falls through to a usable github link.
 	js := "javascript:alert(1)"
 	github := "https://github.com/alice"
-	fallback := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &js, GitHubURL: &github})
+	fallback := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &js, GitHubURL: &github}, TargetBlog)
 	if fallback.LinkTarget != github {
 		t.Fatalf("LinkTarget = %q, want the github fallback after the refused blog", fallback.LinkTarget)
 	}
+	// Symmetrically, a refused github falls through to the blog link.
+	blog := "https://blog.example.com"
+	reverse := buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &blog, GitHubURL: &js}, TargetGithub)
+	if reverse.LinkTarget != blog {
+		t.Fatalf("LinkTarget = %q, want the blog fallback after the refused github", reverse.LinkTarget)
+	}
 	// When both links are refused the rendered SVG carries no anchor at all.
 	jsGithub := "java\tscript:alert(1)"
-	svg, err := renderCard(ThemeLight, buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &js, GitHubURL: &jsGithub}))
+	svg, err := renderCard(ThemeLight, buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &js, GitHubURL: &jsGithub}, TargetBlog))
 	if err != nil {
 		t.Fatalf("renderCard: %v", err)
 	}
@@ -330,13 +353,79 @@ func TestBuildCardDataRefusesNonHTTPLinkTarget(t *testing.T) {
 		t.Fatal("rendered SVG carries an anchor despite both links being refused")
 	}
 	// ...and the refused scheme never reaches the document in any form.
-	poison, err := renderCard(ThemeLight, buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &js}))
+	poison, err := renderCard(ThemeLight, buildCardData(&repository.PublicCard{Nickname: strPtr("张三"), BlogURL: &js}, TargetBlog))
 	if err != nil {
 		t.Fatalf("renderCard: %v", err)
 	}
 	if strings.Contains(string(poison), "javascript") {
 		t.Fatal("rendered SVG contains a javascript: URL")
 	}
+}
+
+// TestRenderHonorsTargetParam pins the regression: a member with both
+// pages configured shared ?target=github, yet the rendered card kept
+// anchoring to the blog because the renderer never read the param. The two
+// variants must also hold distinct cache entries — a warmed blog render must
+// not answer a github request.
+func TestRenderHonorsTargetParam(t *testing.T) {
+	blog := "https://blog.example.com"
+	github := "https://github.com/alice"
+	users := &fakeUserRepository{cards: map[int64]*repository.PublicCard{
+		7: {Nickname: strPtr("张三"), BlogURL: &blog, GitHubURL: &github},
+	}}
+	badges := newFakeBadgeRepository()
+	if err := badges.Create(context.Background(), &model.Badge{UserID: 7, BadgeKey: "target-key"}); err != nil {
+		t.Fatalf("seed badge error = %v", err)
+	}
+	service := newTestService(users, badges, &fakeAuditRepository{})
+
+	// Warm the cache with the default blog variant first.
+	defaultRender, err := service.Render(context.Background(), RenderInput{Key: "target-key", Theme: "auto"})
+	if err != nil || defaultRender.NotFound {
+		t.Fatalf("default render error = %v, notFound = %v", err, defaultRender.NotFound)
+	}
+	if anchor := anchorHref(string(defaultRender.SVG)); anchor != blog {
+		t.Fatalf("default anchor = %q, want the blog url", anchor)
+	}
+
+	// The github target must beat the warmed blog cache and anchor to github.
+	githubRender, err := service.Render(context.Background(), RenderInput{Key: "target-key", Theme: "auto", Target: "github"})
+	if err != nil || githubRender.NotFound {
+		t.Fatalf("github render error = %v, notFound = %v", err, githubRender.NotFound)
+	}
+	if anchor := anchorHref(string(githubRender.SVG)); anchor != github {
+		t.Fatalf("github anchor = %q, want the github url", anchor)
+	}
+	// And back: the github render must not have poisoned the blog variant.
+	blogAgain, err := service.Render(context.Background(), RenderInput{Key: "target-key", Theme: "auto", Target: "blog"})
+	if err != nil || blogAgain.NotFound {
+		t.Fatalf("blog render error = %v, notFound = %v", err, blogAgain.NotFound)
+	}
+	if anchor := anchorHref(string(blogAgain.SVG)); anchor != blog {
+		t.Fatalf("blog anchor = %q, want the blog url again", anchor)
+	}
+
+	// A hand-edited typo normalizes to the default instead of erroring.
+	typo, err := service.Render(context.Background(), RenderInput{Key: "target-key", Theme: "auto", Target: "twtter"})
+	if err != nil || typo.NotFound {
+		t.Fatalf("typo render error = %v, notFound = %v", err, typo.NotFound)
+	}
+	if anchor := anchorHref(string(typo.SVG)); anchor != blog {
+		t.Fatalf("typo anchor = %q, want the normalized blog default", anchor)
+	}
+}
+
+func anchorHref(svg string) string {
+	start := strings.Index(svg, `<a href="`)
+	if start < 0 {
+		return ""
+	}
+	rest := svg[start+len(`<a href="`):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 func TestDisablePurgesRenderCache(t *testing.T) {

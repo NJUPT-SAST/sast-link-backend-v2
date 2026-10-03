@@ -516,8 +516,14 @@ func (s Service) SendRegisterCode(ctx context.Context, input SendRegisterCodeInp
 	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
+	if !validate.WithinLength(email, validate.MaxLoginEmailLength) {
+		return nil, newError(ErrInvalidInput, "邮箱长度超出限制", nil)
+	}
 	if !validate.IsLoginEmailDomain(email) {
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
+	}
+	if !validate.IsNjuptEmailLocalAllowed(email) {
+		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeNjuptEmailPrefixNotAllowed, Message: "邮箱前缀格式错误"}
 	}
 	if err := s.checkEmailLimit(ctx, email, input.ClientIP); err != nil {
 		return nil, err
@@ -547,8 +553,14 @@ func (s Service) VerifyRegisterCode(ctx context.Context, input VerifyRegisterCod
 	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "邮箱格式不正确", nil)
 	}
+	if !validate.WithinLength(email, validate.MaxLoginEmailLength) {
+		return nil, newError(ErrInvalidInput, "邮箱长度超出限制", nil)
+	}
 	if !validate.IsLoginEmailDomain(email) {
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
+	}
+	if !validate.IsNjuptEmailLocalAllowed(email) {
+		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeNjuptEmailPrefixNotAllowed, Message: "邮箱前缀格式错误"}
 	}
 	purpose := string(mailer.VerificationPurposeRegister)
 	if err := s.verifyCode(ctx, purpose, email, input.Code); err != nil {
@@ -677,6 +689,9 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	}
 	if !validate.IsLoginEmailDomain(email) {
 		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeEmailDomainNotAllowed, Message: "邮箱域名不允许"}
+	}
+	if !validate.IsNjuptEmailLocalAllowed(email) {
+		return nil, &Error{Kind: KindInvalidInput, Code: errcode.CodeNjuptEmailPrefixNotAllowed, Message: "邮箱前缀格式错误"}
 	}
 
 	exists, err := s.Users.ExistsAsEmailAnywhere(ctx, email)
