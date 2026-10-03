@@ -11,12 +11,25 @@ import (
 // student ID.
 const pendingStudentConstraint = "uq_alumni_requests_pending_student"
 
-// Submit records an account-request ticket. Field validation runs before the
-// captcha, because a Turnstile token is single-use and short-lived: verifying
-// first would burn it on a submission that then fails a length check. The
-// occupancy queries — the real disclosure surface ("does this email or student ID
-// already have an account") — run behind both the captcha and the rate limiter.
+// Submit records an account-request ticket. The IP rate bucket leads every
+// other step, field validation included: this is the service's only
+// unauthenticated write surface, and each later branch writes an audit row, so
+// every one of those writes must sit behind a bound an anonymous caller cannot
+// skip. Field validation still runs before the captcha, because a Turnstile
+// token is single-use and short-lived: verifying first would burn it on a
+// submission that then fails a length check. The occupancy queries — the real
+// disclosure surface ("does this email or student ID already have an account")
+// — run behind both the captcha and the rate limiter.
 func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, error) {
+	// A refused IP writes no audit row: each refusal would itself be an
+	// unbounded anonymous write, which is exactly what the bucket caps. The
+	// student-ID bucket stays behind the captcha — a student ID is only
+	// meaningful once validated, and solving the challenge is what earns the
+	// right to spend that identity's bucket.
+	if err := s.checkLimit(ctx, "ip:"+input.ClientIP); err != nil {
+		return nil, err
+	}
+
 	validated, err := validateSubmit(input)
 	if err != nil {
 		s.auditSubmit(ctx, input, 0, false, errorCode(err), attemptedSubmitDetail(input))
@@ -36,14 +49,9 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 		return nil, mapped
 	}
 
-	// Two buckets: the IP bound stops one host from flooding the queue, and the
-	// student-ID bound stops a distributed retry loop from doing it under one
-	// identity.
-	for _, subject := range []string{"ip:" + input.ClientIP, "student:" + validated.studentID} {
-		if err := s.checkLimit(ctx, subject); err != nil {
-			s.auditSubmit(ctx, input, 0, false, errorCode(err), attemptedSubmitDetail(input))
-			return nil, err
-		}
+	if err := s.checkLimit(ctx, "student:"+validated.studentID); err != nil {
+		s.auditSubmit(ctx, input, 0, false, errorCode(err), attemptedSubmitDetail(input))
+		return nil, err
 	}
 
 	if err := s.checkOccupancy(ctx, validated); err != nil {

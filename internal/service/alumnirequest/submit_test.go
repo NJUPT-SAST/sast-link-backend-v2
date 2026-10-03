@@ -228,6 +228,65 @@ func TestSubmitChecksOccupancyOnlyAfterTheCaptcha(t *testing.T) {
 	}
 }
 
+// The IP bucket is the only bound an anonymous caller cannot skip, so it leads
+// every other step — validation and the audit rows the failure branches write
+// included. A refused IP must not reach the captcha, the occupancy queries, or
+// the audit trail: an audited refusal would itself be an unbounded anonymous
+// write, which is exactly what the bucket exists to cap.
+func TestSubmitRefusedIPWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	input := validSubmit()
+	captcha := &fakeCaptcha{}
+	audit := &fakeAudit{}
+	users := &fakeUsers{}
+	limiter := &fakeLimiter{deny: map[string]bool{"ip:" + input.ClientIP: true}}
+	service := newService(&fakeRequests{}, users, audit, captcha)
+	service.Limiter = limiter
+	service.SubmitRateLimit = 5
+
+	_, err := service.Submit(context.Background(), input)
+	if err == nil {
+		t.Fatal("Submit() error = nil, want a rate-limit refusal")
+	}
+	if len(limiter.subjects) != 1 || limiter.subjects[0] != "ip:"+input.ClientIP {
+		t.Fatalf("limiter subjects = %v, want exactly the IP bucket", limiter.subjects)
+	}
+	if len(captcha.tokens) != 0 {
+		t.Fatalf("captcha consulted %d times, want 0 for a rate-limited request", len(captcha.tokens))
+	}
+	if len(users.emailQueries) != 0 {
+		t.Fatalf("occupancy queried %v, want none for a rate-limited request", users.emailQueries)
+	}
+	if len(audit.entries) != 0 {
+		t.Fatalf("audit entries = %d, want 0: a refused IP writes no audit row", len(audit.entries))
+	}
+}
+
+// A field-level refusal still writes its audit row, but only behind the IP
+// bucket: the bound an anonymous caller cannot skip also bounds the failure
+// writes, which is what keeps the audit trail from being an unauthenticated
+// write amplifier.
+func TestSubmitFieldRefusalAuditSitsBehindTheIPBucket(t *testing.T) {
+	t.Parallel()
+
+	input := validSubmit()
+	input.Major = ""
+	captcha := &fakeCaptcha{}
+	audit := &fakeAudit{}
+	limiter := &fakeLimiter{deny: map[string]bool{"ip:" + input.ClientIP: true}}
+	service := newService(&fakeRequests{}, &fakeUsers{}, audit, captcha)
+	service.Limiter = limiter
+	service.SubmitRateLimit = 5
+
+	if _, err := service.Submit(context.Background(), input); err == nil {
+		t.Fatal("Submit() error = nil, want a rate-limit refusal before validation")
+	}
+	if len(audit.entries) != 0 {
+		t.Fatalf("audit entries = %d, want 0: the IP bucket refuses before field validation", len(audit.entries))
+	}
+}
+
 // A rejected token and an unavailable verifier are opposite instructions to the
 // caller, so they must not collapse into one code: 40021 says "solve it again",
 // 50301 says "nothing you do will help".
