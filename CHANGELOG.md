@@ -104,6 +104,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **性能与可靠性审计落地**（2026-10-04，`fix/perf-reliability-audit`）：全仓只读审计（主脑深读 + 5 分域并行扫查 + 交叉验证）发现的全部可行动项一次落地，共 13 个 commit：
+  - **修复**：`POST /alumni-requests` 的 IP 限流前置到字段校验之前，匿名审计写放大被限流桶覆盖（校验失败仍写审计但已有界，被拒 IP 不再写审计）；`/health` 的 DB 探活补 2s 超时（原为全服务唯一无界出站调用）；忘记密码队列满改答 `50300` 而非假成功（原“已发送”永不到达且重试撞限流）；注册后重载失败降级为内存行 + 告警日志（原已建号却答 500，重试死在已消费的 Register-Ticket）；`/userinfo` 后端故障（缓存 miss + DB 失败）改答 RFC 6750 `server_error` 而非折叠为 401（避免故障期全量 RP 刷新风暴）；设备淘汰撤销与审计改用 detach + 5s 预算 ctx（原客户端断连会留下第 6 个活会话无审计，session 与 oauthlogin 两处）；refresh 的 user_deleted / user_missing 分支补审计；RotateClientSecret 内部错误分支补审计；forgot-password worker 审计 IP/UA 改 NullableString（保持 V007 NULL 语义）；alumni 通知 worker 启动 reconcile 失败改退避重试 + shutdown 排空在途投递 + exclude 列表限界；retention 派生状态连续 3 tick 失败后游标重置（防永久卡死）；后台 worker panic 转“带栈错误 + 快速退出”而非裸崩溃。
+  - **性能**：V022 `user(lower(btrim(student_id)))` 表达式索引（4 处全表扫描消除，含审批事务内 FOR UPDATE）；V023 last-admin 守卫部分索引（批量端点 ≤500 次全表 COUNT 变索引扫描）；批量用户更新 8 并发 worker 池（每条仍独立事务+守卫，结果保持请求序）；控制台 stats 五次全表聚合合一次 `GROUP BY role, state` + FILTER；`validateTokenFamilyAppend` 窄列投影；outbox `CleanupExpired` 改主键子查询限量删除；`RecomputeDerivedState` 改单条 `UPDATE ... FROM (VALUES)`；全部 Lua 调 EVALSHA（NOSCRIPT 回退）；设备淘汰 DEL 入脚本（省一次往返）；Peek GET+PTTL 合并原子脚本；限流/登录失败计数脚本 TTL 自愈（无 TTL key 不再永久 429）；SMTP 拨号独立 10s 预算；provider/turnstile/COS 共享 Transport 连接池（MaxIdleConnsPerHost=16）；Lark app_token 取数 single-flight；OAuth 回调多跳 15s 总预算；/metrics 的 method label 白名单归一（堵匿名 label 基数放大）。
+  - **文档/运维**：Caddy runbook 对 `/v2/metrics` 钉 404（与 pprof 同一道防线，抓取走内网）；production + `DB_SSLMODE=disable` 启动 WARN。
+  - **审计报告**：`.pi/audit/`（REPORT.md 总报告 + A~E 五份分域详报，含已排除项清单）。
+
 - **个人徽标 `target` 参数生效**（2026-09-30）：前端分享 URL 早已携带 `?target=blog|github`，但渲染端从未读取该参数——`ServeSVG` 只解析 `theme`，卡片锚点固定 blog 优先、github 兜底，`?target=github` 的分享在两页都配置时永远跳博客。现在 `target` 与 `theme` 同一契约：随 `RenderInput` 下传、未知值归一化为 `blog`、锚点按「请求的目标优先，另一个兜底」解析（http(s) 白名单不变），并加入渲染缓存标识（version|theme|target|key），两个变体互不命中对方缓存。`docs/API文档.md` §9.4 与 `docs/openapi.yaml` 补记 `target` 参数。
 
 - **注册邮箱前缀错误文案**（2026-09-30）：注册发码、验码和提交的 `40022` 响应保留“邮箱前缀格式错误”，与业务错误码和 API 契约一致。
