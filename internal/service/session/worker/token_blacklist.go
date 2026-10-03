@@ -25,7 +25,7 @@ type TokenBlacklistOutbox interface {
 	ClaimDue(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]model.TokenBlacklistOutbox, error)
 	AckMany(ctx context.Context, ids []int64, claimToken string) (int64, error)
 	Fail(ctx context.Context, id int64, claimToken string, attemptedAt, nextDeliveryAt time.Time, deliveryError string) (bool, error)
-	CleanupExpired(ctx context.Context, now time.Time) (int64, error)
+	CleanupExpired(ctx context.Context, now time.Time, batchSize int) (int64, error)
 }
 
 type AuthStateInvalidator interface {
@@ -163,7 +163,7 @@ func (w TokenBlacklist) ackMany(ctx context.Context, ids []int64, claimToken str
 }
 
 func (w TokenBlacklist) cleanupExpired(ctx context.Context) {
-	if _, err := w.Outbox.CleanupExpired(ctx, w.now()); err != nil && ctx.Err() == nil {
+	if _, err := w.Outbox.CleanupExpired(ctx, w.now(), w.batchSize()); err != nil && ctx.Err() == nil {
 		slog.Error("cleanup token blacklist outbox", "error", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -239,6 +240,16 @@ func (r *RetentionRepository) RecomputeDerivedState(
 		return 0, nil
 	}
 	next := rows[len(rows)-1].ID
+	// Collect the divergent rows, then apply them in one statement: the academic
+	// year boundary flips a whole cohort at once, and per-row UPDATEs turned one
+	// tick into up to batchSize independent round trips. The per-row guards stay
+	// in the WHERE clause, so a concurrent pin or closure still wins exactly as
+	// the per-row form allowed.
+	type divergence struct {
+		id         int64
+		derivedState model.UserState
+	}
+	divergent := make([]divergence, 0, len(rows))
 	for _, row := range rows {
 		derived, err := validate.DeriveState(row.Role, row.StudentID, now)
 		if err != nil {
@@ -246,21 +257,30 @@ func (r *RetentionRepository) RecomputeDerivedState(
 			// row alone rather than guessing; the next pass skips it the same way.
 			continue
 		}
-		if derived == row.State {
-			continue
+		if derived != row.State {
+			divergent = append(divergent, divergence{id: row.ID, derivedState: derived})
 		}
-		result := r.database.WithContext(ctx).
-			Model(&model.User{}).
-			Where("id = ? AND state_manual = ? AND state <> ?",
-				row.ID, false, model.UserStateDeleted).
-			Update("state", derived)
-		if result.Error != nil {
-			return 0, fmt.Errorf("recompute derived state: %w", result.Error)
-		}
-		// RowsAffected == 0 means a concurrent writer pinned the row or closed the
-		// account between the read and the update; both are between-state changes
-		// the sweep must not fight, so the update is simply skipped.
 	}
+	if len(divergent) > 0 {
+		values := make([]string, 0, len(divergent))
+		args := make([]any, 0, len(divergent)*2)
+		for _, item := range divergent {
+			args = append(args, item.id, string(item.derivedState))
+			values = append(values, fmt.Sprintf("(?::int8, ?::state_enum)"))
+		}
+		if err := r.database.WithContext(ctx).
+			Exec(fmt.Sprintf(
+				`UPDATE "user" AS u SET state = v.target_state
+				 FROM (VALUES %s) AS v(id, target_state)
+				 WHERE u.id = v.id AND u.state_manual = ? AND u.state <> ?`,
+				strings.Join(values, ", ")),
+			append(args, false, model.UserStateDeleted)...).Error; err != nil {
+			return 0, fmt.Errorf("recompute derived state: %w", err)
+		}
+	}
+	// RowsAffected == 0 for a row means a concurrent writer pinned the row or
+	// closed the account between the read and the update; both are between-state
+	// changes the sweep must not fight, so the update is simply skipped.
 	// A short batch means the cursor reached the end: report it as 0 so the
 	// worker loop terminates without one extra no-op pass.
 	if len(rows) < batchSize {

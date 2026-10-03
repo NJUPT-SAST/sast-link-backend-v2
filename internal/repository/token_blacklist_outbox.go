@@ -130,13 +130,23 @@ func (r *TokenBlacklistOutboxRepository) Fail(
 	return result.RowsAffected == 1, nil
 }
 
-// CleanupExpired deletes deliveries whose JWTs can no longer be blacklisted.
-func (r *TokenBlacklistOutboxRepository) CleanupExpired(ctx context.Context, now time.Time) (int64, error) {
-	if now.IsZero() {
+// CleanupExpired deletes deliveries whose JWTs can no longer be blacklisted,
+// at most batchSize per call via a primary-key subquery — the same bounded-work
+// contract the retention deletes keep: a client-wide revocation enqueues one
+// row per live access token, and a single unbounded DELETE would hold those row
+// locks in one statement. The worker polls, so the remainder drains on later
+// ticks.
+func (r *TokenBlacklistOutboxRepository) CleanupExpired(ctx context.Context, now time.Time, batchSize int) (int64, error) {
+	if now.IsZero() || batchSize <= 0 {
 		return 0, fmt.Errorf("cleanup token blacklist outbox: %w", ErrInvalidArgument)
 	}
-	result := r.database.WithContext(ctx).
+	subquery := r.database.WithContext(ctx).
+		Model(&model.TokenBlacklistOutbox{}).
+		Select("id").
 		Where("expires_at <= ?", now).
+		Limit(batchSize)
+	result := r.database.WithContext(ctx).
+		Where("id IN (?)", subquery).
 		Delete(&model.TokenBlacklistOutbox{})
 	if result.Error != nil {
 		return 0, fmt.Errorf("cleanup token blacklist outbox: %w", result.Error)

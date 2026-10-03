@@ -67,7 +67,7 @@ func TestTokenBlacklistOutboxRepositoryClaimAckFailAndCleanup(t *testing.T) {
 		t.Fatalf("failed entry = %#v, want released retry state", failedEntry)
 	}
 
-	deleted, err := outbox.CleanupExpired(context.Background(), now)
+	deleted, err := outbox.CleanupExpired(context.Background(), now, 100)
 	if err != nil || deleted != 1 {
 		t.Fatalf("CleanupExpired() = %d, %v, want 1, nil", deleted, err)
 	}
@@ -136,7 +136,7 @@ func TestTokenBlacklistOutboxRepositoryClaimDueIsMultiInstanceSafe(t *testing.T)
 		{"claim", func() error { _, err := outbox.ClaimDue(context.Background(), now, 0, 1); return err }},
 		{"ack", func() error { _, err := outbox.Ack(context.Background(), 0, "claim"); return err }},
 		{"fail", func() error { _, err := outbox.Fail(context.Background(), 1, "claim", now, now, "error"); return err }},
-		{"cleanup", func() error { _, err := outbox.CleanupExpired(context.Background(), time.Time{}); return err }},
+		{"cleanup", func() error { _, err := outbox.CleanupExpired(context.Background(), time.Time{}, 100); return err }},
 	} {
 		t.Run(invalid.name, func(t *testing.T) {
 			if err := invalid.call(); !errors.Is(err, repository.ErrInvalidArgument) {

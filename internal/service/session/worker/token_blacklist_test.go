@@ -60,7 +60,7 @@ func (f *fakeOutbox) Fail(_ context.Context, id int64, _ string, attemptedAt, ne
 	return true, nil
 }
 
-func (f *fakeOutbox) CleanupExpired(_ context.Context, _ time.Time) (int64, error) {
+func (f *fakeOutbox) CleanupExpired(_ context.Context, _ time.Time, _ int) (int64, error) {
 	f.cleanups++
 	return 0, nil
 }

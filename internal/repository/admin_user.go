@@ -175,6 +175,12 @@ func liveUser(query *gorm.DB) *gorm.DB {
 }
 
 // Stats returns the aggregate counts for the overview dashboard.
+//
+// The user-side dimensions share one pass: a GROUP BY role, state scan with
+// FILTER aggregates costs one sequential sweep instead of five, and the
+// role x state cross product stays tiny (a handful of roles times the states
+// actually present). The department cut needs profile's join and keeps its
+// own query.
 func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	var stats UserStats
 	stats.ByRole = make(map[model.UserRole]int64)
@@ -183,71 +189,57 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	stats.IncompleteByRole = make(map[model.UserRole]int64)
 	stats.IncompleteByState = make(map[model.UserState]int64)
 
-	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
-		Count(&stats.Total).Error; err != nil {
-		return stats, fmt.Errorf("count users: %w", err)
+	type censusRow struct {
+		Role       string
+		State      string
+		Count      int64
+		Incomplete int64
+	}
+	rows := make([]censusRow, 0, 16)
+	// Incomplete (role cut): live accounts still flagged incomplete whose role
+	// is neither lecturer nor admin - staff are organization members, not
+	// follow-up targets. The state cut below narrows the same flag to njupter,
+	// mirroring the role cut's population judgement.
+	if err := r.database.WithContext(ctx).Model(&model.User{}).
+		Select(fmt.Sprintf(`role, state, COUNT(*) AS count,
+			COUNT(*) FILTER (WHERE profile_needs_completion = true
+				AND role NOT IN ('%s', '%s')) AS incomplete`,
+			model.UserRoleLecturer, model.UserRoleAdmin)).
+		Group("role, state").
+		Scan(&rows).Error; err != nil {
+		return stats, fmt.Errorf("count users by role and state: %w", err)
+	}
+	for _, row := range rows {
+		state := model.UserState(row.State)
+		stats.ByState[state] += row.Count
+		if state == model.UserStateDeleted {
+			continue
+		}
+		stats.Total += row.Count
+		stats.ByRole[model.UserRole(row.Role)] += row.Count
+		if row.Incomplete > 0 {
+			stats.IncompleteByRole[model.UserRole(row.Role)] += row.Incomplete
+			// Grouped by state, the njupter bucket's flagged count is exactly the
+			// state cut (njupter is a live state, so the deleted guard above and
+			// the live predicate of the old queries agree here).
+			if state == model.UserStateNJUPTer {
+				stats.IncompleteByState[state] += row.Incomplete
+			}
+		}
 	}
 
 	type groupRow struct {
 		Group string
 		Count int64
 	}
-	rows := make([]groupRow, 0, 8)
-
-	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
-		Select(`role AS "group", COUNT(*) AS count`).Group("role").Scan(&rows).Error; err != nil {
-		return stats, fmt.Errorf("count users by role: %w", err)
-	}
-	for _, row := range rows {
-		stats.ByRole[model.UserRole(row.Group)] = row.Count
-	}
-
-	rows = rows[:0]
-	// ByState deliberately keeps every state, is_deleted included, so the deleted
-	// count stays visible as its own bucket rather than vanishing from the console.
-	if err := r.database.WithContext(ctx).Model(&model.User{}).
-		Select(`state AS "group", COUNT(*) AS count`).Group("state").Scan(&rows).Error; err != nil {
-		return stats, fmt.Errorf("count users by state: %w", err)
-	}
-	for _, row := range rows {
-		stats.ByState[model.UserState(row.Group)] = row.Count
-	}
-
-	rows = rows[:0]
-	// IncompleteByRole: only live accounts still flagged incomplete whose role is
-	// neither lecturer nor admin, grouped by role for the frontend's subtraction.
-	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{}).
-		Where(`profile_needs_completion = true AND role NOT IN (?, ?)`,
-			model.UserRoleLecturer, model.UserRoleAdmin)).
-		Select(`role AS "group", COUNT(*) AS count`).Group("role").Scan(&rows).Error; err != nil {
-		return stats, fmt.Errorf("count users by role (incomplete): %w", err)
-	}
-	for _, row := range rows {
-		stats.IncompleteByRole[model.UserRole(row.Group)] = row.Count
-	}
-
-	rows = rows[:0]
-	// IncompleteByState: only live accounts still flagged incomplete in the
-	// in-school student state (njupter). Grouped by state for symmetry with
-	// IncompleteByRole, which drops the same population by role instead — staff
-	// and retired members are organization members, not follow-up targets.
-	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{}).
-		Where(`profile_needs_completion = true AND state = ?`, model.UserStateNJUPTer)).
-		Select(`state AS "group", COUNT(*) AS count`).Group("state").Scan(&rows).Error; err != nil {
-		return stats, fmt.Errorf("count users by state (incomplete): %w", err)
-	}
-	for _, row := range rows {
-		stats.IncompleteByState[model.UserState(row.Group)] = row.Count
-	}
-
-	rows = rows[:0]
+	departmentRows := make([]groupRow, 0, 8)
 	if err := liveUser(r.database.WithContext(ctx).Model(&model.User{})).
 		Joins(`LEFT JOIN profile ON profile.user_id = "user".id`).
 		Select(`profile.department AS "group", COUNT(*) AS count`).
-		Group("profile.department").Scan(&rows).Error; err != nil {
+		Group("profile.department").Scan(&departmentRows).Error; err != nil {
 		return stats, fmt.Errorf("count users by department: %w", err)
 	}
-	for _, row := range rows {
+	for _, row := range departmentRows {
 		if row.Group == "" {
 			stats.NoDepartment = row.Count
 			continue
@@ -258,9 +250,6 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	return stats, nil
 }
 
-// adminUserQuery builds the shared predicates of the list and its count. The
-// join is LEFT so a user with a missing profile row still appears, and is
-// unconditional so the list and its count see identical row sets.
 func (r *UserRepository) adminUserQuery(ctx context.Context, filter AdminUserFilter) *gorm.DB {
 	query := r.database.WithContext(ctx).
 		Model(&model.User{}).
