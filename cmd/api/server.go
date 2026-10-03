@@ -132,7 +132,13 @@ func pingDB(database *gorm.DB) error {
 	if err != nil {
 		return err
 	}
-	return sqlDB.Ping()
+	// The same 2s bound as pingRedis: a hung (not refused) PostgreSQL must not
+	// pin the health goroutine indefinitely — the WriteTimeout only closes the
+	// client side of a stuck response, leaving this call and its pooled
+	// connection occupied. A fast, honest "error" is what an orchestrator needs.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return sqlDB.PingContext(ctx)
 }
 
 func pingRedis(client *goredis.Client) error {
