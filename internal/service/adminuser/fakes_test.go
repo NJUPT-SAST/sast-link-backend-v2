@@ -2,6 +2,7 @@ package adminuser
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 )
 
 type fakeUsers struct {
+	mu           sync.Mutex
 	listRows     []repository.AdminUserRow
 	listTotal    int64
 	listErr      error
@@ -29,11 +31,15 @@ type fakeUsers struct {
 	// correct even when the write lands on the wrong row.
 	updateCalls    int
 	updatedUserID  int64
+	updatedTargets map[int64]bool
 	updateInput    repository.AdminUserUpdate
 	updateEntries  []model.BlacklistEntry
 	updateRevoked  bool
 	updateErr      error
-	updateErrs     []error
+	// updateErrByID keys a per-id failure for batch tests; keyed by user id
+	// rather than queued by call order because the batch endpoint runs its
+	// independent items concurrently — call order is no longer id order.
+	updateErrByID  map[int64]error
 	deleteCalls    int
 	deletedUserID  int64
 	deleteEntries  []model.BlacklistEntry
@@ -89,20 +95,22 @@ func (f *fakeUsers) UpdateAdminUser(
 	_ model.UserRole,
 	_ time.Time,
 ) ([]model.BlacklistEntry, bool, error) {
+	// The batch endpoint overlaps its per-item calls, so the recording fields
+	// need the mutex; the real repository serializes through row locks.
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.updateCalls++
 	f.updatedUserID = userID
 	f.updateInput = update
+	if f.updatedTargets == nil {
+		f.updatedTargets = make(map[int64]bool)
+	}
+	f.updatedTargets[userID] = true
 	if f.updateErr != nil {
 		return nil, false, f.updateErr
 	}
-	// updateErrs is a per-call failure queue for batch tests: the first call may
-	// fail while the rest succeed. A nil slot in the queue means success.
-	if len(f.updateErrs) > 0 {
-		err := f.updateErrs[0]
-		f.updateErrs = f.updateErrs[1:]
-		if err != nil {
-			return nil, false, err
-		}
+	if err := f.updateErrByID[userID]; err != nil {
+		return nil, false, err
 	}
 	return f.updateEntries, f.updateRevoked, nil
 }
@@ -161,6 +169,7 @@ func (f *fakeUsers) ExistsAsEmailAnywhere(_ context.Context, email string) (bool
 }
 
 type fakeAudit struct {
+	mu        sync.Mutex
 	entries   []*model.AuditLog
 	listed    repository.AuditLogFilter
 	listRows  []model.AuditLog
@@ -170,6 +179,10 @@ type fakeAudit struct {
 }
 
 func (f *fakeAudit) Create(_ context.Context, entry *model.AuditLog) error {
+	// The batch endpoint overlaps its per-item audits, so the recorder needs
+	// the mutex; the real repository serializes through the database.
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.entries = append(f.entries, entry)
 	return f.createErr
 }

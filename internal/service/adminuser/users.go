@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -232,9 +233,11 @@ func (s Service) GetUsersByIDs(ctx context.Context, input GetUsersByIDsInput) ([
 }
 
 // BatchUpdateUsers applies the requested role and/or department change to every
-// id, independently, and reports each outcome. Deliberately not atomic: each
-// item runs its own UpdateUser transaction with its own guards, so the batch
-// cannot bypass a guard the single-user endpoint honors.
+// id, independently, and reports each outcome in request order. Deliberately
+// not atomic: each item runs its own UpdateUser transaction with its own
+// guards, so the batch cannot bypass a guard the single-user endpoint honors;
+// the per-item transactions merely overlap, bounded by a fixed-width worker
+// pool, since the guards' own locks serialize anything that truly conflicts.
 func (s Service) BatchUpdateUsers(ctx context.Context, input BatchUpdateUsersInput) (*BatchUpdateUsersResult, error) {
 	if s.Users == nil {
 		return nil, newError(ErrInternal, "用户仓储未配置", nil)
@@ -271,40 +274,61 @@ func (s Service) BatchUpdateUsers(ctx context.Context, input BatchUpdateUsersInp
 	}
 	requestedRole := string(role)
 
-	results := make([]BatchUpdateResult, 0, len(ids))
-	for _, id := range ids {
-		result := BatchUpdateResult{ID: id, Department: requestedDepartment}
-		if roleRequested {
-			result.Role = requestedRole
-		}
-		update := UpdateUserInput{
-			UserID:        id,
-			Batch:         true,
-			AdminUserID:   input.AdminUserID,
-			AdminRole:     input.AdminRole,
-			ActorClientID: input.ActorClientID,
-			ClientIP:      input.ClientIP,
-			UserAgent:     input.UserAgent,
-		}
-		if roleRequested {
-			update.Role = &requestedRole
-		}
-		if input.Department != nil {
-			update.Department = requestedDepartment
-		}
-		_, updateErr := s.UpdateUser(ctx, update)
-		if updateErr == nil {
-			result.Success = true
-			results = append(results, result)
-			continue
-		}
-		// A failure carries the reason and no echo of the requested changes, since
-		// neither was applied.
-		result.Role = ""
-		result.Department = nil
-		result.Reason = batchUpdateReason(updateErr)
-		results = append(results, result)
+	// Each item stays its own UpdateUser transaction with its own guards — the
+	// batch must not bypass a guard the single-user endpoint honors — but the
+	// items are independent rows, so the loop itself may overlap: a 500-item
+	// batch of serial cross-RTT transactions held a handler for seconds while
+	// the admin advisory lock and row locks already serialize everything that
+	// actually conflicts. Fixed width, in the database pool's size class, so a
+	// wider fan-out would only queue at the pool.
+	const batchUpdateConcurrency = 8
+	width := min(batchUpdateConcurrency, len(ids))
+	results := make([]BatchUpdateResult, len(ids))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(width)
+	for range width {
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				id := ids[index]
+				result := BatchUpdateResult{ID: id, Department: requestedDepartment}
+				if roleRequested {
+					result.Role = requestedRole
+				}
+				update := UpdateUserInput{
+					UserID:        id,
+					Batch:         true,
+					AdminUserID:   input.AdminUserID,
+					AdminRole:     input.AdminRole,
+					ActorClientID: input.ActorClientID,
+					ClientIP:      input.ClientIP,
+					UserAgent:     input.UserAgent,
+				}
+				if roleRequested {
+					update.Role = &requestedRole
+				}
+				if input.Department != nil {
+					update.Department = requestedDepartment
+				}
+				if _, updateErr := s.UpdateUser(ctx, update); updateErr == nil {
+					result.Success = true
+				} else {
+					// A failure carries the reason and no echo of the requested
+					// changes, since neither was applied.
+					result.Role = ""
+					result.Department = nil
+					result.Reason = batchUpdateReason(updateErr)
+				}
+				results[index] = result
+			}
+		}()
 	}
+	for index := range ids {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
 	return &BatchUpdateUsersResult{Results: results}, nil
 }
 
