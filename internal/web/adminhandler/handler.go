@@ -29,7 +29,7 @@ type UserService interface {
 	GetUsersByIDs(ctx context.Context, input adminuser.GetUsersByIDsInput) ([]adminuser.UserDetail, error)
 	CreateUser(ctx context.Context, input adminuser.CreateUserInput) (*adminuser.CreateUserResult, error)
 	UpdateUser(ctx context.Context, input adminuser.UpdateUserInput) (*adminuser.UpdateUserResult, error)
-	UpdateUserRoles(ctx context.Context, input adminuser.UpdateUserRolesInput) (*adminuser.UpdateUserRolesResult, error)
+	BatchUpdateUsers(ctx context.Context, input adminuser.BatchUpdateUsersInput) (*adminuser.BatchUpdateUsersResult, error)
 	DeleteUser(ctx context.Context, input adminuser.TargetUserInput) error
 	RestoreUser(ctx context.Context, input adminuser.TargetUserInput) error
 	// Stats returns the aggregate account counts for the console overview.
@@ -124,7 +124,7 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	// service: it cannot create or promote to admin, and cannot write an admin's
 	// account — see UserWriterRoles below.
 	admin.POST("/users", g.RequireWriteScope, g.RequireUserWriter, h.CreateUser)
-	admin.PUT("/users", g.RequireWriteScope, g.RequireUserWriter, h.UpdateUsersRole)
+	admin.PUT("/users", g.RequireWriteScope, g.RequireUserWriter, h.BatchUpdateUsers)
 	admin.PUT("/users/:id", g.RequireWriteScope, g.RequireUserWriter, h.UpdateUser)
 	admin.DELETE("/users/:id", g.RequireWriteScope, g.RequireUserWriter, h.DeleteUser)
 	admin.PUT("/users/:id/restore", g.RequireWriteScope, g.RequireUserWriter, h.RestoreUser)

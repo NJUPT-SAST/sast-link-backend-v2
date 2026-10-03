@@ -12,6 +12,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/alumnihandler"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/departmenthandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthhandler"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/oauthloginhandler"
@@ -43,6 +44,7 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 		RequireAuth: passthrough, RequireReadScope: passthrough, RequireWriteScope: passthrough,
 		RequireAdmin: passthrough,
 	})
+	departmenthandler.RegisterRoutes(router)
 
 	registered := make(map[string]bool)
 	for _, route := range router.Routes() {
@@ -118,6 +120,8 @@ func TestSessionAndOAuthRoutesCoexist(t *testing.T) {
 		http.MethodPost + " /admin/alumni-requests/:id/approve",
 		http.MethodPost + " /admin/alumni-requests/:id/reject",
 		http.MethodPost + " /admin/alumni-requests/:id/resend-notification",
+		// The public department catalogue.
+		http.MethodGet + " /departments",
 	}
 	for _, route := range want {
 		if !registered[route] {

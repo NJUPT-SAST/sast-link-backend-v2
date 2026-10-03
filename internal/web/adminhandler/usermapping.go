@@ -63,18 +63,21 @@ type batchUsersResponse struct {
 	Users []userDetailDTO `json:"users"`
 }
 
-// roleUpdateResultDTO is one id's outcome of a batch role change. omitempty
-// keeps a success from carrying an empty reason and a failure from carrying a
-// role that was never applied.
-type roleUpdateResultDTO struct {
-	ID      int64  `json:"id"`
-	Success bool   `json:"success"`
-	Role    string `json:"role,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+// batchUpdateResultDTO is one id's outcome of a batch update. omitempty keeps a
+// success from carrying an empty reason, a failure from carrying a change that
+// was never applied, and a department-free request from carrying a department
+// key at all. A department that was applied as the empty string — the clear —
+// still shows, because a pointer to "" is not empty for encoding/json.
+type batchUpdateResultDTO struct {
+	ID         int64   `json:"id"`
+	Success    bool    `json:"success"`
+	Role       string  `json:"role,omitempty"`
+	Department *string `json:"department,omitempty"`
+	Reason     string  `json:"reason,omitempty"`
 }
 
-type batchRoleUpdateResponse struct {
-	Results []roleUpdateResultDTO `json:"results"`
+type batchUpdateResponse struct {
+	Results []batchUpdateResultDTO `json:"results"`
 }
 
 // userDetailDTO is one full user record. Same reasoning as adminUserDTO, plus the
