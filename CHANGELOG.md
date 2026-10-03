@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **部门自助写入收紧为 manager / admin 专属**（fix/department-self-edit-gate）：`PUT /user/profile` 的 `department` 键从「任意角色可写」收紧为仅 `manager` / `admin` 角色可写，其他角色（member / freshman / lecturer）提交该键返回 `40000`（与未知权限字段同姿，拒绝整个请求而非静默忽略——调用方不能误以为改成功了）。部门是组织归属字段而非展示资料，下游（People 等）按它做权限隔离；此前仅靠前端不暴露编辑入口实现限制，后端从未拒绝。角色取自 auth-state 实时数据库行（非 token 内 role claim 快照），降权下一请求即生效；空/未知角色一律拒绝（fail closed）。`PUT /admin/users/:id` / `PUT /admin/users` 的部门写入不变，普通用户的部门变更由管理员归置。前端配合：非管理角色的编辑请求体不应携带 `department` 键。
+
 ### Added
 
 - **部门枚举扩至七部门 + 管理端写入 + 公开目录**（feat/department-enum，[issue #99](https://github.com/NJUPT-SAST/sast-link-backend-v2/issues/99)，基于 PR #98 的 V020 之后）：V021 向 `department_enum` 追加 `electronics` / `office` / `liaison` / `publicity` / `competition`（纯增量 `ADD VALUE`，不可回滚），配套 `GET /departments` 公开只读目录（key + 中文展示名，与后端枚举同源，集成方不再本地维护 key→label 映射）与 `PUT /admin/users/:id` 的可选 `department` 字段（admin / manager 可写，语义与 `PUT /user/profile` 完全一致：传值即设置、空串清空为 NULL、缺省不修改；写 profile 行且 upsert 无 profile 行的存量账号，不触动 token_version 不撤销会话——部门不是授权输入），批量端点 `PUT /admin/users` 同步接受可选 `department`（与 `role` 至少传一项，可同传；逐项走单条端点同款守卫与事务，成功项回显应用的 department，空串表示清空）。背景：People 侧按 `profile.department` 做部门权限隔离，两个值的值域无法给其余五个部门分家，且存量上百账号逐个通知自助改部门不现实。枚举扩展自动生效于自助写入、admin 筛选与 `by_department` 统计（实现本就按 GROUP BY 动态分桶，仅文档描述同步）。
