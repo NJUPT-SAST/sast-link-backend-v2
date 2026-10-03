@@ -22,6 +22,7 @@ type Cmdable interface {
 	Del(context.Context, ...string) *goredis.IntCmd
 	PTTL(context.Context, string) *goredis.DurationCmd
 	Eval(context.Context, string, []string, ...any) *goredis.Cmd
+	EvalSha(context.Context, string, []string, ...any) *goredis.Cmd
 	Pipeline() goredis.Pipeliner
 }
 
@@ -247,6 +248,51 @@ func (s Store) PeekOneTime(ctx context.Context, key string, target any) error {
 	return nil
 }
 
+// peekWithTTLScript reads a value and its remaining TTL in one atomic call, so
+// the two facts cannot disagree: a GET followed by a separate PTTL lets the key
+// expire between the calls, and the caller must then guess whether the payload
+// it holds is still live.
+const peekWithTTLScript = `
+local value = redis.call("GET", KEYS[1])
+if not value then
+  return {false, 0}
+end
+return {value, redis.call("PTTL", KEYS[1])}
+`
+
+// PeekOneTimeWithTTL is PeekOneTime plus the payload's remaining lifetime, read
+// atomically. A missing key reports found=false; a key whose TTL has passed
+// reports found=false as well, since the atomic read makes that state
+// indistinguishable from a miss that happened one instant earlier.
+func (s Store) PeekOneTimeWithTTL(ctx context.Context, key string, target any) (ttl time.Duration, found bool, err error) {
+	if s.Client == nil || key == "" || target == nil {
+		return 0, false, fmt.Errorf("peek one-time with ttl: %w", ErrInvalidArgument)
+	}
+	values, err := evalScript(ctx, s.Client, peekWithTTLScript, []string{key}).Slice()
+	if err != nil {
+		return 0, false, fmt.Errorf("peek one-time with ttl: %w", err)
+	}
+	if len(values) != 2 {
+		return 0, false, fmt.Errorf("peek one-time with ttl: unexpected result")
+	}
+	raw, ok := values[0].(string)
+	if !ok {
+		// Lua false arrives as a nil interface in go-redis: the key is gone.
+		return 0, false, nil
+	}
+	ttlMilliseconds, convErr := redisInt(values[1])
+	if convErr != nil {
+		return 0, false, fmt.Errorf("peek one-time with ttl: %w", convErr)
+	}
+	if ttlMilliseconds <= 0 {
+		return 0, false, nil
+	}
+	if err := json.Unmarshal([]byte(raw), target); err != nil {
+		return 0, false, fmt.Errorf("unmarshal one-time payload: %w", err)
+	}
+	return time.Duration(ttlMilliseconds) * time.Millisecond, true, nil
+}
+
 // DeleteOneTime removes a one-time key and reports whether this call was the one
 // that deleted it. Concurrent callers can use that to elect a single winner.
 func (s Store) DeleteOneTime(ctx context.Context, key string) (bool, error) {
@@ -326,7 +372,7 @@ func (s Store) SaveVerificationCode(ctx context.Context, purpose, email, code st
 		s.Keys.VerifyCode(purpose, email),
 		s.Keys.VerificationCodeAttempt(purpose, email),
 	}
-	if err := s.Client.Eval(ctx, saveVerificationCodeScript, keys, code, int(milliseconds)).Err(); err != nil {
+	if err := evalScript(ctx, s.Client, saveVerificationCodeScript, keys, code, int(milliseconds)).Err(); err != nil {
 		return fmt.Errorf("save verification code: %w", err)
 	}
 	return nil
@@ -397,7 +443,7 @@ func (s Store) VerifyVerificationCode(ctx context.Context, purpose, email, code 
 		s.Keys.VerifyCode(purpose, email),
 		s.Keys.VerificationCodeAttempt(purpose, email),
 	}
-	values, err := s.Client.Eval(ctx, verificationCodeAttemptScript, keys, code, maximumVerificationCodeAttempts).Slice()
+	values, err := evalScript(ctx, s.Client, verificationCodeAttemptScript, keys, code, maximumVerificationCodeAttempts).Slice()
 	if err != nil {
 		return false, 0, fmt.Errorf("verify verification code eval: %w", err)
 	}
@@ -474,7 +520,9 @@ type LoginFailureState struct {
 
 const loginFailureCounterScript = `
 local current = redis.call("INCR", KEYS[1])
-if current == 1 then
+-- Same TTL heal as the fixed-window limiter: a counter key without an expiry
+-- would lock an account out forever instead of one window.
+if current == 1 or redis.call("PTTL", KEYS[1]) < 0 then
   redis.call("PEXPIRE", KEYS[1], ARGV[1])
 end
 return {current, redis.call("PTTL", KEYS[1])}
@@ -497,7 +545,7 @@ func (s Store) GetLoginFailures(ctx context.Context, email string) (LoginFailure
 	if s.Client == nil || email == "" {
 		return LoginFailureState{}, fmt.Errorf("get login failures: %w", ErrInvalidArgument)
 	}
-	values, err := s.Client.Eval(ctx, getLoginFailuresScript, []string{s.Keys.LoginFailure(email)}).Slice()
+	values, err := evalScript(ctx, s.Client, getLoginFailuresScript, []string{s.Keys.LoginFailure(email)}).Slice()
 	if err != nil {
 		return LoginFailureState{}, fmt.Errorf("get login failures eval: %w", err)
 	}
@@ -524,10 +572,10 @@ func (s Store) RecordLoginFailure(ctx context.Context, email string, window time
 		return LoginFailureState{}, fmt.Errorf("record login failure: %w", ErrInvalidArgument)
 	}
 	windowMilliseconds := window.Milliseconds()
-	if windowMilliseconds <= 0 {
+	if windowMilliseconds <= 0 || windowMilliseconds > math.MaxInt {
 		return LoginFailureState{}, fmt.Errorf("record login failure: %w", ErrInvalidArgument)
 	}
-	values, err := s.Client.Eval(ctx, loginFailureCounterScript, []string{s.Keys.LoginFailure(email)}, int(windowMilliseconds)).Slice()
+	values, err := evalScript(ctx, s.Client, loginFailureCounterScript, []string{s.Keys.LoginFailure(email)}, int(windowMilliseconds)).Slice()
 	if err != nil {
 		return LoginFailureState{}, fmt.Errorf("record login failure eval: %w", err)
 	}

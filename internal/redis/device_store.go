@@ -73,16 +73,11 @@ func (s Store) RegisterDevice(
 		s.Keys.Device(deviceID),
 		s.Keys.deviceHashKeyPrefix(),
 	}
-	evicted, err := s.Client.Eval(ctx, registerDeviceScript, keys,
+	evicted, err := evalScript(ctx, s.Client, registerDeviceScript, keys,
 		now.UnixMilli(), deviceID, seconds, ua, ip, loginTime, limit,
 	).Text()
 	if err != nil {
 		return "", fmt.Errorf("register device eval: %w", err)
-	}
-	if evicted != "" {
-		if err := s.Client.Del(ctx, s.Keys.Device(evicted)).Err(); err != nil {
-			return evicted, fmt.Errorf("delete evicted device hash: %w", err)
-		}
 	}
 	return evicted, nil
 }
@@ -108,6 +103,10 @@ local count = redis.call("ZCARD", KEYS[1])
 if count > tonumber(ARGV[7]) then
   local evicted = redis.call("ZRANGE", KEYS[1], 0, 0)
   redis.call("ZREMRANGEBYRANK", KEYS[1], 0, 0)
+  -- The evicted member's Hash dies in the same script: a separate DEL was a
+  -- second round trip that could fail alone and strand the Hash (up to its
+  -- TTL) beside a set that has already forgotten it.
+  redis.call("DEL", KEYS[3] .. evicted[1])
   return evicted[1]
 end
 return ""
@@ -129,7 +128,7 @@ func (s Store) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip s
 		return "", fmt.Errorf("touch device: %w", ErrInvalidArgument)
 	}
 	lastSeen := now.UTC().Format(time.RFC3339)
-	values, err := s.Client.Eval(ctx, touchDeviceScript, []string{
+	values, err := evalScript(ctx, s.Client, touchDeviceScript, []string{
 		s.Keys.Devices(userID),
 		s.Keys.Device(deviceID),
 		s.Keys.deviceHashKeyPrefix(),
@@ -141,11 +140,6 @@ func (s Store) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip s
 	if len(values) >= 2 {
 		if raw, ok := values[1].(string); ok {
 			evicted = raw
-		}
-	}
-	if evicted != "" {
-		if err := s.Client.Del(ctx, s.Keys.Device(evicted)).Err(); err != nil {
-			return evicted, fmt.Errorf("delete evicted device hash: %w", err)
 		}
 	}
 	return evicted, nil
@@ -216,6 +210,8 @@ local count = redis.call("ZCARD", KEYS[1])
 if count > tonumber(ARGV[7]) then
   local evicted = redis.call("ZRANGE", KEYS[1], 0, 0)
   redis.call("ZREMRANGEBYRANK", KEYS[1], 0, 0)
+  -- Same in-script DEL as RegisterDevice's eviction branch.
+  redis.call("DEL", KEYS[3] .. evicted[1])
   return {0, evicted[1]}
 end
 return {0, ""}
@@ -231,7 +227,7 @@ func (s Store) RemoveDevice(ctx context.Context, userID int64, deviceID string) 
 	if s.Client == nil || userID <= 0 || deviceID == "" {
 		return fmt.Errorf("remove device: %w", ErrInvalidArgument)
 	}
-	if err := s.Client.Eval(ctx, removeDeviceScript, []string{
+	if err := evalScript(ctx, s.Client, removeDeviceScript, []string{
 		s.Keys.Devices(userID),
 		s.Keys.Device(deviceID),
 	}, deviceID).Err(); err != nil {
@@ -253,7 +249,7 @@ func (s Store) RemoveAllDevices(ctx context.Context, userID int64) error {
 	if s.Client == nil || userID <= 0 {
 		return fmt.Errorf("remove all devices: %w", ErrInvalidArgument)
 	}
-	if err := s.Client.Eval(ctx, removeAllDevicesScript, []string{
+	if err := evalScript(ctx, s.Client, removeAllDevicesScript, []string{
 		s.Keys.Devices(userID),
 		s.Keys.deviceHashKeyPrefix(),
 	}).Err(); err != nil {
@@ -281,7 +277,7 @@ func (s Store) ListDevices(ctx context.Context, userID int64) ([]DeviceInfo, err
 	if s.Client == nil || userID <= 0 {
 		return nil, fmt.Errorf("list devices: %w", ErrInvalidArgument)
 	}
-	values, err := s.Client.Eval(ctx, listDevicesScript, []string{
+	values, err := evalScript(ctx, s.Client, listDevicesScript, []string{
 		s.Keys.Devices(userID),
 		s.Keys.deviceHashKeyPrefix(),
 	}).Slice()
@@ -346,7 +342,7 @@ func (s Store) DeviceOwnedBy(ctx context.Context, userID int64, deviceID string)
 	if s.Client == nil || userID <= 0 || deviceID == "" {
 		return false, fmt.Errorf("device ownership: %w", ErrInvalidArgument)
 	}
-	owned, err := s.Client.Eval(ctx, deviceOwnedByScript,
+	owned, err := evalScript(ctx, s.Client, deviceOwnedByScript,
 		[]string{s.Keys.Devices(userID)}, deviceID,
 	).Int64()
 	if err != nil {
