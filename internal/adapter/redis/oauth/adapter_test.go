@@ -36,7 +36,7 @@ func (c scriptedClient) Eval(_ context.Context, _ string, _ []string, _ ...any) 
 		cmd.SetErr(c.ttlErr)
 		return cmd
 	}
-	cmd.SetVal([]any{c.payload, int64(c.ttl.Milliseconds())})
+	cmd.SetVal([]any{c.payload, c.ttl.Milliseconds()})
 	return cmd
 }
 

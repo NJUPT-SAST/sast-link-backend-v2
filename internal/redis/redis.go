@@ -3,7 +3,7 @@ package redis
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // G505: SHA-1 is Redis EVALSHA script-cache keying, not a security use
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -58,6 +58,6 @@ func evalScript(ctx context.Context, client Cmdable, script string, keys []strin
 
 // scriptDigest returns the SHA-1 hex digest Redis keys its script cache by.
 func scriptDigest(script string) string {
-	sum := sha1.Sum([]byte(script)) //nolint:gosec // Redis's script-cache key convention, not a security use
+	sum := sha1.Sum([]byte(script)) //nolint:gosec // G505: SHA-1 is Redis's script-cache key convention (EVALSHA), not a security primitive here
 	return hex.EncodeToString(sum[:])
 }

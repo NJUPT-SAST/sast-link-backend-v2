@@ -246,7 +246,7 @@ func (r *RetentionRepository) RecomputeDerivedState(
 	// in the WHERE clause, so a concurrent pin or closure still wins exactly as
 	// the per-row form allowed.
 	type divergence struct {
-		id         int64
+		id           int64
 		derivedState model.UserState
 	}
 	divergent := make([]divergence, 0, len(rows))
@@ -266,7 +266,7 @@ func (r *RetentionRepository) RecomputeDerivedState(
 		args := make([]any, 0, len(divergent)*2)
 		for _, item := range divergent {
 			args = append(args, item.id, string(item.derivedState))
-			values = append(values, fmt.Sprintf("(?::int8, ?::state_enum)"))
+			values = append(values, "(?::int8, ?::state_enum)")
 		}
 		if err := r.database.WithContext(ctx).
 			Exec(fmt.Sprintf(
@@ -274,7 +274,7 @@ func (r *RetentionRepository) RecomputeDerivedState(
 				 FROM (VALUES %s) AS v(id, target_state)
 				 WHERE u.id = v.id AND u.state_manual = ? AND u.state <> ?`,
 				strings.Join(values, ", ")),
-			append(args, false, model.UserStateDeleted)...).Error; err != nil {
+				append(args, false, model.UserStateDeleted)...).Error; err != nil {
 			return 0, fmt.Errorf("recompute derived state: %w", err)
 		}
 	}
