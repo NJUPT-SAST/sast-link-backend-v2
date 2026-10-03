@@ -174,3 +174,220 @@ func TestBodyExcerptCollapsesNewlinesAndTruncates(t *testing.T) {
 		t.Fatalf("excerpt was not truncated: len=%d", len(long))
 	}
 }
+
+// scriptedAttempt is one outcome in a sequenceDoer's script: either a response
+// or a transport error.
+type scriptedAttempt struct {
+	status int
+	body   string
+	err    error
+}
+
+// sequenceDoer serves attempts in order, regardless of URL, repeating the last
+// one when the script runs dry. It exists for retry-path tests, which need the
+// same request to fail once and then succeed.
+type sequenceDoer struct {
+	attempts []scriptedAttempt
+	handled  int
+	bodies   []string
+}
+
+func (d *sequenceDoer) Do(req *http.Request) (*http.Response, error) {
+	body := ""
+	if req.Body != nil {
+		raw, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		body = string(raw)
+	}
+	d.bodies = append(d.bodies, body)
+	index := d.handled
+	if index >= len(d.attempts) {
+		index = len(d.attempts) - 1
+	}
+	d.handled++
+	attempt := d.attempts[index]
+	if attempt.err != nil {
+		return nil, attempt.err
+	}
+	return &http.Response{
+		StatusCode: attempt.status,
+		Body:       io.NopCloser(strings.NewReader(attempt.body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// retryTestRunner swaps the retry backoff for a negligible one and restores it,
+// so retry tests run in milliseconds without changing production timing.
+func retryTestRunner(t *testing.T) {
+	t.Helper()
+	previous := providerRetryBackoff
+	providerRetryBackoff = time.Millisecond
+	t.Cleanup(func() { providerRetryBackoff = previous })
+}
+
+func buildJSONRequest(body string) requestBuilder {
+	return func() (*http.Request, error) {
+		var reader io.Reader
+		if body != "" {
+			reader = strings.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.test/x", reader)
+		if err != nil {
+			return nil, err
+		}
+		return req, nil
+	}
+}
+
+// A transport failure on the first attempt is retried, and a provider that
+// answers the second try turns the login into a success instead of an error
+// page.
+func TestDoJSONRetryRecoversAfterTransportFailure(t *testing.T) {
+	retryTestRunner(t)
+	doer := &sequenceDoer{attempts: []scriptedAttempt{
+		{err: errors.New("connection reset by peer")},
+		{status: http.StatusOK, body: `{"ok":true}`},
+	}}
+	var target struct {
+		OK bool `json:"ok"`
+	}
+	if err := doJSONRetry(context.Background(), doer, buildJSONRequest("a=1"), "test stage", &target); err != nil {
+		t.Fatalf("error = %v, want success on retry", err)
+	}
+	if !target.OK {
+		t.Fatal("target was not decoded from the retried response")
+	}
+	if doer.handled != 2 {
+		t.Fatalf("handled = %d attempts, want 2", doer.handled)
+	}
+}
+
+// The retry must re-send the POST body: the first attempt consumed the
+// original body reader, so the builder is invoked per attempt.
+func TestDoJSONRetryRebuildsPostBodyPerAttempt(t *testing.T) {
+	retryTestRunner(t)
+	doer := &sequenceDoer{attempts: []scriptedAttempt{
+		{err: errors.New("dial tcp: i/o timeout")},
+		{status: http.StatusOK, body: `{"ok":true}`},
+	}}
+	var target map[string]any
+	if err := doJSONRetry(context.Background(), doer, buildJSONRequest("code=abc"), "test stage", &target); err != nil {
+		t.Fatalf("error = %v, want success on retry", err)
+	}
+	if len(doer.bodies) != 2 || doer.bodies[0] != "code=abc" || doer.bodies[1] != "code=abc" {
+		t.Fatalf("bodies = %v, want the full body on every attempt", doer.bodies)
+	}
+}
+
+// A 4xx is an answer, not a fault: re-asking the same question cannot change
+// it, and burning a second round trip would only double the latency.
+func TestDoJSONRetryDoesNotRetryClientRejection(t *testing.T) {
+	retryTestRunner(t)
+	doer := &sequenceDoer{attempts: []scriptedAttempt{
+		{status: http.StatusBadRequest, body: `{"error":"nope"}`},
+		{status: http.StatusOK, body: `{"ok":true}`},
+	}}
+	var target map[string]any
+	err := doJSONRetry(context.Background(), doer, buildJSONRequest(""), "test stage", &target)
+	if !errors.Is(err, ErrUnexpectedResponse) {
+		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
+	}
+	if doer.handled != 1 {
+		t.Fatalf("handled = %d attempts, want no retry", doer.handled)
+	}
+}
+
+// A 5xx is the provider's side failing, which is exactly what one retry is for.
+func TestDoJSONRetryRetriesServerError(t *testing.T) {
+	retryTestRunner(t)
+	doer := &sequenceDoer{attempts: []scriptedAttempt{
+		{status: http.StatusBadGateway, body: `upstream down`},
+		{status: http.StatusOK, body: `{"ok":true}`},
+	}}
+	var target map[string]any
+	if err := doJSONRetry(context.Background(), doer, buildJSONRequest(""), "test stage", &target); err != nil {
+		t.Fatalf("error = %v, want success on retry", err)
+	}
+	if doer.handled != 2 {
+		t.Fatalf("handled = %d attempts, want 2", doer.handled)
+	}
+}
+
+// An unparseable 2xx body is a shape problem with this client, not a network
+// hiccup; retrying cannot produce a different shape from the same provider.
+func TestDoJSONRetryDoesNotRetryDecodeFailure(t *testing.T) {
+	retryTestRunner(t)
+	doer := &sequenceDoer{attempts: []scriptedAttempt{
+		{status: http.StatusOK, body: `not json`},
+		{status: http.StatusOK, body: `{"ok":true}`},
+	}}
+	var target map[string]any
+	err := doJSONRetry(context.Background(), doer, buildJSONRequest(""), "test stage", &target)
+	if !errors.Is(err, ErrUnexpectedResponse) {
+		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
+	}
+	if doer.handled != 1 {
+		t.Fatalf("handled = %d attempts, want no retry", doer.handled)
+	}
+}
+
+// A caller that went away must not trigger a retry: the request would run for
+// an audience that no longer exists.
+func TestDoJSONRetrySkipsRetryWhenCallerCancelled(t *testing.T) {
+	retryTestRunner(t)
+	doer := &sequenceDoer{attempts: []scriptedAttempt{
+		{err: context.Canceled},
+		{status: http.StatusOK, body: `{"ok":true}`},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	build := func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, "https://example.test/x", nil)
+	}
+	var target map[string]any
+	err := doJSONRetry(ctx, doer, build, "test stage", &target)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if doer.handled != 1 {
+		t.Fatalf("handled = %d attempts, want no retry", doer.handled)
+	}
+}
+
+// A provider that stalls past the per-call timeout is retried — one slow round
+// trip is not evidence the provider is down.
+func TestDoJSONRetryRetriesPerCallTimeout(t *testing.T) {
+	retryTestRunner(t)
+	doer := &sequenceDoer{attempts: []scriptedAttempt{
+		{err: context.DeadlineExceeded},
+		{status: http.StatusOK, body: `{"ok":true}`},
+	}}
+	var target map[string]any
+	if err := doJSONRetry(context.Background(), doer, buildJSONRequest(""), "test stage", &target); err != nil {
+		t.Fatalf("error = %v, want success on retry", err)
+	}
+	if doer.handled != 2 {
+		t.Fatalf("handled = %d attempts, want 2", doer.handled)
+	}
+}
+
+// Two failures exhaust the retry: the second error is returned as-is, mapped
+// by the service exactly like a first-attempt failure.
+func TestDoJSONRetryGivesUpAfterSecondFailure(t *testing.T) {
+	retryTestRunner(t)
+	doer := &sequenceDoer{attempts: []scriptedAttempt{
+		{err: errors.New("connection reset by peer")},
+		{err: errors.New("connection reset by peer")},
+		{status: http.StatusOK, body: `{"ok":true}`},
+	}}
+	var target map[string]any
+	err := doJSONRetry(context.Background(), doer, buildJSONRequest(""), "test stage", &target)
+	if err == nil {
+		t.Fatal("error = nil, want the transport failure")
+	}
+	if doer.handled != 2 {
+		t.Fatalf("handled = %d attempts, want exactly 2 (one retry)", doer.handled)
+	}
+}

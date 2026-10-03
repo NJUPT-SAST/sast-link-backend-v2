@@ -144,17 +144,20 @@ func (c *GitHubClient) exchangeCode(ctx context.Context, code, redirectURI strin
 		"code":          {code},
 		"redirect_uri":  {redirect},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, githubTokenURL,
-		strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("build github token request: %w", err)
+	buildTokenRequest := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, githubTokenURL,
+			strings.NewReader(form.Encode()))
+		if err != nil {
+			return nil, fmt.Errorf("build github token request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		// Without this GitHub returns a form-encoded body instead of JSON.
+		req.Header.Set("Accept", "application/json")
+		return req, nil
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Without this GitHub returns a form-encoded body instead of JSON.
-	req.Header.Set("Accept", "application/json")
 
 	var token githubTokenResponse
-	if err := doJSON(ctx, c.client, req, "github token exchange", &token); err != nil {
+	if err := doJSONRetry(ctx, c.client, buildTokenRequest, "github token exchange", &token); err != nil {
 		return nil, err
 	}
 	if token.Error != "" {
@@ -171,16 +174,19 @@ func (c *GitHubClient) exchangeCode(ctx context.Context, code, redirectURI strin
 }
 
 func (c *GitHubClient) fetchUser(ctx context.Context, accessToken string) (*githubUser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubUserURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build github user request: %w", err)
+	buildUserRequest := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubUserURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build github user request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
+		return req, nil
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 
 	var user githubUser
-	if err := doJSON(ctx, c.client, req, "github fetch user", &user); err != nil {
+	if err := doJSONRetry(ctx, c.client, buildUserRequest, "github fetch user", &user); err != nil {
 		return nil, err
 	}
 	return &user, nil
