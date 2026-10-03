@@ -861,7 +861,13 @@ func (s Service) ForgotPasswordSendCode(ctx context.Context, input ForgotPasswor
 		Email: email, ClientIP: input.ClientIP, UserAgent: input.UserAgent,
 	})
 	if !accepted {
-		slog.WarnContext(ctx, "forgot password request dropped", "operation", "forgot_password_send_code", "stage", "enqueue")
+		// Answering success here would hand the user an "email sent" page for a
+		// message that will never arrive, and the retry path is the rate limiter's —
+		// strictly worse than an honest 503 the client can surface as "try again".
+		// The queue only fills when delivery is already lagging, so a retry a
+		// minute later is the correct instruction.
+		slog.WarnContext(ctx, "forgot password queue full", "operation", "forgot_password_send_code", "stage", "enqueue")
+		return nil, newError(ErrDependencyUnavailable, "邮件发送繁忙，请稍后重试", nil)
 	}
 	return &ForgotPasswordResult{Email: email, ExpiresIn: int(verificationTTL.Seconds())}, nil
 }

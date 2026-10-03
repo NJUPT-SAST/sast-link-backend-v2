@@ -1741,6 +1741,19 @@ func TestForgotPasswordSendCodeAnswersAccountExistence(t *testing.T) {
 	}
 }
 
+// A full queue must not be answered with success: the user would wait for an
+// email that cannot arrive, and the retry path sits behind the send-code rate
+// limiter. The honest answer is the dependency-unavailable 503, which the
+// client can surface as "try again shortly".
+func TestForgotPasswordSendCodeRejectsWhenQueueIsFull(t *testing.T) {
+	service := newRegisterService(t)
+	dispatcher := service.ForgotPasswords.(*fakeForgotPasswordDispatcher)
+	dispatcher.accepted = false
+
+	_, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn", ClientIP: "127.0.0.1"})
+	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
+}
+
 // A lookup failure must surface as ErrInternal, not masquerade as "unknown
 // account": the distinction keeps a database outage from feeding the
 // enumeration signal this endpoint now answers.
@@ -1749,15 +1762,6 @@ func TestForgotPasswordSendCodeLookupFailure(t *testing.T) {
 	service.Users.(*fakeUsers).err = errors.New("db down")
 	_, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn", ClientIP: "127.0.0.1"})
 	assertKind(t, err, KindInternal, errcode.CodeInternal)
-}
-
-func TestForgotPasswordSendCodeReturnsAcceptedWhenQueueIsFull(t *testing.T) {
-	service := newRegisterService(t)
-	service.ForgotPasswords = &fakeForgotPasswordDispatcher{accepted: false}
-	result, err := service.ForgotPasswordSendCode(context.Background(), ForgotPasswordInput{Email: "user@njupt.edu.cn"})
-	if err != nil || result.Email != "user@njupt.edu.cn" || result.ExpiresIn != 300 {
-		t.Fatalf("result/error = %+v/%v, want uniform accepted response", result, err)
-	}
 }
 
 func TestSendRegisterCodeAllowsWhenEmailLimiterUnavailable(t *testing.T) {
