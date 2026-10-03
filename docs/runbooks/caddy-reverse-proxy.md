@@ -31,6 +31,14 @@ link.sast.fun {
   reverse_proxy frontend:3000
  }
 
+ # /metrics 只允许内网抓取：匿名公网可达会暴露路由清单、每路由 QPS/延迟
+ # 与错误分布（撞库与限流探测的地图）。与 /v2/debug 同一道路径级防线；
+ # 抓取走 SSH 本地转发或内网监听，不经过公网路径。单路径 matcher 比
+ # /v2/* 更具体，Caddy 排序保证先命中。
+ handle /v2/metrics {
+  respond 404
+ }
+
  # 其余 /v2/* 是 API。handle_path 会剥掉 /v2 前缀，后端收到的是
  # /oauth/github/callback 这样的根路径。
  handle_path /v2/* {
@@ -50,6 +58,7 @@ link.sast.fun {
 
 - 后端限流与登录失败计数按 IP 分桶，反代不传真实客户端 IP 时全站共用一个桶：Caddy 侧转发 `X-Forwarded-For`，服务侧把代理网段配入 `TRUSTED_PROXIES`（见 `.env.example`）。
 - `/v2/debug/*`（pprof）在反代层额外钉一道 `respond 404`：`PPROF_ENABLED` 是进程内开关，一次误配即公网暴露，路径级拒绝是与开关取值无关的第二道防线；需要用时走 SSH 本地转发，不经过公网路径。
+- `/v2/metrics`（Prometheus）同样钉 `respond 404`：代码侧匿名暴露是刻意的（抓取不携带凭据），但 /health 只泄露存活，/metrics 泄露的是路由清单与流量画像，风险不对等；监控改从内网或 SSH 隧道抓取（上游仍指向 `127.0.0.1:8080`）。
 
 ### 为什么这个顺序是可靠的
 
