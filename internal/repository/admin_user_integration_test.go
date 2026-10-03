@@ -634,6 +634,79 @@ func TestUpdateAdminUserRejectsEmptyUpdate(t *testing.T) {
 	}
 }
 
+// The department edit writes the profile row in the same transaction as the
+// user-row edit: a value sets it, an empty string clears it to NULL, and a
+// user imported without a profile row still gets one written (the upsert), so
+// no account is unreachable by the department migration (issue #99).
+func TestUpdateAdminUserWritesDepartment(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	software := model.DepartmentSoftware
+	user := adminSeed(t, database, "b230@njupt.edu.cn", "改部门",
+		model.UserRoleMember, model.UserStateOnSAST, &software)
+
+	readDepartment := func() *model.Department {
+		var profile model.Profile
+		if err := database.Where("user_id = ?", user.ID).First(&profile).Error; err != nil {
+			t.Fatalf("load profile: %v", err)
+		}
+		return profile.Department
+	}
+
+	electronics := model.DepartmentElectronics
+	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
+		repository.AdminUserUpdate{Department: &electronics}, model.UserRoleAdmin, time.Now().UTC()); err != nil {
+		t.Fatalf("UpdateAdminUser set department: %v", err)
+	}
+	if department := readDepartment(); department == nil || *department != model.DepartmentElectronics {
+		t.Fatalf("department = %v, want electronics", department)
+	}
+	var reloaded model.User
+	if err := database.First(&reloaded, user.ID).Error; err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if reloaded.TokenVersion != user.TokenVersion {
+		t.Fatalf("token_version = %d, want it untouched: a department edit is not a credential change",
+			reloaded.TokenVersion)
+	}
+
+	clear := model.Department("")
+	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
+		repository.AdminUserUpdate{Department: &clear}, model.UserRoleAdmin, time.Now().UTC()); err != nil {
+		t.Fatalf("UpdateAdminUser clear department: %v", err)
+	}
+	if department := readDepartment(); department != nil {
+		t.Fatalf("department = %v, want NULL after the empty-string clear", department)
+	}
+}
+
+// A user without a profile row (imported before V001's flow) still receives the
+// department write: the profile row is upserted rather than plain-updated.
+func TestUpdateAdminUserUpsertsProfileForDepartment(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+
+	user := testUser("b231@njupt.edu.cn")
+	user.Role = model.UserRoleMember
+	user.State = model.UserStateOnSAST
+	if err := database.Create(user).Error; err != nil {
+		t.Fatalf("seed user without profile: %v", err)
+	}
+
+	competition := model.DepartmentCompetition
+	if _, _, err := users.UpdateAdminUser(context.Background(), user.ID,
+		repository.AdminUserUpdate{Department: &competition}, model.UserRoleAdmin, time.Now().UTC()); err != nil {
+		t.Fatalf("UpdateAdminUser upsert department: %v", err)
+	}
+	var profile model.Profile
+	if err := database.Where("user_id = ?", user.ID).First(&profile).Error; err != nil {
+		t.Fatalf("load profile: %v", err)
+	}
+	if profile.Department == nil || *profile.Department != model.DepartmentCompetition {
+		t.Fatalf("department = %v, want competition", profile.Department)
+	}
+}
+
 func TestSoftDeleteAndRevokeSessions(t *testing.T) {
 	database := setupDatabase(t)
 	users := repository.NewUser(database)

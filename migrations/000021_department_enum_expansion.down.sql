@@ -1,0 +1,4 @@
+-- Irreversible: PostgreSQL cannot drop an enum value. V021 is purely additive
+-- and no release shipped with the new labels, so a rollback can only leave the
+-- extra members in place. Removing them would require RENAME VALUE to a
+-- tombstone label, which is deliberately not done here.
