@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net/http"
 	"strconv"
 	"time"
 
@@ -38,6 +39,25 @@ var httpRequestDuration = prometheus.NewHistogramVec(
 // bounded: every unmatched path would otherwise mint its own label set.
 const unmatchedRoute = "unmatched"
 
+// otherMethod is the method label for anything outside the verbs this service's
+// routes and CORS preflight use. Go's http server accepts any RFC 7230 token as
+// a request method, so the raw value is attacker-chosen input: an anonymous
+// caller could mint unlimited label values (each permanent, in two metric
+// families) by sending random method tokens at 404s. Normalizing to a sentinel
+// keeps cardinality bounded by the route table × the known verb set.
+const otherMethod = "other"
+
+// normalizedMethod maps a request method onto the fixed label value set.
+func normalizedMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		return method
+	default:
+		return otherMethod
+	}
+}
+
 func init() {
 	// The default registry is what promhttp.Handler() exposes on /metrics, so no
 	// second registry is constructed or wired in cmd/api.
@@ -63,7 +83,8 @@ func Metrics() gin.HandlerFunc {
 			route = unmatchedRoute
 		}
 		status := strconv.Itoa(c.Writer.Status())
-		httpRequestsTotal.WithLabelValues(c.Request.Method, route, status).Inc()
-		httpRequestDuration.WithLabelValues(c.Request.Method, route).Observe(time.Since(start).Seconds())
+		method := normalizedMethod(c.Request.Method)
+		httpRequestsTotal.WithLabelValues(method, route, status).Inc()
+		httpRequestDuration.WithLabelValues(method, route).Observe(time.Since(start).Seconds())
 	}
 }
