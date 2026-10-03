@@ -334,6 +334,9 @@ func (s Service) RotateClientSecret(ctx context.Context, input RotateClientSecre
 		return nil, newError(ErrNotFound, "OAuth 客户端不存在", nil)
 	}
 	if err != nil {
+		// Audited like the other rejections: an emergency rotation that dies on a
+		// database hiccup is exactly when the missing row matters to the trail.
+		s.auditRotateSecret(ctx, input, nil, false, ErrInternal.Code)
 		return nil, newError(ErrInternal, "查询 OAuth 客户端失败", err)
 	}
 	if current.ClientSecretHash == nil {

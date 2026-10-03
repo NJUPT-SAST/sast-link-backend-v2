@@ -289,9 +289,11 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	}
 	user, err := s.Users.FindAuthUserByID(ctx, current.UserID)
 	if errors.Is(err, repository.ErrNotFound) {
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeUserMissing, "", input)
 		return nil, newError(ErrInvalidToken, "Refresh Token 所属用户无效", nil)
 	}
 	if err == nil && user.State == model.UserStateDeleted {
+		s.auditRefresh(ctx, current.UserID, &current.FamilyID, false, refreshOutcomeUserDeleted, "", input)
 		return nil, newError(ErrUserDeleted, "用户已注销", nil)
 	}
 	if err != nil {
@@ -814,12 +816,16 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	}
 	// The registration transaction does not reload the aggregate, so the in-memory
-	// user has empty Profile and Identities — which would disagree with a Login
-	// response. Read the aggregate back.
+	// user lacks the database-derived fields the response carries (email_type
+	// from the trigger, created_at/updated_at, the generated completion flag) —
+	// read the aggregate back. A reload failure must not answer 500: the
+	// account, the ticket consumption and the session are already committed, so
+	// the client would retry into "Register-Ticket invalid" while holding a
+	// live account. Degrade to the in-memory shape and say so loudly instead.
 	reloaded, reloadErr := s.Users.FindByID(ctx, user.ID)
 	if reloadErr != nil {
-		slog.ErrorContext(ctx, "reload registered user", "user_id", user.ID, "error", reloadErr)
-		return nil, newError(ErrInternal, "读取注册结果失败", reloadErr)
+		slog.ErrorContext(ctx, "reload registered user, answering from the in-memory row", "user_id", user.ID, "error", reloadErr)
+		reloaded = user
 	}
 	return &RegisterResult{
 		AccessToken:      pair.accessToken,
@@ -1301,6 +1307,15 @@ const (
 	// the one it was issued to; not reachable through the first-party flow, so it
 	// means a misrouted client or a probed token.
 	refreshOutcomeClientMismatch = "client_mismatch"
+	// refreshOutcomeUserDeleted is a refresh for an account that was closed: the
+	// closing transaction revokes every family, so reaching this branch means the
+	// read raced the close — rare, but without a row the attempt is invisible in
+	// the 90-day trail every other refresh outcome lands in.
+	refreshOutcomeUserDeleted = "user_deleted"
+	// refreshOutcomeUserMissing is a refresh token whose user row no longer
+	// resolves at all — harder drift than a closed account (close is a state
+	// flip, not a delete), so it gets its own name for the log reader.
+	refreshOutcomeUserMissing = "user_missing"
 )
 
 // auditRefresh records a refresh rotation outcome. Failures carry the

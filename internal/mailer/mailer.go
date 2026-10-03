@@ -302,10 +302,20 @@ func sendTLS(ctx context.Context, addr, host string, auth smtp.Auth, from string
 	return sendSMTPTransaction(ctx, client, auth, from, to, msg)
 }
 
-const smtpIOTimeout = 30 * time.Second
+const (
+	smtpIOTimeout = 30 * time.Second
+	// smtpDialTimeout is the connect-only budget, separate from the session
+	// budget: a dialer that shares the 30s session timeout stacks the two (a
+	// slow or half-open relay can consume 30s connecting and another 30s
+	// transacting), so a single send could pin a request for a minute. A refused
+	// or unreachable relay answers within 10s in practice; the transaction keeps
+	// the full budget because DATA on a large recipient list is legitimately
+	// slower.
+	smtpDialTimeout = 10 * time.Second
+)
 
 func dialSMTP(ctx context.Context, addr string) (net.Conn, func(), error) {
-	dialer := &net.Dialer{Timeout: smtpIOTimeout}
+	dialer := &net.Dialer{Timeout: smtpDialTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, nil, smtpContextError(ctx, "dial SMTP", err)

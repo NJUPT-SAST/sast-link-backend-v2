@@ -142,6 +142,11 @@ func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoi
 }
 
 // Authorize issues an OAuth state and returns the provider page to redirect to.
+// callbackExchangeBudget caps the whole provider callback exchange — token
+// fetch plus code redemption plus (Lark) user info — where each hop otherwise
+// carries its own independent 10s bound.
+const callbackExchangeBudget = 15 * time.Second
+
 func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*AuthorizeResult, error) {
 	// Throttled before the provider is resolved, so a disabled provider's route
 	// cannot serve as an unthrottled probe.
@@ -183,7 +188,14 @@ func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackRe
 	if err := s.checkLimit(ctx, s.CallbackLimiter, "oauth_login_callback", ipSubject(input.ClientIP)); err != nil {
 		return nil, err
 	}
-	result, err := s.callback(ctx, input)
+	// One budget for the whole multi-hop provider exchange. Each hop already
+	// carries its own 10s bound, but Lark chains three hops (a 30s worst case
+	// that held a handler goroutine and its connection the whole way). 15s
+	// covers the healthy path with margin; the failure audit detaches from ctx,
+	// so a budget expiry still leaves its row in the trail.
+	exchangeCtx, cancel := context.WithTimeout(ctx, callbackExchangeBudget)
+	defer cancel()
+	result, err := s.callback(exchangeCtx, input)
 	if err != nil {
 		// Audit failed callbacks too — they are the events an incident review wants
 		// when someone drives a stolen or replayed state at the endpoint; the success
@@ -485,23 +497,28 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 	if evicted == "" {
 		return
 	}
-	entries, err := s.Tokens.RevokeFamily(ctx, evicted, now)
+	// Detached like the session service's hook: the login has committed, so a
+	// caller disconnecting between commit and revoke must not leave the evicted
+	// family alive past the device cap.
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	entries, err := s.Tokens.RevokeFamily(revokeCtx, evicted, now)
 	if err != nil {
 		slog.WarnContext(ctx, "revoke evicted device family failed", "user_id", userID, "device_id", evicted, "error", err)
 		return
 	}
 	// The shared helper applies the same two filters (expired entry, empty JTI) and
 	// the same fail-open log; this path used to carry its own copy of both.
-	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
+	shared.DeliverBlacklist(revokeCtx, s.Blacklist, entries, now)
 	// Drop the displaced record (idempotent): the script already removed the
 	// member, and this closes the gap where a failed Hash delete would leave an
 	// orphan record.
 	if s.Devices != nil {
-		if err := s.Devices.RemoveDevice(ctx, userID, evicted); err != nil {
+		if err := s.Devices.RemoveDevice(revokeCtx, userID, evicted); err != nil {
 			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, true, 0, s.InternalClientID, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
+	if auditErr := s.audit(revokeCtx, &userID, "evict_device", "session", &evicted, true, 0, s.InternalClientID, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
 		slog.ErrorContext(ctx, "audit evict device", "user_id", userID, "device_id", evicted, "error", auditErr)
 	}
 }

@@ -37,8 +37,11 @@ type LarkConfig struct {
 // The app_access_token is cached: it is app-level (not per-user), valid for two
 // hours, and identical for every exchange, so re-fetching it on each login costs
 // an outbound round trip and one Lark quota hit per login. The cache lives
-// behind this client's interface — nothing in the callers needs to know. A burst
-// of concurrent misses may each fetch once; the requests are idempotent.
+// behind this client's interface — nothing in the callers needs to know. The
+// fetch holds tokenMu, so the concurrent misses at an expiry boundary collapse
+// into one outbound request; waiters re-check the cache under the same lock.
+// Blocking is bounded by the per-hop HTTP timeout, and the fetch runs only once
+// per token lifetime, so the lock is uncontended the rest of the time.
 type LarkClient struct {
 	cfg    LarkConfig
 	client Doer
@@ -189,7 +192,13 @@ func (c *LarkClient) Exchange(ctx context.Context, code, redirectURI string) (*I
 }
 
 func (c *LarkClient) fetchAppAccessToken(ctx context.Context) (string, error) {
-	if token := c.cachedAppToken(); token != "" {
+	// Single-flight by holding the lock across check and fetch: without it,
+	// every concurrent login at an expiry boundary paid its own outbound call,
+	// and a quota-limited provider could turn one expiry into a small outage of
+	// failed logins.
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if token := c.cachedAppTokenLocked(); token != "" {
 		return token, nil
 	}
 	payload, err := json.Marshal(map[string]string{
@@ -220,19 +229,15 @@ func (c *LarkClient) fetchAppAccessToken(ctx context.Context) (string, error) {
 	if strings.TrimSpace(response.AppAccessToken) == "" {
 		return "", fmt.Errorf("lark app_access_token response is empty: %w", ErrUnexpectedResponse)
 	}
-	expiry := c.now().Add(time.Duration(response.Expire) * time.Second)
-	c.tokenMu.Lock()
 	c.appToken = response.AppAccessToken
-	c.appTokenExpiry = expiry
-	c.tokenMu.Unlock()
+	c.appTokenExpiry = c.now().Add(time.Duration(response.Expire) * time.Second)
 	return response.AppAccessToken, nil
 }
 
-// cachedAppToken returns the cached app token while it still has
-// refreshAppTokenLeadTime of life left, or "" so the caller re-fetches.
-func (c *LarkClient) cachedAppToken() string {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
+// cachedAppTokenLocked returns the cached app token while it still has
+// refreshAppTokenLeadTime of life left, or "" so the caller re-fetches. The
+// caller must already hold tokenMu.
+func (c *LarkClient) cachedAppTokenLocked() string {
 	if c.appToken == "" || !c.now().Before(c.appTokenExpiry.Add(-refreshAppTokenLeadTime)) {
 		return ""
 	}

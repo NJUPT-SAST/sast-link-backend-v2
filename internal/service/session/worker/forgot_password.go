@@ -11,6 +11,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
@@ -101,11 +102,12 @@ func (w *ForgotPassword) process(ctx context.Context, job session.ForgotPassword
 	}
 	if w.Audit != nil {
 		success := true
-		clientIP := job.ClientIP
-		userAgent := job.UserAgent
+		// NullableString keeps the V007 contract: a missing IP/UA is NULL, not
+		// the empty string, so NULL stays unambiguous as "no value recorded"
+		// across every audit writer in the service.
 		entry := &model.AuditLog{
 			UserID: &user.ID, Action: "forgot_password_send_code", Resource: "verification_code",
-			Success: &success, ClientIP: &clientIP, UserAgent: &userAgent,
+			Success: &success, ClientIP: shared.NullableString(job.ClientIP), UserAgent: shared.NullableString(job.UserAgent),
 		}
 		if err := w.Audit.Create(ctx, entry); err != nil && ctx.Err() == nil {
 			logForgotPasswordFailure(ctx, "audit", err)
