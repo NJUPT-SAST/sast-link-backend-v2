@@ -156,9 +156,6 @@ func TestBatchUpdateUsersAppliesEachIdIndependently(t *testing.T) {
 	}
 }
 
-// strPtr is the test-local string-pointer helper for the optional department.
-func strPtr(value string) *string { return &value }
-
 // Duplicates collapse before the loop, so one id is never updated twice.
 func TestBatchUpdateUsersDeduplicatesIDs(t *testing.T) {
 	h := newHarness(t)
@@ -190,7 +187,7 @@ func TestBatchUpdateUsersDepartmentOnly(t *testing.T) {
 
 	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:         []int64{1, 2},
-		Department:  strPtr("office"),
+		Department:  stringPtr("office"),
 		AdminUserID: testAdminID,
 	})
 	if err != nil {
@@ -227,7 +224,7 @@ func TestBatchUpdateUsersAppliesRoleAndDepartmentTogether(t *testing.T) {
 	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:         []int64{1},
 		Role:        "member",
-		Department:  strPtr(""),
+		Department:  stringPtr(""),
 		AdminUserID: testAdminID,
 	})
 	if err != nil {
@@ -256,10 +253,10 @@ func TestBatchUpdateUsersRejectsBadRequests(t *testing.T) {
 		message    string
 	}{
 		{"invalid role", "boss", nil, []int64{1}, "role 取值非法"},
-		{"invalid department", "", strPtr("bureau"), []int64{1}, "department 取值非法"},
+		{"invalid department", "", stringPtr("bureau"), []int64{1}, "department 取值非法"},
 		{"neither role nor department", "", nil, []int64{1}, "没有需要更新的字段"},
 		{"empty ids", "member", nil, nil, "ids 不能为空"},
-		{"empty ids department only", "", strPtr("office"), nil, "ids 不能为空"},
+		{"empty ids department only", "", stringPtr("office"), nil, "ids 不能为空"},
 		{"over cap", "member", nil, makeIDs(501), "单次最多更新 500 个用户"},
 		{"non-positive id", "member", nil, []int64{1, -1}, "用户 id 必须为正整数"},
 	} {
@@ -329,7 +326,7 @@ func TestBatchUpdateUsersReportsInternalFailuresPerItem(t *testing.T) {
 
 	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:        []int64{1},
-		Department: strPtr("office"),
+		Department: stringPtr("office"),
 	})
 	if err != nil {
 		t.Fatalf("BatchUpdateUsers: %v", err)

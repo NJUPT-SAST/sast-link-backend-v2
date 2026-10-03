@@ -239,6 +239,10 @@ func (s Service) BatchUpdateUsers(ctx context.Context, input BatchUpdateUsersInp
 	if s.Users == nil {
 		return nil, newError(ErrInternal, "用户仓储未配置", nil)
 	}
+	// TrimSpace-then-empty is the deliberate reading of a blank role: whitespace
+	// carries no change anyone could apply, so it counts as "not requested"
+	// rather than "requested an invalid value" — matching how a blank department
+	// reads as the clear, not an enum violation.
 	role := model.UserRole(strings.TrimSpace(input.Role))
 	roleRequested := role != ""
 	if roleRequested && !validRole(role) {

@@ -1036,6 +1036,32 @@ func TestBatchUpdateUsersManagerBoundary(t *testing.T) {
 	}
 }
 
+// The boundary is on the account, not on the field: a department-only batch is
+// still a write on the admin's account, so a manager running the People-style
+// sync against an admin target is refused per item — the department field being
+// display-only must not become a side door past the role hierarchy.
+func TestBatchUpdateUsersManagerBoundaryDepartmentOnly(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
+
+	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
+		IDs:         []int64{testTargetID},
+		Department:  stringPtr("office"),
+		AdminUserID: testAdminID + 100,
+		AdminRole:   string(model.UserRoleManager),
+	})
+	if err != nil {
+		t.Fatalf("BatchUpdateUsers: %v", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Success ||
+		result.Results[0].Reason != "无权操作管理员账号" {
+		t.Fatalf("result = %+v, want the admin-target refusal", result.Results)
+	}
+	if h.users.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+	}
+}
+
 // The manager boundary on the close/reopen paths: both are writes on the
 // account, and the role survives a close (DELETE flips state, not role), so a
 // deleted administrator cannot be reopened behind the boundary either.

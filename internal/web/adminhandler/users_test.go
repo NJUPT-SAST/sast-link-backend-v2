@@ -996,8 +996,9 @@ func TestBatchUpdateUsersRejectsBadBodies(t *testing.T) {
 }
 
 // Missing required fields reach the service untouched: the service is the layer
-// that owns the "ids 不能为空" / "role 取值非法" rules, exactly as it owns the
-// single-user endpoint's "没有需要更新的字段".
+// that owns the "ids 不能为空" / "role 取值非法" / "没有需要更新的字段"
+// (neither role nor department) rules, exactly as it owns the single-user
+// endpoint's field rules.
 func TestBatchUpdateUsersPassesMissingFieldsThrough(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
