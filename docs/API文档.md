@@ -1988,7 +1988,7 @@ GET /admin/users/batch?ids=1,2,3
 
 ---
 
-### 6.5.2 批量修改用户角色
+### 6.5.2 批量修改用户（角色 / 部门）
 
 ```
 PUT /admin/users
@@ -2001,33 +2001,36 @@ PUT /admin/users
 ```json
 {
   "ids": [1, 2, 3],
-  "role": "member"
+  "role": "member",
+  "department": "office"
 }
 ```
 
 **说明**：
 
 - `ids` 单次最多 **500** 个（招新录取批量升级一次可覆盖），重复 ID 去重后只执行一次；`role` 枚举与单条接口一致：freshman / member / manager / lecturer / admin。manager 调用时逐项拒绝 admin 目标账号与 `role=admin`（`无权操作管理员账号` / `不可授予 admin 角色`）；升 / 降 lecturer、manager（自我复制）与其余组合允许。
-- **逐条独立执行（非原子）**：每个 ID 走与 `PUT /admin/users/:id` 完全相同的守卫与事务——不可修改自己的角色（403 语义）、系统至少保留一名管理员、已注销用户拒绝（需先恢复）；角色实际变化时同一事务递增 `token_version` 并撤销该用户全部 Token。**freshman→member 批量录取后，被录取者需重新登录一次**（与单条行为一致）。
-- 请求本身合法即返回 `200`，**失败是逐条数据而非传输错误**：`results` 与去重后的 ids 一一对应，调用方对失败项重试或告警。
+- `role` 与 `department` 至少传一项，两者都不传返回 `400`（`没有需要更新的字段`）；也可以两项同传，每个 ID 一次事务同时落地。
+- `department` 语义与 `PUT /admin/users/:id` / `PUT /user/profile` 完全一致：传值即设置、传空字符串清空为 `null`、缺省不修改；取值见附录 A（目录见 `GET /departments`）。部门不是授权输入，不触动 `token_version` 也不撤销会话。这是下游系统（如 SAST People）按批次同步成员部门的通道（issue #99）。
+- **逐条独立执行（非原子）**：每个 ID 走与 `PUT /admin/users/:id` 完全相同的守卫与事务——不可修改自己的角色（403 语义，改部门不受限）、系统至少保留一名管理员、已注销用户拒绝（需先恢复）；角色实际变化时同一事务递增 `token_version` 并撤销该用户全部 Token。**freshman→member 批量录取后，被录取者需重新登录一次**（与单条行为一致）。
+- 请求本身合法即返回 `200`，**失败是逐条数据而非传输错误**：`results` 与去重后的 ids 一一对应，调用方对失败项重试或告警。成功项回显实际应用的变更（`role` / `department`，清空时 `department` 为 `""`），失败项只带 `reason`，不回显未落地的值。
 - 未知字段 / 尾部多余内容返回 `400`（strict 解码）。
-- 审计：每个 ID 各记一条 `admin_user_update`，detail 含 `"batch": true` 标记，便于控制台区分批量操作与单条编辑。
+- 审计：每个 ID 各记一条 `admin_user_update`，detail 含 `"batch": true` 标记与变更字段名列表，便于控制台区分批量操作与单条编辑。
 
-**错误码**：`40000`（ids 为空 / 超过 500 / 含非正整数 / role 取值非法 / 未知字段）、`40100`、`40300`。
+**错误码**：`40000`（ids 为空 / 超过 500 / 含非正整数 / role 取值非法 / department 取值非法 / 两项均缺省 / 未知字段）、`40100`、`40300`。
 
 **Response** `200`:
 
 ```json
 {
   "results": [
-    { "id": 1, "success": true, "role": "member" },
+    { "id": 1, "success": true, "role": "member", "department": "office" },
     { "id": 2, "success": false, "reason": "用户不存在" },
     { "id": 3, "success": false, "reason": "用户已注销，请先恢复后再编辑" }
   ]
 }
 ```
 
-`reason` 取值：`用户不存在` / `用户已注销，请先恢复后再编辑` / `不可修改自己的角色` / `系统中至少需要保留一名管理员` / `服务器内部错误`。
+仅改部门时不带 `role` 键（`department`-only 请求的成功项只有 `department` 回显）；`reason` 取值：`用户不存在` / `用户已注销，请先恢复后再编辑` / `不可修改自己的角色` / `系统中至少需要保留一名管理员` / `服务器内部错误`。
 
 ---
 

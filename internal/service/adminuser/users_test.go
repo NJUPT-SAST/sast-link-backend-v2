@@ -1009,11 +1009,11 @@ func TestUpdateUserManagerBoundary(t *testing.T) {
 // The batch endpoint routes through UpdateUser, so the manager boundary holds
 // per item: admin targets fail with the boundary reason, everything else
 // proceeds.
-func TestUpdateUserRolesManagerBoundary(t *testing.T) {
+func TestBatchUpdateUsersManagerBoundary(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
 
-	result, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:  []int64{testTargetID, testAdminID},
 		Role: string(model.UserRoleManager),
 		// The fake returns the same row for every id; the second id differs, so
@@ -1024,7 +1024,7 @@ func TestUpdateUserRolesManagerBoundary(t *testing.T) {
 		ActorClientID: "",
 	})
 	if err != nil {
-		t.Fatalf("UpdateUserRoles: %v", err)
+		t.Fatalf("BatchUpdateUsers: %v", err)
 	}
 	if len(result.Results) != 2 {
 		t.Fatalf("results = %d, want 2", len(result.Results))

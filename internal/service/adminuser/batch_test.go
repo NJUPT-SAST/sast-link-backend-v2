@@ -93,7 +93,7 @@ func TestBatchCapsCountRawInputBeforeDedupe(t *testing.T) {
 	h2 := newHarness(t)
 	ids = makeIDs(500)
 	ids = append(ids, 1) // 501 raw, 500 unique: still over the update cap
-	_, err = h2.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+	_, err = h2.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:  ids,
 		Role: "member",
 	})
@@ -114,13 +114,13 @@ func TestGetUsersByIDsMapsRepositoryFailure(t *testing.T) {
 // Each id is updated independently through the single-user path, so the batch
 // cannot bypass a guard the single-user endpoint honors, and failures are data:
 // one bad id does not abort the rest.
-func TestUpdateUserRolesAppliesEachIdIndependently(t *testing.T) {
+func TestBatchUpdateUsersAppliesEachIdIndependently(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleFreshman, model.UserStateNJUPTer)
 	// First call fails with a not-found, the rest succeed.
 	h.users.updateErrs = []error{repository.ErrNotFound, nil, nil}
 
-	result, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:         []int64{1, 2, 3},
 		Role:        "member",
 		AdminUserID: testAdminID,
@@ -128,7 +128,7 @@ func TestUpdateUserRolesAppliesEachIdIndependently(t *testing.T) {
 		UserAgent:   testUserAgent,
 	})
 	if err != nil {
-		t.Fatalf("UpdateUserRoles: %v", err)
+		t.Fatalf("BatchUpdateUsers: %v", err)
 	}
 	if h.users.updateCalls != 3 {
 		t.Fatalf("update calls = %d, want 3 (one per id)", h.users.updateCalls)
@@ -147,7 +147,7 @@ func TestUpdateUserRolesAppliesEachIdIndependently(t *testing.T) {
 	}
 	// Every call must have carried the requested role; the fake records the last
 	// call's repository input. The batch audit marker is asserted separately, in
-	// TestUpdateUserRolesAuditsEachItemWithBatchMarker.
+	// TestBatchUpdateUsersAuditsEachItemWithBatchMarker.
 	if h.users.updateInput.Role == nil || *h.users.updateInput.Role != "member" {
 		t.Fatalf("last update role = %v, want member", h.users.updateInput.Role)
 	}
@@ -156,18 +156,21 @@ func TestUpdateUserRolesAppliesEachIdIndependently(t *testing.T) {
 	}
 }
 
+// strPtr is the test-local string-pointer helper for the optional department.
+func strPtr(value string) *string { return &value }
+
 // Duplicates collapse before the loop, so one id is never updated twice.
-func TestUpdateUserRolesDeduplicatesIDs(t *testing.T) {
+func TestBatchUpdateUsersDeduplicatesIDs(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleFreshman, model.UserStateNJUPTer)
 
-	result, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:         []int64{5, 5, 5},
 		Role:        "member",
 		AdminUserID: testAdminID,
 	})
 	if err != nil {
-		t.Fatalf("UpdateUserRoles: %v", err)
+		t.Fatalf("BatchUpdateUsers: %v", err)
 	}
 	if h.users.updateCalls != 1 {
 		t.Fatalf("update calls = %d, want 1 after dedupe", h.users.updateCalls)
@@ -177,23 +180,95 @@ func TestUpdateUserRolesDeduplicatesIDs(t *testing.T) {
 	}
 }
 
-func TestUpdateUserRolesRejectsBadRequests(t *testing.T) {
+// A department-only batch is the downstream sync shape: the per-item update
+// carries the department pointer and no role, the result echoes the applied
+// department with no role, and the audit names department as the changed
+// field — a mass department move must not read as a no-op in the log.
+func TestBatchUpdateUsersDepartmentOnly(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleFreshman, model.UserStateNJUPTer)
+
+	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
+		IDs:         []int64{1, 2},
+		Department:  strPtr("office"),
+		AdminUserID: testAdminID,
+	})
+	if err != nil {
+		t.Fatalf("BatchUpdateUsers: %v", err)
+	}
+	if h.users.updateCalls != 2 {
+		t.Fatalf("update calls = %d, want 2", h.users.updateCalls)
+	}
+	if input := h.users.updateInput; input.Role != nil || input.Department == nil || *input.Department != "office" {
+		t.Fatalf("repository role/department = %v/%v, want nil role and office", input.Role, input.Department)
+	}
+	for _, item := range result.Results {
+		if !item.Success || item.Role != "" || item.Department == nil || *item.Department != "office" {
+			t.Fatalf("result = %+v, want department-only success", item)
+		}
+	}
+	if len(h.audit.entries) != 2 {
+		t.Fatalf("audit entries = %d, want one per id", len(h.audit.entries))
+	}
+	for _, entry := range h.audit.entries {
+		if !strings.Contains(string(entry.Detail), "department") {
+			t.Fatalf("audit detail = %s, want it to name the changed field", entry.Detail)
+		}
+	}
+}
+
+// A request may carry both changes: each item's update and audit carry both
+// fields, so a promotion and a department move land in one transaction per
+// user instead of racing two separate batches.
+func TestBatchUpdateUsersAppliesRoleAndDepartmentTogether(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleFreshman, model.UserStateNJUPTer)
+
+	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
+		IDs:         []int64{1},
+		Role:        "member",
+		Department:  strPtr(""),
+		AdminUserID: testAdminID,
+	})
+	if err != nil {
+		t.Fatalf("BatchUpdateUsers: %v", err)
+	}
+	if input := h.users.updateInput; input.Role == nil || *input.Role != "member" ||
+		input.Department == nil || *input.Department != "" {
+		t.Fatalf("repository role/department = %v/%v, want member and the clear", input.Role, input.Department)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Success || result.Results[0].Role != "member" ||
+		result.Results[0].Department == nil || *result.Results[0].Department != "" {
+		t.Fatalf("result = %+v, want both echoes with the clear as \"\"", result.Results[0])
+	}
+	if !strings.Contains(string(h.audit.entries[0].Detail), "department") ||
+		!strings.Contains(string(h.audit.entries[0].Detail), "role") {
+		t.Fatalf("audit detail = %s, want both changed fields", h.audit.entries[0].Detail)
+	}
+}
+
+func TestBatchUpdateUsersRejectsBadRequests(t *testing.T) {
 	for _, testCase := range []struct {
-		name    string
-		role    string
-		ids     []int64
-		message string
+		name       string
+		role       string
+		department *string
+		ids        []int64
+		message    string
 	}{
-		{"invalid role", "boss", []int64{1}, "role 取值非法"},
-		{"empty ids", "member", nil, "ids 不能为空"},
-		{"over cap", "member", makeIDs(501), "单次最多更新 500 个用户"},
-		{"non-positive id", "member", []int64{1, -1}, "用户 id 必须为正整数"},
+		{"invalid role", "boss", nil, []int64{1}, "role 取值非法"},
+		{"invalid department", "", strPtr("bureau"), []int64{1}, "department 取值非法"},
+		{"neither role nor department", "", nil, []int64{1}, "没有需要更新的字段"},
+		{"empty ids", "member", nil, nil, "ids 不能为空"},
+		{"empty ids department only", "", strPtr("office"), nil, "ids 不能为空"},
+		{"over cap", "member", nil, makeIDs(501), "单次最多更新 500 个用户"},
+		{"non-positive id", "member", nil, []int64{1, -1}, "用户 id 必须为正整数"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			h := newHarness(t)
-			_, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
-				IDs:  testCase.ids,
-				Role: testCase.role,
+			_, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
+				IDs:        testCase.ids,
+				Role:       testCase.role,
+				Department: testCase.department,
 			})
 			assertKind(t, err, KindInvalidInput)
 			var serviceErr *Error
@@ -209,18 +284,18 @@ func TestUpdateUserRolesRejectsBadRequests(t *testing.T) {
 
 // Every item is audited through the shared admin_user_update action, marked as
 // a batch so the console can tell a mass promotion from an individual edit.
-func TestUpdateUserRolesAuditsEachItemWithBatchMarker(t *testing.T) {
+func TestBatchUpdateUsersAuditsEachItemWithBatchMarker(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleFreshman, model.UserStateNJUPTer)
 
-	if _, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+	if _, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:         []int64{1, 2},
 		Role:        "member",
 		AdminUserID: testAdminID,
 		ClientIP:    testClientIP,
 		UserAgent:   testUserAgent,
 	}); err != nil {
-		t.Fatalf("UpdateUserRoles: %v", err)
+		t.Fatalf("BatchUpdateUsers: %v", err)
 	}
 	if len(h.audit.entries) != 2 {
 		t.Fatalf("audit entries = %d, want one per id", len(h.audit.entries))
@@ -244,22 +319,24 @@ func TestUpdateUserRolesAuditsEachItemWithBatchMarker(t *testing.T) {
 }
 
 // An untyped repository failure is reported as a generic per-item failure, not
-// as a transport error: the caller still gets its other results.
-func TestUpdateUserRolesReportsInternalFailuresPerItem(t *testing.T) {
+// as a transport error: the caller still gets its other results. The failure
+// also drops the requested-change echoes, department included — neither change
+// was applied, so echoing either would read as landed.
+func TestBatchUpdateUsersReportsInternalFailuresPerItem(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleFreshman, model.UserStateNJUPTer)
 	h.users.updateErr = errors.New("boom")
 
-	result, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
-		IDs:  []int64{1},
-		Role: "member",
+	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
+		IDs:        []int64{1},
+		Department: strPtr("office"),
 	})
 	if err != nil {
-		t.Fatalf("UpdateUserRoles: %v", err)
+		t.Fatalf("BatchUpdateUsers: %v", err)
 	}
 	if len(result.Results) != 1 || result.Results[0].Success ||
-		result.Results[0].Reason != "服务器内部错误" {
-		t.Fatalf("result = %+v, want a generic internal failure", result.Results)
+		result.Results[0].Reason != "服务器内部错误" || result.Results[0].Department != nil {
+		t.Fatalf("result = %+v, want a generic internal failure with no echo", result.Results)
 	}
 }
 
@@ -267,20 +344,20 @@ func TestUpdateUserRolesReportsInternalFailuresPerItem(t *testing.T) {
 // the batch skipped their own id needs to know why. Each case is triggered
 // through its real path — the self-role guard, the closed-account check, the
 // repository's last-admin guard — not by injecting the error into the fake.
-func TestUpdateUserRolesMapsProtectedAndStateKinds(t *testing.T) {
+func TestBatchUpdateUsersMapsProtectedAndStateKinds(t *testing.T) {
 	t.Run("self role change", func(t *testing.T) {
 		h := newHarness(t)
 		h.users.findResult = targetUser(model.UserRoleFreshman, model.UserStateNJUPTer)
 		h.users.findResult.ID = testAdminID
 
-		result, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+		result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 			IDs:         []int64{testAdminID},
 			Role:        "member",
 			AdminUserID: testAdminID,
 			AdminRole:   string(model.UserRoleAdmin),
 		})
 		if err != nil {
-			t.Fatalf("UpdateUserRoles: %v", err)
+			t.Fatalf("BatchUpdateUsers: %v", err)
 		}
 		if result.Results[0].Success || result.Results[0].Reason != "不可修改自己的角色" {
 			t.Fatalf("result = %+v, want the self-role message", result.Results[0])
@@ -291,14 +368,14 @@ func TestUpdateUserRolesMapsProtectedAndStateKinds(t *testing.T) {
 		h := newHarness(t)
 		h.users.findResult = targetUser(model.UserRoleFreshman, model.UserStateDeleted)
 
-		result, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+		result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 			IDs:         []int64{testTargetID},
 			Role:        "member",
 			AdminUserID: testAdminID,
 			AdminRole:   string(model.UserRoleAdmin),
 		})
 		if err != nil {
-			t.Fatalf("UpdateUserRoles: %v", err)
+			t.Fatalf("BatchUpdateUsers: %v", err)
 		}
 		if result.Results[0].Success || result.Results[0].Reason != "用户已注销，请先恢复后再编辑" {
 			t.Fatalf("result = %+v, want the state-conflict message", result.Results[0])
@@ -310,14 +387,14 @@ func TestUpdateUserRolesMapsProtectedAndStateKinds(t *testing.T) {
 		h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
 		h.users.updateErr = repository.ErrLastAdmin
 
-		result, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+		result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 			IDs:         []int64{testTargetID},
 			Role:        "member",
 			AdminUserID: testAdminID,
 			AdminRole:   string(model.UserRoleAdmin),
 		})
 		if err != nil {
-			t.Fatalf("UpdateUserRoles: %v", err)
+			t.Fatalf("BatchUpdateUsers: %v", err)
 		}
 		if result.Results[0].Success || result.Results[0].Reason != "系统中至少需要保留一名管理员" {
 			t.Fatalf("result = %+v, want the last-admin message", result.Results[0])

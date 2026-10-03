@@ -287,13 +287,13 @@ Body: { "password": "current_password" }
 | ---- | ------ | ----------- |
 | `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号） |
 | `user` | login_email, role, state, email_type | `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号或授予 admin） |
-| `profile` | department | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager，批量归置存量账号部门的通道）；语义一致：传值设置、空串清空、缺省不改 |
+| `profile` | department | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager） / `PUT /admin/users` 批量（admin / manager，归置存量账号部门的通道，role 与 department 至少一项）；语义一致：传值设置、空串清空、缺省不改 |
 | `profile` | nickname, intro, email, blog_url, github_url | `PUT /user/profile`（本人） |
 | `profile` | avatar | `PUT /user/avatar`（multipart/form-data，≤1MB 且任一维 ≤4096，jpg/png/webp；前端压缩后上传） |
 
 #### 部门值域与公开目录（V021）
 
-`department_enum` 从迁移期的 software / media 两值扩到协会七部门（software 软件研发部 / media 多媒体部 / electronics 电子部 / office 办公室 / liaison 外联部 / publicity 科宣部 / competition 赛事部），`profile.department` 是所有角色均可自行修改的展示资料，不能单独作为部门归属证明或数据权限依据。下游（SAST People）的部门间数据权限必须依据独立核验的成员归属，不能信任这个自填字段。公开只读端点 `GET /departments` 返回全量 key + 中文展示名（与后端枚举同源，无需认证、不限流——七个组织公开名称非个人数据），集成方不再本地维护 key→label 映射，避免下次扩枚举时漂移。管理端批量归置存量账号走 `PUT /admin/users/:id` 的 `department` 字段。
+`department_enum` 从迁移期的 software / media 两值扩到协会七部门（software 软件研发部 / media 多媒体部 / electronics 电子部 / office 办公室 / liaison 外联部 / publicity 科宣部 / competition 赛事部），`profile.department` 是所有角色均可自行修改的展示资料，不能单独作为部门归属证明或数据权限依据。下游（SAST People）的部门间数据权限必须依据独立核验的成员归属，不能信任这个自填字段。公开只读端点 `GET /departments` 返回全量 key + 中文展示名（与后端枚举同源，无需认证、不限流——七个组织公开名称非个人数据），集成方不再本地维护 key→label 映射，避免下次扩枚举时漂移。管理端归置存量账号部门走 `PUT /admin/users/:id`（单个）与 `PUT /admin/users`（批量，issue #99：下游按批次同步成员部门的通道）的 `department` 字段。
 
 #### 迁移账号资料补全标志（V010）
 

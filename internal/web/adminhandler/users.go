@@ -282,28 +282,33 @@ func parseIDList(raw string) ([]int64, bool) {
 	return ids, true
 }
 
-// batchRoleUpdateRequest is the body of the batch role-change endpoint.
-type batchRoleUpdateRequest struct {
-	IDs  []int64 `json:"ids"`
-	Role string  `json:"role"`
+// batchUpdateRequest is the body of the batch user-update endpoint: an optional
+// role, an optional department with the self-service set/clear/omit semantics,
+// or both. The service refuses a body carrying neither.
+type batchUpdateRequest struct {
+	IDs        []int64 `json:"ids"`
+	Role       string  `json:"role"`
+	Department *string `json:"department"`
 }
 
-// UpdateUsersRole applies one role change to every listed user and reports the
-// per-item outcome, so the caller can retry or alert on the failures.
-func (h Handler) UpdateUsersRole(c *gin.Context) {
+// BatchUpdateUsers applies one role and/or department change to every listed
+// user and reports the per-item outcome, so the caller can retry or alert on
+// the failures.
+func (h Handler) BatchUpdateUsers(c *gin.Context) {
 	principal, ok := middleware.PrincipalFrom(c)
 	if !ok {
 		response.Error(c, internalError())
 		return
 	}
-	var req batchRoleUpdateRequest
+	var req batchUpdateRequest
 	if err := webutil.DecodeStrictJSON(c, &req); err != nil {
 		response.Error(c, badRequest())
 		return
 	}
-	result, err := h.Users.UpdateUserRoles(c.Request.Context(), adminuser.UpdateUserRolesInput{
+	result, err := h.Users.BatchUpdateUsers(c.Request.Context(), adminuser.BatchUpdateUsersInput{
 		IDs:           req.IDs,
 		Role:          req.Role,
+		Department:    req.Department,
 		AdminUserID:   principal.UserID,
 		AdminRole:     principal.Role,
 		ActorClientID: principal.ClientID,
@@ -314,16 +319,17 @@ func (h Handler) UpdateUsersRole(c *gin.Context) {
 		response.Error(c, mapUserServiceError(err))
 		return
 	}
-	items := make([]roleUpdateResultDTO, 0, len(result.Results))
+	items := make([]batchUpdateResultDTO, 0, len(result.Results))
 	for _, item := range result.Results {
-		items = append(items, roleUpdateResultDTO{
-			ID:      item.ID,
-			Success: item.Success,
-			Role:    item.Role,
-			Reason:  item.Reason,
+		items = append(items, batchUpdateResultDTO{
+			ID:         item.ID,
+			Success:    item.Success,
+			Role:       item.Role,
+			Department: item.Department,
+			Reason:     item.Reason,
 		})
 	}
-	response.Ok(c, batchRoleUpdateResponse{Results: items})
+	response.Ok(c, batchUpdateResponse{Results: items})
 }
 
 // DeleteUser closes an account and cuts every session it holds.
