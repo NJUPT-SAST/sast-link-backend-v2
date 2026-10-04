@@ -409,6 +409,20 @@ type AdminUserUpdate struct {
 	// account from outside. Cross-account occupancy is enforced by the V005
 	// triggers and the unique indexes, so no pre-flight read is needed.
 	PersonalEmail *string
+	// Department, when set, writes the profile row's department column instead of
+	// the user row: a value sets it, an empty string clears it to NULL. The profile
+	// row is upserted, so an account without one (imported before V001's flow)
+	// still gets a writable department.
+	Department *model.Department
+}
+
+// departmentColumnValue maps the edit semantics onto the column: the API
+// clears the department with an empty string, the column holds NULL.
+func departmentColumnValue(department model.Department) any {
+	if department == "" {
+		return nil
+	}
+	return department
 }
 
 // columns returns the "user" table assignments, empty when untouched.
@@ -480,7 +494,7 @@ func (r *UserRepository) UpdateAdminUser(
 		return nil, false, fmt.Errorf("%w: state and state_auto are mutually exclusive", ErrInvalidArgument)
 	}
 	columns := update.columns()
-	if len(columns) == 0 && update.PersonalEmail == nil && !update.StateAuto {
+	if len(columns) == 0 && update.PersonalEmail == nil && update.Department == nil && !update.StateAuto {
 		return nil, false, fmt.Errorf("%w: update has no fields", ErrInvalidArgument)
 	}
 
@@ -586,6 +600,30 @@ func (r *UserRepository) UpdateAdminUser(
 			}
 			if err := transaction.Create(identity).Error; err != nil {
 				return fmt.Errorf("bind admin user personal email: %w", err)
+			}
+		}
+		if update.Department != nil {
+			// The user row is already locked and proven live above, so the profile
+			// write needs no owner re-check. The upsert (UPDATE, then ON CONFLICT on a
+			// zero-row result) mirrors UpdateProfile so an account without a profile
+			// row still gets its department written; a bare INSERT would race another
+			// first-write and surface the profile_user_id_key violation as an
+			// unmapped 40900.
+			profileColumns := map[string]any{"department": departmentColumnValue(*update.Department)}
+			result := transaction.Model(&model.Profile{}).
+				Where("user_id = ?", userID).
+				Updates(profileColumns)
+			if result.Error != nil {
+				return fmt.Errorf("update admin user department: %w", result.Error)
+			}
+			if result.RowsAffected == 0 {
+				profileColumns["user_id"] = userID
+				if err := transaction.Model(&model.Profile{}).Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "user_id"}},
+					DoUpdates: clause.AssignmentColumns([]string{"department"}),
+				}).Create(profileColumns).Error; err != nil {
+					return fmt.Errorf("create profile for department update: %w", err)
+				}
 			}
 		}
 		if !roleChanged {
