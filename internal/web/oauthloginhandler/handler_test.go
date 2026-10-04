@@ -375,8 +375,8 @@ func TestCallbackFailureHidesInternalMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse Location: %v", err)
 	}
-	if got := location.Query().Get("error_description"); got != "依赖服务暂不可用" {
-		t.Fatalf("error_description = %q, want the generic per-Kind string", got)
+	if got := location.Query().Get("error_description"); got != "服务暂不可用，请稍后重试" {
+		t.Fatalf("error_description = %q, want the canonical dependency string", got)
 	}
 }
 

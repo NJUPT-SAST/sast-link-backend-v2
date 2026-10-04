@@ -89,8 +89,8 @@ func mapServiceError(err error) error {
 	case session.KindNotFound:
 		status = http.StatusNotFound
 	case session.KindDependencyUnavailable:
-		// Same UX addition as KindEmailFailed.
-		message = "依赖服务暂不可用，请稍后重试"
+		// The canonical message carries the guidance ("服务暂不可用，请稍后重试")
+		// so this case only picks the status; no local copy to drift.
 		status = http.StatusServiceUnavailable
 	case session.KindInternal:
 		message = "服务器内部错误"
@@ -162,7 +162,7 @@ func defaultMessage(kind session.Kind) string {
 	case session.KindNotFound:
 		return "资源不存在"
 	case session.KindDependencyUnavailable:
-		return "依赖服务暂不可用，请稍后重试"
+		return errcode.Messages[errcode.CodeDependencyUnavailable]
 	default:
 		return "服务器内部错误"
 	}
