@@ -99,7 +99,7 @@ func providerFailureOutcome(err error) (stage, reason string, outcome error) {
 		// httpIOTimeout — a single slow round trip is not evidence the provider is
 		// down, so this is a restartable failure.
 		return StageProvider, ReasonProviderTimeout, restorableError(
-			newDisplayError(ErrStateInvalid, "连接第三方登录服务超时，请重试", err))
+			newDisplayError(ErrStateInvalid, "连接第三方登录服务超时", err))
 	case errors.Is(err, context.Canceled):
 		// The caller went away mid-exchange; reporting a provider outage would blame
 		// the provider for a client disconnect.
