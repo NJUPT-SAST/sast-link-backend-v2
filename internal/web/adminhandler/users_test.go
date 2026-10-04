@@ -33,9 +33,9 @@ type fakeUsers struct {
 	updateErr      error
 	updateInput    adminuser.UpdateUserInput
 	updateCalls    int
-	rolesResult    *adminuser.UpdateUserRolesResult
+	rolesResult    *adminuser.BatchUpdateUsersResult
 	rolesErr       error
-	rolesInput     adminuser.UpdateUserRolesInput
+	rolesInput     adminuser.BatchUpdateUsersInput
 	deleteErr      error
 	deleteInput    adminuser.TargetUserInput
 	restoreErr     error
@@ -102,16 +102,16 @@ func (f *fakeUsers) UpdateUser(
 	return f.updateResult, nil
 }
 
-func (f *fakeUsers) UpdateUserRoles(
+func (f *fakeUsers) BatchUpdateUsers(
 	_ context.Context,
-	input adminuser.UpdateUserRolesInput,
-) (*adminuser.UpdateUserRolesResult, error) {
+	input adminuser.BatchUpdateUsersInput,
+) (*adminuser.BatchUpdateUsersResult, error) {
 	f.rolesInput = input
 	if f.rolesErr != nil {
 		return nil, f.rolesErr
 	}
 	if f.rolesResult == nil {
-		return &adminuser.UpdateUserRolesResult{Results: []adminuser.RoleUpdateResult{}}, nil
+		return &adminuser.BatchUpdateUsersResult{Results: []adminuser.BatchUpdateResult{}}, nil
 	}
 	return f.rolesResult, nil
 }
@@ -472,6 +472,45 @@ func TestUpdateUserPassesPrincipalAndFields(t *testing.T) {
 	// clearing it.
 	if input.PhoneNumber != nil || input.State != nil {
 		t.Fatalf("omitted fields = %v/%v, want nil", input.PhoneNumber, input.State)
+	}
+}
+
+// department arrives as a top-level field (not under profile, which the strict
+// decoder refuses) and rides through to the service with set/clear/omit
+// semantics: a value sets, an empty string clears, omission leaves alone.
+func TestUpdateUserPassesDepartmentThrough(t *testing.T) {
+	users := &fakeUsers{}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodPut, "/admin/users/5", "application/json",
+		`{"department":"electronics"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if input := users.updateInput; input.Department == nil || *input.Department != "electronics" {
+		t.Fatalf("department = %v, want electronics", input.Department)
+	}
+
+	users2 := &fakeUsers{}
+	router2 := newUserRouter(t, users2, nil)
+	recorder2 := doRequest(t, router2, http.MethodPut, "/admin/users/5", "application/json",
+		`{"name":"张三","department":""}`)
+	if recorder2.Code != http.StatusOK {
+		t.Fatalf("clear status = %d, want 200: %s", recorder2.Code, recorder2.Body.String())
+	}
+	if input := users2.updateInput; input.Department == nil || *input.Department != "" {
+		t.Fatalf("department = %v, want a present empty value", input.Department)
+	}
+
+	users3 := &fakeUsers{}
+	router3 := newUserRouter(t, users3, nil)
+	recorder3 := doRequest(t, router3, http.MethodPut, "/admin/users/5", "application/json",
+		`{"name":"张三"}`)
+	if recorder3.Code != http.StatusOK {
+		t.Fatalf("omit status = %d, want 200: %s", recorder3.Code, recorder3.Body.String())
+	}
+	if input := users3.updateInput; input.Department != nil {
+		t.Fatalf("department = %v, want nil when omitted", input.Department)
 	}
 }
 
@@ -838,8 +877,8 @@ func TestGetUsersByIDsSerializesEmptyAsArray(t *testing.T) {
 
 // The batch role change passes the body and principal through and serializes the
 // per-item results.
-func TestUpdateUsersRolePassesPrincipalAndBody(t *testing.T) {
-	users := &fakeUsers{rolesResult: &adminuser.UpdateUserRolesResult{Results: []adminuser.RoleUpdateResult{
+func TestBatchUpdateUsersPassesPrincipalAndBody(t *testing.T) {
+	users := &fakeUsers{rolesResult: &adminuser.BatchUpdateUsersResult{Results: []adminuser.BatchUpdateResult{
 		{ID: 1, Success: true, Role: "member"},
 		{ID: 2, Success: false, Reason: "用户不存在"},
 	}}}
@@ -879,10 +918,64 @@ func TestUpdateUsersRolePassesPrincipalAndBody(t *testing.T) {
 	}
 }
 
+// ptr is the test-local string-pointer helper for the batch result echoes.
+func ptr(value string) *string { return &value }
+
+// A department-only batch is legal — the downstream sync shape — and the
+// department reaches the service as a pointer so the set/clear/omit semantics
+// survive the handler. The response echoes the applied department and carries
+// no role key at all.
+func TestBatchUpdateUsersPassesDepartmentThrough(t *testing.T) {
+	users := &fakeUsers{rolesResult: &adminuser.BatchUpdateUsersResult{Results: []adminuser.BatchUpdateResult{
+		{ID: 1, Success: true, Department: ptr("office")},
+	}}}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodPut, "/admin/users", "application/json",
+		`{"ids":[1],"department":"office"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	input := users.rolesInput
+	if input.Role != "" || input.Department == nil || *input.Department != "office" {
+		t.Fatalf("input role/department = %q/%v, want empty role and office", input.Role, input.Department)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"department":"office"`) {
+		t.Fatalf("response misses the applied department: %s", body)
+	}
+	if strings.Contains(body, `"role"`) {
+		t.Fatalf("department-only response carries a role key: %s", body)
+	}
+}
+
+// The empty-string department is the clear: it must reach the service as a
+// pointer to "" rather than being dropped somewhere on the way, because
+// encoding/json omitempty would erase a non-pointer empty string.
+func TestBatchUpdateUsersPassesDepartmentClearThrough(t *testing.T) {
+	users := &fakeUsers{rolesResult: &adminuser.BatchUpdateUsersResult{Results: []adminuser.BatchUpdateResult{
+		{ID: 1, Success: true, Department: ptr("")},
+	}}}
+	router := newUserRouter(t, users, nil)
+
+	recorder := doRequest(t, router, http.MethodPut, "/admin/users", "application/json",
+		`{"ids":[1],"department":""}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if users.rolesInput.Department == nil || *users.rolesInput.Department != "" {
+		t.Fatalf("department = %v, want a pointer to the empty string", users.rolesInput.Department)
+	}
+	// The cleared department still echoes: a pointer to "" is not omitted.
+	if !strings.Contains(recorder.Body.String(), `"department":""`) {
+		t.Fatalf("response misses the cleared department: %s", recorder.Body.String())
+	}
+}
+
 // The strict decoder protects the batch body the same way it protects the
 // single-user one: an unknown field or a trailing value is refused outright
 // rather than partially honored.
-func TestUpdateUsersRoleRejectsBadBodies(t *testing.T) {
+func TestBatchUpdateUsersRejectsBadBodies(t *testing.T) {
 	for _, body := range []string{
 		`{"ids":[1,2],"role":"member","state":"on_sast"}`, // unknown field
 		`{"ids":[1,2],"role":"member"} trailing`,          // trailing value
@@ -903,9 +996,10 @@ func TestUpdateUsersRoleRejectsBadBodies(t *testing.T) {
 }
 
 // Missing required fields reach the service untouched: the service is the layer
-// that owns the "ids 不能为空" / "role 取值非法" rules, exactly as it owns the
-// single-user endpoint's "没有需要更新的字段".
-func TestUpdateUsersRolePassesMissingFieldsThrough(t *testing.T) {
+// that owns the "ids 不能为空" / "role 取值非法" / "没有需要更新的字段"
+// (neither role nor department) rules, exactly as it owns the single-user
+// endpoint's field rules.
+func TestBatchUpdateUsersPassesMissingFieldsThrough(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
 		body string
@@ -933,7 +1027,7 @@ func TestUpdateUsersRolePassesMissingFieldsThrough(t *testing.T) {
 
 // A request-level validation failure (bad role, over-cap ids) surfaces as the
 // service's 400 with its literal message, like the single-user endpoint.
-func TestUpdateUsersRoleMapsServiceError(t *testing.T) {
+func TestBatchUpdateUsersMapsServiceError(t *testing.T) {
 	users := &fakeUsers{rolesErr: &adminuser.Error{
 		Kind: adminuser.KindInvalidInput, Code: errcode.CodeBadRequest, Message: "role 取值非法",
 	}}

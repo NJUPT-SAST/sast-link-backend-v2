@@ -37,6 +37,65 @@ func TestUpdateUserRefusesSelfRoleChange(t *testing.T) {
 	assertAudited(t, h, actionUpdateUser, false, errcode.CodeForbidden)
 }
 
+// A department edit reaches the repository with the validated value: the
+// administrative path exists so the existing member base can be migrated
+// without one self-edit at a time, so the field must survive validation intact.
+func TestUpdateUserPassesDepartmentThrough(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+
+	_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.Department = stringPtr("electronics")
+	}))
+	if err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	if h.users.updateInput.Department == nil || *h.users.updateInput.Department != model.DepartmentElectronics {
+		t.Fatalf("department = %v, want electronics", h.users.updateInput.Department)
+	}
+	entry := assertAudited(t, h, actionUpdateUser, true, 0)
+	if !strings.Contains(string(entry.Detail), "department") {
+		t.Fatalf("audit detail = %s, want it to name department", string(entry.Detail))
+	}
+	if strings.Contains(string(entry.Detail), "electronics") {
+		t.Fatalf("audit detail = %s, want it to omit the submitted value", string(entry.Detail))
+	}
+}
+
+// An unknown department is a field error, not a database rejection: PostgreSQL
+// would refuse an unknown enum member as a 500.
+func TestUpdateUserRefusesInvalidDepartment(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+
+	_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.Department = stringPtr("hardware")
+	}))
+
+	assertKind(t, err, KindInvalidInput)
+	if h.users.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want the write refused before reaching the repository", h.users.updateCalls)
+	}
+}
+
+// The empty string clears the department (NULL), matching PUT /user/profile;
+// it must reach the repository as a present-but-empty value rather than being
+// dropped as "no change".
+func TestUpdateUserClearsDepartmentWithEmptyString(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleMember, model.UserStateOnSAST)
+
+	_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+		input.Department = stringPtr(" ")
+	}))
+	if err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	if h.users.updateInput.Department == nil || *h.users.updateInput.Department != "" {
+		t.Fatalf("department = %v, want a present empty value", h.users.updateInput.Department)
+	}
+}
+
 // Editing your own non-role fields is allowed: the guard is about surrendering
 // access, not about self-service.
 func TestUpdateUserAllowsSelfNonRoleEdit(t *testing.T) {
@@ -1061,11 +1120,11 @@ func TestUpdateUserStudentIDOccupancyFoldsCase(t *testing.T) {
 // The batch endpoint routes through UpdateUser, so the manager boundary holds
 // per item: admin targets fail with the boundary reason, everything else
 // proceeds.
-func TestUpdateUserRolesManagerBoundary(t *testing.T) {
+func TestBatchUpdateUsersManagerBoundary(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
 
-	result, err := h.service.UpdateUserRoles(context.Background(), UpdateUserRolesInput{
+	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:  []int64{testTargetID, testAdminID},
 		Role: string(model.UserRoleManager),
 		// The fake returns the same row for every id; the second id differs, so
@@ -1076,7 +1135,7 @@ func TestUpdateUserRolesManagerBoundary(t *testing.T) {
 		ActorClientID: "",
 	})
 	if err != nil {
-		t.Fatalf("UpdateUserRoles: %v", err)
+		t.Fatalf("BatchUpdateUsers: %v", err)
 	}
 	if len(result.Results) != 2 {
 		t.Fatalf("results = %d, want 2", len(result.Results))
@@ -1085,6 +1144,32 @@ func TestUpdateUserRolesManagerBoundary(t *testing.T) {
 		if item.Success || item.Reason != "无权操作管理员账号" {
 			t.Fatalf("item = %+v, want the admin-target refusal", item)
 		}
+	}
+}
+
+// The boundary is on the account, not on the field: a department-only batch is
+// still a write on the admin's account, so a manager running the People-style
+// sync against an admin target is refused per item — the department field being
+// display-only must not become a side door past the role hierarchy.
+func TestBatchUpdateUsersManagerBoundaryDepartmentOnly(t *testing.T) {
+	h := newHarness(t)
+	h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
+
+	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
+		IDs:         []int64{testTargetID},
+		Department:  stringPtr("office"),
+		AdminUserID: testAdminID + 100,
+		AdminRole:   string(model.UserRoleManager),
+	})
+	if err != nil {
+		t.Fatalf("BatchUpdateUsers: %v", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Success ||
+		result.Results[0].Reason != "无权操作管理员账号" {
+		t.Fatalf("result = %+v, want the admin-target refusal", result.Results)
+	}
+	if h.users.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
 	}
 }
 

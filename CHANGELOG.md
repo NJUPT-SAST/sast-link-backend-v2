@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **部门枚举扩至七部门 + 管理端写入 + 公开目录**（feat/department-enum，[issue #99](https://github.com/NJUPT-SAST/sast-link-backend-v2/issues/99)，基于 PR #98 的 V020 之后）：V021 向 `department_enum` 追加 `electronics` / `office` / `liaison` / `publicity` / `competition`（纯增量 `ADD VALUE`，不可回滚），配套 `GET /departments` 公开只读目录（key + 中文展示名，与后端枚举同源，集成方不再本地维护 key→label 映射）与 `PUT /admin/users/:id` 的可选 `department` 字段（admin / manager 可写，语义与 `PUT /user/profile` 完全一致：传值即设置、空串清空为 NULL、缺省不修改；写 profile 行且 upsert 无 profile 行的存量账号，不触动 token_version 不撤销会话——部门不是授权输入），批量端点 `PUT /admin/users` 同步接受可选 `department`（与 `role` 至少传一项，可同传；逐项走单条端点同款守卫与事务，成功项回显应用的 department，空串表示清空）。背景：People 侧按 `profile.department` 做部门权限隔离，两个值的值域无法给其余五个部门分家，且存量上百账号逐个通知自助改部门不现实。枚举扩展自动生效于自助写入、admin 筛选与 `by_department` 统计（实现本就按 GROUP BY 动态分桶，仅文档描述同步）。
+
 - **manager（部长）角色分层**（feat/manager-role，[PR #98](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/98)）：V020 向 `user_role_enum` 加入 `manager`。控制台分三层：lecturer 只读用户目录；manager 拥有成员管理半边——用户读写（建号 / 编辑 / 批量角色 / 软删 / 恢复）与概览统计（概览仅返回 users 聚合，clients/audit 两路对 manager 整体缺席），phone 视角同 admin（含 keyword 匹配），但不接触技术信息（OAuth 客户端、审计日志、校友工单均 403）；服务层与写事务内（锁定行重判）双重约束 manager 边界：不可写 admin 角色账号（编辑 / 升降 / 注销 / 恢复均 403）、不可授予 admin 角色（建号与批量逐项拒绝），其余一切升降权含把他人升为 manager（自我复制）与升 / 降 lecturer 均可行——并发场景下 admin 恰好把目标升为 admin 时，进行中的 manager 写入也会在提交前被事务内重判拒绝。manager 是学生角色账号：状态推导为 njupter、入学满 4 学年 retired_sast，计入 `incomplete_by_role` 资料补全跟进。管理员自保护规则（不可改自己角色、不可注销自己）对 manager 同样适用。
 
 - **个人徽标**（feat/card-badge）：`GET`/`POST`/`DELETE /user/badge` 管理端点 + 公开渲染 `GET /badge/:key`。用户自主开启的可嵌入 SVG 身份卡片（头像/昵称/「签名」），查看无需认证——URL 本身是凭证：256-bit 随机 capability key，不可枚举（兼容 `/card/:id` 因枚举风险被移除的隐私决策）；开关只改变可见性，key 首次开启时生成、永不轮换。固定紧凑画布 320×72（左头像、右昵称+「签名」；点击卡片跳转个人主页：blog 优先、github 兜底）+ 三主题（auto 内嵌 prefers-color-scheme 双调色板 / light / dark）；头像从 COS 拉取缩至 128px 后 base64 内嵌（camo 剥离外部引用）失败降级首字标记；未知/已关闭 key 返回 404 错误卡片保证 `<img>` 不裂图；`Cache-Control: public, no-cache` + 强 ETag（304 协商）+ 每实例 TTL 缓存（关闭/恢复时双向即时清除）；管理端点每用户限流 5 次/小时，公开端点每 IP 120 次/分钟；审计 `badge_enable`/`badge_disable`；新业务码 40907（已开启）/42205（昵称未设置）。V019 badge 表（含 disabled_at 软开关；跳号：V017/V018 由并行的 name-initials 与 revoked_reason 迁移占用）。
@@ -120,6 +122,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Administrative user updates recheck self-role changes inside the locked transaction, preventing a queued manager self-update from restoring privileges after demotion (2026-09-30).
 
+- The department catalogue OpenAPI response now includes the standard `code`, `message`, and `data.departments` envelope (2026-09-30).
+
+- **部门字段信任边界**（2026-09-30）：明确 `profile.department` 是本人可修改的展示资料，下游授权必须依据独立核验的成员归属；同步 manager 的成员管理权限说明。
 - **恢复账号事务锁定目标角色**（2026-09-30）：读取已关闭账号时加行锁，防止 manager 的恢复请求在并发恢复、升为 admin、再次关闭后用旧角色判断重新开放 admin 账号。
 
 - **紧急回滚：admin scope 授权用户角色门**（2026-09-26）：回滚 `721d849`（`checkScopeForUser`，consent-info / consent / 兑现三段把 admin scope 绑定到授权用户实时角色）。该门使注册了 admin scope 的应用对非 admin 用户在 consent-info 阶段直接 400，前端兜底文案误导为「授权请求已失效，请重新发起授权」，第三方登录被完全阻断且重试无解。回滚后恢复登录；安全底线不受影响——`/admin` 角色门每请求从数据库行读角色，非 admin 用户拿到的 admin-scoped token 在使用处仍被拒。
