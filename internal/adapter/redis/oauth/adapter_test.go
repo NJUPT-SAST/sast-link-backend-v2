@@ -18,8 +18,12 @@ import (
 type scriptedClient struct {
 	internalredis.Cmdable
 	payload string
-	ttl     time.Duration
-	ttlErr  error
+	// ttlMilliseconds is the raw script answer, not a time.Duration: the fake
+	// used to derive milliseconds from a Duration, and Duration(-2).Milliseconds()
+	// truncates to zero, silently turning every negative-PTTL test case into the
+	// zero branch.
+	ttlMilliseconds int64
+	ttlErr          error
 }
 
 // EvalSha answers NOSCRIPT so evalScript falls back to the scripted Eval: the
@@ -36,7 +40,7 @@ func (c scriptedClient) Eval(_ context.Context, _ string, _ []string, _ ...any) 
 		cmd.SetErr(c.ttlErr)
 		return cmd
 	}
-	cmd.SetVal([]any{c.payload, c.ttl.Milliseconds()})
+	cmd.SetVal([]any{c.payload, c.ttlMilliseconds})
 	return cmd
 }
 
@@ -71,8 +75,8 @@ func TestPeekAuthorizeRequestReportsTTLFailure(t *testing.T) {
 // miss, which is exactly the semantics the caller wants.
 func TestPeekAuthorizeRequestReportsExpiredKeyAsNotFound(t *testing.T) {
 	store := peekStore(scriptedClient{
-		payload: `{"client_id":"sast-link-web"}`,
-		ttl:     time.Duration(-2),
+		payload:         `{"client_id":"sast-link-web"}`,
+		ttlMilliseconds: -2,
 	})
 
 	_, _, found, err := store.PeekAuthorizeRequest(context.Background(), "req_1")
@@ -87,8 +91,8 @@ func TestPeekAuthorizeRequestReportsExpiredKeyAsNotFound(t *testing.T) {
 // A live key reports its payload and remaining lifetime.
 func TestPeekAuthorizeRequestReportsLiveKey(t *testing.T) {
 	store := peekStore(scriptedClient{
-		payload: `{"client_id":"sast-link-web","scopes":["openid"]}`,
-		ttl:     10 * time.Minute,
+		payload:         `{"client_id":"sast-link-web","scopes":["openid"]}`,
+		ttlMilliseconds: (10 * time.Minute).Milliseconds(),
 	})
 
 	payload, ttl, found, err := store.PeekAuthorizeRequest(context.Background(), "req_1")
@@ -100,5 +104,24 @@ func TestPeekAuthorizeRequestReportsLiveKey(t *testing.T) {
 	}
 	if ttl != 10*time.Minute {
 		t.Fatalf("ttl = %v, want 10m", ttl)
+	}
+}
+
+// A negative PTTL alongside a hit is an invariant break (SetOneTime never
+// writes a key without a TTL), but the client-facing answer is still
+// not-found: the consent flow restarts cleanly instead of eating a 500 for
+// state a stray operator SET broke.
+func TestPeekAuthorizeRequestNegativeTTLIsNotFound(t *testing.T) {
+	store := peekStore(scriptedClient{
+		payload:         `{"client_id":"sast-link-web"}`,
+		ttlMilliseconds: -1,
+	})
+
+	_, _, found, err := store.PeekAuthorizeRequest(context.Background(), "req_1")
+	if err != nil {
+		t.Fatalf("err = %v, want nil: an invariant break degrades to not-found", err)
+	}
+	if found {
+		t.Fatal("found = true, want false for a TTL-less one-time key")
 	}
 }

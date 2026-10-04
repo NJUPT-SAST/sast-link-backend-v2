@@ -71,7 +71,10 @@ type fakeUsers struct {
 	byLogin map[string]*model.User
 	byID    map[int64]*model.User
 	err     error
-	lookups []string
+	// findByIDErr fails only the aggregate reload, so a test can break the
+	// post-commit leg without tripping the Exists*/FindAuth* pre-checks.
+	findByIDErr error
+	lookups     []string
 	// tokens lets the fake mirror the repository's atomic
 	// password-update-plus-revocation transaction.
 	tokens *fakeTokens
@@ -134,6 +137,9 @@ func (f *fakeUsers) FindProfileByID(_ context.Context, userID int64) (*model.Use
 }
 
 func (f *fakeUsers) FindByID(_ context.Context, userID int64) (*model.User, error) {
+	if f.findByIDErr != nil {
+		return nil, f.findByIDErr
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -3533,5 +3539,36 @@ func TestRefreshAdministrativeRevocationDuringRotation(t *testing.T) {
 	}
 	if !strings.Contains(string(entry.Detail), repository.RevokeReasonPasswordReset) {
 		t.Fatalf("missing reason: %s", entry.Detail)
+	}
+}
+
+// A failed post-commit reload must not answer 500: the account, the ticket
+// consumption and the session are already committed, so the client would retry
+// into "Register-Ticket invalid" while holding a live account. The response
+// degrades to the in-memory row (database-derived fields zero-valued) and the
+// degradation is logged loudly.
+func TestRegisterSurvivesPostCommitReloadFailure(t *testing.T) {
+	service := newRegisterService(t)
+	tickets := service.RegisterTicket.(*fakeRegisterTicketStore)
+	if err := tickets.SaveRegisterTicket(context.Background(), "reg_reload", "new@sast.fun", time.Minute); err != nil {
+		t.Fatalf("SaveRegisterTicket() error = %v", err)
+	}
+	// The reload is the only FindByID on the register path; every earlier read
+	// goes through the Exists*/FindAuth* fakes, so a generic lookup error lands
+	// exactly on the post-commit leg.
+	service.Users.(*fakeUsers).findByIDErr = errors.New("db went away")
+
+	result, err := service.Register(context.Background(), validRegisterInput("reg_reload", "B24040777"))
+	if err != nil {
+		t.Fatalf("Register() error = %v, want success despite the reload failure", err)
+	}
+	if result.AccessToken == "" || result.RefreshToken == "" {
+		t.Fatal("the committed session must ride the degraded response")
+	}
+	if result.Profile.StudentID != "B24040777" || result.Profile.LoginEmail != "new@sast.fun" {
+		t.Fatalf("profile = %+v, want the in-memory row's scalar fields", result.Profile)
+	}
+	if _, ok := tickets.tickets["reg_reload"]; ok {
+		t.Fatal("the ticket must be consumed even on the degraded path")
 	}
 }

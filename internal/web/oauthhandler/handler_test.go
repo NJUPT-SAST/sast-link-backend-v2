@@ -17,6 +17,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/oauth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/middleware"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/response"
 )
 
 const testConsentURL = "https://link.sast.fun/oauth/consent"
@@ -1300,5 +1301,62 @@ func TestTokenRejectsOversizedBody(t *testing.T) {
 	// The service must not have been reached at all.
 	if service.tokenInput != (oauth.TokenInput{}) {
 		t.Fatalf("service received %+v for an oversized body", service.tokenInput)
+	}
+}
+
+// A backend fault on the authentication leg (auth-state cache miss plus a
+// failed database fallback) is not a token verdict: it must answer 500
+// server_error without a challenge, so relying parties retry later instead of
+// refreshing — and monitoring sees a 5xx spike rather than a token-quality
+// artifact.
+func TestUserInfoBackendFaultIsServerErrorWithoutChallenge(t *testing.T) {
+	service := &fakeService{}
+	router := newRouter(t, service, &fakeAuthenticator{err: &response.BusinessError{
+		HTTPStatus: http.StatusInternalServerError,
+		Code:       errcode.CodeInternal,
+		Message:    "服务器内部错误",
+	}})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/userinfo", nil)
+	request.Header.Set("Authorization", "Bearer token")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", recorder.Code)
+	}
+	if challenge := recorder.Header().Get("WWW-Authenticate"); challenge != "" {
+		t.Fatalf("WWW-Authenticate = %q, want none: a server error is not a token challenge", challenge)
+	}
+	var body errorResponse
+	decodeJSON(t, recorder, &body)
+	if body.Error != oauth.ErrorServerError {
+		t.Fatalf("error = %q, want server_error", body.Error)
+	}
+	if service.userInfoInput.UserID != 0 {
+		t.Fatal("an unauthenticated request reached the service")
+	}
+}
+
+// A 4xx business refusal from the authenticator is still a token verdict and
+// keeps the single-code collapse: only 5xx splits off as server_error.
+func TestUserInfoForbiddenBusinessErrorStillCollapsesToInvalidToken(t *testing.T) {
+	service := &fakeService{}
+	router := newRouter(t, service, &fakeAuthenticator{err: &response.BusinessError{
+		HTTPStatus: http.StatusForbidden,
+		Code:       errcode.CodeAccountDeleted,
+		Message:    "账号已注销",
+	}})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/userinfo", nil)
+	request.Header.Set("Authorization", "Bearer token")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want the 401 collapse for a 4xx token verdict", recorder.Code)
+	}
+	if !strings.Contains(recorder.Header().Get("WWW-Authenticate"), `error="invalid_token"`) {
+		t.Fatalf("WWW-Authenticate = %q, want the invalid_token challenge", recorder.Header().Get("WWW-Authenticate"))
 	}
 }

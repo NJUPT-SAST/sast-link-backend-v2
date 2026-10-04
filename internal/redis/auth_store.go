@@ -280,9 +280,15 @@ func (s Store) PeekOneTimeWithTTL(ctx context.Context, key string, target any) (
 		// Lua false arrives as a nil interface in go-redis: the key is gone.
 		return 0, false, nil
 	}
-	ttlMilliseconds, convErr := redisInt(values[1])
-	if convErr != nil {
-		return 0, false, fmt.Errorf("peek one-time with ttl: %w", convErr)
+	// A negative PTTL means the key carries no expiry (-1) — an invariant
+	// break, since SetOneTime never writes without one — or a -2 that cannot
+	// occur inside the atomic read. Either way the honest client-facing answer
+	// is not-found: the consent flow restarts cleanly instead of eating a 500
+	// for state a stray operator SET broke. redisInt rejects the negatives, so
+	// clamp through a wider read first.
+	ttlMilliseconds, err := redisInt64(values[1])
+	if err != nil {
+		return 0, false, fmt.Errorf("peek one-time with ttl: %w", err)
 	}
 	if ttlMilliseconds <= 0 {
 		return 0, false, nil
@@ -291,6 +297,24 @@ func (s Store) PeekOneTimeWithTTL(ctx context.Context, key string, target any) (
 		return 0, false, fmt.Errorf("unmarshal one-time payload: %w", err)
 	}
 	return time.Duration(ttlMilliseconds) * time.Millisecond, true, nil
+}
+
+// redisInt64 reads a Redis integer without the non-negative clamp redisInt
+// applies: the peek's TTL answer needs to see negatives to classify them.
+func redisInt64(value any) (int64, error) {
+	switch typed := value.(type) {
+	case int64:
+		return typed, nil
+	case int:
+		return int64(typed), nil
+	case uint64:
+		if typed > uint64(math.MaxInt64) {
+			return 0, fmt.Errorf("redis integer: %w", ErrInvalidArgument)
+		}
+		return int64(typed), nil
+	default:
+		return 0, fmt.Errorf("redis integer: unsupported %T", value)
+	}
 }
 
 // DeleteOneTime removes a one-time key and reports whether this call was the one

@@ -185,6 +185,18 @@ func TestRotateClientSecret(t *testing.T) {
 			t.Fatalf("audit entries = %+v, want one rotate-secret row for the probe", h.audit.entries)
 		}
 	})
+
+	t.Run("audits a failed lookup like every other rejection", func(t *testing.T) {
+		h := newHarness(t)
+		h.clients.findErr = errors.New("connection refused")
+
+		_, err := h.service.RotateClientSecret(context.Background(), RotateClientSecretInput{ClientPK: 5, AdminUserID: 99})
+		assertKind(t, err, KindInternal)
+		// An emergency rotation that dies on a database hiccup is exactly when
+		// the missing row matters to the trail; the branch is audited like the
+		// not-found probe above, with no target to name.
+		assertOneFailedRotateAudit(t, h.audit.entries, ErrInternal.Code)
+	})
 }
 
 // assertOneFailedRotateAudit checks that a refused rotation still lands an audit

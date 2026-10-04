@@ -411,3 +411,42 @@ func TestPeekAndConsumeTicketsElectSingleWinner(t *testing.T) {
 		t.Fatalf("PeekRegisterTicket() after consume = (%t, %v), want not found", found, err)
 	}
 }
+
+// A counter key that lost its TTL (an operator SET, a restore from persistence)
+// must self-heal on the next record instead of counting forever: without the
+// heal, the subject is permanently over the limit with a window that never
+// rotates.
+func TestRecordLoginFailureHealsATTLessCounterKey(t *testing.T) {
+	client := testutil.StartRedis(t)
+	store := Store{Client: client, Keys: NewKeys("sastlink:test:heal")}
+
+	// Simulate the invariant break: a counter with no expiry, already past the
+	// limit the caller will use.
+	key := store.Keys.LoginFailure("victim@example.com")
+	if err := client.Set(context.Background(), key, 99, 0).Err(); err != nil {
+		t.Fatalf("seed TTL-less key: %v", err)
+	}
+
+	window := time.Minute
+	state, err := store.RecordLoginFailure(context.Background(), "victim@example.com", window)
+	if err != nil {
+		t.Fatalf("RecordLoginFailure() error = %v", err)
+	}
+	if state.TTL <= 0 || state.TTL > window {
+		t.Fatalf("TTL after heal = %v, want a full fresh window", state.TTL)
+	}
+	// The window is armed: after it expires the counter is gone. The expiry is
+	// second-grained because the container clock can drift past a millisecond
+	// deadline on WSL2 hosts.
+	if expireErr := client.Expire(context.Background(), key, time.Second).Err(); expireErr != nil {
+		t.Fatalf("fast-forward expiry: %v", expireErr)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	state, err = store.GetLoginFailures(context.Background(), "victim@example.com")
+	if err != nil {
+		t.Fatalf("GetLoginFailures() error = %v", err)
+	}
+	if state.Count != 0 {
+		t.Fatalf("count after window = %d, want 0: the healed window must expire", state.Count)
+	}
+}

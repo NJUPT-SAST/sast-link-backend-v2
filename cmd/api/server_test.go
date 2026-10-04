@@ -74,3 +74,34 @@ func TestServeStopsHTTPWhenWorkerFails(t *testing.T) {
 		t.Fatalf("shutdown calls = %d, want 1", server.shutdownCalls)
 	}
 }
+
+// A panicking worker must not crash the process with a bare stack: serve
+// converts the panic into an error carrying the stack, takes the same fast
+// shutdown a returned error takes, and exits with a named cause.
+func TestServeConvertsWorkerPanicToError(t *testing.T) {
+	original := newHTTPServer
+	t.Cleanup(func() { newHTTPServer = original })
+	server := &fakeHTTPServer{listenErr: http.ErrServerClosed, listenRelease: make(chan struct{})}
+	newHTTPServer = func(string, http.Handler) httpServer { return server }
+	background := &panicBackgroundWorker{}
+
+	err := serve(context.Background(), ":8080", http.NewServeMux(), []backgroundWorker{background})
+	if err == nil {
+		t.Fatal("serve() error = nil, want the panic surfaced as an error")
+	}
+	if !strings.Contains(err.Error(), "background worker panicked") || !strings.Contains(err.Error(), "boom in worker loop") {
+		t.Fatalf("serve() error = %v, want the panic value and the sentinel text", err)
+	}
+	if !strings.Contains(err.Error(), "goroutine") {
+		t.Fatalf("serve() error = %v, want the stack trace preserved", err)
+	}
+	if server.shutdownCalls != 1 {
+		t.Fatalf("shutdown calls = %d, want 1: the panic takes the normal exit path", server.shutdownCalls)
+	}
+}
+
+type panicBackgroundWorker struct{}
+
+func (panicBackgroundWorker) Run(context.Context) error {
+	panic("boom in worker loop")
+}
