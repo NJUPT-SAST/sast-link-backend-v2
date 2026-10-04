@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **部门自助写入收紧为 manager / admin 专属**（fix/department-self-edit-gate）：`PUT /user/profile` 的 `department` 键从「任意角色可写」收紧为仅 `manager` / `admin` 角色可写，其他角色（member / freshman / lecturer）提交该键返回 `40000`（与未知权限字段同姿，拒绝整个请求而非静默忽略——调用方不能误以为改成功了）。部门是组织归属字段而非展示资料，下游（People 等）按它做权限隔离；此前仅靠前端不暴露编辑入口实现限制，后端从未拒绝。角色取自 auth-state 实时数据库行（非 token 内 role claim 快照），降权下一请求即生效；空/未知角色一律拒绝（fail closed）。`PUT /admin/users/:id` / `PUT /admin/users` 的部门写入不变，普通用户的部门变更由管理员归置。前端配合：非管理角色的编辑请求体不应携带 `department` 键。
+
 - **manager 不再可改写既有账号的 login_email**（fix/admin-identity-boundaries）：`PUT /admin/users/:id` 的 `login_email` 改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可修改 login_email」），`email_type` 只能随 `login_email` 提交放带受限。与 personal_email 同判：忘记密码验证码发往 login_email 且 `@sast.fun` 前缀无格式约束，manager 把成员主邮箱改写为自己可读的 sast.fun 地址（部门共用箱/别名，唯一约束只挡精确重复）即构成对既有账号的静默持久接管。建号路径（`POST /admin/users`）不拦——manager 建号本就持有初始密码，无额外提权。
 
 - **manager 不再可绑定 personal_email**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的 `personal_email` 直绑改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可绑定 personal_email」）。直绑是免验证的身份断言：绑定后控制该邮箱即可登录并重置账号密码，manager 若能自选邮箱即可绑定自己控制的邮箱对任意成员账号构成持久静默接管（成员改密也不切断）；建号路径同理，绑定比初始密码存活得更久。自助面 `POST /user/identities/email`（需邮箱验证）不受影响，admin 直绑与校友工单审批直绑（本就 admin-only）不变。

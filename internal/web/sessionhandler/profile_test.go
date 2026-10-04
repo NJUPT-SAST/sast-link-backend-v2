@@ -25,6 +25,16 @@ func authedRouter(service Service) *gin.Engine {
 	return router
 }
 
+// roleRouter mounts the profile routes behind a principal carrying an explicit
+// role, the value the live database row (not the token claim) produced.
+func roleRouter(service Service, role string) *gin.Engine {
+	router := gin.New()
+	RegisterRoutes(router, Handler{Service: service}, scopedGates(allowAuthWith(middleware.Principal{
+		UserID: 42, JTI: "jti", ExpiresAt: time.Now().Add(time.Hour), Role: role,
+	})))
+	return router
+}
+
 func doJSON(router *gin.Engine, method, path, body string) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), method, path, strings.NewReader(body))
@@ -82,6 +92,29 @@ func TestUpdateProfileDistinguishesAbsentFromEmpty(t *testing.T) {
 	}
 	if input.Nickname != nil {
 		t.Fatalf("nickname = %v, want nil for an absent key", *input.Nickname)
+	}
+}
+
+// The department gate is decided in the service on the principal's live role,
+// so the handler's one job is forwarding it untouched: a manager's request
+// carries "manager" into the service, and a principal with no role resolves
+// to the empty string rather than some defaulted value.
+func TestUpdateProfileForwardsPrincipalRole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeService{updateProfileResult: &session.UpdateProfileResult{}}
+	if recorder := doJSON(roleRouter(service, "manager"), http.MethodPut, "/user/profile", `{"department":"software"}`); recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if service.updateProfileInput.Role != "manager" {
+		t.Fatalf("role = %q, want the principal's manager", service.updateProfileInput.Role)
+	}
+
+	service = &fakeService{updateProfileResult: &session.UpdateProfileResult{}}
+	if recorder := doJSON(authedRouter(service), http.MethodPut, "/user/profile", `{"intro":"新介绍"}`); recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if service.updateProfileInput.Role != "" {
+		t.Fatalf("role = %q, want empty when the principal carries none", service.updateProfileInput.Role)
 	}
 }
 

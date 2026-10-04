@@ -49,6 +49,7 @@ func (h Handler) UpdateProfile(c *gin.Context) {
 	result, err := h.Service.UpdateProfile(c.Request.Context(), session.UpdateProfileInput{
 		UserID:        principal.UserID,
 		ActorClientID: principal.ClientID,
+		Role:          principal.Role,
 		Name:          req.Name,
 		PhoneNumber:   req.PhoneNumber,
 		QQNumber:      req.QQNumber,

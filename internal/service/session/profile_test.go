@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
@@ -67,6 +68,7 @@ func TestUpdateProfileClearsDepartment(t *testing.T) {
 
 	if _, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
 		UserID:     42,
+		Role:       string(model.UserRoleManager),
 		Department: stringPtr(""),
 	}); err != nil {
 		t.Fatalf("UpdateProfile returned error: %v", err)
@@ -77,6 +79,59 @@ func TestUpdateProfileClearsDepartment(t *testing.T) {
 	if got := *users.profileUpdates[0].Department; got != "" {
 		t.Fatalf("update department = %q, want empty sentinel", got)
 	}
+}
+
+// department is an organizational field rather than a display one, so the
+// self-service path accepts it only from manager/admin — the same write roles
+// the admin surface grants. Every other role submitting the key is refused the
+// way a permission field the path does not expose would be, instead of the
+// field being dropped silently while the caller believes the edit landed.
+// A blank or unknown role is a refusal too: membership is decided on the live
+// database role, never on a client-supplied string.
+func TestUpdateProfileDepartmentRoleGate(t *testing.T) {
+	refuse := []string{"", "member", "freshman", "lecturer", "superuser"}
+	for _, role := range refuse {
+		t.Run("refuse "+role, func(t *testing.T) {
+			service := newRegisterService(t)
+			_, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
+				UserID:     42,
+				Role:       role,
+				Department: stringPtr("software"),
+			})
+			assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+			if calls := len(service.Users.(*fakeUsers).profileUpdates); calls != 0 {
+				t.Fatalf("repository called %d times, want 0 on refused department", calls)
+			}
+		})
+	}
+	for _, role := range []string{string(model.UserRoleManager), string(model.UserRoleAdmin)} {
+		t.Run("allow "+role, func(t *testing.T) {
+			service := newRegisterService(t)
+			users := service.Users.(*fakeUsers)
+			if _, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
+				UserID:     42,
+				Role:       role,
+				Department: stringPtr("software"),
+			}); err != nil {
+				t.Fatalf("UpdateProfile returned error: %v", err)
+			}
+			if got := users.profileUpdates[0].Department; got == nil || *got != "software" {
+				t.Fatalf("update department = %v, want software", got)
+			}
+		})
+	}
+	// The gate covers only the department key: a non-privileged role keeps
+	// every other self-service edit, so the refusal must not leak.
+	t.Run("member without department", func(t *testing.T) {
+		service := newRegisterService(t)
+		if _, err := service.UpdateProfile(context.Background(), UpdateProfileInput{
+			UserID: 42,
+			Role:   "member",
+			Intro:  stringPtr("新介绍"),
+		}); err != nil {
+			t.Fatalf("UpdateProfile returned error: %v", err)
+		}
+	})
 }
 
 // "user" columns are NOT NULL, so a blank value is invalid input rather than a
@@ -99,7 +154,9 @@ func TestUpdateProfileRejectsUnknownEnums(t *testing.T) {
 		input UpdateProfileInput
 	}{
 		{"college", UpdateProfileInput{UserID: 42, College: stringPtr("不存在学院")}},
-		{"department", UpdateProfileInput{UserID: 42, Department: stringPtr("hardware")}},
+		// The role is what the admin surface grants the same write; without it
+		// the enum branch is unreachable and the case would pass vacuously.
+		{"department", UpdateProfileInput{UserID: 42, Role: string(model.UserRoleAdmin), Department: stringPtr("hardware")}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

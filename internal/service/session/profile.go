@@ -19,10 +19,9 @@ import (
 //
 // student_id has no entry: the self-service edit accepted it once, guarded only
 // by the case-sensitive unique constraint, so a user could squat a case variant
-// of another account's ID and break the mailbox-prefix pairing. Changing a
-// student ID is an administrator's correction, not a self-service edit —
-// PUT /admin/users/:id carries the folded occupancy pre-check and the merged
-// prefix-consistency judgement.
+// of another account's ID. Changing a student ID is an administrator's
+// correction, not a self-service edit — PUT /admin/users/:id carries the
+// folded occupancy pre-check and the NJUPT-prefix collision guard.
 var profileFieldOrder = []string{
 	"name", "phone_number", "qq_number", "college", "major",
 	"nickname", "department", "intro", "email", "blog_url", "github_url",
@@ -32,9 +31,10 @@ var profileFieldOrder = []string{
 // Only the fields PRD §4.9 assigns to the user are accepted: login_email, role,
 // state, email_type and student_id have no entry in the input, so no request can
 // reach them — the strict JSON decoder answers an unknown student_id key with
-// 400 rather than silently ignoring it. Every present field is validated before
-// the write, so a partial failure cannot leave the user table updated and
-// profile untouched.
+// 400 rather than silently ignoring it. department additionally carries a role
+// gate (manager/admin only — see departmentSelfEditRoles). Every present field
+// is validated before the write, so a partial failure cannot leave the user
+// table updated and profile untouched.
 func (s Service) UpdateProfile(ctx context.Context, input UpdateProfileInput) (*UpdateProfileResult, error) {
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidToken, "身份主体无效", nil)
@@ -177,6 +177,16 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 	}
 
 	if input.Department != nil {
+		// department is an organizational field, not a display one: it feeds
+		// the console's department filters and downstream membership systems, so
+		// the self-service edit accepts it only from the roles the admin surface
+		// trusts with the same write (manager/admin). Any other role submitting
+		// the key is rejected — the same posture as a permission field the path
+		// does not expose — rather than silently dropping it: a caller must not
+		// believe an edit landed when it did not.
+		if !departmentSelfEditAllowed(input.Role) {
+			return update, nil, newError(ErrInvalidInput, "部门仅限管理员修改", nil)
+		}
 		department := model.Department(strings.TrimSpace(*input.Department))
 		// An empty department clears the column; any other value must be a real
 		// department_enum member, or PostgreSQL rejects it as a 500 rather than a
@@ -200,4 +210,17 @@ func buildProfileUpdate(input UpdateProfileInput) (repository.ProfileUpdate, []s
 func resourceID(userID int64) *string {
 	value := strconv.FormatInt(userID, 10)
 	return &value
+}
+
+// departmentSelfEditRoles is the role set allowed to write its own department
+// through PUT /user/profile — the same write roles the admin surface grants
+// (manager/admin); lecturer stays a directory reader. Membership is decided on
+// the live database role, so an unknown or blank role is a refusal, not a pass.
+var departmentSelfEditRoles = map[model.UserRole]bool{
+	model.UserRoleManager: true,
+	model.UserRoleAdmin:   true,
+}
+
+func departmentSelfEditAllowed(role string) bool {
+	return departmentSelfEditRoles[model.UserRole(role)]
 }

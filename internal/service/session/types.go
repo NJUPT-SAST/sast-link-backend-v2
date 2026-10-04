@@ -449,6 +449,10 @@ type UpdateProfileInput struct {
 	// ActorClientID is the azp of the token that authorized the edit; empty
 	// means a legacy console token, resolved to InternalClientID at audit time.
 	ActorClientID string
+	// Role is the caller's live database role (Principal.Role), deciding whether
+	// the department field is writable on this path. It is not taken from the
+	// token's role claim, which is a snapshot that survives a demotion.
+	Role string
 
 	Name        *string
 	PhoneNumber *string
