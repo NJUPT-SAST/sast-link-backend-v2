@@ -774,6 +774,8 @@ paths:
         更新当前登录用户可自助维护的个人信息。允许更新 user 表中的基础信息
         （真实姓名、手机号、QQ 号、学院、专业、学号）以及 profile 表中的展示资料。
         登录邮箱、角色、状态、邮箱类型等身份与权限字段不可通过此接口修改，传入未知字段返回 40000。
+        部门是组织归属字段：仅 manager / admin 角色可在自助路径携带 department 键，
+        其他角色提交该键返回 40000（与未知权限字段同姿）。
 
         未传的字段保持不变；传 null 等同于未传，不表示清空。profile 侧的可空展示字段
         （nickname、intro、email、blog_url、github_url、department）传空字符串表示
@@ -840,7 +842,9 @@ paths:
                   type: string
                   nullable: true
                   enum: [software, media, electronics, office, liaison, publicity, competition, ""]
-                  description: 部门。传空字符串清空为 NULL，传 null 表示不修改
+                  description: 部门（组织归属字段，非展示资料）。仅 manager / admin
+                    角色可携带此键，其他角色提交返回 40000。传空字符串清空为 NULL，
+                    传 null 表示不修改
                 intro:
                   type: string
                   nullable: true
@@ -882,7 +886,8 @@ paths:
           description: 未认证（401xx）
         "400":
           $ref: "#/components/responses/BadRequest"
-          description: 参数错误、未知字段、枚举/长度/链接校验失败（40000）
+          description: 参数错误、未知字段、枚举/长度/链接校验失败、非 manager/admin
+            角色提交 department 键（40000）
         "403":
           $ref: "#/components/responses/Forbidden"
           description: 账号已注销（40301）
