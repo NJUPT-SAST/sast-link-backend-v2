@@ -38,7 +38,7 @@ curl http://127.0.0.1:8080/health
 - **Self-service**: profile management, third-party account binding, authorized-apps management, device management, avatar upload
 - **Admin console**: user management (list, detail, edit, provision, soft-delete/restore, batch role change); provisioning can bind a personal email as the login identity when the school mailbox is no longer usable; alumni account-request review queue; OAuth client configuration, audit logs, console overview stats
 - **Alumni intake**: graduated members whose school mailbox no longer receives the registration code submit a request instead of registering; a Turnstile-guarded public form feeds a console review queue, and approval provisions the account and emails the applicant. Rejection can be silent (V022): a mistaken submission whose applicant already self-registered closes without emailing anyone. Identity verification stays human
-- **Operations**: PostgreSQL 16 + Redis 8, one-command Compose startup, built-in health check
+- **Operations**: PostgreSQL 16 + Redis 8, one-command Compose startup, built-in health check; an in-process retention worker sweeps expired tokens, audit logs and reviewed alumni tickets, recalibrates derived user state, and physically purges closed accounts past their grace window (V023, default 30d, 0 disables)
 
 ## Documentation
 

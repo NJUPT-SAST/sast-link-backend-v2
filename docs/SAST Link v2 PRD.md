@@ -533,6 +533,7 @@ Payload: {
 | `update_profile` | 修改个人资料 |
 | `upload_avatar` | 上传头像 |
 | `admin_user_update` / `admin_user_delete` / `admin_user_restore` | admin 编辑 / 注销 / 恢复用户（`resource = user`） |
+| `user_purge` | retention worker 物理清除已过宽限期的注销账号（`resource = user`；`user_id` / `actor_client_id` 均为 NULL，`detail` 无 PII，台账用途：证明数据何时被销毁） |
 | `admin_oauth_client_create` / `admin_oauth_client_update` | admin 注册 / 更新 OAuth 客户端（`resource = oauth_client`） |
 
 日志字段：`user_id`、`action`、`resource`、`resource_id`、`detail`(JSONB)、`client_ip`(INET)、`user_agent`、`success`、`err_code`、`actor_client_id`。用户删除后 `user_id` SET NULL 保留日志。
@@ -594,8 +595,10 @@ Payload: {
 njupter ──(加入SAST)──► on_sast    ← 手动通道（PUT state 钉住），不再由状态机自动迁移
 on_sast ──(离开SAST)──► retired_sast
 njupter/on_sast/retired_sast ──(注销)──► is_deleted
-is_deleted ──(恢复)──► 按自动状态机重新推导
+is_deleted ──(恢复，仅限宽限期内)──► 按自动状态机重新推导
 ```
+
+注销是两段式的：`DELETE /admin/users/:id` 软删（同事务撤销全部 token、盖 V023 的 `deleted_at` 章），宽限期（`RETENTION_DELETED_USER_AGE`，默认 30 天，0 禁用）内可 restore；超期后 retention worker 物理删除行——级联清除 profile / identities / token 元数据 / grants / badge，audit 与校友工单引用置 NULL，`login_email` / `student_id` 释放可重新注册，每账号同一事务写一条无 PII 的 `user_purge` 审计行，COS 头像对象事务外删除。
 
 手动通道：管理员 `PUT /admin/users/:id` 提交 `state` 即钉住（`state_manual`），自动推导与清算批次全部跳过；`state_auto=true` 在同一事务内重推并解除钉住（与 `state` 互斥，同时提交返回 `400`）。`GET /admin/users`（列表 / 详情 / 批量）携带 `state_manual`，控制台据此判断某个 `state` 是人做的裁决还是机器推导，进而决定要不要发 `state_auto`。清算批次挂在 retention worker 每小时跑，只改 state、不 bump `token_version`、不撤销会话。
 

@@ -2751,6 +2751,14 @@ paths:
         需 admin 或 manager 角色，委派调用需 `admin:write` scope。将 user.state 设为 is_deleted，保留数据；同一事务内递增
         token_version 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，
         非 DB 级联删除），撤销的 JTI 写入 outbox，由 worker 失效对应 auth-state 缓存。
+        V023 起同时盖 deleted_at 章，即物理清除时钟。
+
+        实质删除（V023）：retention worker 物理删除 deleted_at 早于
+        RETENTION_DELETED_USER_AGE（默认 30 天，0 禁用）的已注销行：级联清除
+        profile / identities / token 元数据 / grants / badge，audit 与校友工单
+        引用置 NULL，login_email / student_id 释放可重新注册，每账号同一事务
+        写一条无 PII 的 user_purge 审计行，COS 头像对象事务外删除。宽限期内
+        可 restore，超期后 restore 返回 404。
 
         不可注销自己的账号，也不可注销系统中最后一名活跃管理员（均 403）；
         manager 亦不可注销 admin 角色账号（403）。
@@ -4289,6 +4297,14 @@ components:
             state 是否由管理员手写钉住（PUT 传 state 即为钉住）。true 表示该账号跳过
             自动推导与清算批次，值是人做的判断而非事实；false 表示由状态机推导。
             控制台据此判断该不该发 state_auto 解除钉住。
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            物理清除时钟（V023）：已注销账号的注销时刻，控制台据此展示剩余宽限
+            （超过 RETENTION_DELETED_USER_AGE 后行被物理删除，restore 返回 404）；
+            活跃账号恒为 null。
 
         profile_needs_completion:
           type: boolean
@@ -4428,6 +4444,14 @@ components:
             state 是否由管理员手写钉住（PUT 传 state 即为钉住）。true 表示该账号跳过
             自动推导与清算批次，值是人做的判断而非事实；false 表示由状态机推导。
             控制台据此判断该不该发 state_auto 解除钉住。
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            物理清除时钟（V023）：已注销账号的注销时刻，控制台据此展示剩余宽限
+            （超过 RETENTION_DELETED_USER_AGE 后行被物理删除，restore 返回 404）；
+            活跃账号恒为 null。
 
         profile_needs_completion:
           type: boolean
@@ -4891,6 +4915,14 @@ components:
             state 是否由管理员手写钉住（PUT 传 state 即为钉住）。true 表示该账号跳过
             自动推导与清算批次，值是人做的判断而非事实；false 表示由状态机推导。
             控制台据此判断该不该发 state_auto 解除钉住。
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            物理清除时钟（V023）：已注销账号的注销时刻，控制台据此展示剩余宽限
+            （超过 RETENTION_DELETED_USER_AGE 后行被物理删除，restore 返回 404）；
+            活跃账号恒为 null。
 
         profile_needs_completion:
           type: boolean

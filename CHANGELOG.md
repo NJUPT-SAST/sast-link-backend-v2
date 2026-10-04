@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **注销账号宽限期后物理清除**（V023，feat/alumni-silent-reject）：`DELETE /admin/users/:id` 仍为软删（同事务盖 `deleted_at` 章），retention worker 每小时物理删除 `deleted_at` 早于 `RETENTION_DELETED_USER_AGE`（默认 30 天，`0` 禁用，低于 24h 拒绝启动）的已注销行：级联清除 profile / identities / token 元数据 / grants / badge，`audit_logs` 与校友工单引用置 NULL（历史存活），`login_email` / `student_id` 唯一约束释放可重新注册；每账号同一事务写一条无 PII 的 `user_purge` 审计行，COS 头像对象事务外删除（失败仅记日志）。restore 清空 `deleted_at`；宽限期内可恢复，超期后 restore 返回 `404`。存量 `is_deleted` 行回填 `deleted_at = now()`，从迁移时刻起统一宽限。用户列表/详情新增 `deleted_at` 字段供控制台展示剩余宽限。
+
 - **校友建号申请支持静默驳回**（feat/alumni-silent-reject）：`POST /admin/alumni-requests/:id/reject` 新增可选 `silent`（默认 `false`）。误操作工单（典型：新生误提交后已自行完成注册）可落库 verdict 但不发结果邮件；`reject_reason` 静默时仍必填（工单与审计自身的解释）。驳回事务同 UPDATE 落 `silently_rejected` 标记与 `notified_at`（V022），重启补投扫描与 `notified=false` 积压过滤均不再命中；`resend-notification` 对静默工单拒绝补发（`42200`），工单响应携带 `silently_rejected`（审计 detail 记 `silent: true`）供控制台渲染与隐藏补发入口。配套：审批撞学号占用（`40902`）文案补「如申请人已自行注册请静默驳回」指引。
 
 ### Changed

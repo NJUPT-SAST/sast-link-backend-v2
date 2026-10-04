@@ -139,6 +139,7 @@ CREATE TABLE "user" (
 |student_id|学号|
 |state|enum {'is_deleted','on_sast','retired_sast','njupter'}。V014 起 `njupter`/`on_sast`/`retired_sast` 由自动状态机推导（规则单一事实源在 `internal/validate`，不复制进 SQL）：学号前两位数字=入学年份（格式保证），东八区 9/1 为学年切点，入学满 4 年→`retired_sast`；否则在校 `lecturer`/`admin`→`on_sast`，在校 `freshman`/`member`→`njupter`。`is_deleted` 保持手动独立通道。管理员传 `state` 即钉住（`state_manual=TRUE`），`state_auto=true` 重推并解除；清算批次每 tick 校准未钉住的活跃行，只改 state 不撤销会话|
 |state_manual|V014 钉住标记，见 `state` 行|
+|deleted_at|V023 物理清除锚点。注销事务写入、restore 清空；retention worker 据此硬删超期行（见[定时清理](#定时清理)）。活跃行恒为 NULL，读路径一律按 `state` 过滤，不读本列。gorm 的 soft-delete 魔法绑定在实现 clause 接口的 `gorm.DeletedAt` 类型上而非字段名，此列为普通 `*time.Time`，不会自动过滤查询|
 
 |email_type|注册邮箱类型，见 `email_enum`|
 |login_email|注册邮箱|
@@ -1100,6 +1101,7 @@ oauth_authorizations.family_id
 | `audit_logs` | 超过保留期 | `created_at` + 90d | 90 天（PRD §9）是**默认值**：审计日志在这里属运维用途而非合规强制，可调大以保留更多历史，也可收紧至 30 天下限；低于下限启动时拒绝，避免误配到「事故排查时相关记录已被删」的程度 |
 | `user.state`（重算，非删除） | 未钉住的活跃账号（`state_manual = FALSE AND state <> 'is_deleted'`） | 每轮 sweep | 派生状态校准：Go 里算 `validate.DeriveState`，只写与现值不同的行，**不 bump `token_version`、不撤销会话**（state 不是鉴权输入）。按 `id` keyset 游标推进，一批不满即结束；超过单轮预算（`20 × RETENTION_BATCH_SIZE`）时游标跨 tick 保留，下一轮续扫而非重头，因此尾部不会被永久饿死。V014 上线时不刷值，由首个批次自然校准 |
 | `alumni_requests` | 已审批（approved/rejected）且超过保留期 | `reviewed_at` + 180d | **pending 永不清理**，无论多久：三天处理时限只是前端文案，后端不做硬限制，删掉一条未审的申请是丢掉某人的请求而不是让它过期。窗口从 `reviewed_at` 起算而非 `created_at`——保留期的钟在「被决定」时才开始走，未审的没有起点。谓词显式带 `reviewed_at IS NOT NULL`：有状态但无时间戳的行否则会被拿去和一个它无值可比的 cutoff 比较。部分索引 `idx_alumni_requests_pending_notification` 服务的是通知积压视图，不是本清理 |
+| `"user"`（物理删除） | 已关闭且超过宽限期（`state = 'is_deleted' AND deleted_at IS NOT NULL AND deleted_at < cutoff`） | `deleted_at` + 30d（V023；`RETENTION_DELETED_USER_AGE`，0 = 禁用） | 注销的实质删除：DELETE /admin/users/:id 仍是软删（同事务撤销全部 token 并盖 `deleted_at` 章），宽限期后 worker 硬删行。级联带走 `profile` / `identities` / token 元数据 / `oauth_grants` / `badge`（建表时全部 `ON DELETE CASCADE`， schema 本就为这天铺路）；`audit_logs.user_id` 与 `alumni_requests` 两根 FK `ON DELETE SET NULL`，历史存活但主体置空。每账号同一事务写一条 `user_purge` 审计行（user_id/actor_client_id NULL，无 PII）作为「数据何时被销毁」的台账；行删后 `login_email` / `student_id` 唯一约束释放，可重新注册。头像对象（key 在级联前读出）在事务外逐个删，失败仅 WARN 留孤儿。候选行 `FOR UPDATE OF "user" SKIP LOCKED`，与 restore 的行锁天然串行：restore 在途的行本批跳过，提交后不再满足谓词。V023 回填存量 is_deleted 行 `deleted_at = now()`——从迁移时刻起统一宽限，而非按未知年龄立即清除。低于 24h 的正窗口启动时拒绝（给管理员留下发现并撤销误关的现实机会） |
 
 `oauth_grants` 不在此列，且**刻意永不清理**：授权记录是长效 consent history（当前态，历史
 审计在 `audit_logs`），不是一次性凭据。把它加进这张表会重新制造 V009 之前「已授权应用列表
