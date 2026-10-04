@@ -158,11 +158,15 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 			// The state is consumed either way; the cookie pairing it is spent too —
 			// except under the callback cap, which rejects before touching state:
 			// clearing the pairing there would break the in-flight login the caller
-			// is about to retry (shared-NAT neighbors can trip the cap).
-			if h.StateCookie != nil && !errors.Is(err, oauthlogin.ErrRateLimited) {
+			// is about to retry (shared-NAT neighbors can trip the cap), and except a
+			// provider outage, whose state the service just wrote back so the
+			// browser's own retry can re-run the whole callback — clearing the cookie
+			// would strand that restored state behind a pairing check that cannot
+			// pass anymore.
+			if h.StateCookie != nil && !errors.Is(err, oauthlogin.ErrRateLimited) && !isRestorableFailure(err) {
 				h.StateCookie.Clear(c)
 			}
-			h.redirectFailure(c, err)
+			h.redirectFailure(c, err, name)
 			return
 		}
 		if h.StateCookie != nil {
@@ -215,12 +219,14 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 	}
 }
 
-// redirectFailure sends a failed callback to the frontend error page.
+// redirectFailure sends a failed callback to the frontend error page. The
+// provider is named so the page can offer a one-click restart of that
+// provider's login — the action almost every callback failure needs.
 //
 // When no error page is configured the envelope is used instead — worse UX but
 // never worse security, since the alternative would be redirecting to an
 // unvalidated location.
-func (h Handler) redirectFailure(c *gin.Context, err error) {
+func (h Handler) redirectFailure(c *gin.Context, err error, provider model.LoginMethod) {
 	mapped := mapServiceError(err)
 	if strings.TrimSpace(h.ErrorRedirect) == "" {
 		response.Error(c, mapped)
@@ -232,6 +238,7 @@ func (h Handler) redirectFailure(c *gin.Context, err error) {
 		return
 	}
 	query := target.Query()
+	query.Set("provider", string(provider))
 	var business *response.BusinessError
 	if errors.As(mapped, &business) {
 		query.Set("error", strconv.Itoa(business.Code))
@@ -243,6 +250,14 @@ func (h Handler) redirectFailure(c *gin.Context, err error) {
 	}
 	target.RawQuery = query.Encode()
 	c.Redirect(http.StatusFound, target.String())
+}
+
+// isRestorableFailure reports whether a callback failure carries the service's
+// Restorable flag — a provider outage whose state was written back for a browser
+// retry, so the state cookie pairing it must survive.
+func isRestorableFailure(err error) bool {
+	var serviceErr *oauthlogin.Error
+	return errors.As(err, &serviceErr) && serviceErr.Restorable
 }
 
 // exchangeCodeRequest redeems a login_code.
