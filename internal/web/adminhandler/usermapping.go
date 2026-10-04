@@ -45,9 +45,13 @@ type adminUserDTO struct {
 	// StateManual says whether state above was hand-written (and therefore pins
 	// the row out of the derived-state machine) or derived. The console needs it
 	// to decide whether state_auto is the right next request.
-	StateManual bool      `json:"state_manual"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	StateManual bool `json:"state_manual"`
+	// DeletedAt is the close moment (V023): null on a live account, and on a
+	// closed one the countdown input for the physical purge that follows the
+	// grace window — after which restore answers 404.
+	DeletedAt *time.Time `json:"deleted_at"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 type adminUserListResponse struct {
@@ -99,6 +103,7 @@ type userDetailDTO struct {
 	ProfileNeedsCompletion bool              `json:"profile_needs_completion"`
 	IncompleteFields       []string          `json:"incomplete_fields"`
 	StateManual            bool              `json:"state_manual"`
+	DeletedAt              *time.Time        `json:"deleted_at"`
 	Profile                *userProfileDTO   `json:"profile"`
 	Identities             []userIdentityDTO `json:"identities"`
 	CreatedAt              time.Time         `json:"created_at"`
@@ -192,6 +197,7 @@ func mapAdminUser(user adminuser.UserListItem, role string) adminUserDTO {
 		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
 		IncompleteFields:       user.IncompleteFields,
 		StateManual:            user.StateManual,
+		DeletedAt:              user.DeletedAt,
 
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
@@ -224,6 +230,7 @@ func mapUserDetail(detail adminuser.UserDetail, role string) userDetailDTO {
 		ProfileNeedsCompletion: detail.ProfileNeedsCompletion,
 		IncompleteFields:       detail.IncompleteFields,
 		StateManual:            detail.StateManual,
+		DeletedAt:              detail.DeletedAt,
 
 		Identities: make([]userIdentityDTO, 0, len(detail.Identities)),
 		CreatedAt:  detail.CreatedAt,

@@ -268,3 +268,103 @@ func (r *RetentionRepository) RecomputeDerivedState(
 	}
 	return next, nil
 }
+
+// PurgedUser is one physically deleted account, as the worker needs it: the id
+// for logging, and the COS avatar key read off the profile row before the
+// cascade removed it.
+type PurgedUser struct {
+	ID     int64
+	Avatar *string
+}
+
+// PurgeDeletedUsers physically removes closed accounts whose deleted_at stamp is
+// older than before, in one transaction per batch.
+//
+// The delete cascades profile, identities, token metadata, grants and badge
+// (their FKs are ON DELETE CASCADE by design — the schema was laid out for this
+// day), and sets NULL the audit_logs and alumni_requests references so history
+// survives the account it names. A user_purge audit row is written per account
+// inside the same transaction: the ledger that says "this person's data was
+// destroyed at this moment" must not be separable from the destruction itself.
+// user_id and actor_client_id are NULL on those rows — no subject, no OAuth
+// credential, a background worker.
+//
+// Candidates are locked FOR UPDATE OF the user row with SKIP LOCKED, so a
+// restore holding the lock removes the row from this batch (it is no longer
+// closed once that transaction commits) instead of blocking the sweep. The
+// delete re-states the full candidate predicate under the lock, so a row that
+// changed shape mid-batch is left alone.
+func (r *RetentionRepository) PurgeDeletedUsers(
+	ctx context.Context,
+	before time.Time,
+	now time.Time,
+	limit int,
+) ([]PurgedUser, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("purge deleted users: %w", ErrInvalidArgument)
+	}
+
+	var purged []PurgedUser
+	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		rows := []PurgedUser{}
+		if err := transaction.Raw(`
+			SELECT "user".id, profile.avatar
+			FROM "user"
+			LEFT JOIN profile ON profile.user_id = "user".id
+			WHERE "user".state = ? AND "user".deleted_at IS NOT NULL AND "user".deleted_at < ?
+			ORDER BY "user".id
+			LIMIT ?
+			FOR UPDATE OF "user" SKIP LOCKED`,
+			model.UserStateDeleted, before, limit).Scan(&rows).Error; err != nil {
+			return fmt.Errorf("select closed accounts for purge: %w", err)
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+
+		ids := make([]int64, 0, len(rows))
+		for _, row := range rows {
+			ids = append(ids, row.ID)
+		}
+		result := transaction.Where(
+			`id IN ? AND state = ? AND deleted_at IS NOT NULL AND deleted_at < ?`,
+			ids, model.UserStateDeleted, before,
+		).Delete(&model.User{})
+		if result.Error != nil {
+			return fmt.Errorf("purge closed accounts: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			// Every candidate changed shape between the lock and the delete (a
+			// restore won). Nothing to ledger, nothing to hand back.
+			return nil
+		}
+
+		purged = make([]PurgedUser, 0, len(rows))
+		for _, row := range rows {
+			// The audit row carries no profile data: the point is that the data is
+			// gone, and the id plus the timestamp is the whole story a privacy
+			// inquiry needs.
+			id := row.ID
+			resourceID := fmt.Sprintf("%d", id)
+			success := true
+			if err := transaction.Create(&model.AuditLog{
+				Action:     "user_purge",
+				Resource:   "user",
+				ResourceID: &resourceID,
+				Success:    &success,
+				// The worker's clock, not time.Now() inside the transaction: the
+				// ledger's "when" must answer to the same fixed clock the sweep
+				// computed its cutoff from.
+				CreatedAt: now,
+			}).Error; err != nil {
+				return fmt.Errorf("write user_purge audit row: %w", err)
+			}
+			purged = append(purged, row)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return purged, nil
+}

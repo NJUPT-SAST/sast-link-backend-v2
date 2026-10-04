@@ -149,8 +149,12 @@ type UserListItem struct {
 	// reviewer sees a value and cannot tell whether it is a fact to trust or a
 	// judgement to reconsider, so the state_auto unpin channel is unusable.
 	StateManual bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// DeletedAt is the close moment (V023). The console counts the remaining
+	// grace window down from it — past the window the retention worker physically
+	// deletes the row and restore starts answering 404.
+	DeletedAt *time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // UpdateUserInput is a partial administrative edit. A nil field is left
@@ -348,10 +352,12 @@ type UserDetail struct {
 	IncompleteFields       []string
 	// StateManual is the pin flag; see UserListItem.
 	StateManual bool
-	Profile     *ProfileDetail
-	Identities  []IdentityDetail
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// DeletedAt is the close moment; see UserListItem.
+	DeletedAt  *time.Time
+	Profile    *ProfileDetail
+	Identities []IdentityDetail
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // ProfileDetail is the display-card half of a user record.
