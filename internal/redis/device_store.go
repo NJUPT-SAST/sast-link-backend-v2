@@ -105,8 +105,11 @@ if count > tonumber(ARGV[7]) then
   redis.call("ZREMRANGEBYRANK", KEYS[1], 0, 0)
   -- The evicted member's Hash dies in the same script: a separate DEL was a
   -- second round trip that could fail alone and strand the Hash (up to its
-  -- TTL) beside a set that has already forgotten it.
-  redis.call("DEL", KEYS[3] .. evicted[1])
+  -- TTL) beside a set that has already forgotten it. The DEL rides pcall so a
+  -- failed one cannot abort the script and swallow evicted[1]: the family
+  -- revoke keyed on that return value is the load-bearing half of the
+  -- eviction, while a stranded Hash self-clears through its TTL.
+  pcall(redis.call, "DEL", KEYS[3] .. evicted[1])
   return evicted[1]
 end
 return ""
@@ -210,8 +213,9 @@ local count = redis.call("ZCARD", KEYS[1])
 if count > tonumber(ARGV[7]) then
   local evicted = redis.call("ZRANGE", KEYS[1], 0, 0)
   redis.call("ZREMRANGEBYRANK", KEYS[1], 0, 0)
-  -- Same in-script DEL as RegisterDevice's eviction branch.
-  redis.call("DEL", KEYS[3] .. evicted[1])
+  -- Same pcall'd in-script DEL as RegisterDevice's eviction branch: the
+  -- revoke riding on the returned ID must survive a failed Hash delete.
+  pcall(redis.call, "DEL", KEYS[3] .. evicted[1])
   return {0, evicted[1]}
 end
 return {0, ""}
