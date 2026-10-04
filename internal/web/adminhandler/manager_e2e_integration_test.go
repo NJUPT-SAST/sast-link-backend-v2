@@ -175,6 +175,54 @@ func TestManagerE2EBoundary(t *testing.T) {
 		}
 	})
 
+	t.Run("cannot bind a personal email on an existing account", func(t *testing.T) {
+		refused := h.do(t, http.MethodPut, "/admin/users/"+memberTarget, "application/json",
+			`{"personal_email":"manager-picked@qq.com"}`)
+		if refused.Code != http.StatusForbidden {
+			t.Fatalf("bind status = %d, want 403: %s", refused.Code, refused.Body.String())
+		}
+		if !strings.Contains(refused.Body.String(), "仅管理员可绑定 personal_email") {
+			t.Fatalf("missing bind refusal: %s", refused.Body.String())
+		}
+		var bound int64
+		if err := h.database.Model(&model.Identity{}).
+			Where("user_id = ? AND provider = ?", createdBody.Data.ID, model.LoginMethodOtherMail).
+			Count(&bound).Error; err != nil || bound != 0 {
+			t.Fatalf("other_mail bound behind the boundary: count = %d err = %v", bound, err)
+		}
+	})
+
+	t.Run("cannot provision with a personal email", func(t *testing.T) {
+		refused := h.do(t, http.MethodPost, "/admin/users", "application/json",
+			`{"name":"直绑账号","student_id":"B24040341","login_email":"b24040341@njupt.edu.cn",
+		  "phone_number":"13900139003","qq_number":"24040341","personal_email":"manager-picked@qq.com"}`)
+		if refused.Code != http.StatusForbidden {
+			t.Fatalf("create-bind status = %d, want 403: %s", refused.Code, refused.Body.String())
+		}
+		var provisioned int64
+		if err := h.database.Model(&model.User{}).
+			Where("student_id = ?", "B24040341").
+			Count(&provisioned).Error; err != nil || provisioned != 0 {
+			t.Fatalf("account created behind the boundary: count = %d err = %v", provisioned, err)
+		}
+	})
+
+	t.Run("cannot rewrite the login email", func(t *testing.T) {
+		refused := h.do(t, http.MethodPut, "/admin/users/"+memberTarget, "application/json",
+			`{"login_email":"shared-box@sast.fun"}`)
+		if refused.Code != http.StatusForbidden {
+			t.Fatalf("login-email status = %d, want 403: %s", refused.Code, refused.Body.String())
+		}
+		if !strings.Contains(refused.Body.String(), "仅管理员可修改 login_email") {
+			t.Fatalf("missing login-email refusal: %s", refused.Body.String())
+		}
+		var login string
+		if err := h.database.Model(&model.User{}).Where("id = ?", createdBody.Data.ID).
+			Pluck("login_email", &login).Error; err != nil || login != "b24040321@njupt.edu.cn" {
+			t.Fatalf("login email after refusal = %q err = %v, want the original", login, err)
+		}
+	})
+
 	t.Run("cannot edit or close an admin account", func(t *testing.T) {
 		var adminID int64
 		if err := h.database.Model(&model.User{}).

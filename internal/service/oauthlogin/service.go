@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -246,8 +247,12 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 			newError(ErrDependencyUnavailable, "读取 OAuth state 失败", err))
 	}
 	if !found {
+		// Display: the default Kind string names the mechanism ("state 无效或已过期"),
+		// which a user cannot act on — every cause of a missing state (expired,
+		// forged, or consumed by an earlier copy of this same callback) has the
+		// same instruction: start the login again.
 		return nil, tagCallbackFailure(StageState, ReasonStateNotFound,
-			newError(ErrStateInvalid, "state 无效或已过期", nil))
+			newDisplayError(ErrStateInvalid, "登录已中断，请重新发起登录", nil))
 	}
 	// Login CSRF (OAuth 2.0 §10.12): the state alone proves somebody started a
 	// login, not that the browser completing it is the one that did. The digest
@@ -261,18 +266,31 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 			reason = ReasonStateCookieMissing
 		}
 		return nil, tagCallbackFailure(StageState, reason,
-			newError(ErrStateInvalid, "state 与发起授权的浏览器不匹配", nil))
+			newDisplayError(ErrStateInvalid, "登录校验失败，请重新发起登录", nil))
 	}
 	// A state issued for one provider must not be redeemable at another's
 	// callback, which would pair a GitHub state with a Lark identity.
 	if statePayload.Provider != input.Provider {
 		return nil, tagCallbackFailure(StageState, ReasonProviderMismatch,
-			newError(ErrStateInvalid, "state 与回调 provider 不匹配", nil))
+			newDisplayError(ErrStateInvalid, "登录已中断，请重新发起登录", nil))
 	}
 
 	identity, err := client.Exchange(ctx, input.Code, "")
 	if err != nil {
 		stage, reason, outcome := providerFailureOutcome(err)
+		// A provider outage is the one failure whose state is written back:
+		// the callback failed on our network leg, not on an answer GitHub or
+		// Lark gave, and a retried GET (a browser refresh, the provider page's
+		// back-and-authorize) arriving with this state should re-run the whole
+		// exchange instead of falling into "state 无效或已过期" — which is what
+		// made these outages undiagnosable from the user side. Re-running is
+		// safe: the CSRF cookie still binds the state to the browser that started
+		// it (the HTTP layer keeps the cookie for exactly this flag), and the code
+		// is single-use at the provider, so a retry that finds the code already
+		// spent lands on the ordinary restart-the-login path.
+		if isRestorableOutcome(outcome) {
+			s.restoreStateAfterOutage(ctx, input.State, statePayload)
+		}
 		return nil, tagCallbackFailure(stage, reason, outcome)
 	}
 
@@ -290,6 +308,32 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		return s.registrationBranch(ctx, input, identity, redirect)
 	}
 	return s.loginBranch(ctx, input, identity, existing, redirect)
+}
+
+// oauthStateRestoreTTL bounds how long a state is written back after a provider
+// outage. Short on purpose: it must cover a user noticing the error page and
+// retrying, while keeping the replay window of an outage-restored state far
+// below the 10-minute lifetime of a fresh one.
+const oauthStateRestoreTTL = 2 * time.Minute
+
+// isRestorableOutcome reports whether a mapped provider failure carries the
+// Restorable flag — the same flag the HTTP layer reads to keep the state cookie.
+func isRestorableOutcome(outcome error) bool {
+	var serviceErr *Error
+	return errors.As(outcome, &serviceErr) && serviceErr.Restorable
+}
+
+// restoreStateAfterOutage puts a consumed state back so the browser's own
+// retry can complete the login. Best-effort: when Redis refuses the write the
+// retry simply finds no state and restarts the login, exactly as before.
+func (s Service) restoreStateAfterOutage(ctx context.Context, state string, payload StatePayload) {
+	ttl := s.stateTTL()
+	if ttl > oauthStateRestoreTTL {
+		ttl = oauthStateRestoreTTL
+	}
+	if err := s.States.SaveOAuthState(ctx, state, payload, ttl); err != nil {
+		slog.WarnContext(ctx, "restore oauth state after provider outage failed", "error", err)
+	}
 }
 
 // loginBranch handles a provider account that is already bound: it refreshes the

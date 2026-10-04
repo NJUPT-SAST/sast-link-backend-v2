@@ -391,9 +391,11 @@ func (r *UserRepository) ExistsByStudentID(ctx context.Context, studentID string
 
 // ExistsByStudentIDExcluding is ExistsByStudentID with one row left out, so an
 // edit can re-submit (or case-normalize) the target account's own student ID
-// without colliding against itself. Pass 0 to exclude nothing. Same folded
-// comparison: the console's writes ride the same case-sensitive unique
-// constraint the registration and alumni paths guard against.
+// without colliding against itself. Pass 0 to exclude nothing — the provision
+// path, where every existing row counts. Same folded comparison, because the
+// console's writes ride the same case-sensitive unique constraint the
+// registration and alumni paths guard against; the NJUPT-prefix collision
+// guard reads it with an email local part in place of a student ID.
 func (r *UserRepository) ExistsByStudentIDExcluding(
 	ctx context.Context,
 	studentID string,

@@ -571,11 +571,11 @@ POST /auth/reset-password
 >
 > **provider 开关**：GitHub 与飞书各由 `OAUTH_GITHUB_ENABLED` / `OAUTH_FEISHU_ENABLED` 独立控制，未启用的 provider 路由仍然注册，调用返回 `40000`（不支持的第三方登录方式）而非 `404`。启用某个 provider 时其 client id / secret / redirect_uri 均为必填，飞书还必须提供 `OAUTH_FEISHU_TENANT_KEY`——留空会关闭租户校验，接受任意飞书企业的用户。
 >
-> **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
+> **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=&provider=`（`provider` 取 `github`/`lark`，供错误页渲染一键重新发起该 provider 的登录）；该项留空时改为返回标准信封。state 失效/校验失败类文案为面向用户的行动指引（如「登录已中断，请重新发起登录」）而非描述性文案。
 >
 > **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`GET /oauth/{github,lark}/callback` 另有**独立**的 per-IP 配额（默认 120 次/60s，`RATE_LIMIT_OAUTH_CALLBACK_RPM`）：callback 是公开入口，扫描与 state 重放都打在这里，而 authorize 的配额管不到它，每次无效调用仍要读一次 state 并写一条审计。限流在读取 state **之前**生效，被限流的请求不消费 state、不写审计、不调用 provider。阈值刻意高于其他名额：出口 NAT 后每个用户每次登录只发一次 callback，配额定得太低会一次性锁死整个宿舍或社团；它刹住的是单一来源重放，**挡不住多 IP 分布式洪峰**——后者要靠边缘层，因为每个来源的成本本来就不高。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。三处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 >
-> **登录 CSRF 防护**（OAuth 2.0 §10.12）：`GET /oauth/{github,lark}` 响应同时下发 `sl_oauth_state` cookie（HttpOnly、SameSite=Lax、值为 `state` 的 SHA-256 摘要、Path/Secure 与 `sl_session` 相同、有效期与 state TTL 一致）。回调要求浏览器携带与 `state` 匹配的该 cookie，缺失或不匹配按 state 无效处理（重定向到错误页）；state 单次消费，回调结束后 cookie 即清除。
+> **登录 CSRF 防护**（OAuth 2.0 §10.12）：`GET /oauth/{github,lark}` 响应同时下发 `sl_oauth_state` cookie（HttpOnly、SameSite=Lax、值为 `state` 的 SHA-256 摘要、Path/Secure 与 `sl_session` 相同、有效期与 state TTL 一致）。回调要求浏览器携带与 `state` 匹配的该 cookie，缺失或不匹配按 state 无效处理（重定向到错误页）；state 单次消费，回调结束后 cookie 即清除。**例外——provider 网络故障**：出站调用 GitHub/Lark 超时或不可达（区别于 provider 拒绝 code）时，已消费的 state 会被写回 Redis（剩余寿命上限 2 分钟，取 state TTL 与 2 分钟的较小者），配对 cookie 同步保留：callback 是可被刷新/重发的 GET，而故障期间的重试命中已消费 state 时只会看到「state 无效或已过期」，把网络抖动伪装成登录会话问题。写回后的重试能完整重走 exchange——code 在 provider 侧单次使用，若首次请求实际已到达 provider，重试得到 `bad_verification_code`，走正常的「重新发起登录」分支；CSRF 防护不受影响（cookie 仍绑定发起授权的浏览器）。出站调用另有一次 250ms 退避重试，仅针对传输层错误与 provider 5xx（4xx 与 code 被拒不重试）；单次 I/O 超时从 10s 收紧到 4s，重试后的最坏总时长低于原单次。
 
 ### 2.1 GitHub 登录
 
@@ -1803,13 +1803,13 @@ POST /admin/users
 | 字段 | 必填 | 说明 |
 | ------ | ---- | ------ |
 | `name` | ✓ | 姓名（≤255 字，仅汉字与间隔号 `·` 及其常见变体） |
-| `student_id` | ✓ | 学号（≤50 字，全库唯一） |
+| `student_id` | ✓ | 学号（≤50 字，全库唯一，占用判定不区分大小写与首尾空白：`b24040525` 与 `B24040525` 视为同一学号） |
 | `phone_number` | ✓ | 手机号（≤20 字） |
 | `qq_number` | ✓ | QQ 号（≤20 字） |
 | `login_email` | ✓ | 主登录邮箱，仅接受注册白名单域名（`@njupt.edu.cn` / `sast.fun`），全库唯一；`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字）；`email_type` 由服务端按域名派生，无需也不可自行指定。前缀不等于提交学号时查表校验：若前缀是其他账号的学号返回 `40902`「login_email 前缀与其他账号学号冲突」（大小写不敏感） |
 | `major` | – | 专业（≤50 字），缺省空串 |
 | `college` | – | 学院（college_enum 枚举），缺省「其他」 |
-| `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（§1.8/1.9）。不可与 `login_email` 相同，不得已被其他账号占用（作为主登录邮箱或已绑身份），且**不接受 `@njupt.edu.cn` 域**——校园邮箱是登录身份不是个人邮箱，绑定会把重置通道放进别人的邮箱 |
+| `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（§1.8/1.9）。不可与 `login_email` 相同，不得已被其他账号占用（作为主登录邮箱或已绑身份），**不接受 `@njupt.edu.cn` 域**（校园邮箱是登录身份不是个人邮箱），且**仅 admin 角色可提交**（直绑是免验证的身份断言，manager 提交返回 `403`（`40300`）） |
 | `role` | – | freshman / member / manager / lecturer / admin，缺省 member；manager 调用时不可为 admin（403） |
 | `state` | – | njupter / on_sast / retired_sast；不接受 `is_deleted`（新建即注销无意义，返回 `42200`）。**缺省由自动状态机推导**（role + 学号入学年份 + 当前学年；毕业生学号旧 → retired_sast，在校 lecturer/admin → on_sast，在校 freshman/member/manager → njupter）；显式传 `state` 则作为钉住值写入，该账号从此跳过自动推导与清算批次 |
 
@@ -1830,7 +1830,7 @@ POST /admin/users
 - 严格新建：同一 `login_email` / `student_id` 重复建号因唯一约束返回 `409`，服务端不静默复用旧账号；存量账号的补充绑定不归本接口管。
 - 本接口只建账号与绑定，不签发 token；初始会话由成员首次登录时建立。
 
-**错误码**: `40000`（必填缺失 / 格式 / 域白名单 / 枚举非法、`personal_email` 与 `login_email` 相同、`personal_email` 为校园邮箱域）、`40022`（`login_email` 前缀非学号样式）、`40901`（主邮箱或绑定邮箱已被占用）、`40902`（学号已被占用、或 `login_email` 前缀与其他账号学号冲突）、`42200`（`state` 为 `is_deleted`）、`40100`、`40300`。
+**错误码**: `40000`（必填缺失 / 格式 / 域白名单 / 枚举非法、`personal_email` 与 `login_email` 相同、`personal_email` 为校园邮箱域）、`40022`（`login_email` 前缀非学号样式）、`40901`（主邮箱或绑定邮箱已被占用）、`40902`（学号已被占用（大小写不敏感）、或 `login_email` 前缀与其他账号学号冲突）、`42200`（`state` 为 `is_deleted`）、`40100`、`40300`（manager 提交 `personal_email`、授予 admin 角色等越权）。
 
 ---
 
@@ -1865,15 +1865,16 @@ PUT /admin/users/:id
 
 - 至少传一个字段，否则返回 `400`。未知字段（含 `password`、`token_version`、`id`、`profile`）一律返回 `400`，不静默忽略。
 - `name` / `phone_number` / `qq_number` / `student_id` 不可传空串（列为 `NOT NULL`）；`major` 可置空。长度按 V001 列宽校验，中文按字符数而非字节数计。
-- `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字），否则返回 `40022`。改写 `login_email` 时若前缀（大小写不敏感）不等于该账号生效学号（本次提交或行内现值），查表校验：前缀是其他账号的学号则返回 `40902`「login_email 前缀与其他账号学号冲突」；仅改 `student_id` 不触发此查表
+- `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字），否则返回 `40022`。**仅 admin 角色可修改**：改写主登录邮箱是免验证的身份断言，且忘记密码验证码发往该地址（`@sast.fun` 前缀无格式约束），manager 提交返回 `403`（`40300`）；`email_type` 只能随 `login_email` 提交，连带同样受限。建号（§6.2.1）不受影响——manager 建号本就持有初始密码。改写时若前缀（大小写不敏感）不等于该账号生效学号（本次提交或行内现值），查库校验：前缀是其他账号的学号则返回 `40902`「login_email 前缀与其他账号学号冲突」；仅改 `student_id` 不触发此查库
 - `role` 实际发生变化时，同一事务内递增 `token_version` 并撤销该用户全部 Token，响应 `message` 变为 `"用户信息更新成功，已撤销该用户的全部 Token"`。仅提交与当前值相同的 `role` 不算变化，不触发撤销。
 - `state` 可在 `njupter` / `on_sast` / `retired_sast` 之间任意修改（供管理员纠错），但不接受 `is_deleted`。**手写的 state 是钉住（pin）**：该账号从此由管理员接管，自动推导与定时清算批次一律跳过它。
 - `state_auto`（布尔，可选）：恢复该账号的自动状态机——按 role + 学号入学年份 + 当前学年重新推导 `state` 并解除钉住，同一事务内完成。与 `state` 互斥，同时提交返回 `400`。用于误钉后的恢复；留级 / 延毕等例外账号不传此字段、保持手写钉住即可。
-- `personal_email` 提供时，在**同一事务**内将地址直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（与建号时的绑定同一语义，是已有账号的救援通道，§1.8/1.9）。不可与 `login_email` 相同（含本次修改后的值），不得已被其他账号占用，且每账号 `other_mail` 绑定总数不超过 2 个；不可对已注销用户绑定；**不接受 `@njupt.edu.cn` 域**——校园邮箱是登录身份不是个人邮箱。
+- `student_id` 修改时占用判定**不区分大小写与首尾空白**（`lower(btrim())`）：`b24040525` 与 `B24040525` 视为同一学号，避免在既有账号旁开立变体重复号；本账号自身的学号（含仅大小写归一）不算冲突。
+- `personal_email` 提供时，在**同一事务**内将地址直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（与建号时的绑定同一语义，是已有账号的救援通道，§1.8/1.9）。不可与 `login_email` 相同（含本次修改后的值），不得已被其他账号占用，且每账号 `other_mail` 绑定总数不超过 2 个；不可对已注销用户绑定；**不接受 `@njupt.edu.cn` 域**（校园邮箱是登录身份不是个人邮箱），且**仅 admin 角色可提交**（manager 提交返回 `403`（`40300`））。
 - `department` 写入 `profile` 行，语义与 `PUT /user/profile` 的同名字段完全一致：传值即设置，传空字符串清空为 `null`，缺省不修改；取值见附录 A（目录见 `GET /departments`）。与其它字段同一事务提交，不触动 `token_version` 也不撤销会话——部门不是授权输入。这是管理员归置存量账号部门的通道，自助修改之外的另一条路；审计 `detail` 记录字段名 `department`，不记录其值。
 - 其余 `profile` 表展示字段（`nickname`、`intro` 等）不在本接口：它们只应归属用户自己的 `PUT /user/profile`，传入会被严格解码器拒绝（40000）。
 
-**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同、`personal_email` 为校园邮箱域 / `department` 取值非法）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用、或 `login_email` 前缀与其他账号学号冲突）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
+**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同、`personal_email` 为校园邮箱域 / `department` 取值非法）、`40100`、`40300`（改自己的 role / 降权最后一名管理员 / manager 绑定 `personal_email` / manager 修改 `login_email`）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用（大小写不敏感）、或 `login_email` 前缀与其他账号学号冲突）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
 
 **Response** `200`:
 
