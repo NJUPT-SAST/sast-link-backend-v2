@@ -294,7 +294,8 @@ func TestCreateUserDerivesStateAndTracksPin(t *testing.T) {
 // The manager boundary on the provision path: a manager's writes stop short of
 // the admin role. The default (member) and every other role are within reach,
 // so a manager can staff a department — including appointing another manager —
-// but never manufacture an administrator.
+// but never manufacture an administrator, and never pick the mailbox an
+// account's password resets would later go to.
 func TestCreateUserManagerBoundary(t *testing.T) {
 	t.Run("manager cannot provision an admin", func(t *testing.T) {
 		h := newHarness(t)
@@ -309,6 +310,21 @@ func TestCreateUserManagerBoundary(t *testing.T) {
 		if h.users.createCalls != 0 {
 			t.Fatalf("create calls = %d, want no write", h.users.createCalls)
 		}
+	})
+
+	t.Run("manager cannot bind a personal email", func(t *testing.T) {
+		h := newHarness(t)
+		input := createProbeInput()
+		input.AdminRole = string(model.UserRoleManager)
+		input.PersonalEmail = stringPtr("manager-picked@qq.com")
+
+		_, err := h.service.CreateUser(context.Background(), input)
+
+		assertKind(t, err, KindProtected)
+		if h.users.createCalls != 0 {
+			t.Fatalf("create calls = %d, want no write", h.users.createCalls)
+		}
+		assertAudited(t, h, actionCreateUser, false, errcode.CodeForbidden)
 	})
 
 	t.Run("manager may provision a manager", func(t *testing.T) {
@@ -327,4 +343,33 @@ func TestCreateUserManagerBoundary(t *testing.T) {
 			t.Fatalf("create calls = %d, result = %+v, want the write through", h.users.createCalls, result)
 		}
 	})
+}
+
+// The provision path guards student-id occupancy with the folded comparison,
+// because user_student_id_key is case-sensitive: a case-variant of an existing
+// ID must refuse to provision, the same B24040525/b24040525 shape the import
+// produced once and the registration and alumni paths already refuse.
+func TestCreateUserStudentIDOccupancyFoldsCase(t *testing.T) {
+	h := newHarness(t)
+	h.users.studentIDOwners = map[string]int64{"b24040525": 999}
+	input := createProbeInput()
+	input.StudentID = "B24040525"
+
+	_, err := h.service.CreateUser(context.Background(), input)
+
+	assertKind(t, err, KindConflict)
+	if h.users.createCalls != 0 {
+		t.Fatalf("create calls = %d, want no write", h.users.createCalls)
+	}
+	assertAudited(t, h, actionCreateUser, false, errcode.CodeStudentIDOccupied)
+
+	// A genuinely free id still provisions — the folded pre-check must not
+	// refuse an untouched namespace.
+	h2 := newHarness(t)
+	if _, err := h2.service.CreateUser(context.Background(), createProbeInput()); err != nil {
+		t.Fatalf("CreateUser(free id): %v", err)
+	}
+	if h2.users.createCalls != 1 {
+		t.Fatalf("create calls = %d, want the write through", h2.users.createCalls)
+	}
 }

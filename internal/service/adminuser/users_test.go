@@ -990,6 +990,76 @@ func TestUpdateUserManagerBoundary(t *testing.T) {
 		}
 	})
 
+	t.Run("manager cannot bind a personal email", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.AdminRole = string(model.UserRoleManager)
+			input.PersonalEmail = stringPtr("manager-picked@qq.com")
+		}))
+
+		assertKind(t, err, KindProtected)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+		assertAudited(t, h, actionUpdateUser, false, errcode.CodeForbidden)
+	})
+
+	t.Run("admin binds a personal email through", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.PersonalEmail = stringPtr("rescue@qq.com")
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(admin binds): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
+		if h.users.updateInput.PersonalEmail == nil || *h.users.updateInput.PersonalEmail != "rescue@qq.com" {
+			t.Fatalf("personal email = %v, want rescue@qq.com passed down", h.users.updateInput.PersonalEmail)
+		}
+	})
+
+	t.Run("manager cannot rewrite the login email", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.AdminRole = string(model.UserRoleManager)
+			input.LoginEmail = stringPtr("shared-box@sast.fun")
+		}))
+
+		assertKind(t, err, KindProtected)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+		assertAudited(t, h, actionUpdateUser, false, errcode.CodeForbidden)
+	})
+
+	t.Run("admin rewrites the login email through", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.LoginEmail = stringPtr("b24040101@njupt.edu.cn")
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(admin rewrites login email): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
+		if h.users.updateInput.LoginEmail == nil || *h.users.updateInput.LoginEmail != "b24040101@njupt.edu.cn" {
+			t.Fatalf("login email = %v, want b24040101@njupt.edu.cn passed down", h.users.updateInput.LoginEmail)
+		}
+	})
+
 	t.Run("empty caller role falls to the restricted branch", func(t *testing.T) {
 		h := newHarness(t)
 		h.users.findResult = targetUser(model.UserRoleAdmin, model.UserStateOnSAST)
@@ -1003,6 +1073,47 @@ func TestUpdateUserManagerBoundary(t *testing.T) {
 		// A wiring slip must narrow a manager's reach, never widen it: the
 		// unattributed caller is treated as the weaker role.
 		assertKind(t, err, KindProtected)
+	})
+}
+
+// The student-id occupancy guard folds case and whitespace, unlike the
+// user_student_id_key constraint: a case-variant of another account's ID must
+// read as occupied, while the target's own ID — exact or case-normalized —
+// must not collide with itself.
+func TestUpdateUserStudentIDOccupancyFoldsCase(t *testing.T) {
+	t.Run("case-variant of another account is occupied", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		h.users.studentIDOwners = map[string]int64{"b24040999": 777}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.StudentID = stringPtr("B24040999")
+		}))
+
+		assertKind(t, err, KindConflict)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+		assertAudited(t, h, actionUpdateUser, false, errcode.CodeStudentIDOccupied)
+	})
+
+	t.Run("the target's own id is not a collision", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		// The owner of the folded id is the target itself: re-submitting or
+		// case-normalizing its own student id must pass the exclusion.
+		h.users.studentIDOwners = map[string]int64{"b24040101": testTargetID}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.StudentID = stringPtr("B24040101")
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(own id): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
 	})
 }
 

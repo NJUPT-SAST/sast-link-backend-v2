@@ -82,7 +82,10 @@ func providerError(err error) error {
 
 // providerFailureOutcome is the single source of truth for an outbound provider
 // failure: the audit stage/reason plus the client-visible outcome, so the two can
-// never disagree about which case was hit.
+// never disagree about which case was hit. The network-outage branches also set
+// Restorable on the outcome, which is what tells the callback to write the state
+// back and the HTTP layer to keep the state cookie — one classification, three
+// consumers.
 func providerFailureOutcome(err error) (stage, reason string, outcome error) {
 	switch {
 	case errors.Is(err, provider.ErrForeignTenant):
@@ -95,14 +98,26 @@ func providerFailureOutcome(err error) (stage, reason string, outcome error) {
 		// The provider accepted the connection and then did not answer within
 		// httpIOTimeout — a single slow round trip is not evidence the provider is
 		// down, so this is a restartable failure.
-		return StageProvider, ReasonProviderTimeout, newDisplayError(ErrStateInvalid, "连接第三方登录服务超时", err)
+		return StageProvider, ReasonProviderTimeout, restorableError(
+			newDisplayError(ErrStateInvalid, "连接第三方登录服务超时，请重试", err))
 	case errors.Is(err, context.Canceled):
 		// The caller went away mid-exchange; reporting a provider outage would blame
 		// the provider for a client disconnect.
 		return StageProvider, ReasonProviderCanceled, newError(ErrDependencyUnavailable, "第三方授权请求被中断", err)
 	default:
-		return StageProvider, ReasonProviderUnavailable, newError(ErrProviderUnavailable, "第三方服务暂时不可用", err)
+		return StageProvider, ReasonProviderUnavailable, restorableError(
+			newError(ErrProviderUnavailable, "第三方服务暂时不可用", err))
 	}
+}
+
+// restorableError marks a provider-outage outcome as one whose state is written
+// back for a browser retry. See Error.Restorable.
+func restorableError(err error) error {
+	var serviceErr *Error
+	if errors.As(err, &serviceErr) {
+		serviceErr.Restorable = true
+	}
+	return err
 }
 
 // isNotFound reports whether err is the repository's missing-row sentinel.

@@ -2,6 +2,7 @@ package adminuser
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,10 @@ type fakeUsers struct {
 	createdIdentity *model.Identity
 	createErr       error
 	existsEmails    map[string]bool
+	// studentIDOwners maps a folded student id to the account holding it, so the
+	// excluding pre-check can tell "taken by another account" from "the target's
+	// own id". Keys are folded by the method, mirroring the SQL comparison.
+	studentIDOwners map[string]int64
 	existsErr       error
 }
 
@@ -158,6 +163,18 @@ func (f *fakeUsers) ExistsAsEmailAnywhere(_ context.Context, email string) (bool
 		return false, f.existsErr
 	}
 	return f.existsEmails[email], nil
+}
+
+func (f *fakeUsers) ExistsByStudentIDExcluding(
+	_ context.Context,
+	studentID string,
+	excludeUserID int64,
+) (bool, error) {
+	if f.existsErr != nil {
+		return false, f.existsErr
+	}
+	owner, taken := f.studentIDOwners[strings.ToLower(strings.TrimSpace(studentID))]
+	return taken && owner != excludeUserID, nil
 }
 
 type fakeAudit struct {
