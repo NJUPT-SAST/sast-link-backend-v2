@@ -64,7 +64,7 @@
 - `/oauth/authorize`：有三种出口，取决于浏览器是否已持有覆盖请求 scope 的 link session 授权：静默发码后直接 302 至客户端 `redirect_uri`（携带 `code` 与 `state`），或重定向至前端授权页（携带 `request_id`），或对已失效的请求重定向至授权页**错误形态**（携带 `error` / `error_description`，不带 `request_id`）。错误按可重定向性重定向至授权页或客户端 `redirect_uri`。详见 §5.1。
 - `/oauth/token`：请求体为 `application/x-www-form-urlencoded`；成功和错误均使用 OAuth JSON 格式（RFC 6749），字段名使用 `scope`（单数）。
 - `/oauth/revoke`：请求体为 `application/x-www-form-urlencoded`；遵循 RFC 7009，成功固定 `200 OK` 且响应体为空，错误使用 OAuth JSON 格式。
-- `/userinfo`：成功直出 OIDC UserInfo claims；错误遵循 RFC 6750 Bearer Token 错误格式。
+- `/userinfo`：成功直出 OIDC UserInfo claims；错误遵循 RFC 6750 Bearer Token 错误格式——token 被拒为 401 `invalid_token`（带挑战头），服务端自身故障（依赖不可用等）为 500 `server_error`（无挑战头），两者对客户端是相反指令：前者触发刷新/重新授权，后者只应稍后重试。
 - `/.well-known/openid-configuration`：直出 OIDC Discovery JSON。
 - `/.well-known/jwks.json`：直出 JWKS JSON。
 
