@@ -3690,6 +3690,11 @@ paths:
         reject_reason 必填：它会进入驳回通知邮件，是校友唯一的修正依据。
 
         驳回后该学号不再占用待审名额，校友可修正后重新提交。
+
+        silent=true 为静默驳回（V022）：落库 verdict 但不发结果邮件，适用于误操作工单
+        （典型：申请人已自行完成注册）。静默时 reject_reason 仍必填——它是工单与审计
+        自身的解释，不只是邮件正文；事务内同步落 notified_at 与 silently_rejected，
+        重启补投扫描与 notified=false 积压过滤均不再命中，resend 端点拒绝补发。
       operationId: rejectAlumniRequest
       tags:
         - AlumniRequest
@@ -3714,6 +3719,10 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 500
+                silent:
+                  type: boolean
+                  default: false
+                  description: 静默驳回：不发结果邮件，notify_enqueued 恒为 false
       responses:
         "200":
           description: 已驳回
@@ -3766,7 +3775,8 @@ paths:
 
         notified_at 已非空时也允许重发：管理员提出补发说明他掌握系统不知道的信
         息（通常是校友根本没收到）。工单仍为 pending 时返回 42200，没有结果可
-        通知。
+        通知。静默驳回的工单同样返回 42200：沉默是审核人的决定，补发端点不能
+        悄悄把它撤掉。
       operationId: resendAlumniRequestNotification
       tags:
         - AlumniRequest
@@ -4110,7 +4120,10 @@ components:
           description: 工单意图：provision 开新号；recover 给该学号现有账号绑定 personal_email 恢复访问
         reject_reason:
           type: string
-          description: 驳回原因，会进入驳回通知邮件；非驳回状态为空字符串
+          description: 驳回原因，会进入驳回通知邮件；非驳回状态为空字符串。静默驳回时它是工单与审计自身的解释
+        silently_rejected:
+          type: boolean
+          description: 静默驳回标记（V022）：该驳回未向申请人发送结果邮件，notified_at 由驳回事务落定；resend 拒绝补发，控制台应渲染为「静默驳回」并隐藏补发入口
         created_user_id:
           type: integer
           format: int64

@@ -586,6 +586,20 @@ CREATE UNIQUE INDEX uq_alumni_requests_pending_student
     ON alumni_requests (lower(btrim(student_id))) WHERE status = 'pending';
 ```
 
+### 静默驳回（V022）
+
+V022 加列 `silently_rejected BOOLEAN NOT NULL DEFAULT FALSE`。误操作工单（典型：新生误提交后已自行
+完成注册）的驳回可以不发结果邮件：驳回事务在同一 UPDATE 里落 verdict、标记位与 `notified_at`。
+`notified_at` 由驳回事务落定而非由 SMTP 确认，语义是「通知闭环完成，无人欠信」：
+
+- 重启补投扫描（`status <> 'pending' AND notified_at IS NULL AND notify_attempts = 0`）不再命中
+  —— 否则进程重启会把审核人选择不发的邮件重新排队；
+- 控制台 `notified=false` 积压过滤不会误报；
+- `resend-notification` 读到标记位拒绝补发（422）：沉默是审核人的决定，补发端点不能悄悄撤掉它。
+
+显式列而非隐式编码（如 `notified_at 非空且 attempts = 0`）：补发拒绝与「静默驳回」渲染都要把选择读回
+来，约定式编码读者无法自解释。`reject_reason` 静默时仍必填——它是工单与审计自身的解释，不只是邮件正文。
+
 ### intent 两种意图（V013）
 
 V013 加列 `intent TEXT NOT NULL DEFAULT 'provision'`，不用 enum 类型：提交时写一次、从不修改、规则在

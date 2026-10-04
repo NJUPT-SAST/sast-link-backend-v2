@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **校友建号申请支持静默驳回**（feat/alumni-silent-reject）：`POST /admin/alumni-requests/:id/reject` 新增可选 `silent`（默认 `false`）。误操作工单（典型：新生误提交后已自行完成注册）可落库 verdict 但不发结果邮件；`reject_reason` 静默时仍必填（工单与审计自身的解释）。驳回事务同 UPDATE 落 `silently_rejected` 标记与 `notified_at`（V022），重启补投扫描与 `notified=false` 积压过滤均不再命中；`resend-notification` 对静默工单拒绝补发（`42200`），工单响应携带 `silently_rejected`（审计 detail 记 `silent: true`）供控制台渲染与隐藏补发入口。配套：审批撞学号占用（`40902`）文案补「如申请人已自行注册请静默驳回」指引。
+
 ### Changed
 
 - **部门自助写入收紧为 manager / admin 专属**（fix/department-self-edit-gate）：`PUT /user/profile` 的 `department` 键从「任意角色可写」收紧为仅 `manager` / `admin` 角色可写，其他角色（member / freshman / lecturer）提交该键返回 `40000`（与未知权限字段同姿，拒绝整个请求而非静默忽略——调用方不能误以为改成功了）。部门是组织归属字段而非展示资料，下游（People 等）按它做权限隔离；此前仅靠前端不暴露编辑入口实现限制，后端从未拒绝。角色取自 auth-state 实时数据库行（非 token 内 role claim 快照），降权下一请求即生效；空/未知角色一律拒绝（fail closed）。`PUT /admin/users/:id` / `PUT /admin/users` 的部门写入不变，普通用户的部门变更由管理员归置。前端配合：非管理角色的编辑请求体不应携带 `department` 键。
