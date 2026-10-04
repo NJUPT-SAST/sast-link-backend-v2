@@ -20,6 +20,29 @@ func reviewInput() ReviewInput {
 	}
 }
 
+// The NJUPT-prefix collision guard at approval: a ticket email whose prefix
+// names a registered student's ID must not provision — that student would hold
+// a reset handle on the new account. The ticket's own consistent pair (the
+// pendingTicket shape) never triggers the lookup.
+func TestApproveRefusesPrefixNamingAnotherAccount(t *testing.T) {
+	t.Parallel()
+
+	ticket := pendingTicket()
+	ticket.LoginEmail = "b20040999@njupt.edu.cn"
+	requests := &fakeRequests{getResult: ticket}
+	users := &fakeUsers{studentIDOwners: map[string]int64{"b20040999": 777}}
+	service := newService(requests, users, &fakeAudit{}, &fakeCaptcha{})
+
+	_, err := service.Approve(context.Background(), reviewInput())
+	var typed *Error
+	if !errors.As(err, &typed) || typed.Code != errcode.CodeEmailAlreadyRegistered {
+		t.Fatalf("Approve() error = %v, want the email-occupied code", err)
+	}
+	if requests.provisioned != nil {
+		t.Fatal("an account was provisioned over another student's mailbox")
+	}
+}
+
 func TestApproveProvisionsARetiredMemberAccount(t *testing.T) {
 	t.Parallel()
 

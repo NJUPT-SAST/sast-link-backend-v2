@@ -457,7 +457,6 @@ type UpdateProfileInput struct {
 	Name        *string
 	PhoneNumber *string
 	QQNumber    *string
-	StudentID   *string
 	College     *string
 	Major       *string
 

@@ -67,6 +67,9 @@ type UserRepository interface {
 	// case and whitespace because user.student_id's unique constraint does not,
 	// so a case-variant spelling of an existing ID would otherwise slip past the
 	// constraint the way it once slipped past the alumni intake's occupancy check.
+	// The NJUPT-prefix collision guard reads it with an email local part in place
+	// of a student ID: a login_email whose prefix names another account's student
+	// ID hands that student a reset handle on this account.
 	ExistsByStudentIDExcluding(ctx context.Context, studentID string, excludeUserID int64) (bool, error)
 }
 

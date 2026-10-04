@@ -394,7 +394,8 @@ func (r *UserRepository) ExistsByStudentID(ctx context.Context, studentID string
 // without colliding against itself. Pass 0 to exclude nothing — the provision
 // path, where every existing row counts. Same folded comparison, because the
 // console's writes ride the same case-sensitive unique constraint the
-// registration and alumni paths guard against.
+// registration and alumni paths guard against; the NJUPT-prefix collision
+// guard reads it with an email local part in place of a student ID.
 func (r *UserRepository) ExistsByStudentIDExcluding(
 	ctx context.Context,
 	studentID string,
@@ -450,13 +451,15 @@ func (r *UserRepository) FindLoginEmailByStudentID(ctx context.Context, studentI
 // ProfileUpdate carries the self-service field changes for one user. A nil
 // pointer means "leave unchanged"; a non-nil pointer to the zero value means
 // "write that value". Identity and permission columns (login_email, role, state,
-// email_type) are deliberately absent: they are admin-only (PRD §4.9), and
-// leaving them out makes that unreachable rather than merely unvalidated.
+// email_type, student_id) are deliberately absent: they are admin-only
+// (PUT /admin/users/:id), and leaving them out makes that unreachable rather
+// than merely unvalidated — student_id left when the self-service edit was
+// removed, since its only guard was a case-sensitive constraint a user could
+// sidestep with a case variant of another account's ID.
 type ProfileUpdate struct {
 	Name        *string
 	PhoneNumber *string
 	QQNumber    *string
-	StudentID   *string
 	College     *model.College
 	Major       *string
 
@@ -475,7 +478,6 @@ func (u ProfileUpdate) userColumns() map[string]any {
 	assign(columns, "name", u.Name)
 	assign(columns, "phone_number", u.PhoneNumber)
 	assign(columns, "qq_number", u.QQNumber)
-	assign(columns, "student_id", u.StudentID)
 	assign(columns, "major", u.Major)
 	if u.College != nil {
 		columns["college"] = *u.College

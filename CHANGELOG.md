@@ -16,6 +16,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **manager 不再可绑定 personal_email**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的 `personal_email` 直绑改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可绑定 personal_email」）。直绑是免验证的身份断言：绑定后控制该邮箱即可登录并重置账号密码，manager 若能自选邮箱即可绑定自己控制的邮箱对任意成员账号构成持久静默接管（成员改密也不切断）；建号路径同理，绑定比初始密码存活得更久。自助面 `POST /user/identities/email`（需邮箱验证）不受影响，admin 直绑与校友工单审批直绑（本就 admin-only）不变。
 
+
+- **`other_mail` 不再接受校园邮箱域**（fix/identity-pair-consistency）：`@njupt.edu.cn` 地址只能是 login_email，绑成 other_mail 是把重置句柄放进该前缀对应学生的邮箱。四处收紧：admin 建号/改号的 `personal_email`、校友工单的 `personal_email`、自助 `POST /user/identities/email` 绑定发码（有邮箱验证但属同类别错误，一并禁）。校园邮箱域提交返回 `40000`。
+
+- **admin 写入查表拦截 NJUPT 前缀撞号**（fix/identity-pair-consistency）：校园邮箱按学号一人一箱，`login_email` 前缀指向**其他账号学号**时，该邮箱的主人即持有此账号的重置句柄。三个 admin 写入面在写入前查表（`ExistsByStudentIDExcluding`，`lower(btrim())` 折叠，排除目标自身行）：`POST /admin/users`（前缀≠提交学号时查，撞返回 `40902`「login_email 前缀与其他账号学号冲突」）、`PUT /admin/users/:id`（仅 `login_email` 被写入时查，对生效学号判定；仅改学号不查——学号指向他人邮箱前缀不产生重置句柄）、校友 provision 审批（事务前查，撞返回 `40901` 提示驳回）。前缀等于本人学号不查表；前缀是未被注册的号仍放行——查表只能看见已注册账号，未注册学生的邮箱占用继续依赖人工核验。注册/自助面不查：两步流要求控箱，自己配错只伤自己。
+
+- **自助资料编辑移除 `student_id`**（fix/identity-pair-consistency）：`PUT /user/profile` 不再接受 `student_id`（严格 JSON 解码按未知字段返回 `40000`），`UpdateProfileInput` 与仓储 `ProfileUpdate` 同步移除该字段。此前该路径可自助改学号，且占用仅靠大小写敏感的 `user_student_id_key` 约束——同库已有 `B24040525` 时可自改成 `b24040525`；修改学号今后只能由管理员在 `PUT /admin/users/:id` 完成。响应与 `GET /user/profile` 仍返回 `student_id`（只读）。
+
 ### Fixed
 
 - **管理台学号占用判定补齐大小写折叠**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的学号占用预检改为 `lower(btrim())` 折叠比较（新增 `ExistsByStudentIDExcluding`，排除目标自身行），返回 `40902`。V001 的 `user_student_id_key` 约束在默认 collation 下大小写敏感，此前 `b24040525` 可在 `B24040525` 旁再建一号——正是注册与校友路径早已堵掉的导入期形状，控制台两条路一直漏着。折叠窗口内的并发（两个控制台同时建变体号）仍无数据库层硬保证，需表达式唯一索引才可彻底封死。
