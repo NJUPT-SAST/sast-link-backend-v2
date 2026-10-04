@@ -224,9 +224,12 @@ func (h Handler) Approve(c *gin.Context) {
 	})
 }
 
-// rejectRequest carries the reason the applicant is told.
+// rejectRequest carries the reason the applicant is told, plus the silent flag
+// that suppresses the email entirely (a mistaken submission whose applicant
+// already self-registered).
 type rejectRequest struct {
 	RejectReason string `json:"reject_reason"`
+	Silent       bool   `json:"silent"`
 }
 
 // Reject records a rejection.
@@ -241,6 +244,7 @@ func (h Handler) Reject(c *gin.Context) {
 		return
 	}
 	input.Reason = req.RejectReason
+	input.Silent = req.Silent
 
 	result, err := h.Requests.Reject(c.Request.Context(), input)
 	if err != nil {

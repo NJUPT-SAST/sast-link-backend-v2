@@ -130,6 +130,10 @@ var (
 	// ErrNotReviewed is a notification resend for a ticket with no verdict: there is
 	// no result to notify anyone about.
 	ErrNotReviewed = &Error{Kind: KindStateConflict, Code: errcode.CodeValidationFailed}
+	// ErrSilentlyRejected is a resend against a rejection that chose not to email
+	// the applicant: the silence was the reviewer's decision, so an endpoint whose
+	// whole job is to send that email must refuse instead of undoing it quietly.
+	ErrSilentlyRejected = &Error{Kind: KindStateConflict, Code: errcode.CodeValidationFailed}
 	// ErrUnparseableStudentID is an approval whose ticket carries a student_id the
 	// derivation rule cannot read. Submission bounds the field's length only, so the
 	// reviewer is the first to see such a value. 400 rather than 500: the ticket's

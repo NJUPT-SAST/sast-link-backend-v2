@@ -460,6 +460,29 @@ func TestRejectForwardsTheReason(t *testing.T) {
 	if service.reviewInput.Reason != "学号与姓名不匹配" {
 		t.Fatalf("reason = %q, want it forwarded", service.reviewInput.Reason)
 	}
+	if service.reviewInput.Silent {
+		t.Fatal("silent = true when the request did not set it")
+	}
+}
+
+// The silent flag is the reviewer's delivery choice for a mistaken submission;
+// it must survive the DTO or the email would quietly come back.
+func TestRejectForwardsTheSilentFlag(t *testing.T) {
+	t.Parallel()
+
+	service := &stubService{}
+	recorder := doJSON(t, newRouter(service), http.MethodPost,
+		"/admin/alumni-requests/5/reject",
+		`{"reject_reason":"学号已自行注册，无需建号","silent":true}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", recorder.Code, recorder.Body)
+	}
+	if !service.reviewInput.Silent {
+		t.Fatal("silent = false, want the flag forwarded")
+	}
+	if service.reviewInput.Reason != "学号已自行注册，无需建号" {
+		t.Fatalf("reason = %q, want it still forwarded alongside the flag", service.reviewInput.Reason)
+	}
 }
 
 // A non-numeric id names no ticket, so it is a 404 rather than a 400.

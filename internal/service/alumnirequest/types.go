@@ -58,6 +58,7 @@ type Requests interface {
 		requestID int64,
 		reviewerID int64,
 		reason string,
+		silent bool,
 		now time.Time,
 	) (*model.AlumniRequest, error)
 }
@@ -199,15 +200,19 @@ type RequestView struct {
 	// Intent tells the console which approval action the ticket wants; recovery
 	// tickets render as a high-scrutiny card because approving one touches an
 	// existing account rather than minting a new one.
-	Intent         string
-	RejectReason   string
-	CreatedUserID  *int64
-	ReviewedBy     *int64
-	ReviewedAt     *time.Time
-	NotifiedAt     *time.Time
-	NotifyAttempts int
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	Intent       string
+	RejectReason string
+	// SilentlyRejected tells the console the rejection sent no email, so it
+	// renders "静默驳回" and hides the resend offer instead of showing a ticket
+	// whose notified_at looks like a delivered rejection notice.
+	SilentlyRejected bool
+	CreatedUserID    *int64
+	ReviewedBy       *int64
+	ReviewedAt       *time.Time
+	NotifiedAt       *time.Time
+	NotifyAttempts   int
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // ReviewInput identifies the reviewer for an approve, reject or resend.
@@ -216,6 +221,11 @@ type ReviewInput struct {
 	// Reason is the rejection reason. Required for a rejection, ignored otherwise;
 	// it reaches the applicant in the notification email.
 	Reason string
+	// Silent rejects without emailing the applicant (V022): the mistaken
+	// submission whose applicant already self-registered has nothing to hear
+	// about. The reason stays mandatory — it is the ticket's and the audit's
+	// explanation, not just the email's body.
+	Silent bool
 	// AdminUserID is the authenticated reviewer, for the audit trail.
 	AdminUserID int64
 	// ActorClientID is the azp of the token that authorized the call. Empty means a

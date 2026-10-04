@@ -36,6 +36,9 @@ type fakeRequests struct {
 	rejectErr   error
 	rejected    *model.AlumniRequest
 	rejectedFor string
+	// rejectedSilent records the silent flag the service passed down, so tests can
+	// pin that the delivery choice travels with the verdict.
+	rejectedSilent bool
 	// pendingEmail is the fake's answer to EmailHasPendingTicket; the query's
 	// input is recorded in pendingEmailArg.
 	pendingEmail    bool
@@ -166,6 +169,7 @@ func (f *fakeRequests) RejectAlumniRequest(
 	requestID int64,
 	reviewerID int64,
 	reason string,
+	silent bool,
 	now time.Time,
 ) (*model.AlumniRequest, error) {
 	if f.rejectErr != nil {
@@ -181,8 +185,13 @@ func (f *fakeRequests) RejectAlumniRequest(
 	rejected.RejectReason = reason
 	rejected.ReviewedBy = &reviewerID
 	rejected.ReviewedAt = &now
+	rejected.SilentlyRejected = silent
+	if silent {
+		rejected.NotifiedAt = &now
+	}
 	f.rejected = &rejected
 	f.rejectedFor = reason
+	f.rejectedSilent = silent
 	return &rejected, nil
 }
 

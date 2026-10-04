@@ -230,10 +230,14 @@ func (s Service) buildAccount(
 	return user, &model.Profile{}, identity, nil
 }
 
-// Reject records a rejection and notifies the applicant.
+// Reject records a rejection and notifies the applicant — unless Silent is set,
+// which closes the ticket without an email: the mistaken submission whose
+// applicant already self-registered has nothing to hear about.
 //
-// The reason is mandatory because it reaches them by email and is the only thing
-// that tells them what to correct before resubmitting.
+// The reason is mandatory in both modes. On the emailed path it is the only
+// thing that tells them what to correct before resubmitting; on the silent path
+// it is the ticket's own explanation, the one a future queue reader and the
+// audit trail see.
 func (s Service) Reject(ctx context.Context, input ReviewInput) (*ReviewResult, error) {
 	if input.AdminUserID <= 0 {
 		return nil, newError(ErrInvalidInput, "缺少审批人信息", nil)
@@ -244,16 +248,26 @@ func (s Service) Reject(ctx context.Context, input ReviewInput) (*ReviewResult, 
 		return nil, err
 	}
 
-	rejected, err := s.Requests.RejectAlumniRequest(ctx, input.RequestID, input.AdminUserID, reason, s.now())
+	rejected, err := s.Requests.RejectAlumniRequest(ctx, input.RequestID, input.AdminUserID, reason, input.Silent, s.now())
 	if err != nil {
 		mapped := s.mapReviewError(ctx, err, "驳回失败")
 		s.auditReview(ctx, input, actionReject, false, errorCode(mapped), nil)
 		return nil, mapped
 	}
 
-	s.auditReview(ctx, input, actionReject, true, 0, map[string]any{
+	detail := map[string]any{
 		"student_id": rejected.StudentID,
-	})
+	}
+	if input.Silent {
+		// The audit must explain why no email followed the verdict, or a reader of
+		// the trail sees a rejection that never notified anyone for no reason.
+		detail["silent"] = true
+	}
+	s.auditReview(ctx, input, actionReject, true, 0, detail)
+
+	if input.Silent {
+		return &ReviewResult{NotifyEnqueued: false}, nil
+	}
 
 	enqueued := s.enqueueNotification(NotificationJob{
 		RequestID:    rejected.ID,
@@ -282,6 +296,14 @@ func (s Service) ResendNotification(ctx context.Context, input ReviewInput) (*Re
 		notReviewed := newError(ErrNotReviewed, "该申请尚未处理，无结果可通知", nil)
 		s.auditReview(ctx, input, actionResendNotification, false, errorCode(notReviewed), nil)
 		return nil, notReviewed
+	}
+	if request.SilentlyRejected {
+		// The rejecting reviewer decided this applicant should not be emailed at
+		// all, so the resend endpoint — whose entire job is that email — refuses
+		// rather than quietly undoing the decision.
+		refused := newError(ErrSilentlyRejected, "该申请已静默驳回，不发送结果通知", nil)
+		s.auditReview(ctx, input, actionResendNotification, false, errorCode(refused), nil)
+		return nil, refused
 	}
 
 	enqueued := s.enqueueNotification(NotificationJob{
@@ -328,7 +350,7 @@ func (s Service) mapReviewError(ctx context.Context, err error, message string) 
 	case errors.Is(err, repository.ErrStateConflict):
 		return newError(ErrAlreadyReviewed, "该申请已被处理", err)
 	case errors.Is(err, repository.ErrStudentIDExists):
-		return newError(ErrStudentIDOccupied, "学号已被占用", err)
+		return newError(ErrStudentIDOccupied, "学号已被占用，如申请人已自行注册请静默驳回", err)
 	case errors.Is(err, repository.ErrRecoverTargetMissing):
 		return newError(ErrTargetVanished, "该学号当前没有对应账号，请刷新后核对工单", err)
 	case errors.Is(err, repository.ErrAccountClosed):
@@ -350,7 +372,7 @@ func (s Service) mapReviewError(ctx context.Context, err error, message string) 
 		"ck_identities_provider_id_not_login_email", "uq_identities_provider_provider_id":
 		return newError(ErrEmailOccupied, "邮箱已被占用", err)
 	case "user_student_id_key":
-		return newError(ErrStudentIDOccupied, "学号已被占用", err)
+		return newError(ErrStudentIDOccupied, "学号已被占用，如申请人已自行注册请静默驳回", err)
 	}
 	return internalError(ctx, "review alumni request", message, err)
 }

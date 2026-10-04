@@ -87,7 +87,7 @@ func TestAlumniRequestSchemaAndReview(t *testing.T) {
 		}
 
 		// Once the first is rejected it no longer occupies the slot.
-		if _, err := requests.RejectAlumniRequest(ctx, first.ID, mustUserID(t, database), "信息不符", time.Now().UTC()); err != nil {
+		if _, err := requests.RejectAlumniRequest(ctx, first.ID, mustUserID(t, database), "信息不符", false, time.Now().UTC()); err != nil {
 			t.Fatalf("RejectAlumniRequest() error = %v", err)
 		}
 		if err := requests.Create(ctx, testAlumniRequest("B20040201")); err != nil {
@@ -232,10 +232,10 @@ func TestAlumniRequestSchemaAndReview(t *testing.T) {
 		if err := requests.Create(ctx, request); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
-		if _, err := requests.RejectAlumniRequest(ctx, request.ID, reviewer, "信息不符", time.Now().UTC()); err != nil {
+		if _, err := requests.RejectAlumniRequest(ctx, request.ID, reviewer, "信息不符", false, time.Now().UTC()); err != nil {
 			t.Fatalf("RejectAlumniRequest() first error = %v", err)
 		}
-		_, err := requests.RejectAlumniRequest(ctx, request.ID, reviewer, "再次驳回", time.Now().UTC())
+		_, err := requests.RejectAlumniRequest(ctx, request.ID, reviewer, "再次驳回", false, time.Now().UTC())
 		if !errors.Is(err, repository.ErrStateConflict) {
 			t.Fatalf("second rejection error = %v, want ErrStateConflict", err)
 		}
@@ -403,7 +403,7 @@ func TestAlumniRequestCompletenessAndConcurrency(t *testing.T) {
 		// equal without this.
 		time.Sleep(10 * time.Millisecond)
 		if _, err := requests.RejectAlumniRequest(ctx, request.ID, mustUserID(t, database),
-			"信息不符", time.Now().UTC()); err != nil {
+			"信息不符", false, time.Now().UTC()); err != nil {
 			t.Fatalf("RejectAlumniRequest() error = %v", err)
 		}
 
@@ -480,7 +480,7 @@ func TestAlumniRequestQueriesAndRetention(t *testing.T) {
 		if err := requests.Create(ctx, rejected); err != nil {
 			t.Fatalf("Create() rejected error = %v", err)
 		}
-		if _, err := requests.RejectAlumniRequest(ctx, rejected.ID, reviewer, "信息不符", old); err != nil {
+		if _, err := requests.RejectAlumniRequest(ctx, rejected.ID, reviewer, "信息不符", false, old); err != nil {
 			t.Fatalf("RejectAlumniRequest() error = %v", err)
 		}
 
@@ -536,7 +536,7 @@ func TestAlumniRequestQueriesAndRetention(t *testing.T) {
 		if err := requests.Create(ctx, second); err != nil {
 			t.Fatalf("Create() second error = %v", err)
 		}
-		if _, err := requests.RejectAlumniRequest(ctx, second.ID, reviewer, "信息不符", time.Now().UTC()); err != nil {
+		if _, err := requests.RejectAlumniRequest(ctx, second.ID, reviewer, "信息不符", false, time.Now().UTC()); err != nil {
 			t.Fatalf("RejectAlumniRequest() error = %v", err)
 		}
 
@@ -718,7 +718,7 @@ func TestAlumniRequestEmailHasPendingTicket(t *testing.T) {
 	// A reviewed ticket releases the address. Rejection is the resubmit path: a
 	// fixed application carries the same personal email.
 	if _, rejectErr := requests.RejectAlumniRequest(ctx, request.ID, mustUserID(t, database),
-		"请补充毕业证明", time.Now().UTC()); rejectErr != nil {
+		"请补充毕业证明", false, time.Now().UTC()); rejectErr != nil {
 		t.Fatalf("RejectAlumniRequest() error = %v", rejectErr)
 	}
 	after, err := requests.EmailHasPendingTicket(ctx, request.PersonalEmail)
@@ -758,7 +758,7 @@ func TestAlumniRequestListUnnotifiedReviewed(t *testing.T) {
 				})
 		} else {
 			_, verdict = requests.RejectAlumniRequest(ctx, request.ID, mustUserID(t, database),
-				"请补齐资料", time.Now().UTC())
+				"请补齐资料", false, time.Now().UTC())
 		}
 		if verdict != nil {
 			t.Fatalf("verdict on %s error = %v", studentID, verdict)
@@ -990,4 +990,78 @@ func TestAlumniRequestRecoveryApproval(t *testing.T) {
 			t.Fatalf("error = %v, want ErrInvalidArgument for an intent mismatch", err)
 		}
 	})
+}
+
+// TestAlumniRequestRejectSilentlyClosesDelivery pins V022: a silent rejection
+// writes the flag and notified_at in the same verdict transaction, so neither
+// the restart requeue sweep (notified_at IS NULL AND notify_attempts = 0) nor
+// the console's notified=false backlog can resurrect the email the reviewer
+// chose not to send. An ordinary rejection must keep its notified_at NULL and
+// stay sweepable — that email is still owed.
+func TestAlumniRequestRejectSilentlyClosesDelivery(t *testing.T) {
+	database := setupDatabase(t)
+	requests := repository.NewAlumniRequest(database)
+	ctx := context.Background()
+
+	silent := testAlumniRequest("B20040231")
+	if err := requests.Create(ctx, silent); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	audible := testAlumniRequest("B20040232")
+	if err := requests.Create(ctx, audible); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if _, err := requests.RejectAlumniRequest(ctx, silent.ID, mustUserID(t, database),
+		"学号已自行注册，无需建号", true, time.Now().UTC()); err != nil {
+		t.Fatalf("silent RejectAlumniRequest() error = %v", err)
+	}
+	if _, err := requests.RejectAlumniRequest(ctx, audible.ID, mustUserID(t, database),
+		"请补齐资料", false, time.Now().UTC()); err != nil {
+		t.Fatalf("RejectAlumniRequest() error = %v", err)
+	}
+
+	stored, err := requests.Get(ctx, silent.ID)
+	if err != nil {
+		t.Fatalf("Get(silent) error = %v", err)
+	}
+	if !stored.SilentlyRejected {
+		t.Fatal("silently_rejected = false, want true")
+	}
+	if stored.NotifiedAt == nil {
+		t.Fatal("notified_at = NULL for a silent rejection; the requeue sweep would resurrect the email")
+	}
+	if stored.NotifyAttempts != 0 {
+		t.Fatalf("notify_attempts = %d, want 0 on a silent rejection", stored.NotifyAttempts)
+	}
+
+	storedAudible, err := requests.Get(ctx, audible.ID)
+	if err != nil {
+		t.Fatalf("Get(audible) error = %v", err)
+	}
+	if storedAudible.SilentlyRejected {
+		t.Fatal("silently_rejected = true for an ordinary rejection")
+	}
+	if storedAudible.NotifiedAt != nil {
+		t.Fatal("notified_at set on an ordinary rejection; that email is still owed")
+	}
+
+	rows, err := requests.ListUnnotifiedReviewed(ctx, 10, nil)
+	if err != nil {
+		t.Fatalf("ListUnnotifiedReviewed() error = %v", err)
+	}
+	for _, row := range rows {
+		if row.ID == silent.ID {
+			t.Fatal("the sweep listed a silently rejected ticket")
+		}
+	}
+	found := false
+	for _, row := range rows {
+		if row.ID == audible.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the sweep dropped an ordinary rejected ticket that still owes its email")
+	}
 }
