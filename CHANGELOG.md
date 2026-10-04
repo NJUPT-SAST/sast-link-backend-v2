@@ -125,7 +125,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **GitHub/飞书登录网络故障时的误导性「state 无效或已过期」**（fix/oauth-provider-network-retry）：出站到 provider 的 token exchange 挂在网络超时上时，同一 callback URL 的重试（浏览器刷新/GitHub 授权页返回秒跳回）命中已被消费的 state，用户只看到「state 无效或已过期」，真因仅存于审计行的 `provider_timeout`。三层修复：① provider 出站调用（token exchange / user fetch，GitHub 与飞书）加一次 250ms 退避重试，仅限传输层错误与 provider 5xx，4xx 与 code 被拒不重试；单次 I/O 超时 10s→4s，重试后最坏总时长低于原单次。② provider 网络故障（超时/不可达）时把已消费的 state 写回 Redis（上限 2 分钟）并保留配对 cookie，浏览器重试可完整重走 exchange——code 在 provider 侧单次使用，首次请求若实际已到达则重试得到 `bad_verification_code`，走正常重启分支；CSRF cookie 绑定不受影响。③ state 失效/cookie 校验失败类文案改为面向用户的行动指引（「登录已中断，请重新发起登录」），错误页重定向附带 `provider` 参数供前端渲染一键重启；超时文案改为「连接第三方登录服务超时，请重试」。
+- **50300 依赖不可用文案收敛为一份**（fix/oauth-timeout-copy）：同一业务码的文案存在三份措辞——errcode canonical「依赖服务暂不可用」、sessionhandler 映射「依赖服务暂不可用，请稍后重试」、前端对 50300 的整体替换「服务暂不可用，请稍后重试」——用户实际只看到前端那份，后端两份白写且互相漂移（`errcode.go` 注释警告的形态）。现统一为 canonical「服务暂不可用，请稍后重试」（与前端正在显示的措辞逐字一致）：前端删除替换逻辑后显示不变；sessionhandler 的 Kind 映射与 oauthloginhandler 的 Kind 默认文案均改为引用 canonical，不再持有本地副本；「依赖」二字对用户是技术噪音，语义由错误码表与 503xx 章节承担。`docs/API文档.md` 同步三处。
+
+- **GitHub/飞书登录网络故障时的误导性「state 无效或已过期」**（fix/oauth-provider-network-retry）：出站到 provider 的 token exchange 挂在网络超时上时，同一 callback URL 的重试（浏览器刷新/GitHub 授权页返回秒跳回）命中已被消费的 state，用户只看到「state 无效或已过期」，真因仅存于审计行的 `provider_timeout`。三层修复：① provider 出站调用（token exchange / user fetch，GitHub 与飞书）加一次 250ms 退避重试，仅限传输层错误与 provider 5xx，4xx 与 code 被拒不重试；单次 I/O 超时 10s→4s，重试后最坏总时长低于原单次。② provider 网络故障（超时/不可达）时把已消费的 state 写回 Redis（上限 2 分钟）并保留配对 cookie，浏览器重试可完整重走 exchange——code 在 provider 侧单次使用，首次请求若实际已到达则重试得到 `bad_verification_code`，走正常重启分支；CSRF cookie 绑定不受影响。③ state 失效/cookie 校验失败类文案改为面向用户的行动指引（「登录已中断，请重新发起登录」），错误页重定向附带 `provider` 参数供前端渲染一键重启；超时文案与 provider 参数同步更新。
 
 - **个人徽标 `target` 参数生效**（2026-09-30）：前端分享 URL 早已携带 `?target=blog|github`，但渲染端从未读取该参数——`ServeSVG` 只解析 `theme`，卡片锚点固定 blog 优先、github 兜底，`?target=github` 的分享在两页都配置时永远跳博客。现在 `target` 与 `theme` 同一契约：随 `RenderInput` 下传、未知值归一化为 `blog`、锚点按「请求的目标优先，另一个兜底」解析（http(s) 白名单不变），并加入渲染缓存标识（version|theme|target|key），两个变体互不命中对方缓存。`docs/API文档.md` §9.4 与 `docs/openapi.yaml` 补记 `target` 参数。
 

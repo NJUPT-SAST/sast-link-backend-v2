@@ -375,8 +375,8 @@ func TestCallbackFailureHidesInternalMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse Location: %v", err)
 	}
-	if got := location.Query().Get("error_description"); got != "依赖服务暂不可用" {
-		t.Fatalf("error_description = %q, want the generic per-Kind string", got)
+	if got := location.Query().Get("error_description"); got != "服务暂不可用，请稍后重试" {
+		t.Fatalf("error_description = %q, want the canonical dependency string", got)
 	}
 }
 
@@ -812,7 +812,7 @@ func TestCallbackProviderOutageKeepsStateCookie(t *testing.T) {
 	service := &fakeService{callbackErr: &oauthlogin.Error{
 		Kind:       oauthlogin.KindInvalidState,
 		Code:       errcode.CodeBadRequest,
-		Message:    "连接第三方登录服务超时，请重试",
+		Message:    "连接第三方登录服务超时",
 		Display:    true,
 		Restorable: true,
 	}}
@@ -844,7 +844,7 @@ func TestCallbackProviderOutageKeepsStateCookie(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse Location: %v", err)
 	}
-	if got := location.Query().Get("error_description"); got != "连接第三方登录服务超时，请重试" {
+	if got := location.Query().Get("error_description"); got != "连接第三方登录服务超时" {
 		t.Fatalf("error_description = %q, want the outage display message", got)
 	}
 }
