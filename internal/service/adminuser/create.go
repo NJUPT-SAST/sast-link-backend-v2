@@ -5,6 +5,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
 )
 
 // CreateUser creates an account and optionally binds a personal email as an
@@ -51,6 +52,24 @@ func (s Service) CreateUser(ctx context.Context, input CreateUserInput) (*Create
 		occupiedErr := newError(ErrStudentIDOccupied, "学号已被占用", nil)
 		s.auditCreate(ctx, input, 0, false, errorCode(occupiedErr), attemptedCreateDetail(input))
 		return nil, occupiedErr
+	}
+
+	// The NJUPT-prefix collision guard: a login_email whose prefix names another
+	// account's student ID hands that student a reset handle on the new account
+	// (the reset flow resolves by identifier and delivers to that mailbox), so the
+	// prefix is looked up whenever it is not the submitted student ID itself.
+	if prefix, lookup := validate.UnmatchedNjuptPrefix(validated.loginEmail, validated.studentID); lookup {
+		taken, prefixErr := s.Users.ExistsByStudentIDExcluding(ctx, prefix, 0)
+		if prefixErr != nil {
+			internalErr := newError(ErrInternal, "查询邮箱前缀占用情况失败", prefixErr)
+			s.auditCreate(ctx, input, 0, false, errorCode(internalErr), attemptedCreateDetail(input))
+			return nil, internalErr
+		}
+		if taken {
+			occupiedErr := newError(ErrStudentIDOccupied, "login_email 前缀与其他账号学号冲突", nil)
+			s.auditCreate(ctx, input, 0, false, errorCode(occupiedErr), attemptedCreateDetail(input))
+			return nil, occupiedErr
+		}
 	}
 
 	var boundEmail *string

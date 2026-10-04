@@ -868,6 +868,8 @@ paths:
         更新当前登录用户可自助维护的个人信息。允许更新 user 表中的基础信息
         （真实姓名、手机号、QQ 号、学院、专业、学号）以及 profile 表中的展示资料。
         登录邮箱、角色、状态、邮箱类型等身份与权限字段不可通过此接口修改，传入未知字段返回 40000。
+        部门是组织归属字段：仅 manager / admin 角色可在自助路径携带 department 键，
+        其他角色提交该键返回 40000（与未知权限字段同姿）。
 
         未传的字段保持不变；传 null 等同于未传，不表示清空。profile 侧的可空展示字段
         （nickname、intro、email、blog_url、github_url、department）传空字符串表示
@@ -918,12 +920,6 @@ paths:
                   maxLength: 50
                   description: 专业
                   example: 软件工程
-                student_id:
-                  type: string
-                  nullable: true
-                  maxLength: 50
-                  description: 学号
-                  example: B2404****
                 nickname:
                   type: string
                   nullable: true
@@ -934,7 +930,9 @@ paths:
                   type: string
                   nullable: true
                   enum: [software, media, electronics, office, liaison, publicity, competition, ""]
-                  description: 部门。传空字符串清空为 NULL，传 null 表示不修改
+                  description: 部门（组织归属字段，非展示资料）。仅 manager / admin
+                    角色可携带此键，其他角色提交返回 40000。传空字符串清空为 NULL，
+                    传 null 表示不修改
                 intro:
                   type: string
                   nullable: true
@@ -976,7 +974,8 @@ paths:
           description: 未认证（401xx）
         "400":
           $ref: "#/components/responses/BadRequest"
-          description: 参数错误、未知字段、枚举/长度/链接校验失败（40000）
+          description: 参数错误、未知字段、枚举/长度/链接校验失败、非 manager/admin
+            角色提交 department 键（40000）
         "403":
           $ref: "#/components/responses/Forbidden"
           description: 账号已注销（40301）
@@ -1194,7 +1193,10 @@ paths:
     post:
       summary: 绑定其他邮箱（第一步）
       deprecated: false
-      description: 返回 Bind-Ticket（Redis，5 分钟，一次性），内部携带待绑定邮箱地址。
+      description: |
+        返回 Bind-Ticket（Redis，5 分钟，一次性），内部携带待绑定邮箱地址。
+        绑定目标不接受 @njupt.edu.cn 校园邮箱域（40000）——校园邮箱是登录身份
+        不是个人邮箱；域外任意可收信地址均可，仍需验证码确认可控。
       operationId: userRequestBindEmail
       tags:
         - Identities
@@ -2687,6 +2689,9 @@ paths:
                     角色可修改（403）：忘记密码验证码发往该地址且 @sast.fun 前缀
                     无格式约束，manager 改写即接管原语；email_type 只能随本字段
                     提交，连带同样受限。建号路径不受限（manager 本就持有初始密码）。
+                    改写时若前缀（大小写不敏感）不等于该账号生效学号（本次提交
+                    或行内现值），查库校验：前缀是其他账号的学号则 40902；仅改
+                    student_id 不触发此查库。
                 personal_email:
                   type: string
                   format: email
@@ -2696,6 +2701,7 @@ paths:
                     验证），绑定后可用于登录与密码重置——已有账号的救援通道。不可与
                     login_email 相同（含本次修改后的值），不得已被其他账号占用，且每
                     账号 other_mail 绑定总数不超过 2 个（40905）；不可对已注销用户绑定。
+                    不接受 @njupt.edu.cn 域（40000）——校园邮箱是登录身份不是个人邮箱。
                     仅 admin 角色可提交（403）：直绑是免验证的身份断言，绑定后控制
                     该邮箱即可重置账号密码。
                 department:
@@ -4011,6 +4017,7 @@ components:
             可正常收信的第三方邮箱。审批通过后在同一事务内直绑为 other_mail 登
             录身份，也是结果通知与自助改密的收件地址。不能与 login_email 相同：
             V005 的两个触发器禁止同一地址既是 login_email 又是 other_mail 身份。
+            不接受 @njupt.edu.cn 域（40000）——校园邮箱是登录身份不是个人邮箱。
           example: zhangsan@qq.com
         phone_number:
           type: string
@@ -5150,7 +5157,8 @@ components:
           format: email
           description: |
             主登录邮箱，仅接受注册白名单域名（@njupt.edu.cn / sast.fun），全库唯一；
-            email_type 由服务端按域名派生，不可自指定。
+            email_type 由服务端按域名派生，不可自指定。前缀不等于提交学号时
+            查表校验：前缀是其他账号的学号则 40902（大小写不敏感）。
           example: b24040525@njupt.edu.cn
         major:
           type: string
@@ -5166,7 +5174,8 @@ components:
           description: |
             可选。同一事务内直绑为 other_mail 登录身份，无需邮箱验证，
             绑定后可用于登录和密码重置。不可与 login_email 相同，
-            也不得已被其他账号占用（作为主登录邮箱或已绑身份）。
+            也不得已被其他账号占用（作为主登录邮箱或已绑身份）；
+            不接受 @njupt.edu.cn 域（40000）——校园邮箱是登录身份不是个人邮箱。
             仅 admin 角色可提交，manager 提交返回 403（40300）：直绑是
             免验证的身份断言，绑定后控制该邮箱即可重置账号密码。
           example: zhangsan@qq.com

@@ -328,7 +328,6 @@ func (f *fakeUsers) UpdateProfile(_ context.Context, userID int64, update reposi
 	applyString(&user.Name, update.Name)
 	applyString(&user.PhoneNumber, update.PhoneNumber)
 	applyString(&user.QQNumber, update.QQNumber)
-	applyString(&user.StudentID, update.StudentID)
 	applyString(&user.Major, update.Major)
 	if update.College != nil {
 		user.College = *update.College
@@ -2287,6 +2286,31 @@ func TestRegisterRejectsShortPassword(t *testing.T) {
 	assertKind(t, err, KindValidationFailed, errcode.CodePasswordTooShort)
 }
 
+// A school mailbox is a login identity, never an other_mail: binding one would
+// put a reset handle for the account in whatever student's mailbox the prefix
+// names, verification or not.
+func TestBindEmailSendCodeRejectsSchoolDomain(t *testing.T) {
+	service := newRegisterService(t)
+	codes := service.VerificationCode.(*fakeVerificationCodeStore)
+
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{
+		UserID: 42,
+		Email:  "b24040525@njupt.edu.cn",
+	})
+	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
+	if _, ok := codes.codes[codeKey(string(mailer.VerificationPurposeBindEmail), "b24040525@njupt.edu.cn")]; ok {
+		t.Fatal("verification code was saved for a school-domain bind")
+	}
+
+	// A third-party mailbox still binds through.
+	if _, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{
+		UserID: 42,
+		Email:  "extra@gmail.com",
+	}); err != nil {
+		t.Fatalf("BindEmailSendCode(third-party): %v", err)
+	}
+}
+
 func TestBindEmailSendCodeIssuesTicket(t *testing.T) {
 	service := newRegisterService(t)
 	codes := service.VerificationCode.(*fakeVerificationCodeStore)
@@ -2358,7 +2382,12 @@ func TestBindEmailSendCodeSameConflictForSelfAndOtherBinding(t *testing.T) {
 
 func TestBindEmailSendCodeRejectsLoginEmail(t *testing.T) {
 	service := newRegisterService(t)
-	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "user@njupt.edu.cn"})
+	// The seeded account's login email is a school address, which the domain
+	// ban refuses before the occupancy check; a non-school login email isolates
+	// the uniform occupied refusal this test exists for.
+	users := service.Users.(*fakeUsers)
+	users.byLogin["taken@gmail.com"] = testUserWithHash(43, "taken@gmail.com", model.UserStateOnSAST, "hash")
+	_, err := service.BindEmailSendCode(context.Background(), BindEmailSendCodeInput{UserID: 42, Email: "taken@gmail.com"})
 	assertKind(t, err, KindConflict, errcode.CodeIdentityOccupied)
 }
 

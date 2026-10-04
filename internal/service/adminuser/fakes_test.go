@@ -48,7 +48,7 @@ type fakeUsers struct {
 	createErr       error
 	existsEmails    map[string]bool
 	// studentIDOwners maps a folded student id to the account holding it, so the
-	// excluding pre-check can tell "taken by another account" from "the target's
+	// excluding lookup can tell "taken by another account" from "the target's
 	// own id". Keys are folded by the method, mirroring the SQL comparison.
 	studentIDOwners map[string]int64
 	existsErr       error
