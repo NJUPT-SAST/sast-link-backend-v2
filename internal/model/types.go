@@ -23,8 +23,13 @@ const (
 type Department string
 
 const (
-	DepartmentSoftware Department = "software"
-	DepartmentMedia    Department = "media"
+	DepartmentSoftware    Department = "software"
+	DepartmentMedia       Department = "media"
+	DepartmentElectronics Department = "electronics"
+	DepartmentOffice      Department = "office"
+	DepartmentLiaison     Department = "liaison"
+	DepartmentPublicity   Department = "publicity"
+	DepartmentCompetition Department = "competition"
 )
 
 // Valid reports whether d is a defined department_enum value. The column is
@@ -32,11 +37,38 @@ const (
 // callers clear the field with a NULL instead.
 func (d Department) Valid() bool {
 	switch d {
-	case DepartmentSoftware, DepartmentMedia:
+	case DepartmentSoftware, DepartmentMedia, DepartmentElectronics,
+		DepartmentOffice, DepartmentLiaison, DepartmentPublicity, DepartmentCompetition:
 		return true
 	default:
 		return false
 	}
+}
+
+// DepartmentLabel pairs a department key with its Chinese display name. It
+// exists for the public department catalogue (GET /departments), so integrators
+// render labels from the same constants the write paths validate against
+// instead of keeping a local key→label copy that drifts the next time the enum
+// grows.
+type DepartmentLabel struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+// Departments is the complete department_enum membership in display order.
+// The order is presentational only — PostgreSQL enum member position carries no
+// meaning for department (unlike college, whose '其他' fallback must sort
+// last), so this list, not the migration's clause order, is where display
+// order is decided. Keep it in lockstep with the enum values when either
+// changes; enum_test pins the two halves together.
+var Departments = []DepartmentLabel{
+	{Key: string(DepartmentSoftware), Label: "软件研发部"},
+	{Key: string(DepartmentMedia), Label: "多媒体部"},
+	{Key: string(DepartmentElectronics), Label: "电子部"},
+	{Key: string(DepartmentOffice), Label: "办公室"},
+	{Key: string(DepartmentLiaison), Label: "外联部"},
+	{Key: string(DepartmentPublicity), Label: "科宣部"},
+	{Key: string(DepartmentCompetition), Label: "赛事部"},
 }
 
 // LoginMethod is a value from PostgreSQL's login_method_enum.

@@ -33,7 +33,11 @@ func TestCollegeValid(t *testing.T) {
 }
 
 func TestDepartmentValid(t *testing.T) {
-	for _, department := range []model.Department{model.DepartmentSoftware, model.DepartmentMedia} {
+	for _, department := range []model.Department{
+		model.DepartmentSoftware, model.DepartmentMedia, model.DepartmentElectronics,
+		model.DepartmentOffice, model.DepartmentLiaison, model.DepartmentPublicity,
+		model.DepartmentCompetition,
+	} {
 		if !department.Valid() {
 			t.Errorf("Department(%q).Valid() = false, want true", department)
 		}
@@ -43,6 +47,37 @@ func TestDepartmentValid(t *testing.T) {
 	for _, department := range []model.Department{"", "hardware", "Software", " media"} {
 		if department.Valid() {
 			t.Errorf("Department(%q).Valid() = true, want false", department)
+		}
+	}
+}
+
+// TestDepartmentsCatalogueMatchesValid pins the public catalogue to the enum:
+// every listed key must be a Valid() member, no member may be missing from the
+// list, and no key may appear twice. A drift in either direction breaks an
+// integrator's label lookup or hides a department from GET /departments while
+// the write paths still accept it.
+func TestDepartmentsCatalogueMatchesValid(t *testing.T) {
+	seen := make(map[model.Department]bool, len(model.Departments))
+	for _, entry := range model.Departments {
+		key := model.Department(entry.Key)
+		if !key.Valid() {
+			t.Errorf("model.Departments lists %q, which Department.Valid() rejects", entry.Key)
+		}
+		if seen[key] {
+			t.Errorf("model.Departments lists %q twice", entry.Key)
+		}
+		seen[key] = true
+		if entry.Label == "" {
+			t.Errorf("model.Departments entry %q has an empty label", entry.Key)
+		}
+	}
+	for _, department := range []model.Department{
+		model.DepartmentSoftware, model.DepartmentMedia, model.DepartmentElectronics,
+		model.DepartmentOffice, model.DepartmentLiaison, model.DepartmentPublicity,
+		model.DepartmentCompetition,
+	} {
+		if !seen[department] {
+			t.Errorf("department %q is Valid() but missing from model.Departments", department)
 		}
 	}
 }

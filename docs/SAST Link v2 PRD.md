@@ -287,8 +287,13 @@ Body: { "password": "current_password" }
 | ---- | ------ | ----------- |
 | `user` | name, phone_number, qq_number, student_id, college, major | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号） |
 | `user` | login_email, role, state, email_type | `PUT /admin/users/:id`（admin / manager；manager 不可修改 admin 账号或授予 admin） |
-| `profile` | nickname, department, intro, email, blog_url, github_url | `PUT /user/profile`（本人，department 仅 software/media 有值可设） |
+| `profile` | department | `PUT /user/profile`（本人） / `PUT /admin/users/:id`（admin / manager） / `PUT /admin/users` 批量（admin / manager，归置存量账号部门的通道，role 与 department 至少一项）；语义一致：传值设置、空串清空、缺省不改 |
+| `profile` | nickname, intro, email, blog_url, github_url | `PUT /user/profile`（本人） |
 | `profile` | avatar | `PUT /user/avatar`（multipart/form-data，≤1MB 且任一维 ≤4096，jpg/png/webp；前端压缩后上传） |
+
+#### 部门值域与公开目录（V021）
+
+`department_enum` 从迁移期的 software / media 两值扩到协会七部门（software 软件研发部 / media 多媒体部 / electronics 电子部 / office 办公室 / liaison 外联部 / publicity 科宣部 / competition 赛事部），`profile.department` 是所有角色均可自行修改的展示资料，不能单独作为部门归属证明或数据权限依据。下游（SAST People）的部门间数据权限必须依据独立核验的成员归属，不能信任这个自填字段。公开只读端点 `GET /departments` 返回全量 key + 中文展示名（与后端枚举同源，无需认证、不限流——七个组织公开名称非个人数据），集成方不再本地维护 key→label 映射，避免下次扩枚举时漂移。管理端归置存量账号部门走 `PUT /admin/users/:id`（单个）与 `PUT /admin/users`（批量，issue #99：下游按批次同步成员部门的通道）的 `department` 字段。
 
 #### 迁移账号资料补全标志（V010）
 
@@ -443,7 +448,7 @@ Payload: {
 | `/admin/users` | GET | admin / manager / lecturer | admin:read | 分页列表，支持按 role / state / department / student_id / keyword 筛选（phone 视角：admin / manager 返回，lecturer 无） |
 | `/admin/users` | POST | admin / manager | admin:write | 创建账号（管理员建号；manager 不可建 role=admin，403）：name / student_id / phone_number / qq_number / login_email 必填；`login_email` 限注册白名单域名；可选 `personal_email` 在同一事务内直绑为 `other_mail` 登录身份，无需邮箱验证；绑定后可用于登录和密码重置（见 §4.13）；role 缺省 member，state 缺省由自动状态机推导（role + 学号入学年份 + 当前学年），显式传 state 则钉住；系统生成随机初始密码，仅在响应中返回一次；撞 `login_email` / `student_id` / 绑定邮箱唯一 → 409 |
 | `/admin/users/:id` | GET | admin / manager / lecturer | admin:read | 用户详情（含 profile + identities） |
-| `/admin/users/:id` | PUT | admin / manager | admin:write | 更新用户信息（含 role / state / state_auto / email_type；manager 不可写 admin 角色账号、不可设 role=admin） |
+| `/admin/users/:id` | PUT | admin / manager | admin:write | 更新用户信息（含 role / state / state_auto / email_type / department；department 写 profile 行，语义同 `PUT /user/profile`（传值设置 / 空串清空 / 缺省不改）；manager 不可写 admin 角色账号、不可设 role=admin） |
 | `/admin/users/:id` | DELETE | admin / manager | admin:write | 软删除（state → is_deleted），级联撤销所有 token（manager 不可删 admin 角色账号） |
 | `/admin/users/:id/restore` | PUT | admin / manager | admin:write | 恢复已注销用户（manager 不可恢复 admin 角色账号）：state 按自动状态机重新推导并解除钉住（注销时 is_deleted 覆盖了一切旧值，钉住无从保留；恢复即回到自动推导，需重新钉住者再提交一次 state） |
 | `/admin/users/batch` | GET | admin / manager / lecturer | admin:read | 批量查询：`ids` 逗号分隔（≤100），按请求顺序返回详情（字段同 `/admin/users/:id`），缺失 id 缺席，重复 id 只返回一次 |
@@ -572,7 +577,7 @@ Payload: {
 | 表 | 用途 | 关键设计 |
 | ---- | ------ | ---------- |
 | `user` | 用户主表 | `token_version` 支持全局 Token 失效；`state` 状态机驱动 |
-| `profile` | 用户展示资料 | 1:1 关联 user，department 用于权限隔离 |
+| `profile` | 用户展示资料 | 1:1 关联 user，department 为本人可修改的展示资料，不是授权依据 |
 | `identities` | 第三方账号绑定 | provider + provider_id 全局唯一；github/lark 每用户仅 1 条（partial unique index）；other_mail 最多 2 条（触发器 + 应用层双重校验） |
 | `oauth_clients` | OAuth 客户端注册 | first_party 的 client_secret 为 NULL；redirect_uris/grant_types/scopes 数组存储 |
 | `oauth_authorizations` | 授权码 | PKCE 参数（code_challenge + method）+ OIDC nonce；`family_id` 支持重放检测级联撤销；无 updated_at；V009 起仅承载一次性授权码，不再是「已授权应用」列表的数据源 |
@@ -769,9 +774,9 @@ CORS 通过 `CORS_ALLOWED_ORIGINS` 环境变量配置白名单。
 
 | 枚举 | 值 |
 | ------ | ----- |
-| `user_role` | `freshman` / `member` / `lecturer` / `admin` |
+| `user_role` | `freshman` / `member` / `manager` / `lecturer` / `admin` |
 | `state` | `njupter` / `on_sast` / `retired_sast` / `is_deleted` |
-| `department` | `software` / `media` |
+| `department` | `software` / `media` / `electronics` / `office` / `liaison` / `publicity` / `competition` |
 | `email_type` | `njupt_email` / `sast_email` |
 | `login_method` | `github` / `lark` / `other_mail` |
 | `client_type` | `first_party` / `third_party` |

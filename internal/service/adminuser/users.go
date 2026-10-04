@@ -199,6 +199,7 @@ func (s Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*Update
 		StateAuto:     validated.stateAuto,
 		EmailType:     validated.emailType,
 		PersonalEmail: validated.personalEmail,
+		Department:    validated.department,
 		// A role change invalidates sessions: a demoted account's live refresh tokens
 		// must not keep minting tokens for a session meant to end.
 	}, model.UserRole(input.AdminRole), s.now())
@@ -256,17 +257,39 @@ func (s Service) GetUsersByIDs(ctx context.Context, input GetUsersByIDsInput) ([
 	return details, nil
 }
 
-// UpdateUserRoles applies one role change to every id, independently, and reports
-// each outcome. Deliberately not atomic: each item runs its own UpdateUser
-// transaction with its own guards, so the batch cannot bypass a guard the
-// single-user endpoint honors.
-func (s Service) UpdateUserRoles(ctx context.Context, input UpdateUserRolesInput) (*UpdateUserRolesResult, error) {
+// BatchUpdateUsers applies the requested role and/or department change to every
+// id, independently, and reports each outcome. Deliberately not atomic: each
+// item runs its own UpdateUser transaction with its own guards, so the batch
+// cannot bypass a guard the single-user endpoint honors.
+func (s Service) BatchUpdateUsers(ctx context.Context, input BatchUpdateUsersInput) (*BatchUpdateUsersResult, error) {
 	if s.Users == nil {
 		return nil, newError(ErrInternal, "用户仓储未配置", nil)
 	}
+	// TrimSpace-then-empty is the deliberate reading of a blank role: whitespace
+	// carries no change anyone could apply, so it counts as "not requested"
+	// rather than "requested an invalid value" — matching how a blank department
+	// reads as the clear, not an enum violation.
 	role := model.UserRole(strings.TrimSpace(input.Role))
-	if !validRole(role) {
+	roleRequested := role != ""
+	if roleRequested && !validRole(role) {
 		return nil, newError(ErrInvalidInput, "role 取值非法", nil)
+	}
+	// A body carrying neither change is refused before the loop, so the endpoint
+	// stays a write and not a no-op probe.
+	if !roleRequested && input.Department == nil {
+		return nil, newError(ErrInvalidInput, "没有需要更新的字段", nil)
+	}
+	// The department enum is checked request-wide so an unknown value is a 400 on
+	// the whole batch, mirroring the role check above; UpdateUser re-validates
+	// per item regardless, so the two checks cannot drift apart in outcome.
+	var requestedDepartment *string
+	if input.Department != nil {
+		department := model.Department(strings.TrimSpace(*input.Department))
+		if department != "" && !department.Valid() {
+			return nil, newError(ErrInvalidInput, "department 取值非法", nil)
+		}
+		applied := string(department)
+		requestedDepartment = &applied
 	}
 	ids, err := normalizeBatchIDs(input.IDs, maxBatchUpdateIDs, "单次最多更新 500 个用户")
 	if err != nil {
@@ -274,37 +297,48 @@ func (s Service) UpdateUserRoles(ctx context.Context, input UpdateUserRolesInput
 	}
 	requestedRole := string(role)
 
-	results := make([]RoleUpdateResult, 0, len(ids))
+	results := make([]BatchUpdateResult, 0, len(ids))
 	for _, id := range ids {
-		result := RoleUpdateResult{ID: id, Role: requestedRole}
-		_, updateErr := s.UpdateUser(ctx, UpdateUserInput{
+		result := BatchUpdateResult{ID: id, Department: requestedDepartment}
+		if roleRequested {
+			result.Role = requestedRole
+		}
+		update := UpdateUserInput{
 			UserID:        id,
-			Role:          &requestedRole,
 			Batch:         true,
 			AdminUserID:   input.AdminUserID,
 			AdminRole:     input.AdminRole,
 			ActorClientID: input.ActorClientID,
 			ClientIP:      input.ClientIP,
 			UserAgent:     input.UserAgent,
-		})
+		}
+		if roleRequested {
+			update.Role = &requestedRole
+		}
+		if input.Department != nil {
+			update.Department = requestedDepartment
+		}
+		_, updateErr := s.UpdateUser(ctx, update)
 		if updateErr == nil {
 			result.Success = true
 			results = append(results, result)
 			continue
 		}
-		// A failure carries the reason and no role, since the role was not applied.
+		// A failure carries the reason and no echo of the requested changes, since
+		// neither was applied.
 		result.Role = ""
-		result.Reason = roleUpdateReason(updateErr)
+		result.Department = nil
+		result.Reason = batchUpdateReason(updateErr)
 		results = append(results, result)
 	}
-	return &UpdateUserRolesResult{Results: results}, nil
+	return &BatchUpdateUsersResult{Results: results}, nil
 }
 
-// roleUpdateReason turns a per-item update failure into the literal shown in
+// batchUpdateReason turns a per-item update failure into the literal shown in
 // the batch response. The messages mirror the single-user endpoint's HTTP
 // mapping (mapUserServiceError), so a caller sees the same words whether one
 // user or one hundred were submitted.
-func roleUpdateReason(err error) string {
+func batchUpdateReason(err error) string {
 	var serviceErr *Error
 	if !errors.As(err, &serviceErr) {
 		return "服务器内部错误"

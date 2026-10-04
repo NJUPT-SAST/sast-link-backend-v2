@@ -180,7 +180,13 @@ type UpdateUserInput struct {
 	// alumnus whose school mailbox died: one bound address lets the reset flow
 	// reach them again.
 	PersonalEmail *string
-	Batch         bool
+	// Department, when set, writes the profile row's department column with the
+	// same semantics as PUT /user/profile: a value sets it, an empty string clears
+	// it to NULL, and omission leaves it alone. The administrative write path for
+	// an association whose members number in the hundreds — telling each one to
+	// self-edit was never going to migrate the existing accounts (issue #99).
+	Department *string
+	Batch      bool
 	// AdminUserID is the authenticated administrator, for the audit trail and for
 	// the self-demotion guard.
 	AdminUserID int64
@@ -227,13 +233,24 @@ type GetUsersByIDsInput struct {
 	IDs []int64
 }
 
-// UpdateUserRolesInput is a batch role change. IDs must be non-empty and within
-// the documented batch cap; Role must be one of the four user roles. Each id is
-// updated independently and reported per item, so one failure does not abort
-// the rest.
-type UpdateUserRolesInput struct {
-	IDs  []int64
+// BatchUpdateUsersInput is a batch partial update: an optional role applied to
+// every listed user, an optional department with the same set/clear/omit
+// semantics as PUT /user/profile, or both. IDs must be non-empty and within
+// the documented batch cap; at least one of Role and Department must be
+// present. Each id is updated independently and reported per item, so one
+// failure does not abort the rest.
+type BatchUpdateUsersInput struct {
+	IDs []int64
+	// Role, when non-empty, is one of the four user roles, applied to every
+	// listed user. Optional only because a department-only batch is legal: a
+	// body carrying neither role nor department is refused.
 	Role string
+	// Department, when set, writes every listed user's profile department with
+	// the same semantics as PUT /user/profile: a value sets it, an empty string
+	// clears it to NULL, and omission leaves it alone. The bulk form of the
+	// single-user field — downstream systems sync department membership per
+	// batch once a recruitment round closes (issue #99).
+	Department *string
 	// AdminUserID is the authenticated administrator, for the audit trail and for
 	// the self-demotion guard (an administrator cannot change their own role
 	// through the batch either).
@@ -248,21 +265,24 @@ type UpdateUserRolesInput struct {
 	UserAgent     string
 }
 
-// UpdateUserRolesResult is the per-item outcome of a batch role change. The HTTP
+// BatchUpdateUsersResult is the per-item outcome of a batch update. The HTTP
 // response is 200 whenever the request itself was well formed; an item-level
 // failure is data, not transport, so the caller can retry or alert on it.
-type UpdateUserRolesResult struct {
-	Results []RoleUpdateResult
+type BatchUpdateUsersResult struct {
+	Results []BatchUpdateResult
 }
 
-// RoleUpdateResult is one id's outcome. Success carries the requested role so
-// the caller can confirm what landed; failure carries a literal reason, never
-// an echo of submitted values.
-type RoleUpdateResult struct {
+// BatchUpdateResult is one id's outcome. Success echoes the requested changes
+// so the caller can confirm what landed; failure carries a literal reason,
+// never an echo of submitted values.
+type BatchUpdateResult struct {
 	ID      int64
 	Success bool
 	Role    string
-	Reason  string
+	// Department is the trimmed value the item applied — the empty string means
+	// cleared to NULL — and is nil when the request did not touch department.
+	Department *string
+	Reason     string
 }
 
 // ListAuditLogsInput is a filtered, paged audit query.
