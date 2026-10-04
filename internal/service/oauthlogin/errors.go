@@ -47,6 +47,13 @@ type Error struct {
 	// which is a log line, not something to hand a browser. Only outcomes the user
 	// can act on differently from the Kind default set it.
 	Display bool
+	// Restorable marks a callback failure the service answered by writing the
+	// consumed state back, so a browser retry of the same callback URL can
+	// re-run the whole exchange. The HTTP layer keys the state-cookie clearing
+	// on it: the pairing must survive to serve the restored state. Set only by
+	// providerFailureOutcome's network-outage branches, so the audit stage/reason
+	// and this flag can never disagree about which failures count.
+	Restorable bool
 	// RetryAfter carries the limiter's remaining window so the HTTP layer can
 	// emit a Retry-After header.
 	RetryAfter time.Duration

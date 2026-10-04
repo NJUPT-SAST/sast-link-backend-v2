@@ -301,6 +301,92 @@ func TestCallbackMapsInvalidGrantToRestartableFailure(t *testing.T) {
 	assertDisplayMessage(t, err, "第三方授权码")
 }
 
+// A provider outage is the one failure whose consumed state is written back:
+// the callback died on our network leg, and a browser retry of the same URL
+// should re-run the exchange rather than land on "登录已中断".
+func TestCallbackProviderOutageRestoresState(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.GitHub.err = context.DeadlineExceeded
+	state, stateDigest := authorizedState(t, service)
+
+	_, err := service.Callback(context.Background(), CallbackInput{
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
+		State:       state,
+		StateCookie: stateDigest,
+	})
+	assertKind(t, err, KindInvalidState, errcode.CodeBadRequest)
+
+	// The state the callback consumed must be back in the store, so the retried
+	// GET finds it instead of a not-found.
+	payload, found, readErr := doubles.States.ConsumeOAuthState(context.Background(), state)
+	if readErr != nil || !found {
+		t.Fatalf("state was not restored after the outage: found=%v err=%v", found, readErr)
+	}
+	if payload.Provider != model.LoginMethodGitHub {
+		t.Fatalf("restored payload provider = %q, want github", payload.Provider)
+	}
+}
+
+// An unexpected provider response is an outage too: same network leg, same
+// restore.
+func TestCallbackProviderUnavailableRestoresState(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.GitHub.err = provider.ErrUnexpectedResponse
+	state, stateDigest := authorizedState(t, service)
+
+	_, err := service.Callback(context.Background(), CallbackInput{
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
+		State:       state,
+		StateCookie: stateDigest,
+	})
+	assertKind(t, err, KindProviderUnavailable, errcode.CodeDependencyUnavailable)
+
+	if _, found, readErr := doubles.States.ConsumeOAuthState(context.Background(), state); readErr != nil || !found {
+		t.Fatalf("state was not restored after the outage: found=%v err=%v", found, readErr)
+	}
+}
+
+// A rejected code is an answer, not an outage: the code is spent at the
+// provider, so restoring the state would only invite a retry that can never
+// succeed.
+func TestCallbackInvalidGrantDoesNotRestoreState(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.GitHub.err = provider.ErrInvalidGrant
+	state, stateDigest := authorizedState(t, service)
+
+	_, _ = service.Callback(context.Background(), CallbackInput{
+		Provider:    model.LoginMethodGitHub,
+		Code:        "spent",
+		State:       state,
+		StateCookie: stateDigest,
+	})
+
+	if _, found, _ := doubles.States.ConsumeOAuthState(context.Background(), state); found {
+		t.Fatal("state was restored after an invalid grant, want it consumed")
+	}
+}
+
+// A caller that went away has no browser left to retry the callback; the
+// consumed state stays consumed.
+func TestCallbackCallerCancelDoesNotRestoreState(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.GitHub.err = context.Canceled
+	state, stateDigest := authorizedState(t, service)
+
+	_, _ = service.Callback(context.Background(), CallbackInput{
+		Provider:    model.LoginMethodGitHub,
+		Code:        "provider-code",
+		State:       state,
+		StateCookie: stateDigest,
+	})
+
+	if _, found, _ := doubles.States.ConsumeOAuthState(context.Background(), state); found {
+		t.Fatal("state was restored after a caller cancel, want it consumed")
+	}
+}
+
 // Cancelling on the provider's page is a result, not an error: the callback
 // must come back as a cancellation that keeps the frontend's "已取消登录" page,
 // not as a parameter failure. The state is consumed on the way out.

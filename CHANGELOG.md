@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **manager 不再可改写既有账号的 login_email**（fix/admin-identity-boundaries）：`PUT /admin/users/:id` 的 `login_email` 改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可修改 login_email」），`email_type` 只能随 `login_email` 提交放带受限。与 personal_email 同判：忘记密码验证码发往 login_email 且 `@sast.fun` 前缀无格式约束，manager 把成员主邮箱改写为自己可读的 sast.fun 地址（部门共用箱/别名，唯一约束只挡精确重复）即构成对既有账号的静默持久接管。建号路径（`POST /admin/users`）不拦——manager 建号本就持有初始密码，无额外提权。
+
+- **manager 不再可绑定 personal_email**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的 `personal_email` 直绑改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可绑定 personal_email」）。直绑是免验证的身份断言：绑定后控制该邮箱即可登录并重置账号密码，manager 若能自选邮箱即可绑定自己控制的邮箱对任意成员账号构成持久静默接管（成员改密也不切断）；建号路径同理，绑定比初始密码存活得更久。自助面 `POST /user/identities/email`（需邮箱验证）不受影响，admin 直绑与校友工单审批直绑（本就 admin-only）不变。
+
+### Fixed
+
+- **管理台学号占用判定补齐大小写折叠**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的学号占用预检改为 `lower(btrim())` 折叠比较（新增 `ExistsByStudentIDExcluding`，排除目标自身行），返回 `40902`。V001 的 `user_student_id_key` 约束在默认 collation 下大小写敏感，此前 `b24040525` 可在 `B24040525` 旁再建一号——正是注册与校友路径早已堵掉的导入期形状，控制台两条路一直漏着。折叠窗口内的并发（两个控制台同时建变体号）仍无数据库层硬保证，需表达式唯一索引才可彻底封死。
+
 ### Added
 
 - **飞书客户端内免登**（2026-09-30，feat/lark-h5-app-code，[PR #105](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/105)）：`POST /oauth/lark/app-code`。飞书客户端内嵌网页通过 JSSDK `tt.requestAccess`（旧客户端回退 `tt.requestAuthCode`）拿到一次性预授权 code 后 POST 本端点，免跳授权页完成登录/注册分流：已绑定 → `login_code`（续走 `POST /oauth/exchange-code`）；未绑定 → `registration_state` + 本端点签发的 `oauth_state`（注册双绑定与授权页流程一致）。`union_id` 与授权页流程一致，两入口绑定互通；租户闸门（40302）、审计（`oauth_login` 带 `source: "app_code"`）与限流（callback 同档配额、独立桶）不变。无新 errcode / env / 迁移。
@@ -105,6 +115,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **pg_cron 清理方案**（2026-08-01，[PR #33](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/33)）：被进程内 retention worker 取代；不用 pg_cron，因为生产库未安装该扩展且测试镜像无法加载。
 
 ### Fixed
+
+- **GitHub/飞书登录网络故障时的误导性「state 无效或已过期」**（fix/oauth-provider-network-retry）：出站到 provider 的 token exchange 挂在网络超时上时，同一 callback URL 的重试（浏览器刷新/GitHub 授权页返回秒跳回）命中已被消费的 state，用户只看到「state 无效或已过期」，真因仅存于审计行的 `provider_timeout`。三层修复：① provider 出站调用（token exchange / user fetch，GitHub 与飞书）加一次 250ms 退避重试，仅限传输层错误与 provider 5xx，4xx 与 code 被拒不重试；单次 I/O 超时 10s→4s，重试后最坏总时长低于原单次。② provider 网络故障（超时/不可达）时把已消费的 state 写回 Redis（上限 2 分钟）并保留配对 cookie，浏览器重试可完整重走 exchange——code 在 provider 侧单次使用，首次请求若实际已到达则重试得到 `bad_verification_code`，走正常重启分支；CSRF cookie 绑定不受影响。③ state 失效/cookie 校验失败类文案改为面向用户的行动指引（「登录已中断，请重新发起登录」），错误页重定向附带 `provider` 参数供前端渲染一键重启；超时文案改为「连接第三方登录服务超时，请重试」。
 
 - **个人徽标 `target` 参数生效**（2026-09-30）：前端分享 URL 早已携带 `?target=blog|github`，但渲染端从未读取该参数——`ServeSVG` 只解析 `theme`，卡片锚点固定 blog 优先、github 兜底，`?target=github` 的分享在两页都配置时永远跳博客。现在 `target` 与 `theme` 同一契约：随 `RenderInput` 下传、未知值归一化为 `blog`、锚点按「请求的目标优先，另一个兜底」解析（http(s) 白名单不变），并加入渲染缓存标识（version|theme|target|key），两个变体互不命中对方缓存。`docs/API文档.md` §9.4 与 `docs/openapi.yaml` 补记 `target` 参数。
 

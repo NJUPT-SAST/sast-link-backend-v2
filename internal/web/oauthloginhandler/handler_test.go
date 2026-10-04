@@ -805,6 +805,120 @@ func TestCallbackRateLimitKeepsStateCookie(t *testing.T) {
 	}
 }
 
+// A provider outage failure is Restorable: the service wrote the consumed state
+// back for a browser retry, so clearing the pairing cookie here would strand
+// that state behind a check that can never pass again.
+func TestCallbackProviderOutageKeepsStateCookie(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:       oauthlogin.KindInvalidState,
+		Code:       errcode.CodeBadRequest,
+		Message:    "连接第三方登录服务超时，请重试",
+		Display:    true,
+		Restorable: true,
+	}}
+	stateCookie := &middleware.SessionCookie{
+		Name: "sl_oauth_state", Path: "/v2", Secure: true, SameSite: http.SameSiteLaxMode,
+	}
+	router := newTestRouter(Handler{
+		Service:       service,
+		StateCookie:   stateCookie,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=provider-code&state=os_abc", nil)
+	// #nosec G124 -- test fixture: a browser callback request, not a cookie this
+	// service writes.
+	request.AddCookie(&http.Cookie{Name: "sl_oauth_state", Value: "deadbeef"})
+	router.ServeHTTP(recorder, request)
+
+	response := recorder.Result()
+	defer response.Body.Close()
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "sl_oauth_state" {
+			t.Fatalf("state cookie was touched on a restorable outage (Max-Age = %d)", cookie.MaxAge)
+		}
+	}
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := location.Query().Get("error_description"); got != "连接第三方登录服务超时，请重试" {
+		t.Fatalf("error_description = %q, want the outage display message", got)
+	}
+}
+
+// A plain failure (not Restorable) still clears the pairing cookie, keeping the
+// one-consumption invariant for every non-outage outcome.
+func TestCallbackPlainFailureStillClearsStateCookie(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:    oauthlogin.KindInvalidState,
+		Code:    errcode.CodeBadRequest,
+		Message: "登录已中断，请重新发起登录",
+		Display: true,
+	}}
+	stateCookie := &middleware.SessionCookie{
+		Name: "sl_oauth_state", Path: "/v2", Secure: true, SameSite: http.SameSiteLaxMode,
+	}
+	router := newTestRouter(Handler{
+		Service:       service,
+		StateCookie:   stateCookie,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=provider-code&state=os_abc", nil)
+	// #nosec G124 -- test fixture: a browser callback request, not a cookie this
+	// service writes.
+	request.AddCookie(&http.Cookie{Name: "sl_oauth_state", Value: "deadbeef"})
+	router.ServeHTTP(recorder, request)
+
+	response := recorder.Result()
+	defer response.Body.Close()
+	cleared := false
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "sl_oauth_state" && cookie.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("state cookie survived a non-restorable failure, want it cleared")
+	}
+}
+
+// The error redirect names the provider, so the page can offer a one-click
+// restart of that provider's login instead of a generic message.
+func TestCallbackFailureRedirectNamesProvider(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:    oauthlogin.KindInvalidState,
+		Code:    errcode.CodeBadRequest,
+		Display: false,
+	}}
+	router := newTestRouter(Handler{
+		Service:       service,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/lark/callback?code=c&state=s", nil))
+
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := location.Query().Get("provider"); got != "lark" {
+		t.Fatalf("provider = %q, want lark", got)
+	}
+	// The generic per-Kind string still rides along when the service marked
+	// nothing for display.
+	if got := location.Query().Get("error_description"); got != "state 无效或已过期" {
+		t.Fatalf("error_description = %q, want the Kind default", got)
+	}
+}
+
 // Without the state cookie wired, the handler passes an empty cookie value —
 // the service refuses the callback rather than silently dropping the defense.
 func TestCallbackWithoutStateCookieWirePassesEmptyValue(t *testing.T) {
