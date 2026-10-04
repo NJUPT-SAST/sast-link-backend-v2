@@ -60,6 +60,27 @@ func (p *fakeProvider) Exchange(_ context.Context, _ string, _ string) (*provide
 	return p.identity, nil
 }
 
+// fakeAppCodeProvider doubles the Lark client's two exchange legs separately:
+// the authorize-page Exchange (inherited from fakeProvider) and the JSAPI
+// ExchangeAppCode, so a test can drive one leg without the other's stubs
+// interfering. It also satisfies AppCodeExchanger, which fakeProvider alone
+// deliberately does not — tests use a bare fakeProvider to model a provider
+// without the JSAPI leg.
+type fakeAppCodeProvider struct {
+	fakeProvider
+	appCodeIdentity *provider.Identity
+	appCodeErr      error
+	appCodeCalls    int
+}
+
+func (p *fakeAppCodeProvider) ExchangeAppCode(_ context.Context, _ string) (*provider.Identity, error) {
+	p.appCodeCalls++
+	if p.appCodeErr != nil {
+		return nil, p.appCodeErr
+	}
+	return p.appCodeIdentity, nil
+}
+
 type fakeUserRepository struct {
 	byID map[int64]*model.User
 }

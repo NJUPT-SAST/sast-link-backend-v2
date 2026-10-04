@@ -34,6 +34,16 @@ type ProviderClient interface {
 	Exchange(ctx context.Context, code, redirectURI string) (*provider.Identity, error)
 }
 
+// AppCodeExchanger is the provider capability the login-free flow needs: it
+// redeems the pre-authorization code the Feishu client hands an embedded web
+// app through the tt.requestAccess / tt.requestAuthCode JSAPI. It is a
+// separate interface from ProviderClient because GitHub has no JSAPI
+// counterpart and the authorize-page flow must keep compiling against
+// providers that never implement it.
+type AppCodeExchanger interface {
+	ExchangeAppCode(ctx context.Context, code string) (*provider.Identity, error)
+}
+
 // StatePayload is the value stored under oauth_state for one login round trip.
 //
 // Provider is stored rather than inferred from the callback route, so a state
@@ -193,6 +203,20 @@ type CallbackInput struct {
 	// against the state's digest. Empty means the cookie is missing, which
 	// refuses any state that did not originate in this browser.
 	StateCookie string
+	// Source names the entrance this login came through — "" (the authorize-page
+	// callback) or "app_code" (the Feishu client JSAPI login-free leg). It is
+	// service-internal bookkeeping for the audit row; handlers never set it.
+	Source string
+}
+
+// AppCodeLoginInput submits a Feishu client JSAPI pre-authorization code for
+// the login-free leg. There is no state and no redirect: the code is minted
+// inside the page the user is already on, so there is no cross-site callback
+// to bind a browser to.
+type AppCodeLoginInput struct {
+	Code      string
+	ClientIP  string
+	UserAgent string
 }
 
 // CallbackResult is one of three outcomes, distinguished by which field is set.

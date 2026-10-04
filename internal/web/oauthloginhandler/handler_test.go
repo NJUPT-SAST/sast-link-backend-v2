@@ -28,6 +28,10 @@ type fakeService struct {
 	callbackErr    error
 	callbackInput  oauthlogin.CallbackInput
 
+	appCodeResult *oauthlogin.CallbackResult
+	appCodeErr    error
+	appCodeInput  oauthlogin.AppCodeLoginInput
+
 	exchangeResult *oauthlogin.ExchangeCodeResult
 	exchangeErr    error
 
@@ -50,6 +54,14 @@ func (s *fakeService) Callback(
 ) (*oauthlogin.CallbackResult, error) {
 	s.callbackInput = input
 	return s.callbackResult, s.callbackErr
+}
+
+func (s *fakeService) AppCodeLogin(
+	_ context.Context,
+	input oauthlogin.AppCodeLoginInput,
+) (*oauthlogin.CallbackResult, error) {
+	s.appCodeInput = input
+	return s.appCodeResult, s.appCodeErr
 }
 
 func (s *fakeService) ExchangeCode(
@@ -923,5 +935,90 @@ func TestCallbackWithoutStateCookieWirePassesEmptyValue(t *testing.T) {
 
 	if service.callbackInput.StateCookie != "" {
 		t.Fatalf("callback StateCookie = %q, want empty when the cookie is not wired", service.callbackInput.StateCookie)
+	}
+}
+
+func TestAppCodeLoginReturnsLoginCodeWhenBound(t *testing.T) {
+	service := &fakeService{appCodeResult: &oauthlogin.CallbackResult{
+		Bound:     true,
+		LoginCode: "lc_abc",
+		Provider:  "lark",
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/lark/app-code",
+		strings.NewReader(`{"code":"jsapi-code"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", recorder.Code, recorder.Body.String())
+	}
+	code, message, data := decodeEnvelope(t, recorder.Body.String())
+	if code != 0 || message != "ok" {
+		t.Fatalf("envelope = %d/%q, want 0/ok", code, message)
+	}
+	if data["bound"] != true || data["login_code"] != "lc_abc" {
+		t.Fatalf("data = %+v, want bound=true with the login_code", data)
+	}
+	// The registration fields must not appear on the bound leg: an omitted key
+	// reads as "not applicable", an empty string reads as "missing".
+	for _, absent := range []string{"registration_state", "oauth_state", "name", "avatar"} {
+		if _, ok := data[absent]; ok {
+			t.Fatalf("data carries %q on the bound leg", absent)
+		}
+	}
+	if service.appCodeInput.Code != "jsapi-code" {
+		t.Fatalf("service code = %q, want the posted code", service.appCodeInput.Code)
+	}
+}
+
+func TestAppCodeLoginReturnsRegistrationPairWhenUnbound(t *testing.T) {
+	service := &fakeService{appCodeResult: &oauthlogin.CallbackResult{
+		RegistrationState: "rs_abc",
+		OAuthState:        "os_xyz",
+		Provider:          "lark",
+		DisplayName:       "张三",
+		AvatarURL:         "https://lark.test/a.png",
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/lark/app-code",
+		strings.NewReader(`{"code":"jsapi-code"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", recorder.Code, recorder.Body.String())
+	}
+	_, _, data := decodeEnvelope(t, recorder.Body.String())
+	if data["bound"] != false {
+		t.Fatalf("bound = %v, want false", data["bound"])
+	}
+	if data["registration_state"] != "rs_abc" || data["oauth_state"] != "os_xyz" {
+		t.Fatalf("data = %+v, want both halves of the registration pair", data)
+	}
+	if data["provider"] != "lark" || data["name"] != "张三" || data["avatar"] != "https://lark.test/a.png" {
+		t.Fatalf("data = %+v, want the prefill hints", data)
+	}
+}
+
+func TestAppCodeLoginRejectsMissingCode(t *testing.T) {
+	service := &fakeService{}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/lark/app-code",
+		strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", recorder.Code)
+	}
+	if service.appCodeInput.Code != "" {
+		t.Fatal("service was called despite the missing code")
 	}
 }

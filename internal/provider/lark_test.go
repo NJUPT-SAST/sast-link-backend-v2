@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -202,5 +203,146 @@ func TestLarkExchangeFallsBackToEnName(t *testing.T) {
 	}
 	if identity.DisplayName != "San Zhang" {
 		t.Fatalf("DisplayName = %q, want the en_name fallback", identity.DisplayName)
+	}
+}
+
+// larkAppCodeHappyResponses is the three-call sequence a successful
+// login-free exchange makes: app_access_token, the v1 OIDC token endpoint,
+// then user_info. It differs from larkHappyResponses only at the token step.
+func larkAppCodeHappyResponses(tenantKey string) map[string]fakeResponse {
+	responses := larkHappyResponses(tenantKey)
+	delete(responses, larkUserTokenURL)
+	responses[larkOIDCTokenURL] = fakeResponse{status: http.StatusOK, body: `{
+		"code":0,"msg":"success","data":{
+			"access_token":"u-token","refresh_token":"r-token","token_type":"Bearer",
+			"expires_in":7200,"refresh_expires_in":2591999,
+			"scope":"auth:user.id:read"}}`}
+	return responses
+}
+
+func TestLarkExchangeAppCodeUsesUnionIDAsProviderID(t *testing.T) {
+	doer := &fakeDoer{responses: larkAppCodeHappyResponses(testTenantKey)}
+	identity, err := larkTestClient(doer, testTenantKey).ExchangeAppCode(context.Background(), "code-app")
+	if err != nil {
+		t.Fatalf("ExchangeAppCode: %v", err)
+	}
+	if identity.ProviderID != "on_union" {
+		t.Fatalf("ProviderID = %q, want the union_id \"on_union\"", identity.ProviderID)
+	}
+	if identity.AccessToken != "u-token" || identity.RefreshToken != "r-token" {
+		t.Fatalf("tokens = %q/%q, want u-token/r-token", identity.AccessToken, identity.RefreshToken)
+	}
+	if identity.TokenExpiresAt == nil {
+		t.Fatal("TokenExpiresAt is nil, want it derived from expires_in")
+	}
+
+	// The OIDC endpoint authenticates the app through the app_access_token and
+	// must not see a redirect_uri or client_secret: the code never rode a
+	// redirect, and repeating the secret next to the header adds a second way
+	// to misconfigure the app for no benefit.
+	tokenReq := doer.requestFor(t, larkOIDCTokenURL)
+	if tokenReq.header.Get("Authorization") != "Bearer a-token" {
+		t.Fatalf("oidc request Authorization = %q, want the app_access_token",
+			tokenReq.header.Get("Authorization"))
+	}
+	for _, forbidden := range []string{"redirect_uri", "client_secret"} {
+		if strings.Contains(tokenReq.body, forbidden) {
+			t.Fatalf("oidc request body %q carries %q", tokenReq.body, forbidden)
+		}
+	}
+	if !strings.Contains(tokenReq.body, `"code":"code-app"`) {
+		t.Fatalf("oidc request body %q is missing the code", tokenReq.body)
+	}
+	userReq := doer.requestFor(t, larkUserInfoURL)
+	if userReq.header.Get("Authorization") != "Bearer u-token" {
+		t.Fatalf("user_info Authorization = %q, want the user access token",
+			userReq.header.Get("Authorization"))
+	}
+}
+
+func TestLarkExchangeAppCodeRejectsForeignTenant(t *testing.T) {
+	doer := &fakeDoer{responses: larkAppCodeHappyResponses("other-company")}
+
+	_, err := larkTestClient(doer, testTenantKey).ExchangeAppCode(context.Background(), "code-app")
+	if !errors.Is(err, ErrForeignTenant) {
+		t.Fatalf("error = %v, want ErrForeignTenant", err)
+	}
+}
+
+func TestLarkExchangeAppCodeRejectsMissingUnionID(t *testing.T) {
+	responses := larkAppCodeHappyResponses(testTenantKey)
+	responses[larkUserInfoURL] = fakeResponse{status: http.StatusOK, body: `{
+		"code":0,"data":{"name":"张三","tenant_key":"` + testTenantKey + `"}}`}
+	doer := &fakeDoer{responses: responses}
+
+	_, err := larkTestClient(doer, testTenantKey).ExchangeAppCode(context.Background(), "code-app")
+	if !errors.Is(err, ErrUnexpectedResponse) {
+		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
+	}
+}
+
+func TestLarkExchangeAppCodeMapsSpentOrExpiredCodeToInvalidGrant(t *testing.T) {
+	for _, code := range []int{20003, 20004} {
+		responses := larkAppCodeHappyResponses(testTenantKey)
+		responses[larkOIDCTokenURL] = fakeResponse{status: http.StatusOK, body: `{
+			"code":` + strconv.Itoa(code) + `,"msg":"the code is invalid"}`}
+		doer := &fakeDoer{responses: responses}
+
+		_, err := larkTestClient(doer, testTenantKey).ExchangeAppCode(context.Background(), "code-app")
+		if !errors.Is(err, ErrInvalidGrant) {
+			t.Fatalf("code %d: error = %v, want ErrInvalidGrant", code, err)
+		}
+	}
+}
+
+func TestLarkExchangeAppCodeKeepsOtherApplicationErrorAsOutage(t *testing.T) {
+	// 20014 is an invalid app_access_token: an app-side fault, not something
+	// the caller can fix by presenting a fresh pre-authorization code.
+	responses := larkAppCodeHappyResponses(testTenantKey)
+	responses[larkOIDCTokenURL] = fakeResponse{status: http.StatusOK, body: `{
+		"code":20014,"msg":"invalid app access token"}`}
+	doer := &fakeDoer{responses: responses}
+
+	_, err := larkTestClient(doer, testTenantKey).ExchangeAppCode(context.Background(), "code-app")
+	if !errors.Is(err, ErrUnexpectedResponse) {
+		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
+	}
+}
+
+func TestLarkExchangeAppCodeKeepsServerErrorAsOutage(t *testing.T) {
+	// A non-2xx from the OIDC endpoint must not be reclassified: unlike the v2
+	// leg there is no isClientRejection carve-out, so a 4xx/5xx stays an outage
+	// rather than reading as a spent code.
+	responses := larkAppCodeHappyResponses(testTenantKey)
+	responses[larkOIDCTokenURL] = fakeResponse{status: http.StatusBadGateway, body: `gateway down`}
+	doer := &fakeDoer{responses: responses}
+
+	_, err := larkTestClient(doer, testTenantKey).ExchangeAppCode(context.Background(), "code-app")
+	if errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("error = %v, want an outage rather than ErrInvalidGrant", err)
+	}
+	if !errors.Is(err, ErrUnexpectedResponse) {
+		t.Fatalf("error = %v, want ErrUnexpectedResponse", err)
+	}
+}
+
+func TestLarkExchangeAppCodeReusesCachedAppToken(t *testing.T) {
+	doer := &fakeDoer{responses: larkAppCodeHappyResponses(testTenantKey)}
+	client := larkTestClient(doer, testTenantKey)
+
+	for i := 0; i < 2; i++ {
+		if _, err := client.ExchangeAppCode(context.Background(), "code-app"); err != nil {
+			t.Fatalf("ExchangeAppCode #%d: %v", i, err)
+		}
+	}
+	appTokenCalls := 0
+	for _, req := range doer.requests {
+		if strings.HasPrefix(req.url, larkAppAccessTokenURL) {
+			appTokenCalls++
+		}
+	}
+	if appTokenCalls != 1 {
+		t.Fatalf("app_access_token fetched %d times, want the 2h cache to serve both exchanges",
+			appTokenCalls)
 	}
 }

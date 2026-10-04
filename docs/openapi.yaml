@@ -696,6 +696,100 @@ paths:
             飞书不可用，且未配置 OAUTH_LOGIN_ERROR_REDIRECT。该变量为空时失败
             以信封返回而非重定向，此时才会看到 502 + `50300`。
       security: []
+  /oauth/lark/app-code:
+    post:
+      summary: 飞书客户端内免登
+      deprecated: false
+      description: >
+        飞书客户端内嵌网页（H5）的免登录入口。前端在飞书客户端内通过 JSSDK
+        tt.requestAccess（客户端 <6.9.0 或 JSSDK 过旧时回退 tt.requestAuthCode）
+        获得一次性预授权 code（3 分钟、单次使用）后 POST 给本端点；后端兑换出
+        用户身份，与 /oauth/lark/callback 走同一套分支与同一道租户闸门。
+        union_id 与授权页流程一致，已有飞书绑定的账号在两条入口间互通。
+
+        - 已有绑定 → data.bound=true，携带一次性 login_code（续走
+          POST /oauth/exchange-code）
+
+        - 无绑定 → data.bound=false，携带 registration_state 与 oauth_state
+          （双绑定，提交 POST /auth/register 时同时携带）及 name/avatar 预填提示
+
+        - 非 SAST 企业用户 → 40302
+
+        - 预授权 code 被飞书拒绝（已使用/过期）→ 40000
+
+        飞书侧前置配置：同一自建应用加「网页应用」能力并配主页 URL；
+        tt.requestAccess 传 scopeList: []（仅授予获取登录用户信息）；
+        requestAccess/requestAuthCode 无需网页应用鉴权。
+      operationId: oauthLarkAppCodeLogin
+      tags:
+        - OAuth Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  description: 飞书 JSAPI 预授权码（3 分钟、单次使用）
+      responses:
+        "200":
+          description: 成功；data.bound 区分登录与注册分支
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: integer
+                    example: 0
+                  message:
+                    type: string
+                    example: ok
+                  data:
+                    type: object
+                    properties:
+                      bound:
+                        type: boolean
+                      login_code:
+                        type: string
+                        description: 已绑定时的一次性登录码
+                      registration_state:
+                        type: string
+                        description: 未绑定时暂存身份的一次性状态
+                      oauth_state:
+                        type: string
+                        description: 未绑定时与本端点签发的双绑定另一半
+                      provider:
+                        type: string
+                        example: lark
+                      name:
+                        type: string
+                        description: 未绑定时注册表单预填昵称
+                      avatar:
+                        type: string
+                        description: 未绑定时注册表单预填头像 URL
+        "400":
+          $ref: "#/components/responses/BadRequest"
+          description: >-
+            `40000`——缺 code，或预授权 code 被飞书拒绝（已使用/过期，
+            「第三方授权码无效或已过期」）。
+        "403":
+          $ref: "#/components/responses/Forbidden"
+          description: >-
+            `40302` 仅限 SAST 企业飞书用户。
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+          description: >-
+            `42900`（带 Retry-After）—— per-IP 独立配额，默认 120 次/60s
+            （与 RATE_LIMIT_OAUTH_CALLBACK_RPM 同档、独立桶）。
+        "502":
+          $ref: "#/components/responses/BadGateway"
+          description: >-
+            飞书不可用（`50300`）。
+      security: []
   /oauth/exchange-code:
     post:
       summary: 交换登录码

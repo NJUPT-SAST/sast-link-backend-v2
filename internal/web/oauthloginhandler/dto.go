@@ -38,6 +38,23 @@ type authUserDTO struct {
 	IncompleteFields       []string `json:"incomplete_fields"`
 }
 
+// appCodeLoginDTO is the login-free response payload. Its fields mirror the
+// callback redirect's query parameters one for one, so the frontend reuses the
+// same handling it already has for the authorize-page flow's redirect.
+type appCodeLoginDTO struct {
+	Bound bool `json:"bound"`
+	// LoginCode is set when bound: the one-time code POST /oauth/exchange-code
+	// redeems, same as the callback leg.
+	LoginCode string `json:"login_code,omitempty"`
+	// RegistrationState and OAuthState are set when unbound: both halves of the
+	// double binding POST /auth/register requires.
+	RegistrationState string `json:"registration_state,omitempty"`
+	OAuthState        string `json:"oauth_state,omitempty"`
+	Provider          string `json:"provider"`
+	DisplayName       string `json:"name,omitempty"`
+	AvatarURL         string `json:"avatar,omitempty"`
+}
+
 // identityBindDTO is the bind response envelope payload.
 type identityBindDTO struct {
 	Message  string      `json:"message"`
