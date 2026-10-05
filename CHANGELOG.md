@@ -31,6 +31,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **login_code 兑换补 PKCE 绑定（RFC 7636，强制 S256）**（2026-10-05）：`POST /oauth/exchange-code` 此前是纯 bearer 消费——`login_code` 经回调 URL query 下发，Referer / 浏览器历史 / 日志均为泄漏面，60s 窗口内持有者即可兑换。现发起端（`GET /oauth/{github,lark}`）必须携带 `code_challenge` + `code_challenge_method=S256`（缺失/格式错误/方法不符 → `40000`），challenge 随 state 走完 provider 往返并绑定进 `login_code` 的存储；兑换时必须携带 `code_verifier`，验证失败返回 `40107` 且与「code 无效」同码同文案（不给泄漏持有者预言机），失败的验证同样烧毁 code（GetDel 先于验证，不可重试爆破）。`POST /oauth/lark/app-code` 的 body 同样必须携带 `code_challenge`（同一规则，内嵌页发起前生成）。verifier 只存在于发起页 sessionStorage、不进任何 URL——这是对「URL 泄漏 code」威胁的直接关闭。**前端契约变更**：发起登录页需生成 verifier（43..128 字符，`[A-Za-z0-9-._~]`）暂存 sessionStorage 并随发起携带 challenge；兑换请求体新增必填 `code_verifier`；内嵌页 app-code 请求体新增必填 `code_challenge`。部署瞬间在途的 60s 旧格式 code 将兑换失败一次，用户重新发起即可。
+
 - **管理台学号占用判定补齐大小写折叠**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的学号占用预检改为 `lower(btrim())` 折叠比较（新增 `ExistsByStudentIDExcluding`，排除目标自身行），返回 `40902`。V001 的 `user_student_id_key` 约束在默认 collation 下大小写敏感，此前 `b24040525` 可在 `B24040525` 旁再建一号——正是注册与校友路径早已堵掉的导入期形状，控制台两条路一直漏着。折叠窗口内的并发（两个控制台同时建变体号）仍无数据库层硬保证，需表达式唯一索引才可彻底封死。
 
 ### Added

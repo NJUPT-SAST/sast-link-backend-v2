@@ -59,6 +59,8 @@ func TestAuthorizeStoresStateAndReturnsProviderURL(t *testing.T) {
 
 	result, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodGitHub,
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	})
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
@@ -85,6 +87,8 @@ func TestAuthorizeRejectsUnknownProvider(t *testing.T) {
 	// Lark is not in the Providers map for this deployment.
 	_, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodLark,
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 }
@@ -96,6 +100,8 @@ func TestAuthorizeRejectsRedirectOutsideAllowList(t *testing.T) {
 	_, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodGitHub,
 		Redirect: "https://link.sast.fun.evil.test/callback",
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 }
@@ -108,6 +114,8 @@ func TestAuthorizeFailsClosedWhenStateStoreIsDown(t *testing.T) {
 	// must not start at all.
 	_, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodGitHub,
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	})
 	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
 }
@@ -119,6 +127,8 @@ func authorizedState(t *testing.T, service Service) (state, digest string) {
 	t.Helper()
 	result, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodGitHub,
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	})
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
@@ -152,8 +162,13 @@ func TestCallbackBoundUserIssuesLoginCode(t *testing.T) {
 	if result.RegistrationState != "" {
 		t.Fatalf("RegistrationState = %q, want empty on the login branch", result.RegistrationState)
 	}
-	if got := doubles.LoginCodes.codes[result.LoginCode]; got != 42 {
-		t.Fatalf("login_code maps to user %d, want 42", got)
+	if got := doubles.LoginCodes.codes[result.LoginCode]; got.userID != 42 {
+		t.Fatalf("login_code maps to user %d, want 42", got.userID)
+	}
+	// The stored binding is the challenge the authorize leg carried: a code
+	// without it would redeem against any verifier.
+	if got := doubles.LoginCodes.codes[result.LoginCode]; got.challenge != testPKCEChallenge {
+		t.Fatalf("login_code challenge = %q, want the authorize leg's", got.challenge)
 	}
 	// A re-login refreshes the stored provider credentials.
 	if _, ok := doubles.Identities.updated[1]; !ok {
@@ -624,11 +639,11 @@ func TestCallbackRefusesDeletedAccount(t *testing.T) {
 func TestExchangeCodeIssuesSessionAndConsumesCode(t *testing.T) {
 	service, doubles := newTestService(t)
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
 
-	result, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"})
+	result, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier})
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
@@ -658,11 +673,11 @@ func TestExchangeCodeRegistersDevice(t *testing.T) {
 	devices := &fakeDeviceStore{}
 	service.Devices = devices
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
 
-	result, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", ClientIP: "10.0.0.7", UserAgent: "browser/7"})
+	result, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier, ClientIP: "10.0.0.7", UserAgent: "browser/7"})
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
@@ -693,12 +708,13 @@ func TestExchangeCodeRegistersDeviceWithoutClock(t *testing.T) {
 	devices := &fakeDeviceStore{}
 	service.Devices = devices
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
 
 	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{
 		Code: "lc_abc", ClientIP: "10.0.0.7", UserAgent: "browser/7",
+		CodeVerifier: testPKCEVerifier,
 	}); err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
@@ -716,11 +732,11 @@ func TestExchangeCodeRevokesEvictedFamily(t *testing.T) {
 	service.Devices = devices
 	service.Blacklist = &fakeBlacklist{}
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
 
-	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"}); err != nil {
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier}); err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
 	if len(doubles.Tokens.revoked) != 1 || doubles.Tokens.revoked[0] != "family-oldest" {
@@ -757,11 +773,11 @@ func TestExchangeCodeSucceedsWhenDeviceRegistrationFails(t *testing.T) {
 	devices := &fakeDeviceStore{registerErr: errors.New("redis down")}
 	service.Devices = devices
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
 
-	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"}); err != nil {
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier}); err != nil {
 		t.Fatalf("ExchangeCode returned error, want fail-open session: %v", err)
 	}
 	if doubles.Tokens.pairs != 1 {
@@ -773,8 +789,8 @@ func TestExchangeCodeSucceedsWhenDeviceRegistrationFails(t *testing.T) {
 	// family is still revoked on the error path.
 	storeErr := &fakeDeviceStore{registerErr: errors.New("redis down"), evicted: "family-oldest"}
 	service.Devices = storeErr
-	doubles.LoginCodes.codes["lc_abd"] = 42
-	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abd"}); err != nil {
+	doubles.LoginCodes.codes["lc_abd"] = loginCodeRecord{userID: 42, challenge: testPKCEChallenge}
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abd", CodeVerifier: testPKCEVerifier}); err != nil {
 		t.Fatalf("ExchangeCode returned error: %v", err)
 	}
 	if len(doubles.Tokens.revoked) != 1 || doubles.Tokens.revoked[0] != "family-oldest" {
@@ -789,24 +805,24 @@ func TestExchangeCodeSucceedsWhenEvictedRevokeFails(t *testing.T) {
 	service.Devices = &fakeDeviceStore{evicted: "family-oldest"}
 	doubles.Tokens.revokeErr = errors.New("db down")
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
 
-	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"}); err != nil {
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier}); err != nil {
 		t.Fatalf("ExchangeCode returned error, want fail-open session: %v", err)
 	}
 }
 
 func TestExchangeCodeRejectsUnknownCode(t *testing.T) {
 	service, _ := newTestService(t)
-	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_missing"})
+	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_missing", CodeVerifier: testPKCEVerifier})
 	assertKind(t, err, KindInvalidToken, errcode.CodeLoginCodeInvalid)
 }
 
 func TestExchangeCodeRejectsEmptyCode(t *testing.T) {
 	service, _ := newTestService(t)
-	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{})
+	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{CodeVerifier: testPKCEVerifier})
 	assertKind(t, err, KindInvalidToken, errcode.CodeLoginCodeInvalid)
 }
 
@@ -816,7 +832,7 @@ func TestExchangeCodeFailsClosedWhenStoreIsDown(t *testing.T) {
 
 	// Redis is the only copy of a login_code; a read failure cannot be treated
 	// as "valid" or as "expired", so the request is rejected with 503.
-	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"})
+	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier})
 	assertKind(t, err, KindDependencyUnavailable, errcode.CodeDependencyUnavailable)
 }
 
@@ -825,13 +841,13 @@ func TestExchangeCodeRefusesAccountClosedAfterCodeWasIssued(t *testing.T) {
 	deleted := activeUser(42)
 	deleted.State = model.UserStateDeleted
 	doubles.Users.byID[42] = deleted
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
 
 	// The code outlives the account state it was issued under, so state is
 	// re-checked at redemption rather than trusted from the callback.
-	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"})
+	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier})
 	assertKind(t, err, KindUserDeleted, errcode.CodeAccountDeleted)
 	if doubles.Tokens.pairs != 0 {
 		t.Fatal("a session was issued for a deleted account")
@@ -841,10 +857,10 @@ func TestExchangeCodeRefusesAccountClosedAfterCodeWasIssued(t *testing.T) {
 func TestExchangeCodeAuditsTheSession(t *testing.T) {
 	service, doubles := newTestService(t)
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
-	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"}); err != nil {
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier}); err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
 
@@ -868,6 +884,8 @@ func TestAuthorizeThrottlesPerIP(t *testing.T) {
 	_, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodGitHub,
 		ClientIP: "203.0.113.7",
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	})
 	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
 
@@ -898,6 +916,8 @@ func TestAuthorizeThrottlesBeforeResolvingProvider(t *testing.T) {
 	_, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodLark,
 		ClientIP: "203.0.113.7",
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 	if len(limiter.calls) != 1 {
@@ -912,6 +932,8 @@ func TestAuthorizeAllowsWhenLimiterUnavailable(t *testing.T) {
 	if _, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodGitHub,
 		ClientIP: "203.0.113.7",
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	}); err != nil {
 		t.Fatalf("Authorize with a broken limiter = %v, want fail-open", err)
 	}
@@ -926,6 +948,8 @@ func TestAuthorizeSkipsLimiterWithoutClientIP(t *testing.T) {
 
 	if _, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodGitHub,
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	}); err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
@@ -939,13 +963,14 @@ func TestExchangeCodeThrottlesPerIP(t *testing.T) {
 	limiter := &fakeLimiter{result: LimitResult{Allowed: false, RetryAfter: 15 * time.Second}}
 	service.ExchangeLimiter = limiter
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
 
 	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{
-		Code:     "lc_abc",
-		ClientIP: "203.0.113.9",
+		Code:         "lc_abc",
+		ClientIP:     "203.0.113.9",
+		CodeVerifier: testPKCEVerifier,
 	})
 	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
 	if got, want := limiter.calls[0], "oauth_exchange_code:ip:203.0.113.9"; got != want {
@@ -953,7 +978,7 @@ func TestExchangeCodeThrottlesPerIP(t *testing.T) {
 	}
 	// The code must survive a throttled attempt: consuming it would let an
 	// attacker burn a victim's live code by tripping the limit.
-	if _, found, _ := doubles.LoginCodes.ConsumeLoginCode(context.Background(), "lc_abc"); !found {
+	if _, _, found, _ := doubles.LoginCodes.ConsumeLoginCode(context.Background(), "lc_abc"); !found {
 		t.Fatal("login_code was consumed by a throttled call")
 	}
 }
@@ -965,7 +990,7 @@ func TestExchangeCodeThrottlesBeforeRejectingEmptyCode(t *testing.T) {
 	limiter := &fakeLimiter{}
 	service.ExchangeLimiter = limiter
 
-	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{ClientIP: "203.0.113.9"})
+	_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{ClientIP: "203.0.113.9", CodeVerifier: testPKCEVerifier})
 	assertKind(t, err, KindInvalidToken, errcode.CodeLoginCodeInvalid)
 	if len(limiter.calls) != 1 {
 		t.Fatalf("limiter calls = %v, want the cap applied before the empty-code check", limiter.calls)
@@ -976,13 +1001,14 @@ func TestExchangeCodeAllowsWhenLimiterUnavailable(t *testing.T) {
 	service, doubles := newTestService(t)
 	service.ExchangeLimiter = &fakeLimiter{err: errors.New("redis unavailable")}
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
 
 	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{
-		Code:     "lc_abc",
-		ClientIP: "203.0.113.9",
+		Code:         "lc_abc",
+		ClientIP:     "203.0.113.9",
+		CodeVerifier: testPKCEVerifier,
 	}); err != nil {
 		t.Fatalf("ExchangeCode with a broken limiter = %v, want fail-open", err)
 	}
@@ -996,6 +1022,8 @@ func TestAuthorizeReturnsStateDigestAndTTL(t *testing.T) {
 
 	result, err := service.Authorize(context.Background(), AuthorizeInput{
 		Provider: model.LoginMethodGitHub,
+
+		CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "S256",
 	})
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
@@ -1076,7 +1104,9 @@ func TestAppCodeLoginBoundUserIssuesLoginCode(t *testing.T) {
 		UserID: 42, Provider: model.LoginMethodLark, ProviderID: "on_union",
 	})
 
-	result, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	result, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code",
+		CodeChallenge: testPKCEChallenge,
+	})
 	if err != nil {
 		t.Fatalf("AppCodeLogin: %v", err)
 	}
@@ -1086,8 +1116,13 @@ func TestAppCodeLoginBoundUserIssuesLoginCode(t *testing.T) {
 	if !strings.HasPrefix(result.LoginCode, loginCodePrefix) {
 		t.Fatalf("LoginCode = %q, want the %q prefix", result.LoginCode, loginCodePrefix)
 	}
-	if got := doubles.LoginCodes.codes[result.LoginCode]; got != 42 {
-		t.Fatalf("login_code maps to user %d, want 42", got)
+	if got := doubles.LoginCodes.codes[result.LoginCode]; got.userID != 42 {
+		t.Fatalf("login_code maps to user %d, want 42", got.userID)
+	}
+	// The stored binding is the challenge the authorize leg carried: a code
+	// without it would redeem against any verifier.
+	if got := doubles.LoginCodes.codes[result.LoginCode]; got.challenge != testPKCEChallenge {
+		t.Fatalf("login_code challenge = %q, want the authorize leg's", got.challenge)
 	}
 	// A re-login refreshes the stored provider credentials, same as the callback leg.
 	if _, ok := doubles.Identities.updated[1]; !ok {
@@ -1104,7 +1139,9 @@ func TestAppCodeLoginUnboundUserIssuesRegistrationStatePair(t *testing.T) {
 	service, doubles := newTestService(t)
 	enableLarkAppCode(service)
 
-	result, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	result, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code",
+		CodeChallenge: testPKCEChallenge,
+	})
 	if err != nil {
 		t.Fatalf("AppCodeLogin: %v", err)
 	}
@@ -1153,7 +1190,9 @@ func TestAppCodeLoginAuditsTheEntrance(t *testing.T) {
 		UserID: 42, Provider: model.LoginMethodLark, ProviderID: "on_union",
 	})
 
-	if _, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"}); err != nil {
+	if _, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code",
+		CodeChallenge: testPKCEChallenge,
+	}); err != nil {
 		t.Fatalf("AppCodeLogin: %v", err)
 	}
 	found := false
@@ -1171,7 +1210,9 @@ func TestAppCodeLoginRejectsEmptyCode(t *testing.T) {
 	service, _ := newTestService(t)
 	lark := enableLarkAppCode(service)
 
-	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{})
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{
+		CodeChallenge: testPKCEChallenge,
+	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 	if lark.appCodeCalls != 0 {
 		t.Fatalf("provider exchange ran %d times for an empty code", lark.appCodeCalls)
@@ -1181,7 +1222,9 @@ func TestAppCodeLoginRejectsEmptyCode(t *testing.T) {
 func TestAppCodeLoginRejectsDisabledProvider(t *testing.T) {
 	service, _ := newTestService(t) // Lark not installed
 
-	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code",
+		CodeChallenge: testPKCEChallenge,
+	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 }
 
@@ -1195,7 +1238,9 @@ func TestAppCodeLoginRejectsProviderWithoutAppCodeLeg(t *testing.T) {
 		identity:     &provider.Identity{ProviderID: "on_union", Data: map[string]any{}},
 	}
 
-	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code",
+		CodeChallenge: testPKCEChallenge,
+	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 }
 
@@ -1204,7 +1249,9 @@ func TestAppCodeLoginMapsSpentCodeToRestartableFailure(t *testing.T) {
 	lark := enableLarkAppCode(service)
 	lark.appCodeErr = provider.ErrInvalidGrant
 
-	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "spent"})
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "spent",
+		CodeChallenge: testPKCEChallenge,
+	})
 	assertKind(t, err, KindInvalidState, errcode.CodeBadRequest)
 	assertDisplayMessage(t, err, "第三方授权码")
 }
@@ -1214,7 +1261,9 @@ func TestAppCodeLoginMapsForeignTenantToBusinessCode(t *testing.T) {
 	lark := enableLarkAppCode(service)
 	lark.appCodeErr = provider.ErrForeignTenant
 
-	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code"})
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi-code",
+		CodeChallenge: testPKCEChallenge,
+	})
 	assertKind(t, err, KindForbidden, errcode.CodeLarkTenantRequired)
 }
 
@@ -1227,7 +1276,9 @@ func TestAppCodeLoginFailureAuditsTheEntrance(t *testing.T) {
 	lark := enableLarkAppCode(service)
 	lark.appCodeErr = provider.ErrInvalidGrant
 
-	if _, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "spent"}); err == nil {
+	if _, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "spent",
+		CodeChallenge: testPKCEChallenge,
+	}); err == nil {
 		t.Fatal("AppCodeLogin() error = nil, want a rejection")
 	}
 	entry := lastAuditEntry(t, doubles.Audits)
@@ -1254,6 +1305,8 @@ func TestAppCodeLoginThrottlesPerIP(t *testing.T) {
 	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{
 		Code:     "jsapi-code",
 		ClientIP: "203.0.113.9",
+
+		CodeChallenge: testPKCEChallenge,
 	})
 	assertKind(t, err, KindRateLimited, errcode.CodeRateLimited)
 	if got, want := limiter.calls[0], "oauth_login_app_code:ip:203.0.113.9"; got != want {
@@ -1271,9 +1324,90 @@ func TestAppCodeLoginThrottlesBeforeRejectingEmptyCode(t *testing.T) {
 	limiter := &fakeLimiter{}
 	service.AppCodeLimiter = limiter
 
-	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{ClientIP: "203.0.113.9"})
+	_, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{ClientIP: "203.0.113.9",
+		CodeChallenge: testPKCEChallenge,
+	})
 	assertKind(t, err, KindInvalidInput, errcode.CodeBadRequest)
 	if len(limiter.calls) != 1 {
 		t.Fatalf("limiter saw %d calls, want it consulted before the empty-code rejection", len(limiter.calls))
+	}
+}
+
+// --- PKCE binding on the login_code exchange leg ---
+
+// The authorize leg refuses to start without a well-formed S256 challenge: a
+// login_code minted without a binding would redeem against any bearer, which is
+// exactly the exposure the binding exists to close.
+func TestAuthorizeRequiresSizedS256Challenge(t *testing.T) {
+	service, _ := newTestService(t)
+
+	cases := []struct {
+		name    string
+		input   AuthorizeInput
+		wantMsg string
+	}{
+		{"missing challenge", AuthorizeInput{Provider: model.LoginMethodGitHub}, "code_challenge"},
+		{"short challenge", AuthorizeInput{Provider: model.LoginMethodGitHub, CodeChallenge: "tooshort", CodeChallengeMethod: "S256"}, "code_challenge"},
+		{"plain method", AuthorizeInput{Provider: model.LoginMethodGitHub, CodeChallenge: testPKCEChallenge, CodeChallengeMethod: "plain"}, "S256"},
+		{"missing method", AuthorizeInput{Provider: model.LoginMethodGitHub, CodeChallenge: testPKCEChallenge}, "S256"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := service.Authorize(context.Background(), test.input)
+			if err == nil || !strings.Contains(err.Error(), test.wantMsg) {
+				t.Fatalf("Authorize() error = %v, want a refusal naming %q", err, test.wantMsg)
+			}
+		})
+	}
+}
+
+// The exchange leg refuses a wrong or missing verifier with the same code and
+// copy as an unknown login_code, and the GetDel has already burned the code:
+// a holder of a leaked code gets no oracle and no retry surface.
+func TestExchangeCodeWrongVerifierBurnsTheCode(t *testing.T) {
+	service, doubles := newTestService(t)
+	doubles.Users.byID[42] = activeUser(42)
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
+		t.Fatalf("seed login code: %v", err)
+	}
+
+	wrong := strings.Repeat("w", 43)
+	for name, verifier := range map[string]string{"wrong": wrong, "missing": ""} {
+		_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: verifier})
+		assertKind(t, err, KindInvalidToken, errcode.CodeLoginCodeInvalid)
+		_ = name
+	}
+
+	// The code burned on the first wrong attempt: the second refuses as unknown
+	// too, and no session was issued anywhere.
+	if _, ok := doubles.LoginCodes.codes["lc_abc"]; ok {
+		t.Fatal("login_code survived a failed verification")
+	}
+	if doubles.Tokens.pairs != 0 {
+		t.Fatalf("persisted pairs = %d, want 0", doubles.Tokens.pairs)
+	}
+}
+
+// The Feishu embedded-page entrance carries the same binding: its login_code
+// is bound to the challenge the page posted.
+func TestAppCodeLoginRequiresChallengeAndBindsIt(t *testing.T) {
+	service, doubles := newTestService(t)
+	enableLarkAppCode(service)
+	doubles.Identities.put(&model.Identity{
+		UserID: 42, Provider: model.LoginMethodLark, ProviderID: "on_union",
+	})
+	doubles.Users.byID[42] = activeUser(42)
+
+	if _, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi"}); err == nil ||
+		!strings.Contains(err.Error(), "code_challenge") {
+		t.Fatalf("AppCodeLogin() error = %v, want a refusal naming code_challenge", err)
+	}
+
+	result, err := service.AppCodeLogin(context.Background(), AppCodeLoginInput{Code: "jsapi", CodeChallenge: testPKCEChallenge})
+	if err != nil {
+		t.Fatalf("AppCodeLogin: %v", err)
+	}
+	if record, ok := doubles.LoginCodes.codes[result.LoginCode]; !ok || record.challenge != testPKCEChallenge {
+		t.Fatalf("login_code challenge = %+v, want the posted binding", record)
 	}
 }

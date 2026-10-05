@@ -575,6 +575,8 @@ POST /auth/reset-password
 >
 > **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`GET /oauth/{github,lark}/callback` 另有**独立**的 per-IP 配额（默认 120 次/60s，`RATE_LIMIT_OAUTH_CALLBACK_RPM`）：callback 是公开入口，扫描与 state 重放都打在这里，而 authorize 的配额管不到它，每次无效调用仍要读一次 state 并写一条审计。限流在读取 state **之前**生效，被限流的请求不消费 state、不写审计、不调用 provider。阈值刻意高于其他名额：出口 NAT 后每个用户每次登录只发一次 callback，配额定得太低会一次性锁死整个宿舍或社团；它刹住的是单一来源重放，**挡不住多 IP 分布式洪峰**——后者要靠边缘层，因为每个来源的成本本来就不高。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。`POST /oauth/lark/app-code` 同样按 IP 限流（与 `RATE_LIMIT_OAUTH_CALLBACK_RPM` 同档、独立桶）：每次被接受的调用消耗一次飞书侧兑换与若干 Redis 写，与 callback 同成本，但两条入口互不挤兑。限流排在 provider 兑换之前，被限流的请求不触达 provider。四处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 >
+> **PKCE 绑定**（RFC 7636，强制）：`GET /oauth/{github,lark}` 必须携带 `code_challenge`（S256 摘要，43 位 base64url）与 `code_challenge_method=S256`，缺失、格式错误或方法不符返回 `40000`。发起页先生成 verifier（43..128 字符，`[A-Za-z0-9-._~]`）暂存 sessionStorage，challenge 随请求进入 state；回调签发的 `login_code` 与该 challenge 绑定存储，`POST /oauth/exchange-code` 必须携带 `code_verifier`，`S256(verifier)` 与签发时的 challenge 不匹配返回 `40107`——与 login_code 无效同码同文案，且 code 已随之消费作废。`POST /oauth/lark/app-code` 的 body 同样必须携带 `code_challenge`（同一规则）。动机：`login_code` 经回调 URL query 下发，`Referer`、浏览器历史、日志都是泄漏面；verifier 只存在于发起页的 sessionStorage，不进任何 URL，泄漏的 code 因此无法兑换，也无法通过重试爆破（每次失败的验证都已烧掉 code）。
+
 > **登录 CSRF 防护**（OAuth 2.0 §10.12）：`GET /oauth/{github,lark}` 响应同时下发 `sl_oauth_state` cookie（HttpOnly、SameSite=Lax、值为 `state` 的 SHA-256 摘要、Path/Secure 与 `sl_session` 相同、有效期与 state TTL 一致）。回调要求浏览器携带与 `state` 匹配的该 cookie，缺失或不匹配按 state 无效处理（重定向到错误页）；state 单次消费，回调结束后 cookie 即清除。**例外——provider 网络故障**：出站调用 GitHub/Lark 超时或不可达（区别于 provider 拒绝 code）时，已消费的 state 会被写回 Redis（剩余寿命上限 2 分钟，取 state TTL 与 2 分钟的较小者），配对 cookie 同步保留：callback 是可被刷新/重发的 GET，而故障期间的重试命中已消费 state 时只会看到「state 无效或已过期」，把网络抖动伪装成登录会话问题。写回后的重试能完整重走 exchange——code 在 provider 侧单次使用，若首次请求实际已到达 provider，重试得到 `bad_verification_code`，走正常的「重新发起登录」分支；CSRF 防护不受影响（cookie 仍绑定发起授权的浏览器）。出站调用另有一次 250ms 退避重试，仅针对传输层错误与 provider 5xx（4xx 与 code 被拒不重试）；单次 I/O 超时从 10s 收紧到 4s，重试后的最坏总时长低于原单次。
 
 ### 2.1 GitHub 登录
@@ -718,9 +720,12 @@ POST /oauth/exchange-code
 
 ```json
 {
-  "code": "lc_abc123..."
+  "code": "lc_abc123...",
+  "code_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 }
 ```
+
+`code_verifier` 为发起登录时（§2.1 / §2.3 / §2.5）生成并暂存的 RFC 7636 verifier。缺失或验证失败返回 `40107`（与 login_code 无效同码同文案——不给持有泄漏 code 的一方区分「code 活着但 verifier 错」的预言机），且失败的验证同样烧掉该 code（GetDel 先于验证发生），不可重试爆破。
 
 **Response** `200`:
 

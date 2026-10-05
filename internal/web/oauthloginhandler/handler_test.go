@@ -417,7 +417,7 @@ func TestExchangeCodeReturnsTokenPair(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
-		strings.NewReader(`{"code":"lc_abc"}`))
+		strings.NewReader(`{"code":"lc_abc","code_verifier":"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -458,7 +458,7 @@ func TestExchangeCodeSetsSessionCookie(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
-		strings.NewReader(`{"code":"lc_abc"}`))
+		strings.NewReader(`{"code":"lc_abc","code_verifier":"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -490,7 +490,7 @@ func TestExchangeCodeRejectsUnknownFields(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
-		strings.NewReader(`{"code":"lc_abc","extra":1}`))
+		strings.NewReader(`{"code":"lc_abc","code_verifier":"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv","extra":1}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -508,7 +508,7 @@ func TestExchangeCodeMapsInvalidCodeTo401(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
-		strings.NewReader(`{"code":"lc_spent"}`))
+		strings.NewReader(`{"code":"lc_spent","code_verifier":"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -651,7 +651,7 @@ func TestRedisOutageMapsTo503(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
-		strings.NewReader(`{"code":"lc_abc"}`))
+		strings.NewReader(`{"code":"lc_abc","code_verifier":"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -672,7 +672,7 @@ func TestExchangeCodeMapsRateLimitTo429(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
-		strings.NewReader(`{"code":"lc_abc"}`))
+		strings.NewReader(`{"code":"lc_abc","code_verifier":"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -948,7 +948,7 @@ func TestAppCodeLoginReturnsLoginCodeWhenBound(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/lark/app-code",
-		strings.NewReader(`{"code":"jsapi-code"}`))
+		strings.NewReader(`{"code":"jsapi-code","code_challenge":"ccccccccccccccccccccccccccccccccccccccccccc"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -986,7 +986,7 @@ func TestAppCodeLoginReturnsRegistrationPairWhenUnbound(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/lark/app-code",
-		strings.NewReader(`{"code":"jsapi-code"}`))
+		strings.NewReader(`{"code":"jsapi-code","code_challenge":"ccccccccccccccccccccccccccccccccccccccccccc"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 

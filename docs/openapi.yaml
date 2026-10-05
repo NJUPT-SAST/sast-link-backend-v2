@@ -543,13 +543,33 @@ paths:
           schema:
             type: string
             format: uri
+        - name: code_challenge
+          in: query
+          required: true
+          description: >
+            RFC 7636 PKCE S256 摘要（43 位 base64url）。发起页生成 verifier
+            （43..128 字符）暂存 sessionStorage，challenge 随本请求入 state，
+            最终 login_code 兑换时必须出示 verifier——verifier 不进任何 URL，
+            经回调 query 泄漏的 login_code 无法兑换。
+          schema:
+            type: string
+            minLength: 43
+            maxLength: 43
+        - name: code_challenge_method
+          in: query
+          required: true
+          description: 固定 S256，其他值返回 40000。
+          schema:
+            type: string
+            enum: [S256]
       responses:
         "302":
           description: 重定向至 GitHub OAuth 授权页
           headers: {}
         "400":
           description: >-
-            `40000` —— redirect 不在允许列表中，或该 provider 未启用
+            `40000` —— redirect 不在允许列表中、code_challenge 缺失/格式错误、
+            code_challenge_method 非 S256，或该 provider 未启用
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: >-
@@ -630,13 +650,33 @@ paths:
           schema:
             type: string
             format: uri
+        - name: code_challenge
+          in: query
+          required: true
+          description: >
+            RFC 7636 PKCE S256 摘要（43 位 base64url）。发起页生成 verifier
+            （43..128 字符）暂存 sessionStorage，challenge 随本请求入 state，
+            最终 login_code 兑换时必须出示 verifier——verifier 不进任何 URL，
+            经回调 query 泄漏的 login_code 无法兑换。
+          schema:
+            type: string
+            minLength: 43
+            maxLength: 43
+        - name: code_challenge_method
+          in: query
+          required: true
+          description: 固定 S256，其他值返回 40000。
+          schema:
+            type: string
+            enum: [S256]
       responses:
         "302":
           description: 重定向至飞书 OAuth 授权页
           headers: {}
         "400":
           description: >-
-            `40000` —— redirect 不在允许列表中，或该 provider 未启用
+            `40000` —— redirect 不在允许列表中、code_challenge 缺失/格式错误、
+            code_challenge_method 非 S256，或该 provider 未启用
         "429":
           $ref: "#/components/responses/TooManyRequests"
           description: >-
@@ -729,11 +769,19 @@ paths:
           application/json:
             schema:
               type: object
-              required: [code]
+              required: [code, code_challenge]
               properties:
                 code:
                   type: string
                   description: 飞书 JSAPI 预授权码（3 分钟、单次使用）
+                code_challenge:
+                  type: string
+                  minLength: 43
+                  maxLength: 43
+                  description: >
+                    RFC 7636 PKCE S256 摘要。内嵌页发起前生成 verifier
+                    （sessionStorage 暂存），签发的 login_code 与本 challenge
+                    绑定，兑换（POST /oauth/exchange-code）时出示 verifier。
       responses:
         "200":
           description: 成功；data.bound 区分登录与注册分支
@@ -774,7 +822,8 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
           description: >-
-            `40000`——缺 code，或预授权 code 被飞书拒绝（已使用/过期，
+            `40000`——缺 code、缺 code_challenge（RFC 7636 S256 摘要，内嵌页
+            发起前生成并暂存 verifier），或预授权 code 被飞书拒绝（已使用/过期，
             「第三方授权码无效或已过期」）。
         "403":
           $ref: "#/components/responses/Forbidden"
@@ -806,11 +855,23 @@ paths:
               type: object
               required:
                 - code
+                - code_verifier
               properties:
                 code:
                   type: string
                   description: 一次性登录码
                   example: lc_abc123...
+                code_verifier:
+                  type: string
+                  minLength: 43
+                  maxLength: 128
+                  description: >
+                    RFC 7636 PKCE verifier，发起登录页生成并暂存
+                    sessionStorage（43..128 字符，[A-Za-z0-9-._~]）。
+                    缺失或与签发时的 code_challenge 不匹配时返回
+                    `40107`（与 login_code 无效同码同文案，且 code 已随之
+                    消费作废——经回调 URL 泄漏的 code 无法兑换，也无法
+                    通过重试爆破）。
             examples: {}
         required: true
       responses:

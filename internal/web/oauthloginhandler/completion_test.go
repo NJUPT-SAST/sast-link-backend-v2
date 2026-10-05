@@ -38,7 +38,7 @@ func TestExchangeCodeCarriesProfileCompletionFlag(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
-		strings.NewReader(`{"code":"lc_abc"}`))
+		strings.NewReader(`{"code":"lc_abc","code_verifier":"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
@@ -81,7 +81,7 @@ func TestExchangeCodeReportsEmptyArrayForCompleteProfile(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/exchange-code",
-		strings.NewReader(`{"code":"lc_abc"}`))
+		strings.NewReader(`{"code":"lc_abc","code_verifier":"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 
