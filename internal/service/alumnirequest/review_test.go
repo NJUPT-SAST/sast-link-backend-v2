@@ -2,6 +2,7 @@ package alumnirequest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -347,6 +348,71 @@ func TestRejectNotifiesWithTheReason(t *testing.T) {
 	}
 }
 
+// Silent rejection exists for the mistaken submission whose applicant already
+// self-registered: the verdict lands, no email is queued, and the audit row
+// explains why none followed — otherwise the trail shows a rejection that never
+// notified anyone for no reason.
+func TestRejectSilentSkipsTheNotification(t *testing.T) {
+	t.Parallel()
+
+	requests := &fakeRequests{getResult: pendingTicket()}
+	notifier := &fakeNotifier{}
+	audit := &fakeAudit{}
+	service := newService(requests, &fakeUsers{}, audit, &fakeCaptcha{})
+	service.Notifier = notifier
+
+	input := reviewInput()
+	input.Reason = "学号已自行注册，无需建号"
+	input.Silent = true
+	result, err := service.Reject(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Reject() error = %v", err)
+	}
+	if result.NotifyEnqueued {
+		t.Fatal("NotifyEnqueued = true for a silent rejection")
+	}
+	if len(notifier.jobs) != 0 {
+		t.Fatalf("%d notification jobs queued for a silent rejection", len(notifier.jobs))
+	}
+	if !requests.rejectedSilent {
+		t.Fatal("the repository was not told the rejection is silent")
+	}
+	var silentDetail bool
+	for _, entry := range audit.entries {
+		if entry.Action != actionReject {
+			continue
+		}
+		var detail map[string]any
+		if err := json.Unmarshal(entry.Detail, &detail); err != nil {
+			t.Fatalf("unmarshal reject audit detail: %v", err)
+		}
+		if value, ok := detail["silent"].(bool); ok && value {
+			silentDetail = true
+		}
+	}
+	if !silentDetail {
+		t.Fatal("no reject audit row carries silent: true")
+	}
+}
+
+// The reason stays mandatory in silent mode: it is the ticket's own explanation
+// for a future queue reader, not just the email body the silent path skips.
+func TestRejectSilentStillRequiresAReason(t *testing.T) {
+	t.Parallel()
+
+	requests := &fakeRequests{getResult: pendingTicket()}
+	service := newService(requests, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+
+	input := reviewInput()
+	input.Silent = true
+	if _, err := service.Reject(context.Background(), input); err == nil {
+		t.Fatal("silent Reject() with a blank reason error = nil, want a refusal")
+	}
+	if requests.rejected != nil {
+		t.Fatal("the silent rejection was written despite a blank reason")
+	}
+}
+
 // There is no result to notify anyone about while a ticket is pending.
 func TestResendRefusesAPendingTicket(t *testing.T) {
 	t.Parallel()
@@ -358,6 +424,30 @@ func TestResendRefusesAPendingTicket(t *testing.T) {
 	var typed *Error
 	if !errors.As(err, &typed) || typed.Kind != KindStateConflict {
 		t.Fatalf("ResendNotification() on a pending ticket error = %v, want KindStateConflict", err)
+	}
+}
+
+// The silence was the reviewer's decision, so the resend endpoint — whose whole
+// job is the email that decision suppressed — must refuse rather than quietly
+// undo it.
+func TestResendRefusesASilentlyRejectedTicket(t *testing.T) {
+	t.Parallel()
+
+	ticket := pendingTicket()
+	ticket.Status = model.AlumniRequestStatusRejected
+	ticket.SilentlyRejected = true
+	ticket.NotifiedAt = &testNow
+	notifier := &fakeNotifier{}
+	service := newService(&fakeRequests{getResult: ticket}, &fakeUsers{}, &fakeAudit{}, &fakeCaptcha{})
+	service.Notifier = notifier
+
+	_, err := service.ResendNotification(context.Background(), reviewInput())
+	var typed *Error
+	if !errors.As(err, &typed) || typed.Kind != KindStateConflict {
+		t.Fatalf("ResendNotification() on a silently rejected ticket error = %v, want KindStateConflict", err)
+	}
+	if len(notifier.jobs) != 0 {
+		t.Fatalf("%d jobs queued for a silently rejected ticket", len(notifier.jobs))
 	}
 }
 

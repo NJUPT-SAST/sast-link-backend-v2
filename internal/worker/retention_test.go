@@ -3,9 +3,12 @@ package worker
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
 type fixedClock struct{ value time.Time }
@@ -39,6 +42,12 @@ type fakeRetentionStore struct {
 	// recomputeCursors records the cursor each pass was handed, so a test can
 	// assert the sweep advances instead of re-reading the same head.
 	recomputeCursors []int64
+	// purgeQueue hands out one batch per call; an empty queue answers an empty
+	// batch, which is the short batch that ends the purge loop.
+	purgeQueue   [][]repository.PurgedUser
+	purgeCutoffs []time.Time
+	purgeCalls   int
+	purgeErr     error
 }
 
 func newFakeRetentionStore() *fakeRetentionStore {
@@ -144,6 +153,22 @@ func (s *fakeRetentionStore) DeleteExpiredAlumniRequests(_ context.Context, cuto
 	return s.del("alumni_requests", cutoff, batchSize)
 }
 
+func (s *fakeRetentionStore) PurgeDeletedUsers(_ context.Context, before, _ time.Time, _ int) ([]repository.PurgedUser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeCalls++
+	s.purgeCutoffs = append(s.purgeCutoffs, before)
+	if s.purgeErr != nil {
+		return nil, s.purgeErr
+	}
+	if len(s.purgeQueue) == 0 {
+		return nil, nil
+	}
+	batch := s.purgeQueue[0]
+	s.purgeQueue = s.purgeQueue[1:]
+	return batch, nil
+}
+
 func (s *fakeRetentionStore) RecomputeDerivedState(_ context.Context, cursor int64, _ time.Time, batchSize int) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -175,6 +200,7 @@ func testRetention(store RetentionStore, now time.Time) Retention {
 		RefreshTokenAge:  48 * time.Hour,
 		AuditLogAge:      90 * 24 * time.Hour,
 		AlumniRequestAge: 180 * 24 * time.Hour,
+		DeletedUserAge:   30 * 24 * time.Hour,
 		Clock:            fixedClock{value: now},
 	}
 }
@@ -424,3 +450,114 @@ func TestRetentionDerivedStateSkippedWithoutLock(t *testing.T) {
 		t.Fatalf("recompute calls = %d, want 0 when the lock is held elsewhere", calls)
 	}
 }
+
+// fakeAvatarStore records object deletions and can be told to fail some of them.
+type fakeAvatarStore struct {
+	mu       sync.Mutex
+	deleted  []string
+	failOn   string
+	failErr  error
+	callsAll []string
+}
+
+func (s *fakeAvatarStore) Upload(_ context.Context, _ string, _ io.Reader, _ string, _ int64) (string, error) {
+	return "", nil
+}
+
+func (s *fakeAvatarStore) Delete(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.callsAll = append(s.callsAll, key)
+	if s.failOn != "" && s.failOn == key {
+		return s.failErr
+	}
+	s.deleted = append(s.deleted, key)
+	return nil
+}
+
+// The purge window is its own clock, not one of the shared table windows: a
+// 30-day account grace must not inherit, say, the 90-day audit cutoff.
+func TestRetentionPurgeUsesItsOwnCutoff(t *testing.T) {
+	now := time.Now().UTC()
+	store := newFakeRetentionStore()
+	testRetention(store, now).sweep(context.Background())
+
+	want := now.Add(-30 * 24 * time.Hour)
+	if len(store.purgeCutoffs) == 0 || !store.purgeCutoffs[0].Equal(want) {
+		t.Fatalf("purge cutoffs = %v, want [%s]", store.purgeCutoffs, want)
+	}
+}
+
+// Zero is the documented off switch: no purge calls at all, which is the
+// pre-V023 behavior an operator restores during an incident.
+func TestRetentionPurgeDisabledAtZeroAge(t *testing.T) {
+	store := newFakeRetentionStore()
+	worker := testRetention(store, time.Now().UTC())
+	worker.DeletedUserAge = 0
+	worker.sweep(context.Background())
+
+	if store.purgeCalls != 0 {
+		t.Fatalf("purge calls = %d, want 0 when the age is zero", store.purgeCalls)
+	}
+}
+
+// Avatars are deleted outside the database transaction, one object per purged
+// account that had one; an account without an avatar costs no object call.
+func TestRetentionPurgeDeletesAvatarObjects(t *testing.T) {
+	store := newFakeRetentionStore()
+	store.purgeQueue = [][]repository.PurgedUser{{
+		{ID: 7, Avatar: strptr("avatars/7/a.png")},
+		{ID: 8, Avatar: nil},
+		{ID: 9, Avatar: strptr("avatars/9/c.png")},
+	}}
+	avatars := &fakeAvatarStore{}
+	worker := testRetention(store, time.Now().UTC())
+	worker.AvatarStore = avatars
+	worker.sweep(context.Background())
+
+	if len(avatars.deleted) != 2 ||
+		avatars.deleted[0] != "avatars/7/a.png" || avatars.deleted[1] != "avatars/9/c.png" {
+		t.Fatalf("deleted objects = %v, want the two purged accounts' keys", avatars.deleted)
+	}
+}
+
+// A failed object delete is an orphan, not a failed purge: the row is already
+// gone and the audit row with it, so the sweep keeps going and still tries the
+// remaining objects.
+func TestRetentionPurgeSurvivesAvatarDeleteFailure(t *testing.T) {
+	store := newFakeRetentionStore()
+	store.purgeQueue = [][]repository.PurgedUser{{
+		{ID: 7, Avatar: strptr("avatars/7/first.png")},
+		{ID: 9, Avatar: strptr("avatars/9/second.png")},
+	}}
+	avatars := &fakeAvatarStore{failOn: "avatars/7/first.png", failErr: errors.New("bucket unavailable")}
+	worker := testRetention(store, time.Now().UTC())
+	worker.AvatarStore = avatars
+	worker.sweep(context.Background())
+
+	if len(avatars.callsAll) != 2 {
+		t.Fatalf("object delete calls = %v, want both attempted despite the failure", avatars.callsAll)
+	}
+	if avatars.callsAll[1] != "avatars/9/second.png" {
+		t.Fatalf("second delete = %q, want the surviving account's object", avatars.callsAll[1])
+	}
+	// The derived-state sweep still ran after the purge logged its orphan.
+	if store.recomputeCalls == 0 {
+		t.Fatal("derived-state sweep never ran after a purge object failure")
+	}
+}
+
+// A purge store error aborts the purge for this tick, logged, without taking the
+// rest of the sweep down with it.
+func TestRetentionPurgeStoreErrorDoesNotStopTheSweep(t *testing.T) {
+	store := newFakeRetentionStore()
+	store.purgeErr = errors.New("database gone")
+	worker := testRetention(store, time.Now().UTC())
+	worker.sweep(context.Background())
+
+	if store.recomputeCalls == 0 {
+		t.Fatal("derived-state sweep never ran after a purge failure")
+	}
+}
+
+func strptr(value string) *string { return &value }

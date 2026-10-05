@@ -1790,6 +1790,7 @@ GET /admin/users
       "profile_needs_completion": false,
       "incomplete_fields": [],
       "state_manual": false,
+      "deleted_at": null,
       "created_at": "2026-05-28T12:00:00Z",
       "updated_at": "2026-05-28T12:00:00Z"
     }
@@ -1814,7 +1815,7 @@ GET /admin/users/:id
 
 - 完整档案（含联系方式与第三方绑定）；`phone_number` 仅 **admin / manager** 视角返回，lecturer 视角该字段**不存在**（既不 null 也不空串）。其余字段（`qq_number` / 第三方绑定 / `profile.email` 等）所有角色可见。
 - `identities` 不含第三方 `access_token` / `refresh_token`，也不含 `identity_data`——该字段存的是第三方返回的完整用户对象（飞书含 `mobile`、`email`、`enterprise_email`、`employee_no`），列出绑定不等于交出绑定背后的联系方式。
-- `state_manual` 说明 `state` 的来源：`true` = 管理员手写钉住（该账号跳过自动推导与清算批次，值是人做的判断），`false` = 由状态机按 role + 学号入学年份 + 当前学年推导。`GET /admin/users`、`GET /admin/users/:id` 与 `GET /admin/users/batch` 同带此字段，admin / manager / lecturer 视角一致——能看见 `state` 就必须能看见它是事实还是裁决，否则「要不要发 `state_auto` 解除钉住」这个判断无从做出。
+- `state_manual` 说明 `state` 的来源：`true` = 管理员手写钉住（该账号跳过自动推导与清算批次，值是人做的判断），`false` = 由状态机按 role + 学号入学年份 + 当前学年推导。`GET /admin/users`、`GET /admin/users/:id` 与 `GET /admin/users/batch` 同带此字段，admin / manager / lecturer 视角一致——能看见 `state` 就必须能看见它是事实还是裁决，否则「要不要发 `state_auto` 解除钉住」这个判断无从做出。`deleted_at`（V023）在已注销账号上非空，是物理清除时钟的读数：控制台据此展示剩余宽限（超过 `RETENTION_DELETED_USER_AGE` 后行被硬删，restore 返回 `404`）；活跃账号恒为 `null`。
 
 **错误码**：`40100`、`40300`、`40401`。
 
@@ -1974,7 +1975,9 @@ DELETE /admin/users/:id
 }
 ```
 
-**说明**: 将 `user.state` 设为 `is_deleted`，保留数据；同一事务内递增 `token_version` 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，非 DB 级联删除），撤销的 JTI 写入 outbox，worker 失效其 auth-state 缓存。
+**说明**: 将 `user.state` 设为 `is_deleted`，保留数据；同一事务内递增 `token_version` 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，非 DB 级联删除），撤销的 JTI 写入 outbox，worker 失效其 auth-state 缓存。V023 起注销事务同时盖 `deleted_at` 章：这是后续物理清除的时钟。
+
+**实质删除（V023）**：retention worker 每小时扫描 `state = 'is_deleted'` 且 `deleted_at` 早于 `RETENTION_DELETED_USER_AGE`（默认 30 天，`0` 禁用，低于 24h 拒绝启动）的行并**物理删除**：级联清除 profile / identities / token 元数据 / grants / badge，`audit_logs` 与校友工单的引用置 NULL（历史存活），`login_email` / `student_id` 唯一约束释放（同邮箱可重新注册），每账号同一事务写一条 `user_purge` 审计行（无 PII），COS 头像对象在事务外删除（失败仅记日志留孤儿）。宽限期内（默认 30 天）可正常 restore；超期后行已不存在，restore 返回 `404`。用户列表/详情的 `deleted_at` 字段供控制台展示剩余宽限。
 
 不可注销自己的账号，也不可注销系统中最后一名活跃管理员，均返回 `403`。重复注销返回 `422`。
 
@@ -1998,7 +2001,7 @@ PUT /admin/users/:id/restore
 }
 ```
 
-**说明**: 将 `user.state` 从 `is_deleted` 恢复，并按自动状态机重新推导（role + 学号入学年份 + 当前学年），同时解除钉住——注销时的 `is_deleted` 覆盖了此前的手写值，钉住无从保留，恢复即回到自动推导；需要重新钉住的管理员在恢复后再提交一次 `state` 即可。已撤销的 token 不恢复，需用户重新登录。
+**说明**: 将 `user.state` 从 `is_deleted` 恢复，并按自动状态机重新推导（role + 学号入学年份 + 当前学年），同时解除钉住并清空 `deleted_at`——注销时的 `is_deleted` 覆盖了此前的手写值，钉住无从保留，恢复即回到自动推导；需要重新钉住的管理员在恢复后再提交一次 `state` 即可。已撤销的 token 不恢复，需用户重新登录。仅在宽限期内可用：超期后行已被物理删除，返回 `404`（见 §6.4 实质删除）。
 
 对未注销的用户调用返回 `422`。
 
@@ -2337,7 +2340,7 @@ GET /admin/audit-logs
 
 **说明**：时间参数必须带时区偏移（如 `2026-07-01T00:00:00Z`），不带偏移返回 `400` —— `created_at` 是 `timestamptz`，擅自按 UTC 解释会使窗口偏移数小时。`end_time` 早于 `start_time` 返回 `400`。排序为 `created_at DESC, id DESC`（`id` 用于同一时刻内的稳定分页）。
 
-管理端写操作在审计日志中的 `action` 为 `admin_user_create` / `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值——`redirect_uris` 列表冗长，事后要问的是「管理员改了哪些属性、是否切断了现有会话」。委派管理能力的变化是唯一的例外，会额外记录取值：`admin_scope_granted`（本次授予的 admin scope 列表）、`admin_scope_revoked`（布尔）与 `scopes_removed`（被移除的 scope 列表）。复盘管理事件时，首先需要知道「这个客户端不再持有哪些 scope」，而字段名加事后快照推不出这一点。
+管理端写操作在审计日志中的 `action` 为 `admin_user_create` / `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）、`user_purge`（retention worker 物理清除已过宽限期的注销账号，`user_id` / `actor_client_id` 均为 NULL，`detail` 无 PII，台账用途）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值——`redirect_uris` 列表冗长，事后要问的是「管理员改了哪些属性、是否切断了现有会话」。委派管理能力的变化是唯一的例外，会额外记录取值：`admin_scope_granted`（本次授予的 admin scope 列表）、`admin_scope_revoked`（布尔）与 `scopes_removed`（被移除的 scope 列表）。复盘管理事件时，首先需要知道「这个客户端不再持有哪些 scope」，而字段名加事后快照推不出这一点。
 
 `user_name` 是展示字段：随查询取回对应用户显示名，best-effort。软删除（`state = is_deleted`）的行仍在表里，名字照常返回；仅当用户行被物理删除、或显示名回查失败时为 `null`，此时前端应回退显示 `user_id`。
 
@@ -2419,7 +2422,7 @@ GET /admin/stats
 
 **说明**：
 
-- `users` 为账户聚合，枚举见附录 A。本仓软删除是状态位而非 `deleted_at` 列，因此口径为：**`total` / `by_role` / `by_department` / `no_department` 均只统计未注销账户**（`state ≠ is_deleted`），避免「账户总数」被已注销账户虚增；`by_state` 保留全部状态，`is_deleted` 作为独立 bucket 可见注销数。
+- `users` 为账户聚合，枚举见附录 A。软删除是状态位 `state = 'is_deleted'` 加 V023 的 `deleted_at` 清除时钟（读路径仍一律按 `state` 过滤，不读本列），因此口径为：**`total` / `by_role` / `by_department` / `no_department` 均只统计未注销账户**（`state ≠ is_deleted`），避免「账户总数」被已注销账户虚增；`by_state` 保留全部状态，`is_deleted` 作为独立 bucket 可见注销数。
   - `by_role` / `by_state` 按 `user` 表分组统计（`by_state` 含 `is_deleted`，其余两个维度不含）
   - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计，键为 `department_enum` 全量枚举值（按写入数据动态分桶，非固定七桶）；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
   - `incomplete_by_role` / `incomplete_by_state` 是资料未补全（`profile_needs_completion = true`，见 V010 生成列）账户的分组计数，供控制台概览把迁移残留账户单独归为「未补全」扇区：
@@ -2449,7 +2452,7 @@ GET /admin/stats
 
 `recover` 的审批是比开新号更敏感的动作：它把一个能收重置验证码的邮箱绑到现役账号上。控制台必须以高危操作呈现（展示目标账号现有资料与绑定，确认后放行）；已有的第三方绑定一概不动（解绑永远需要密码），每账号绑定上限与 §6.2.1 相同。
 
-审批通过与驳回都会自动发邮件通知校友。通知发往**申请中填写的第三方邮箱**，不是 `login_email`——后者正是那个已停用的学生邮箱，发过去等于不发。
+审批通过与驳回都会自动发邮件通知校友（驳回可带 `silent` 静默跳过，见 §6.13.5）。通知发往**申请中填写的第三方邮箱**，不是 `login_email`——后者正是那个已停用的学生邮箱，发过去等于不发。
 
 #### 6.13.1 提交建号申请（免登录）
 
@@ -2528,7 +2531,7 @@ POST /alumni-requests
 | `42900` | 429 | 提交过于频繁（按 IP 或按学号） |
 | `50301` | 503 | 申请通道不可用——**重做验证无意义，应隐藏入口** |
 
-> 审批侧错误（`40901` 工单邮箱前缀与现有账号学号冲突——审批前查表，邮箱前缀指向已注册学生时拒绝并提示驳回、`40905` 绑定上限、`42200` 目标已注销 / `login_email` 漂移、`42204` 重复审批）见 §6.13.4。
+> 审批侧错误（`40901` 工单邮箱前缀与现有账号学号冲突——审批前查表，邮箱前缀指向已注册学生时拒绝并提示驳回、`40902` 学号已被占用——典型即申请人已自行注册，文案引导静默驳回、`40905` 绑定上限、`42200` 目标已注销 / `login_email` 漂移、`42204` 重复审批）见 §6.13.4。
 
 #### 6.13.2 申请列表
 
@@ -2657,9 +2660,17 @@ POST /admin/alumni-requests/:id/reject
 
 `reject_reason` **必填**（≤ 500 字符）：它会进入驳回通知邮件，是校友唯一的修正依据。
 
+可选 `silent`（默认 `false`）：**静默驳回**——落库 verdict 但不发结果邮件，适用于误操作工单（典型：新生误发起建号申请后已自行完成注册，此时一封驳回邮件只会造成困惑）。静默时 `reject_reason` 仍必填：它是工单与审计自身的解释，不只是邮件正文。
+
+```json
+{ "reject_reason": "学号已自行注册，无需建号", "silent": true }
+```
+
 **Response** `200`: `{ "code": 0, "message": "ok", "data": { "notify_enqueued": true } }`
 
-驳回后该学号不再占用待审名额，校友可修正后重新提交。
+（静默驳回的 `notify_enqueued` 恒为 `false`。）
+
+驳回后该学号不再占用待审名额，校友可修正后重新提交；静默驳回同样释放名额。工单行携带 `silently_rejected` 标记，队列与详情响应均返回该字段，控制台据此渲染「静默驳回（未通知申请人）」；审计 detail 另记 `silent: true`，解释该 verdict 为何没有后续邮件。
 
 **错误码**：`40000`（`reject_reason` 缺失或超长）、`40100`、`40300`、`40403`、`42204`、`50000`。
 
@@ -2677,9 +2688,9 @@ POST /admin/alumni-requests/:id/resend-notification
 
 投递链路是有界队列 + SMTP，两者都可能在审批已提交之后失败。通过邮件是校友唯一的「去设置密码」指引，丢了等于建号白做，所以提供手动补发。
 
-`notified_at` 已非空时**也允许重发**：管理员提出补发说明他掌握系统不知道的信息（通常是校友根本没收到）。工单仍为 `pending` 时返回 `42200`——没有结果可通知。
+`notified_at` 已非空时**也允许重发**：管理员提出补发说明他掌握系统不知道的信息（通常是校友根本没收到）。工单仍为 `pending` 时返回 `42200`——没有结果可通知。**静默驳回的工单拒绝补发**（同样 `42200`，文案「该申请已静默驳回，不发送结果通知」）——沉默是审核人的决定，补发端点不能悄悄把它撤掉。
 
-**错误码**：`40100`、`40300`、`40403`、`42200`（申请尚未处理）、`50000`。
+**错误码**：`40100`、`40300`、`40403`、`42200`（申请尚未处理 / 已静默驳回）、`50000`。
 
 ---
 

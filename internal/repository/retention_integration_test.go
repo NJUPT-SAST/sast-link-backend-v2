@@ -3,11 +3,13 @@ package repository_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/migrations"
 )
 
 // A family whose every refresh token is revoked and expired is dead: its origin
@@ -476,5 +478,243 @@ func TestRetentionRecomputeDerivedStateAdvancesCursor(t *testing.T) {
 	if corrected != int64(len(ids)) {
 		t.Fatalf("corrected %d of %d rows, want all: the cursor was ignored and the head rescanned",
 			corrected, len(ids))
+	}
+}
+
+// The purge clock starts in the close transaction and stops in restore: V023's
+// deleted_at is what the retention worker reads, and restore must leave no stale
+// stamp behind for a later close to inherit.
+func TestSoftDeleteStampsDeletedAtAndRestoreClearsIt(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	closed := createUserWithProfile(t, users, "purge-stamp@njupt.edu.cn")
+
+	stamp := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := users.SoftDeleteAndRevokeSessions(
+		context.Background(), closed.ID, model.UserRoleAdmin, stamp); err != nil {
+		t.Fatalf("SoftDeleteAndRevokeSessions() error = %v", err)
+	}
+
+	stored, err := users.FindByID(context.Background(), closed.ID)
+	if err != nil {
+		t.Fatalf("FindByID() error = %v", err)
+	}
+	if stored.State != model.UserStateDeleted {
+		t.Fatalf("state = %s, want is_deleted", stored.State)
+	}
+	if stored.DeletedAt == nil || !stored.DeletedAt.Equal(stamp) {
+		t.Fatalf("deleted_at = %v, want the close transaction's stamp %s", stored.DeletedAt, stamp)
+	}
+
+	if restoreErr := users.RestoreUser(context.Background(), closed.ID, model.UserRoleAdmin, time.Now().UTC()); restoreErr != nil {
+		t.Fatalf("RestoreUser() error = %v", restoreErr)
+	}
+	restored, err := users.FindByID(context.Background(), closed.ID)
+	if err != nil {
+		t.Fatalf("FindByID() after restore error = %v", err)
+	}
+	if restored.State == model.UserStateDeleted {
+		t.Fatal("state still is_deleted after restore")
+	}
+	if restored.DeletedAt != nil {
+		t.Fatalf("deleted_at = %v after restore, want nil so the next close starts a fresh clock", restored.DeletedAt)
+	}
+}
+
+// The physical purge: only grace-expired closed accounts go, taking their
+// cascading rows with them and nulling the references history keeps. A closed
+// account inside the window and a live account must both survive, the login
+// email is freed for re-registration, and a user_purge audit row is written in
+// the same transaction — the ledger that proves the destruction happened.
+func TestRetentionPurgesGraceExpiredClosedAccounts(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+	retention := repository.NewRetention(database)
+	ctx := context.Background()
+
+	old := createUserWithProfile(t, users, "purge-old@njupt.edu.cn")
+	freshClosed := createUserWithProfile(t, users, "purge-fresh@njupt.edu.cn")
+	live := createUserWithProfile(t, users, "purge-live@njupt.edu.cn")
+
+	now := time.Now().UTC()
+	for _, target := range []*model.User{old, freshClosed} {
+		if _, err := users.SoftDeleteAndRevokeSessions(ctx, target.ID, model.UserRoleAdmin, now); err != nil {
+			t.Fatalf("close %q error = %v", target.LoginEmail, err)
+		}
+	}
+	// Age only the first account past the grace window, the way a real backlog
+	// looks: both closed the same moment, one swept a month later.
+	aged := now.Add(-40 * 24 * time.Hour)
+	if err := database.Model(&model.User{}).Where("id = ?", old.ID).
+		UpdateColumn("deleted_at", aged).Error; err != nil {
+		t.Fatalf("age closed account: %v", err)
+	}
+
+	// An avatar key on the profile row and an other_mail identity: both cascade
+	// children that must vanish with the row, and the avatar key must come back
+	// from the purge call so the worker can remove the object.
+	avatarKey := "avatars/purge-old/main.png"
+	if err := database.Model(&model.Profile{}).Where("user_id = ?", old.ID).
+		UpdateColumn("avatar", avatarKey).Error; err != nil {
+		t.Fatalf("set avatar: %v", err)
+	}
+	if err := database.Create(&model.Identity{
+		UserID:     old.ID,
+		Provider:   model.LoginMethodOtherMail,
+		ProviderID: "purge-old-personal@example.com",
+	}).Error; err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+
+	// An audit row naming the account, and a reviewed alumni ticket it approved:
+	// both keep their rows, with the reference nulled — history outlives the
+	// account it names.
+	oldResourceID := fmt.Sprintf("%d", old.ID)
+	if err := database.Create(&model.AuditLog{
+		UserID: &old.ID, Action: "login", Resource: "user",
+		ResourceID: &oldResourceID,
+	}).Error; err != nil {
+		t.Fatalf("seed audit row: %v", err)
+	}
+	ticket := testAlumniRequest("B20040977")
+	ticket.Status = model.AlumniRequestStatusApproved
+	ticket.CreatedUserID = &old.ID
+	if err := database.Create(ticket).Error; err != nil {
+		t.Fatalf("seed alumni ticket: %v", err)
+	}
+
+	purged, err := retention.PurgeDeletedUsers(ctx, now.Add(-30*24*time.Hour), now, 100)
+	if err != nil {
+		t.Fatalf("PurgeDeletedUsers() error = %v", err)
+	}
+	if len(purged) != 1 || purged[0].ID != old.ID {
+		t.Fatalf("purged = %+v, want exactly the grace-expired account", purged)
+	}
+	if purged[0].Avatar == nil || *purged[0].Avatar != avatarKey {
+		t.Fatalf("purged avatar = %v, want the profile row's key read before the cascade", purged[0].Avatar)
+	}
+
+	var count int64
+	database.Model(&model.User{}).Where("id = ?", old.ID).Count(&count)
+	if count != 0 {
+		t.Fatal("the grace-expired account row still exists")
+	}
+	database.Model(&model.Profile{}).Where("user_id = ?", old.ID).Count(&count)
+	if count != 0 {
+		t.Fatal("the purged account's profile row survived the cascade")
+	}
+	database.Model(&model.Identity{}).Where("user_id = ?", old.ID).Count(&count)
+	if count != 0 {
+		t.Fatal("the purged account's identity row survived the cascade")
+	}
+
+	for _, survivor := range []struct {
+		id    int64
+		label string
+	}{{freshClosed.ID, "closed inside the window"}, {live.ID, "live"}} {
+		database.Model(&model.User{}).Where("id = ?", survivor.id).Count(&count)
+		if count != 1 {
+			t.Fatalf("the %s account was purged", survivor.label)
+		}
+	}
+
+	var oldAudit model.AuditLog
+	if auditErr := database.Where("action = ? AND resource_id = ?", "login", fmt.Sprintf("%d", old.ID)).
+		Take(&oldAudit).Error; auditErr != nil {
+		t.Fatalf("the account's audit row did not survive: %v", auditErr)
+	}
+	if oldAudit.UserID != nil {
+		t.Fatal("the surviving audit row still names the purged account; the FK should have nulled it")
+	}
+
+	var purgedTicket model.AlumniRequest
+	if ticketErr := database.Where("id = ?", ticket.ID).Take(&purgedTicket).Error; ticketErr != nil {
+		t.Fatalf("the approved ticket did not survive the purge: %v", ticketErr)
+	}
+	if purgedTicket.CreatedUserID != nil {
+		t.Fatalf("ticket created_user_id = %d, want NULL after the account's purge", *purgedTicket.CreatedUserID)
+	}
+
+	var ledger model.AuditLog
+	resourceID := fmt.Sprintf("%d", old.ID)
+	if ledgerErr := database.Where("action = ? AND resource_id = ?", "user_purge", resourceID).
+		Take(&ledger).Error; ledgerErr != nil {
+		t.Fatalf("no user_purge audit row for the purged account: %v", ledgerErr)
+	}
+	if ledger.UserID != nil {
+		t.Fatal("user_purge audit row carries a user_id; the worker convention is NULL")
+	}
+
+	// The unique constraints left with the row: the school address is free again
+	// for whoever holds that mailbox next.
+	replacement := testUser(old.LoginEmail)
+	replacement.LoginEmail = old.LoginEmail
+	if replaceErr := users.CreateWithProfile(ctx, replacement, &model.Profile{}); replaceErr != nil {
+		t.Fatalf("re-registering the purged account's login email failed: %v", replaceErr)
+	}
+
+	// Draining: the second pass finds nothing and answers empty.
+	again, err := retention.PurgeDeletedUsers(ctx, now.Add(-30*24*time.Hour), now, 100)
+	if err != nil {
+		t.Fatalf("second PurgeDeletedUsers() error = %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("second purge = %+v, want empty", again)
+	}
+}
+
+// V023's backfill UPDATE has no fresh-database coverage by construction — the
+// branch it fixes only exists on a database that carried is_deleted rows across
+// the migration. Pin the real statement from the embedded migration file, not a
+// hand-copied one (a copy could drift past the very WHERE clause under test):
+// strip it out, run it against a simulated legacy row, and check it stamps only
+// closed accounts.
+func TestV023BackfillStampsLegacyClosedAccounts(t *testing.T) {
+	database := setupDatabase(t)
+	users := repository.NewUser(database)
+
+	legacy := createUserWithProfile(t, users, "v023-legacy@njupt.edu.cn")
+	live := createUserWithProfile(t, users, "v023-live@njupt.edu.cn")
+	if _, err := users.SoftDeleteAndRevokeSessions(
+		context.Background(), legacy.ID, model.UserRoleAdmin, time.Now().UTC()); err != nil {
+		t.Fatalf("close legacy account error = %v", err)
+	}
+	// A closed row that predates V023 carries no stamp — that is the shape the
+	// backfill exists for.
+	if err := database.Model(&model.User{}).Where("id = ?", legacy.ID).
+		UpdateColumn("deleted_at", nil).Error; err != nil {
+		t.Fatalf("clear deleted_at: %v", err)
+	}
+
+	up, err := migrations.FS.ReadFile("000023_user_purge_anchor.up.sql")
+	if err != nil {
+		t.Fatalf("read embedded migration: %v", err)
+	}
+	start := strings.Index(string(up), `UPDATE "user"`)
+	if start < 0 {
+		t.Fatal("V023 up migration has no backfill UPDATE statement")
+	}
+	end := strings.Index(string(up)[start:], ";")
+	if end < 0 {
+		t.Fatal("backfill UPDATE statement is not terminated")
+	}
+	backfill := string(up)[start : start+end]
+	if exec := database.Exec(backfill); exec.Error != nil {
+		t.Fatalf("run backfill: %v", exec.Error)
+	}
+
+	stamped, err := users.FindByID(context.Background(), legacy.ID)
+	if err != nil {
+		t.Fatalf("FindByID(legacy) error = %v", err)
+	}
+	if stamped.DeletedAt == nil {
+		t.Fatal("the legacy closed account carries no deleted_at after the backfill")
+	}
+	untouched, err := users.FindByID(context.Background(), live.ID)
+	if err != nil {
+		t.Fatalf("FindByID(live) error = %v", err)
+	}
+	if untouched.DeletedAt != nil {
+		t.Fatal("the backfill stamped a live account")
 	}
 }

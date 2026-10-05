@@ -24,6 +24,7 @@ func userListItem(row repository.AdminUserRow) UserListItem {
 		// shared rule the user's own completion page uses.
 		ProfileNeedsCompletion: row.ProfileNeedsCompletion,
 		StateManual:            row.StateManual,
+		DeletedAt:              row.DeletedAt,
 		IncompleteFields: incompleteFields(
 			row.Name, row.PhoneNumber, row.QQNumber, row.Major, row.StudentID),
 
@@ -53,6 +54,7 @@ func userDetail(user *model.User) UserDetail {
 
 		ProfileNeedsCompletion: user.ProfileNeedsCompletion,
 		StateManual:            user.StateManual,
+		DeletedAt:              user.DeletedAt,
 		IncompleteFields: incompleteFields(
 			user.Name, user.PhoneNumber, user.QQNumber, user.Major, user.StudentID),
 

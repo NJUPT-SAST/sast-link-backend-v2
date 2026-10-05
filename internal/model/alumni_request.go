@@ -82,8 +82,15 @@ type AlumniRequest struct {
 	ReviewedBy    *int64
 	ReviewedAt    *time.Time
 	// NotifiedAt records that the result email was confirmed sent. NULL is the
-	// backlog marker the console filters on.
+	// backlog marker the console filters on. A silent rejection writes it in the
+	// rejecting transaction (see SilentlyRejected) so the restart requeue sweep
+	// and the notified=false backlog both treat the ticket as closed.
 	NotifiedAt *time.Time
+	// SilentlyRejected is TRUE when the rejection deliberately sent no result
+	// email (V022): the applicant had typically self-registered after a mistaken
+	// submission, so a rejection notice would only confuse them. Resend is
+	// refused for such tickets and the console renders them as never-notified.
+	SilentlyRejected bool
 	// NotifyAttempts is incremented before each send, so a process killed mid-send
 	// leaves evidence that it tried rather than losing the attempt.
 	NotifyAttempts int

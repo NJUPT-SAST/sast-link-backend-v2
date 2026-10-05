@@ -23,6 +23,13 @@ type User struct {
 	College      College `gorm:"type:college_enum;not null;default:(-)"`
 	Major        string
 	TokenVersion int
+	// DeletedAt is the physical-purge anchor (V023): written by the account-close
+	// transaction, cleared by restore. The retention worker hard-deletes the row
+	// once the stamp is older than the configured grace window. A plain
+	// *time.Time deliberately: gorm's soft-delete magic binds to the
+	// clause-implementing gorm.DeletedAt type, not to the field name, so this
+	// column never filters reads.
+	DeletedAt *time.Time `gorm:"column:deleted_at"`
 	// ProfileNeedsCompletion is V010's generated column: TRUE while a required
 	// field is blank or name still duplicates student_id. It is a display hint
 	// for the frontend completion page, never an authorization input.

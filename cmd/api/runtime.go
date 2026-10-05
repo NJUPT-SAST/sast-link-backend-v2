@@ -453,6 +453,8 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 				RefreshTokenAge:    cfg.RetentionRefreshTokenAge,
 				AuditLogAge:        cfg.RetentionAuditLogAge,
 				AlumniRequestAge:   cfg.RetentionAlumniRequestAge,
+				DeletedUserAge:     cfg.RetentionDeletedUserAge,
+				AvatarStore:        avatarStore,
 				DerivedStateCursor: &derivedStateCursor,
 			},
 		},
