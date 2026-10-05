@@ -357,11 +357,18 @@ func writeApprovalVerdict(
 // RejectAlumniRequest locks a pending ticket and records a rejection. It takes
 // the same row lock as approval so two reviewers cannot both write a verdict,
 // and the loser learns the ticket was already handled.
+//
+// silent records a rejection whose applicant is never emailed: the verdict,
+// silently_rejected and notified_at all land in this one transaction, because
+// notified_at is what keeps the restart requeue sweep (notified_at IS NULL AND
+// notify_attempts = 0) from resurrecting the email the reviewer chose not to
+// send.
 func (r *AlumniRequestRepository) RejectAlumniRequest(
 	ctx context.Context,
 	requestID int64,
 	reviewerID int64,
 	reason string,
+	silent bool,
 	now time.Time,
 ) (*model.AlumniRequest, error) {
 	if requestID <= 0 {
@@ -376,14 +383,22 @@ func (r *AlumniRequestRepository) RejectAlumniRequest(
 		if _, err := lockPendingRequest(transaction, requestID); err != nil {
 			return err
 		}
+		updates := map[string]any{
+			"status":        model.AlumniRequestStatusRejected,
+			"reject_reason": reason,
+			"reviewed_by":   reviewerID,
+			"reviewed_at":   now,
+		}
+		if silent {
+			// notified_at closes the delivery story rather than claiming a send:
+			// nothing is owed, so nothing is outstanding. SilentlyRejected is what
+			// lets resend refuse and the console render the choice honestly.
+			updates["notified_at"] = now
+			updates["silently_rejected"] = true
+		}
 		result := transaction.Model(&model.AlumniRequest{}).
 			Where("id = ?", requestID).
-			Updates(map[string]any{
-				"status":        model.AlumniRequestStatusRejected,
-				"reject_reason": reason,
-				"reviewed_by":   reviewerID,
-				"reviewed_at":   now,
-			})
+			Updates(updates)
 		if result.Error != nil {
 			return fmt.Errorf("reject alumni request: %w", result.Error)
 		}

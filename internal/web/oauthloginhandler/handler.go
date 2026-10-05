@@ -28,6 +28,7 @@ import (
 type Service interface {
 	Authorize(ctx context.Context, input oauthlogin.AuthorizeInput) (*oauthlogin.AuthorizeResult, error)
 	Callback(ctx context.Context, input oauthlogin.CallbackInput) (*oauthlogin.CallbackResult, error)
+	AppCodeLogin(ctx context.Context, input oauthlogin.AppCodeLoginInput) (*oauthlogin.CallbackResult, error)
 	ExchangeCode(ctx context.Context, input oauthlogin.ExchangeCodeInput) (*oauthlogin.ExchangeCodeResult, error)
 	Bind(ctx context.Context, input oauthlogin.BindInput) (*oauthlogin.BindResult, error)
 }
@@ -101,6 +102,10 @@ func RegisterRoutes(r gin.IRouter, h Handler, g Gates) {
 	r.GET("/oauth/github/callback", h.callback(model.LoginMethodGitHub))
 	r.GET("/oauth/lark", h.authorize(model.LoginMethodLark))
 	r.GET("/oauth/lark/callback", h.callback(model.LoginMethodLark))
+	// The login-free entrance for pages embedded in the Feishu client: the
+	// page posts the JSAPI pre-authorization code instead of riding the
+	// authorize-page redirect.
+	r.POST("/oauth/lark/app-code", h.AppCodeLogin)
 	r.POST("/oauth/exchange-code", h.ExchangeCode)
 
 	// The binding routes name a write scope gate explicitly: a stolen token
@@ -158,11 +163,15 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 			// The state is consumed either way; the cookie pairing it is spent too —
 			// except under the callback cap, which rejects before touching state:
 			// clearing the pairing there would break the in-flight login the caller
-			// is about to retry (shared-NAT neighbors can trip the cap).
-			if h.StateCookie != nil && !errors.Is(err, oauthlogin.ErrRateLimited) {
+			// is about to retry (shared-NAT neighbors can trip the cap), and except a
+			// provider outage, whose state the service just wrote back so the
+			// browser's own retry can re-run the whole callback — clearing the cookie
+			// would strand that restored state behind a pairing check that cannot
+			// pass anymore.
+			if h.StateCookie != nil && !errors.Is(err, oauthlogin.ErrRateLimited) && !isRestorableFailure(err) {
 				h.StateCookie.Clear(c)
 			}
-			h.redirectFailure(c, err)
+			h.redirectFailure(c, err, name)
 			return
 		}
 		if h.StateCookie != nil {
@@ -215,12 +224,14 @@ func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 	}
 }
 
-// redirectFailure sends a failed callback to the frontend error page.
+// redirectFailure sends a failed callback to the frontend error page. The
+// provider is named so the page can offer a one-click restart of that
+// provider's login — the action almost every callback failure needs.
 //
 // When no error page is configured the envelope is used instead — worse UX but
 // never worse security, since the alternative would be redirecting to an
 // unvalidated location.
-func (h Handler) redirectFailure(c *gin.Context, err error) {
+func (h Handler) redirectFailure(c *gin.Context, err error, provider model.LoginMethod) {
 	mapped := mapServiceError(err)
 	if strings.TrimSpace(h.ErrorRedirect) == "" {
 		response.Error(c, mapped)
@@ -232,6 +243,7 @@ func (h Handler) redirectFailure(c *gin.Context, err error) {
 		return
 	}
 	query := target.Query()
+	query.Set("provider", string(provider))
 	var business *response.BusinessError
 	if errors.As(mapped, &business) {
 		query.Set("error", strconv.Itoa(business.Code))
@@ -245,9 +257,53 @@ func (h Handler) redirectFailure(c *gin.Context, err error) {
 	c.Redirect(http.StatusFound, target.String())
 }
 
+// isRestorableFailure reports whether a callback failure carries the service's
+// Restorable flag — a provider outage whose state was written back for a browser
+// retry, so the state cookie pairing it must survive.
+func isRestorableFailure(err error) bool {
+	var serviceErr *oauthlogin.Error
+	return errors.As(err, &serviceErr) && serviceErr.Restorable
+}
+
 // exchangeCodeRequest redeems a login_code.
 type exchangeCodeRequest struct {
 	Code string `json:"code" binding:"required"`
+}
+
+// appCodeRequest submits the Feishu client JSAPI pre-authorization code the
+// embedded web app obtained through tt.requestAccess / tt.requestAuthCode.
+type appCodeRequest struct {
+	Code string `json:"code" binding:"required"`
+}
+
+// AppCodeLogin redeems a Feishu client JSAPI pre-authorization code: the
+// login-free leg for pages opened inside the Feishu client. Unlike the
+// callback it answers in the envelope, because the caller is the page's own
+// fetch rather than a top-level navigation a redirect could serve.
+func (h Handler) AppCodeLogin(c *gin.Context) {
+	var request appCodeRequest
+	if err := webutil.DecodeStrictJSON(c, &request); err != nil {
+		response.Error(c, webutil.BadRequest())
+		return
+	}
+	result, err := h.Service.AppCodeLogin(c.Request.Context(), oauthlogin.AppCodeLoginInput{
+		Code:      request.Code,
+		ClientIP:  c.ClientIP(),
+		UserAgent: c.Request.UserAgent(),
+	})
+	if err != nil {
+		response.Error(c, mapServiceError(err))
+		return
+	}
+	response.Ok(c, appCodeLoginDTO{
+		Bound:             result.Bound,
+		LoginCode:         result.LoginCode,
+		RegistrationState: result.RegistrationState,
+		OAuthState:        result.OAuthState,
+		Provider:          result.Provider,
+		DisplayName:       result.DisplayName,
+		AvatarURL:         result.AvatarURL,
+	})
 }
 
 // ExchangeCode swaps a one-time login_code for a session.

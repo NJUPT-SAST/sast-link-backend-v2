@@ -10,6 +10,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **注销账号宽限期后物理清除**（V023，feat/alumni-silent-reject）：`DELETE /admin/users/:id` 仍为软删（同事务盖 `deleted_at` 章），retention worker 每小时物理删除 `deleted_at` 早于 `RETENTION_DELETED_USER_AGE`（默认 30 天，`0` 禁用，低于 24h 拒绝启动）的已注销行：级联清除 profile / identities / token 元数据 / grants / badge，`audit_logs` 与校友工单引用置 NULL（历史存活），`login_email` / `student_id` 唯一约束释放可重新注册；每账号同一事务写一条无 PII 的 `user_purge` 审计行，COS 头像对象事务外删除（失败仅记日志）。restore 清空 `deleted_at`；宽限期内可恢复，超期后 restore 返回 `404`。存量 `is_deleted` 行回填 `deleted_at = now()`，从迁移时刻起统一宽限。用户列表/详情新增 `deleted_at` 字段供控制台展示剩余宽限。
+
+- **校友建号申请支持静默驳回**（feat/alumni-silent-reject）：`POST /admin/alumni-requests/:id/reject` 新增可选 `silent`（默认 `false`）。误操作工单（典型：新生误提交后已自行完成注册）可落库 verdict 但不发结果邮件；`reject_reason` 静默时仍必填（工单与审计自身的解释）。驳回事务同 UPDATE 落 `silently_rejected` 标记与 `notified_at`（V022），重启补投扫描与 `notified=false` 积压过滤均不再命中；`resend-notification` 对静默工单拒绝补发（`42200`），工单响应携带 `silently_rejected`（审计 detail 记 `silent: true`）供控制台渲染与隐藏补发入口。配套：审批撞学号占用（`40902`）文案补「如申请人已自行注册请静默驳回」指引。
+
+### Changed
+
+- **部门自助写入收紧为 manager / admin 专属**（fix/department-self-edit-gate）：`PUT /user/profile` 的 `department` 键从「任意角色可写」收紧为仅 `manager` / `admin` 角色可写，其他角色（member / freshman / lecturer）提交该键返回 `40000`（与未知权限字段同姿，拒绝整个请求而非静默忽略——调用方不能误以为改成功了）。部门是组织归属字段而非展示资料，下游（People 等）按它做权限隔离；此前仅靠前端不暴露编辑入口实现限制，后端从未拒绝。角色取自 auth-state 实时数据库行（非 token 内 role claim 快照），降权下一请求即生效；空/未知角色一律拒绝（fail closed）。`PUT /admin/users/:id` / `PUT /admin/users` 的部门写入不变，普通用户的部门变更由管理员归置。前端配合：非管理角色的编辑请求体不应携带 `department` 键。
+
+- **manager 不再可改写既有账号的 login_email**（fix/admin-identity-boundaries）：`PUT /admin/users/:id` 的 `login_email` 改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可修改 login_email」），`email_type` 只能随 `login_email` 提交放带受限。与 personal_email 同判：忘记密码验证码发往 login_email 且 `@sast.fun` 前缀无格式约束，manager 把成员主邮箱改写为自己可读的 sast.fun 地址（部门共用箱/别名，唯一约束只挡精确重复）即构成对既有账号的静默持久接管。建号路径（`POST /admin/users`）不拦——manager 建号本就持有初始密码，无额外提权。
+
+- **manager 不再可绑定 personal_email**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的 `personal_email` 直绑改为仅 admin 角色可提交，manager 提交返回 `403`（`40300`，「仅管理员可绑定 personal_email」）。直绑是免验证的身份断言：绑定后控制该邮箱即可登录并重置账号密码，manager 若能自选邮箱即可绑定自己控制的邮箱对任意成员账号构成持久静默接管（成员改密也不切断）；建号路径同理，绑定比初始密码存活得更久。自助面 `POST /user/identities/email`（需邮箱验证）不受影响，admin 直绑与校友工单审批直绑（本就 admin-only）不变。
+
+
+- **`other_mail` 不再接受校园邮箱域**（fix/identity-pair-consistency）：`@njupt.edu.cn` 地址只能是 login_email，绑成 other_mail 是把重置句柄放进该前缀对应学生的邮箱。四处收紧：admin 建号/改号的 `personal_email`、校友工单的 `personal_email`、自助 `POST /user/identities/email` 绑定发码（有邮箱验证但属同类别错误，一并禁）。校园邮箱域提交返回 `40000`。
+
+- **admin 写入查表拦截 NJUPT 前缀撞号**（fix/identity-pair-consistency）：校园邮箱按学号一人一箱，`login_email` 前缀指向**其他账号学号**时，该邮箱的主人即持有此账号的重置句柄。三个 admin 写入面在写入前查表（`ExistsByStudentIDExcluding`，`lower(btrim())` 折叠，排除目标自身行）：`POST /admin/users`（前缀≠提交学号时查，撞返回 `40902`「login_email 前缀与其他账号学号冲突」）、`PUT /admin/users/:id`（仅 `login_email` 被写入时查，对生效学号判定；仅改学号不查——学号指向他人邮箱前缀不产生重置句柄）、校友 provision 审批（事务前查，撞返回 `40901` 提示驳回）。前缀等于本人学号不查表；前缀是未被注册的号仍放行——查表只能看见已注册账号，未注册学生的邮箱占用继续依赖人工核验。注册/自助面不查：两步流要求控箱，自己配错只伤自己。
+
+- **自助资料编辑移除 `student_id`**（fix/identity-pair-consistency）：`PUT /user/profile` 不再接受 `student_id`（严格 JSON 解码按未知字段返回 `40000`），`UpdateProfileInput` 与仓储 `ProfileUpdate` 同步移除该字段。此前该路径可自助改学号，且占用仅靠大小写敏感的 `user_student_id_key` 约束——同库已有 `B24040525` 时可自改成 `b24040525`；修改学号今后只能由管理员在 `PUT /admin/users/:id` 完成。响应与 `GET /user/profile` 仍返回 `student_id`（只读）。
+
+### Fixed
+
+- **管理台学号占用判定补齐大小写折叠**（fix/admin-identity-boundaries）：`POST /admin/users` 与 `PUT /admin/users/:id` 的学号占用预检改为 `lower(btrim())` 折叠比较（新增 `ExistsByStudentIDExcluding`，排除目标自身行），返回 `40902`。V001 的 `user_student_id_key` 约束在默认 collation 下大小写敏感，此前 `b24040525` 可在 `B24040525` 旁再建一号——正是注册与校友路径早已堵掉的导入期形状，控制台两条路一直漏着。折叠窗口内的并发（两个控制台同时建变体号）仍无数据库层硬保证，需表达式唯一索引才可彻底封死。
+
+### Added
+
+- **飞书客户端内免登**（2026-09-30，feat/lark-h5-app-code，[PR #105](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/105)）：`POST /oauth/lark/app-code`。飞书客户端内嵌网页通过 JSSDK `tt.requestAccess`（旧客户端回退 `tt.requestAuthCode`）拿到一次性预授权 code 后 POST 本端点，免跳授权页完成登录/注册分流：已绑定 → `login_code`（续走 `POST /oauth/exchange-code`）；未绑定 → `registration_state` + 本端点签发的 `oauth_state`（注册双绑定与授权页流程一致）。`union_id` 与授权页流程一致，两入口绑定互通；租户闸门（40302）、审计（`oauth_login` 带 `source: "app_code"`）与限流（callback 同档配额、独立桶）不变。无新 errcode / env / 迁移。
+
 - **部门枚举扩至七部门 + 管理端写入 + 公开目录**（feat/department-enum，[issue #99](https://github.com/NJUPT-SAST/sast-link-backend-v2/issues/99)，基于 PR #98 的 V020 之后）：V021 向 `department_enum` 追加 `electronics` / `office` / `liaison` / `publicity` / `competition`（纯增量 `ADD VALUE`，不可回滚），配套 `GET /departments` 公开只读目录（key + 中文展示名，与后端枚举同源，集成方不再本地维护 key→label 映射）与 `PUT /admin/users/:id` 的可选 `department` 字段（admin / manager 可写，语义与 `PUT /user/profile` 完全一致：传值即设置、空串清空为 NULL、缺省不修改；写 profile 行且 upsert 无 profile 行的存量账号，不触动 token_version 不撤销会话——部门不是授权输入），批量端点 `PUT /admin/users` 同步接受可选 `department`（与 `role` 至少传一项，可同传；逐项走单条端点同款守卫与事务，成功项回显应用的 department，空串表示清空）。背景：People 侧按 `profile.department` 做部门权限隔离，两个值的值域无法给其余五个部门分家，且存量上百账号逐个通知自助改部门不现实。枚举扩展自动生效于自助写入、admin 筛选与 `by_department` 统计（实现本就按 GROUP BY 动态分桶，仅文档描述同步）。
 
 - **manager（部长）角色分层**（feat/manager-role，[PR #98](https://github.com/NJUPT-SAST/sast-link-backend-v2/pull/98)）：V020 向 `user_role_enum` 加入 `manager`。控制台分三层：lecturer 只读用户目录；manager 拥有成员管理半边——用户读写（建号 / 编辑 / 批量角色 / 软删 / 恢复）与概览统计（概览仅返回 users 聚合，clients/audit 两路对 manager 整体缺席），phone 视角同 admin（含 keyword 匹配），但不接触技术信息（OAuth 客户端、审计日志、校友工单均 403）；服务层与写事务内（锁定行重判）双重约束 manager 边界：不可写 admin 角色账号（编辑 / 升降 / 注销 / 恢复均 403）、不可授予 admin 角色（建号与批量逐项拒绝），其余一切升降权含把他人升为 manager（自我复制）与升 / 降 lecturer 均可行——并发场景下 admin 恰好把目标升为 admin 时，进行中的 manager 写入也会在提交前被事务内重判拒绝。manager 是学生角色账号：状态推导为 njupter、入学满 4 学年 retired_sast，计入 `incomplete_by_role` 资料补全跟进。管理员自保护规则（不可改自己角色、不可注销自己）对 manager 同样适用。
@@ -108,6 +135,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **修复**：`POST /alumni-requests` 的 IP 限流前置到字段校验之前，匿名审计写放大被限流桶覆盖（校验失败仍写审计但已有界，被拒 IP 不再写审计）；`/health` 的 DB 探活补 2s 超时（原为全服务唯一无界出站调用）；忘记密码队列满改答 `50300` 而非假成功（原“已发送”永不到达且重试撞限流）；注册后重载失败降级为内存行 + 告警日志（原已建号却答 500，重试死在已消费的 Register-Ticket）；`/userinfo` 后端故障（缓存 miss + DB 失败）改答 RFC 6750 `server_error` 而非折叠为 401（避免故障期全量 RP 刷新风暴）；设备淘汰撤销与审计改用 detach + 5s 预算 ctx（原客户端断连会留下第 6 个活会话无审计，session 与 oauthlogin 两处）；refresh 的 user_deleted / user_missing 分支补审计；RotateClientSecret 内部错误分支补审计；forgot-password worker 审计 IP/UA 改 NullableString（保持 V007 NULL 语义）；alumni 通知 worker 启动 reconcile 失败改退避重试 + shutdown 排空在途投递 + exclude 列表限界；retention 派生状态连续 3 tick 失败后游标重置（防永久卡死）；后台 worker panic 转“带栈错误 + 快速退出”而非裸崩溃。
   - **性能**：V024（单迁移两索引）`user(lower(btrim(student_id)))` 表达式索引（4 处全表扫描消除，含审批事务内 FOR UPDATE；故意非 UNIQUE，存量行已违反归一化约束）+ last-admin 守卫部分索引（批量端点 ≤500 次全表 COUNT 变索引扫描）；批量用户更新 8 并发 worker 池（每条仍独立事务+守卫，结果保持请求序）；控制台 stats 五次全表聚合合一次 `GROUP BY role, state` + FILTER；`validateTokenFamilyAppend` 窄列投影；outbox `CleanupExpired` 改主键子查询限量删除；`RecomputeDerivedState` 改单条 `UPDATE ... FROM (VALUES)`；全部 Lua 调 EVALSHA（NOSCRIPT 回退）；设备淘汰 DEL 入脚本（省一次往返）；Peek GET+PTTL 合并原子脚本；限流/登录失败计数脚本 TTL 自愈（无 TTL key 不再永久 429）；SMTP 拨号独立 10s 预算；provider/turnstile/COS 共享 Transport 连接池（MaxIdleConnsPerHost=16）；Lark app_token 取数 single-flight；OAuth 回调多跳 15s 总预算；/metrics 的 method label 白名单归一（堵匿名 label 基数放大）。
   - **文档/运维**：Caddy runbook 对 `/v2/metrics` 钉 404（与 pprof 同一道防线，抓取走内网）；production + `DB_SSLMODE=disable` 启动 WARN。
+- **50300 依赖不可用文案收敛为一份**（fix/oauth-timeout-copy）：同一业务码的文案存在三份措辞——errcode canonical「依赖服务暂不可用」、sessionhandler 映射「依赖服务暂不可用，请稍后重试」、前端对 50300 的整体替换「服务暂不可用，请稍后重试」——用户实际只看到前端那份，后端两份白写且互相漂移（`errcode.go` 注释警告的形态）。现统一为 canonical「服务暂不可用，请稍后重试」（与前端正在显示的措辞逐字一致）：前端删除替换逻辑后显示不变；sessionhandler 的 Kind 映射与 oauthloginhandler 的 Kind 默认文案均改为引用 canonical，不再持有本地副本；「依赖」二字对用户是技术噪音，语义由错误码表与 503xx 章节承担。`docs/API文档.md` 同步三处。
+
+- **GitHub/飞书登录网络故障时的误导性「state 无效或已过期」**（fix/oauth-provider-network-retry）：出站到 provider 的 token exchange 挂在网络超时上时，同一 callback URL 的重试（浏览器刷新/GitHub 授权页返回秒跳回）命中已被消费的 state，用户只看到「state 无效或已过期」，真因仅存于审计行的 `provider_timeout`。三层修复：① provider 出站调用（token exchange / user fetch，GitHub 与飞书）加一次 250ms 退避重试，仅限传输层错误与 provider 5xx，4xx 与 code 被拒不重试；单次 I/O 超时 10s→4s，重试后最坏总时长低于原单次。② provider 网络故障（超时/不可达）时把已消费的 state 写回 Redis（上限 2 分钟）并保留配对 cookie，浏览器重试可完整重走 exchange——code 在 provider 侧单次使用，首次请求若实际已到达则重试得到 `bad_verification_code`，走正常重启分支；CSRF cookie 绑定不受影响。③ state 失效/cookie 校验失败类文案改为面向用户的行动指引（「登录已中断，请重新发起登录」），错误页重定向附带 `provider` 参数供前端渲染一键重启；超时文案与 provider 参数同步更新。
 
 - **个人徽标 `target` 参数生效**（2026-09-30）：前端分享 URL 早已携带 `?target=blog|github`，但渲染端从未读取该参数——`ServeSVG` 只解析 `theme`，卡片锚点固定 blog 优先、github 兜底，`?target=github` 的分享在两页都配置时永远跳博客。现在 `target` 与 `theme` 同一契约：随 `RenderInput` 下传、未知值归一化为 `blog`、锚点按「请求的目标优先，另一个兜底」解析（http(s) 白名单不变），并加入渲染缓存标识（version|theme|target|key），两个变体互不命中对方缓存。`docs/API文档.md` §9.4 与 `docs/openapi.yaml` 补记 `target` 参数。
 

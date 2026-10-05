@@ -36,6 +36,10 @@ const (
 	// only rejects values so short that an incident investigation would find the
 	// relevant entries already deleted.
 	minAuditLogRetention = 30 * 24 * time.Hour
+	// minDeletedUserGrace bounds how short the account purge window may be. A
+	// day is the shortest window that still leaves an administrator a realistic
+	// chance to notice and undo a mistaken close before the data is gone.
+	minDeletedUserGrace = 24 * time.Hour
 )
 
 // Config holds all runtime configuration for the service.
@@ -286,6 +290,16 @@ type Config struct {
 	// request, and the three-day handling target is a UI statement, not a backend
 	// rule.
 	RetentionAlumniRequestAge time.Duration `env:"RETENTION_ALUMNI_REQUEST_AGE" envDefault:"4320h"`
+
+	// RetentionDeletedUserAge is the grace window between a soft close and the
+	// physical purge of the account row (V023): delete cascades profile,
+	// identities and token metadata, and nulls the audit and ticket references —
+	// history survives, personal data does not. Measured from deleted_at, which
+	// only the close transaction writes and restore clears. Defaults to 30 days,
+	// which is the restore window; 0 disables the purge entirely (the pre-V023
+	// behavior), and any positive value below minDeletedUserGrace is rejected
+	// rather than clamped, so an instant-erase misconfiguration fails at startup.
+	RetentionDeletedUserAge time.Duration `env:"RETENTION_DELETED_USER_AGE" envDefault:"720h"`
 
 	// TurnstileSecret enables the human-verification check in front of the one
 	// unauthenticated write endpoint, POST /alumni-requests.
@@ -732,6 +746,8 @@ func (c *Config) validateRetention() error {
 		return fmt.Errorf("RETENTION_AUDIT_LOG_AGE must be at least %s", minAuditLogRetention)
 	case c.RetentionAlumniRequestAge <= 0:
 		return fmt.Errorf("RETENTION_ALUMNI_REQUEST_AGE must be positive")
+	case c.RetentionDeletedUserAge != 0 && c.RetentionDeletedUserAge < minDeletedUserGrace:
+		return fmt.Errorf("RETENTION_DELETED_USER_AGE must be 0 (disabled) or at least %s", minDeletedUserGrace)
 	}
 	return nil
 }

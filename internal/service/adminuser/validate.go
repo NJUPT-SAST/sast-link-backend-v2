@@ -290,6 +290,12 @@ func validateUpdatePersonalEmail(raw, newLoginEmail *string) (*string, error) {
 	if !validate.EmailFormat(email) {
 		return nil, newError(ErrInvalidInput, "personal_email 格式非法", nil)
 	}
+	// A school mailbox is a login identity, not a personal one: binding one as
+	// other_mail puts a reset handle for this account in whatever student's
+	// mailbox the prefix names.
+	if validate.IsNjuptEmailDomain(email) {
+		return nil, newError(ErrInvalidInput, "personal_email 不接受校园邮箱域名", nil)
+	}
 	if newLoginEmail != nil && email == *newLoginEmail {
 		return nil, newError(ErrInvalidInput, "personal_email 不能与 login_email 相同", nil)
 	}
@@ -441,6 +447,12 @@ func validateCreate(input CreateUserInput, now time.Time) (validatedCreate, erro
 		}
 		if !validate.EmailFormat(email) {
 			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 格式非法", nil)
+		}
+		// A school mailbox is a login identity, not a personal one: binding one as
+		// other_mail puts a reset handle for this account in whatever student's
+		// mailbox the prefix names.
+		if validate.IsNjuptEmailDomain(email) {
+			return validatedCreate{}, newError(ErrInvalidInput, "personal_email 不接受校园邮箱域名", nil)
 		}
 		if email == result.loginEmail {
 			// Rejected before the identity insert so the caller gets a clear input error

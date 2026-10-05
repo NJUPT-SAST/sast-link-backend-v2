@@ -3,6 +3,7 @@ package alumnirequest
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,9 @@ type fakeRequests struct {
 	rejectErr   error
 	rejected    *model.AlumniRequest
 	rejectedFor string
+	// rejectedSilent records the silent flag the service passed down, so tests can
+	// pin that the delivery choice travels with the verdict.
+	rejectedSilent bool
 	// pendingEmail is the fake's answer to EmailHasPendingTicket; the query's
 	// input is recorded in pendingEmailArg.
 	pendingEmail    bool
@@ -165,6 +169,7 @@ func (f *fakeRequests) RejectAlumniRequest(
 	requestID int64,
 	reviewerID int64,
 	reason string,
+	silent bool,
 	now time.Time,
 ) (*model.AlumniRequest, error) {
 	if f.rejectErr != nil {
@@ -180,8 +185,13 @@ func (f *fakeRequests) RejectAlumniRequest(
 	rejected.RejectReason = reason
 	rejected.ReviewedBy = &reviewerID
 	rejected.ReviewedAt = &now
+	rejected.SilentlyRejected = silent
+	if silent {
+		rejected.NotifiedAt = &now
+	}
 	f.rejected = &rejected
 	f.rejectedFor = reason
+	f.rejectedSilent = silent
 	return &rejected, nil
 }
 
@@ -193,6 +203,10 @@ type fakeUsers struct {
 	// loginEmailByStudentID feeds FindLoginEmailByStudentID; a test seeds the
 	// exact ID string it expects the service to look up.
 	loginEmailByStudentID map[string]string
+	// studentIDOwners maps a folded student id to the account holding it, so the
+	// excluding lookup can tell "taken by another account" from a target's own
+	// id. Keys are folded by the method, mirroring the SQL comparison.
+	studentIDOwners map[string]int64
 	// emailQueries records every address asked about, so a test can assert that both
 	// the personal and the login address were checked.
 	emailQueries []string
@@ -204,6 +218,18 @@ func (f *fakeUsers) ExistsAsEmailAnywhere(_ context.Context, email string) (bool
 		return false, f.emailErr
 	}
 	return f.occupiedEmails[email], nil
+}
+
+func (f *fakeUsers) ExistsByStudentIDExcluding(
+	_ context.Context,
+	studentID string,
+	excludeUserID int64,
+) (bool, error) {
+	if f.studentErr != nil {
+		return false, f.studentErr
+	}
+	owner, taken := f.studentIDOwners[strings.ToLower(strings.TrimSpace(studentID))]
+	return taken && owner != excludeUserID, nil
 }
 
 func (f *fakeUsers) FindLoginEmailByStudentID(_ context.Context, studentID string) (string, bool, error) {

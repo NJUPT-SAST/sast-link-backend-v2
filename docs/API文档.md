@@ -177,11 +177,11 @@
 | `50002` | 对象存储上传失败 |
 | `50003` | 数据库错误 |
 
-#### 依赖服务暂不可用（503xx）
+#### 服务暂不可用（503xx）
 
 | 业务码 | 说明 |
 |--------|------|
-| `50300` | 依赖服务暂不可用，请稍后重试 |
+| `50300` | 服务暂不可用，请稍后重试 |
 | `50301` | 建号申请通道暂不可用（人机校验未配置或不可达） |
 
 `50300` 用于 fail-closed 依赖不可用场景：验证码、Register-Ticket、Bind-Ticket、OAuth 授权请求暂存等仅存于 Redis 的状态在 Redis 不可用时无法校验，服务端拒绝请求并返回 `50300`，客户端应提示用户稍后重试。头像内容审核服务（腾讯云 COS 图片审核）不可用时同样返回 `50300`：未审核的图片不放行，客户端应提示用户稍后重试。忘记密码发码端点在邮件投递队列满时同样返回 `50300`（投递已在积压，稍后重试是正确指令），客户端应提示稍后重试而非等待邮件。
@@ -525,7 +525,7 @@ POST /auth/forgot-password/send-code
 }
 ```
 
-**说明**: 邮箱未注册时返回 `40106`（该邮箱尚未注册）。存在的账号仍为异步受理：响应只表示请求已入队，不表示邮件已经送达。服务端把请求放入有界内存队列；队列满、进程重启或邮件依赖失败时任务可能丢失，用户可在限流窗口后重试。
+**说明**: 邮箱未注册时返回 `40106`（该邮箱尚未注册）。存在的账号仍为异步受理：响应只表示请求已入队，不表示邮件已经送达。服务端把请求放入有界内存队列；队列满时返回 `50300`（客户端提示稍后重试，而非等待邮件），进程重启时在途任务丢失、邮件依赖失败时投递不确认，用户可在限流窗口后重试。
 
 `login_email` 可以是账号的主登录邮箱，也可以是已绑定为该账号 `other_mail` 身份的个人邮箱（例如管理员建号时直绑的邮箱，见 §6.2.1）。请求路径与 worker 均按登录标识解析账号，验证码发到本次提交的这个地址。毕业成员的主登录邮箱如果已不可用，可用绑定的个人邮箱自助重置密码。
 
@@ -571,11 +571,11 @@ POST /auth/reset-password
 >
 > **provider 开关**：GitHub 与飞书各由 `OAUTH_GITHUB_ENABLED` / `OAUTH_FEISHU_ENABLED` 独立控制，未启用的 provider 路由仍然注册，调用返回 `40000`（不支持的第三方登录方式）而非 `404`。启用某个 provider 时其 client id / secret / redirect_uri 均为必填，飞书还必须提供 `OAUTH_FEISHU_TENANT_KEY`——留空会关闭租户校验，接受任意飞书企业的用户。
 >
-> **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=`；该项留空时改为返回标准信封。
+> **回调重定向白名单**：`OAUTH_LOGIN_REDIRECTS` 以精确匹配校验回调可返回的前端地址，不支持前缀匹配。回调会把 `login_code` 交给它重定向到的地址，前缀规则会让 `https://link.sast.fun.evil.test` 也通过。不在白名单内的 `redirect` 返回 `40000`。失败的回调重定向到 `OAUTH_LOGIN_ERROR_REDIRECT`，携带 `?error=&error_description=&provider=`（`provider` 取 `github`/`lark`，供错误页渲染一键重新发起该 provider 的登录）；该项留空时改为返回标准信封。state 失效/校验失败类文案为面向用户的行动指引（如「登录已中断，请重新发起登录」）而非描述性文案。
 >
-> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`GET /oauth/{github,lark}/callback` 另有**独立**的 per-IP 配额（默认 120 次/60s，`RATE_LIMIT_OAUTH_CALLBACK_RPM`）：callback 是公开入口，扫描与 state 重放都打在这里，而 authorize 的配额管不到它，每次无效调用仍要读一次 state 并写一条审计。限流在读取 state **之前**生效，被限流的请求不消费 state、不写审计、不调用 provider。阈值刻意高于其他名额：出口 NAT 后每个用户每次登录只发一次 callback，配额定得太低会一次性锁死整个宿舍或社团；它刹住的是单一来源重放，**挡不住多 IP 分布式洪峰**——后者要靠边缘层，因为每个来源的成本本来就不高。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。三处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
+> **限流**：`GET /oauth/{github,lark}` 按调用方 IP 固定窗口限流（默认 300 次/60s，`RATE_LIMIT_OAUTH_LOGIN_RPM`）。两者与 §8.3 的 `/oauth/authorize` 形状相同——无认证、每次调用写一个带 TTL 的 Redis 键——故采用同一档配额。限流在解析 provider **之前**生效，因此被禁用的 provider 那条仍返回 `40000` 的路由也不是无成本探测面。`GET /oauth/{github,lark}/callback` 另有**独立**的 per-IP 配额（默认 120 次/60s，`RATE_LIMIT_OAUTH_CALLBACK_RPM`）：callback 是公开入口，扫描与 state 重放都打在这里，而 authorize 的配额管不到它，每次无效调用仍要读一次 state 并写一条审计。限流在读取 state **之前**生效，被限流的请求不消费 state、不写审计、不调用 provider。阈值刻意高于其他名额：出口 NAT 后每个用户每次登录只发一次 callback，配额定得太低会一次性锁死整个宿舍或社团；它刹住的是单一来源重放，**挡不住多 IP 分布式洪峰**——后者要靠边缘层，因为每个来源的成本本来就不高。`POST /oauth/exchange-code` 按 IP 限流（默认 300 次/60s，`RATE_LIMIT_EXCHANGE_CODE_RPM`），且检查排在空 `code` 校验之前——调用方控制输入，先直接拒空会让每次猜测一次 Redis GetDel 的昂贵路径保持敞开。被限流的请求不消费 `login_code`：否则触发限流即可销毁他人活跃凭证。`POST /oauth/lark/app-code` 同样按 IP 限流（与 `RATE_LIMIT_OAUTH_CALLBACK_RPM` 同档、独立桶）：每次被接受的调用消耗一次飞书侧兑换与若干 Redis 写，与 callback 同成本，但两条入口互不挤兑。限流排在 provider 兑换之前，被限流的请求不触达 provider。四处均 fail-open（PRD §6.0），超限返回 `42900` 并带 `Retry-After`。
 >
-> **登录 CSRF 防护**（OAuth 2.0 §10.12）：`GET /oauth/{github,lark}` 响应同时下发 `sl_oauth_state` cookie（HttpOnly、SameSite=Lax、值为 `state` 的 SHA-256 摘要、Path/Secure 与 `sl_session` 相同、有效期与 state TTL 一致）。回调要求浏览器携带与 `state` 匹配的该 cookie，缺失或不匹配按 state 无效处理（重定向到错误页）；state 单次消费，回调结束后 cookie 即清除。
+> **登录 CSRF 防护**（OAuth 2.0 §10.12）：`GET /oauth/{github,lark}` 响应同时下发 `sl_oauth_state` cookie（HttpOnly、SameSite=Lax、值为 `state` 的 SHA-256 摘要、Path/Secure 与 `sl_session` 相同、有效期与 state TTL 一致）。回调要求浏览器携带与 `state` 匹配的该 cookie，缺失或不匹配按 state 无效处理（重定向到错误页）；state 单次消费，回调结束后 cookie 即清除。**例外——provider 网络故障**：出站调用 GitHub/Lark 超时或不可达（区别于 provider 拒绝 code）时，已消费的 state 会被写回 Redis（剩余寿命上限 2 分钟，取 state TTL 与 2 分钟的较小者），配对 cookie 同步保留：callback 是可被刷新/重发的 GET，而故障期间的重试命中已消费 state 时只会看到「state 无效或已过期」，把网络抖动伪装成登录会话问题。写回后的重试能完整重走 exchange——code 在 provider 侧单次使用，若首次请求实际已到达 provider，重试得到 `bad_verification_code`，走正常的「重新发起登录」分支；CSRF 防护不受影响（cookie 仍绑定发起授权的浏览器）。出站调用另有一次 250ms 退避重试，仅针对传输层错误与 provider 5xx（4xx 与 code 被拒不重试）；单次 I/O 超时从 10s 收紧到 4s，重试后的最坏总时长低于原单次。
 
 ### 2.1 GitHub 登录
 
@@ -630,7 +630,79 @@ GET /oauth/lark/callback?code=...&state=...
 
 ---
 
-### 2.5 交换登录码
+### 2.5 飞书客户端内免登
+
+```
+POST /oauth/lark/app-code
+```
+
+飞书客户端内嵌网页（H5）的免登录入口。前端在飞书客户端内通过 JSSDK 调用 `tt.requestAccess`（客户端 <6.9.0 或 JSSDK 过旧时回退 `tt.requestAuthCode`）拿到一次性预授权 code（3 分钟、单次使用），POST 给本端点，后端兑换出用户身份后与 §2.4 回调走同一套分支与同一道租户闸门。普通浏览器不受影响：检测不到 `window.h5sdk` 时仍走 §2.3 授权页流程。
+
+**Request**:
+
+```json
+{
+  "code": "1d34ef4fdfdf12332fffd"
+}
+```
+
+**Response**（已绑定，`bound=true`）：字段与 §2.4 回调 302 的 query 参数一一对应，`login_code` 续走 §2.6 兑换会话。
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "bound": true,
+    "login_code": "lc_abc123...",
+    "provider": "lark"
+  }
+}
+```
+
+**Response**（未绑定，`bound=false`）：前端跳注册补全页，提交 `POST /auth/register` 时同时携带 `registration_state` 与 `oauth_state`（双绑定校验与 §2.4 相同；此处的 `oauth_state` 由本端点签发，无需前端另行获取）。`name`/`avatar` 为预填提示。
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "bound": false,
+    "registration_state": "rs_...",
+    "oauth_state": "os_...",
+    "provider": "lark",
+    "name": "张三",
+    "avatar": "https://..."
+  }
+}
+```
+
+**约束**：
+
+- 仅限 SAST 企业内飞书用户（`40302`），与 §2.4 同一租户闸门；`union_id` 与 §2.3/§2.4 一致，已有飞书绑定的账号在两条入口间互通，无需重复绑定
+- 预授权 code 被飞书拒绝（已使用/过期）→ `40000`「第三方授权码无效或已过期」
+- 注册补全仍受注册侧全部约束（邮箱域名白名单与前缀规则 `40020`/`40022` 等）
+- 按 IP 固定窗口限流：默认 120 次/60s（`RATE_LIMIT_OAUTH_CALLBACK_RPM` 同档配额、独立桶）
+
+**飞书侧前置配置**（非本服务代码）：同一自建应用加「网页应用」能力并配置桌面/移动端主页 URL；`tt.requestAccess` 传 `scopeList: []`（仅授予「获取登录用户信息」，无需新申请 API 权限）；`requestAccess`/`requestAuthCode` 无需网页应用鉴权（JSSDK 鉴权）。前端接入要点：
+
+```js
+if (window.h5sdk) {
+  window.h5sdk.ready(() => {
+    tt.requestAccess({
+      appID, scopeList: [],
+      success: ({code}) => api.post('/oauth/lark/app-code', {code}),
+      fail: ({errno}) => { if (errno === 103) callRequestAuthCode(); } // 旧客户端回退
+    });
+  });
+} else {
+  // 普通浏览器走 §2.3 GET /oauth/lark 授权页流程
+}
+```
+
+---
+
+### 2.6 交换登录码
 
 用 OAuth 回调中的一次性 `login_code` 换取 token。
 
@@ -691,7 +763,7 @@ POST /oauth/exchange-code
 | `profile_needs_completion` | `bool` | 仍有必填字段为空、超长、含控制字符，`name` 含字符集规则（汉字 + 间隔号）之外的值，或 `name` 等于 `student_id` |
 | `incomplete_fields` | `string[]` | 待补全的字段名，取值为 `name` / `phone_number` / `qq_number` / `major`；无待补全时为 `[]`（**不是** `null`） |
 
-**出现位置**：密码登录（§1.4）、完成注册（§1.3）、交换登录码（§2.5，GitHub / 飞书登录）的 `user` 对象，以及 `GET`/`PUT /user/profile`（§3.1 / §3.2）的顶层。登录响应就带着它，所以前端无需额外请求即可判定是否跳转补全页。
+**出现位置**：密码登录（§1.4）、完成注册（§1.3）、交换登录码（§2.6，GitHub / 飞书登录）的 `user` 对象，以及 `GET`/`PUT /user/profile`（§3.1 / §3.2）的顶层。登录响应就带着它，所以前端无需额外请求即可判定是否跳转补全页。
 
 **语义边界**：
 
@@ -780,14 +852,13 @@ PUT /user/profile
 
 **Headers**: `Authorization: Bearer <access_token>`
 
-更新当前登录用户可自助维护的个人信息。未传字段保持不变；`login_email`、`role`、`state`、`email_type` 等身份与权限字段不可通过此接口修改，传入未知字段返回 `40000`。
+更新当前登录用户可自助维护的个人信息。未传字段保持不变；`login_email`、`role`、`state`、`email_type`、`student_id` 等身份与权限字段不可通过此接口修改，传入未知字段（含 `student_id`）返回 `40000`——修改学号只能由管理员在 `PUT /admin/users/:id` 完成（§6.3）。
 
 **Request**（所有字段均可选，至少传一个）:
 
 ```json
 {
   "name": "张三",
-  "student_id": "B2404****",
   "phone_number": "13800138000",
   "qq_number": "1234567890",
   "college": "计算机学院、软件学院、网络空间安全学院",
@@ -806,19 +877,19 @@ PUT /user/profile
 | 字段组 | 归属 | 传空字符串 |
 | -------- | ------ | ----------- |
 | `nickname` / `department` / `intro` / `email` / `blog_url` / `github_url` | `profile`（可空） | 清空为 `null` |
-| `name` / `student_id` / `phone_number` / `qq_number` / `college` / `major` | `user`（NOT NULL） | 返回 `40000` |
+| `name` / `phone_number` / `qq_number` / `college` / `major` | `user`（NOT NULL） | 返回 `40000` |
 
 - 未传的键与传空字符串语义不同：前者保持不变，后者对可空字段表示清空
 - 传 `null` 等同于未传该键（保持不变），**不表示清空**；清空请用空字符串
 - `college` 必须是 `college_enum` 完整枚举值（见附录 A），简称如「计算机学院」会被拒绝
-- `department` 仅接受 `department_enum` 完整枚举值（见 `GET /departments` 与附录 A）或空字符串
+- `department` 仅接受 `department_enum` 完整枚举值（见 `GET /departments` 与附录 A）或空字符串；**仅 `manager` / `admin` 角色可写**——部门是组织归属字段而非展示资料，其他角色提交该键返回 `40000`（与未知权限字段同姿），需要修改请联系管理员（或由管理员通过 `PUT /admin/users/:id` 归置）
 - `blog_url` / `github_url` 必须是 http/https 绝对 URL——这两个字段会渲染为链接，故拒绝 `javascript:`、`data:` 等 scheme
 - 所有文本字段拒绝控制字符（NUL、CR、LF、Tab 及其他 C0/C1），返回 `40000`；字段内部的空格保留，仅首尾被裁剪
-- 字段长度上限按数据库列宽校验（`name`/`nickname`/`intro`/`email` 255，`phone_number`/`qq_number` 20，`student_id`/`major` 50，两个 URL 512）
+- 字段长度上限按数据库列宽校验（`name`/`nickname`/`intro`/`email` 255，`phone_number`/`qq_number` 20，`major` 50，两个 URL 512）
 - `email` 为展示邮箱（非登录邮箱），非空时校验格式，不合法返回 `40000`
 - 可空字段传纯空白（如 `" "`）等同于传空字符串，首尾裁剪后为空即清空为 `NULL`；NOT NULL 字段传纯空白返回 `40000`
 
-**错误码**: `40000`（参数/枚举/长度/链接校验失败、未知字段、无任何待更新字段）、`40902`（学号已被占用）、`40900`（其他唯一性冲突）、`40102`（未认证）、`40301`（账号已注销）、`50000`（服务器内部错误）
+**错误码**: `40000`（参数/枚举/长度/链接校验失败、未知字段（含 `student_id`）、无任何待更新字段、**非 `manager`/`admin` 角色提交 `department`**）、`40900`（其他唯一性冲突）、`40102`（未认证）、`40301`（账号已注销）、`50000`（服务器内部错误）
 
 审计日志 `update_profile` 的 `detail.changed_fields` 记录本次实际写入的字段名。
 
@@ -1156,7 +1227,7 @@ POST /user/identities/email
 }
 ```
 
-**说明**: Bind-Ticket 存储在 Redis，有效期 5 分钟，一次性使用，内部携带待绑定邮箱地址。
+**说明**: Bind-Ticket 存储在 Redis，有效期 5 分钟，一次性使用，内部携带待绑定邮箱地址。绑定目标不接受 `@njupt.edu.cn` 校园邮箱域（返回 `40000`）——校园邮箱是登录身份不是个人邮箱，`other_mail` 是第三方找回通道；域外任意可收信地址均可，仍需通过发往该地址的验证码确认可控。
 
 ---
 
@@ -1719,6 +1790,7 @@ GET /admin/users
       "profile_needs_completion": false,
       "incomplete_fields": [],
       "state_manual": false,
+      "deleted_at": null,
       "created_at": "2026-05-28T12:00:00Z",
       "updated_at": "2026-05-28T12:00:00Z"
     }
@@ -1743,7 +1815,7 @@ GET /admin/users/:id
 
 - 完整档案（含联系方式与第三方绑定）；`phone_number` 仅 **admin / manager** 视角返回，lecturer 视角该字段**不存在**（既不 null 也不空串）。其余字段（`qq_number` / 第三方绑定 / `profile.email` 等）所有角色可见。
 - `identities` 不含第三方 `access_token` / `refresh_token`，也不含 `identity_data`——该字段存的是第三方返回的完整用户对象（飞书含 `mobile`、`email`、`enterprise_email`、`employee_no`），列出绑定不等于交出绑定背后的联系方式。
-- `state_manual` 说明 `state` 的来源：`true` = 管理员手写钉住（该账号跳过自动推导与清算批次，值是人做的判断），`false` = 由状态机按 role + 学号入学年份 + 当前学年推导。`GET /admin/users`、`GET /admin/users/:id` 与 `GET /admin/users/batch` 同带此字段，admin / manager / lecturer 视角一致——能看见 `state` 就必须能看见它是事实还是裁决，否则「要不要发 `state_auto` 解除钉住」这个判断无从做出。
+- `state_manual` 说明 `state` 的来源：`true` = 管理员手写钉住（该账号跳过自动推导与清算批次，值是人做的判断），`false` = 由状态机按 role + 学号入学年份 + 当前学年推导。`GET /admin/users`、`GET /admin/users/:id` 与 `GET /admin/users/batch` 同带此字段，admin / manager / lecturer 视角一致——能看见 `state` 就必须能看见它是事实还是裁决，否则「要不要发 `state_auto` 解除钉住」这个判断无从做出。`deleted_at`（V023）在已注销账号上非空，是物理清除时钟的读数：控制台据此展示剩余宽限（超过 `RETENTION_DELETED_USER_AGE` 后行被硬删，restore 返回 `404`）；活跃账号恒为 `null`。
 
 **错误码**：`40100`、`40300`、`40401`。
 
@@ -1804,13 +1876,13 @@ POST /admin/users
 | 字段 | 必填 | 说明 |
 | ------ | ---- | ------ |
 | `name` | ✓ | 姓名（≤255 字，仅汉字与间隔号 `·` 及其常见变体） |
-| `student_id` | ✓ | 学号（≤50 字，全库唯一） |
+| `student_id` | ✓ | 学号（≤50 字，全库唯一，占用判定不区分大小写与首尾空白：`b24040525` 与 `B24040525` 视为同一学号） |
 | `phone_number` | ✓ | 手机号（≤20 字） |
 | `qq_number` | ✓ | QQ 号（≤20 字） |
-| `login_email` | ✓ | 主登录邮箱，仅接受注册白名单域名（`@njupt.edu.cn` / `sast.fun`），全库唯一；`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字）；`email_type` 由服务端按域名派生，无需也不可自行指定 |
+| `login_email` | ✓ | 主登录邮箱，仅接受注册白名单域名（`@njupt.edu.cn` / `sast.fun`），全库唯一；`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字）；`email_type` 由服务端按域名派生，无需也不可自行指定。前缀不等于提交学号时查表校验：若前缀是其他账号的学号返回 `40902`「login_email 前缀与其他账号学号冲突」（大小写不敏感） |
 | `major` | – | 专业（≤50 字），缺省空串 |
 | `college` | – | 学院（college_enum 枚举），缺省「其他」 |
-| `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（§1.8/1.9）。不可与 `login_email` 相同，且不得已被其他账号占用（作为主登录邮箱或已绑身份） |
+| `personal_email` | – | 个人邮箱；提供时在同一事务内直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（§1.8/1.9）。不可与 `login_email` 相同，不得已被其他账号占用（作为主登录邮箱或已绑身份），**不接受 `@njupt.edu.cn` 域**（校园邮箱是登录身份不是个人邮箱），且**仅 admin 角色可提交**（直绑是免验证的身份断言，manager 提交返回 `403`（`40300`）） |
 | `role` | – | freshman / member / manager / lecturer / admin，缺省 member；manager 调用时不可为 admin（403） |
 | `state` | – | njupter / on_sast / retired_sast；不接受 `is_deleted`（新建即注销无意义，返回 `42200`）。**缺省由自动状态机推导**（role + 学号入学年份 + 当前学年；毕业生学号旧 → retired_sast，在校 lecturer/admin → on_sast，在校 freshman/member/manager → njupter）；显式传 `state` 则作为钉住值写入，该账号从此跳过自动推导与清算批次 |
 
@@ -1831,7 +1903,7 @@ POST /admin/users
 - 严格新建：同一 `login_email` / `student_id` 重复建号因唯一约束返回 `409`，服务端不静默复用旧账号；存量账号的补充绑定不归本接口管。
 - 本接口只建账号与绑定，不签发 token；初始会话由成员首次登录时建立。
 
-**错误码**: `40000`（必填缺失 / 格式 / 域白名单 / 枚举非法、`personal_email` 与 `login_email` 相同）、`40022`（`login_email` 前缀非学号样式）、`40901`（主邮箱或绑定邮箱已被占用）、`40902`（学号已被占用）、`42200`（`state` 为 `is_deleted`）、`40100`、`40300`。
+**错误码**: `40000`（必填缺失 / 格式 / 域白名单 / 枚举非法、`personal_email` 与 `login_email` 相同、`personal_email` 为校园邮箱域）、`40022`（`login_email` 前缀非学号样式）、`40901`（主邮箱或绑定邮箱已被占用）、`40902`（学号已被占用（大小写不敏感）、或 `login_email` 前缀与其他账号学号冲突）、`42200`（`state` 为 `is_deleted`）、`40100`、`40300`（manager 提交 `personal_email`、授予 admin 角色等越权）。
 
 ---
 
@@ -1866,15 +1938,16 @@ PUT /admin/users/:id
 
 - 至少传一个字段，否则返回 `400`。未知字段（含 `password`、`token_version`、`id`、`profile`）一律返回 `400`，不静默忽略。
 - `name` / `phone_number` / `qq_number` / `student_id` 不可传空串（列为 `NOT NULL`）；`major` 可置空。长度按 V001 列宽校验，中文按字符数而非字节数计。
-- `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字），否则返回 `40022`。
+- `login_email` 域名限 `@njupt.edu.cn` / `@sast.fun`，会被规范化为小写；修改后触发器重算 `email_type`。`@njupt.edu.cn` 地址的前缀须为学号样式（1 位字母 + 8 位数字，或纯 8 位数字），否则返回 `40022`。**仅 admin 角色可修改**：改写主登录邮箱是免验证的身份断言，且忘记密码验证码发往该地址（`@sast.fun` 前缀无格式约束），manager 提交返回 `403`（`40300`）；`email_type` 只能随 `login_email` 提交，连带同样受限。建号（§6.2.1）不受影响——manager 建号本就持有初始密码。改写时若前缀（大小写不敏感）不等于该账号生效学号（本次提交或行内现值），查库校验：前缀是其他账号的学号则返回 `40902`「login_email 前缀与其他账号学号冲突」；仅改 `student_id` 不触发此查库
 - `role` 实际发生变化时，同一事务内递增 `token_version` 并撤销该用户全部 Token，响应 `message` 变为 `"用户信息更新成功，已撤销该用户的全部 Token"`。仅提交与当前值相同的 `role` 不算变化，不触发撤销。
 - `state` 可在 `njupter` / `on_sast` / `retired_sast` 之间任意修改（供管理员纠错），但不接受 `is_deleted`。**手写的 state 是钉住（pin）**：该账号从此由管理员接管，自动推导与定时清算批次一律跳过它。
 - `state_auto`（布尔，可选）：恢复该账号的自动状态机——按 role + 学号入学年份 + 当前学年重新推导 `state` 并解除钉住，同一事务内完成。与 `state` 互斥，同时提交返回 `400`。用于误钉后的恢复；留级 / 延毕等例外账号不传此字段、保持手写钉住即可。
-- `personal_email` 提供时，在**同一事务**内将地址直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（与建号时的绑定同一语义，是已有账号的救援通道，§1.8/1.9）。不可与 `login_email` 相同（含本次修改后的值），不得已被其他账号占用，且每账号 `other_mail` 绑定总数不超过 2 个；不可对已注销用户绑定。
+- `student_id` 修改时占用判定**不区分大小写与首尾空白**（`lower(btrim())`）：`b24040525` 与 `B24040525` 视为同一学号，避免在既有账号旁开立变体重复号；本账号自身的学号（含仅大小写归一）不算冲突。
+- `personal_email` 提供时，在**同一事务**内将地址直绑为 `other_mail` 登录身份（管理员背书、免邮箱验证），绑定后可用于登录和密码重置（与建号时的绑定同一语义，是已有账号的救援通道，§1.8/1.9）。不可与 `login_email` 相同（含本次修改后的值），不得已被其他账号占用，且每账号 `other_mail` 绑定总数不超过 2 个；不可对已注销用户绑定；**不接受 `@njupt.edu.cn` 域**（校园邮箱是登录身份不是个人邮箱），且**仅 admin 角色可提交**（manager 提交返回 `403`（`40300`））。
 - `department` 写入 `profile` 行，语义与 `PUT /user/profile` 的同名字段完全一致：传值即设置，传空字符串清空为 `null`，缺省不修改；取值见附录 A（目录见 `GET /departments`）。与其它字段同一事务提交，不触动 `token_version` 也不撤销会话——部门不是授权输入。这是管理员归置存量账号部门的通道，自助修改之外的另一条路；审计 `detail` 记录字段名 `department`，不记录其值。
 - 其余 `profile` 表展示字段（`nickname`、`intro` 等）不在本接口：它们只应归属用户自己的 `PUT /user/profile`，传入会被严格解码器拒绝（40000）。
 
-**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同 / `department` 取值非法）、`40100`、`40300`（改自己的 role / 降权最后一名管理员）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
+**错误码**：`40000`（字段校验失败 / 未知字段 / 无可更新字段 / `personal_email` 与 `login_email` 相同、`personal_email` 为校园邮箱域 / `department` 取值非法）、`40100`、`40300`（改自己的 role / 降权最后一名管理员 / manager 绑定 `personal_email` / manager 修改 `login_email`）、`40401`、`40901`（邮箱已被占用）、`40902`（学号已被占用（大小写不敏感）、或 `login_email` 前缀与其他账号学号冲突）、`40905`（`other_mail` 绑定数量已达上限）、`42200`（`state` 为 `is_deleted` 或目标已注销）。
 
 **Response** `200`:
 
@@ -1902,7 +1975,9 @@ DELETE /admin/users/:id
 }
 ```
 
-**说明**: 将 `user.state` 设为 `is_deleted`，保留数据；同一事务内递增 `token_version` 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，非 DB 级联删除），撤销的 JTI 写入 outbox，worker 失效其 auth-state 缓存。
+**说明**: 将 `user.state` 设为 `is_deleted`，保留数据；同一事务内递增 `token_version` 并撤销该用户全部 Access / Refresh Token（应用层逐个撤销，非 DB 级联删除），撤销的 JTI 写入 outbox，worker 失效其 auth-state 缓存。V023 起注销事务同时盖 `deleted_at` 章：这是后续物理清除的时钟。
+
+**实质删除（V023）**：retention worker 每小时扫描 `state = 'is_deleted'` 且 `deleted_at` 早于 `RETENTION_DELETED_USER_AGE`（默认 30 天，`0` 禁用，低于 24h 拒绝启动）的行并**物理删除**：级联清除 profile / identities / token 元数据 / grants / badge，`audit_logs` 与校友工单的引用置 NULL（历史存活），`login_email` / `student_id` 唯一约束释放（同邮箱可重新注册），每账号同一事务写一条 `user_purge` 审计行（无 PII），COS 头像对象在事务外删除（失败仅记日志留孤儿）。宽限期内（默认 30 天）可正常 restore；超期后行已不存在，restore 返回 `404`。用户列表/详情的 `deleted_at` 字段供控制台展示剩余宽限。
 
 不可注销自己的账号，也不可注销系统中最后一名活跃管理员，均返回 `403`。重复注销返回 `422`。
 
@@ -1926,7 +2001,7 @@ PUT /admin/users/:id/restore
 }
 ```
 
-**说明**: 将 `user.state` 从 `is_deleted` 恢复，并按自动状态机重新推导（role + 学号入学年份 + 当前学年），同时解除钉住——注销时的 `is_deleted` 覆盖了此前的手写值，钉住无从保留，恢复即回到自动推导；需要重新钉住的管理员在恢复后再提交一次 `state` 即可。已撤销的 token 不恢复，需用户重新登录。
+**说明**: 将 `user.state` 从 `is_deleted` 恢复，并按自动状态机重新推导（role + 学号入学年份 + 当前学年），同时解除钉住并清空 `deleted_at`——注销时的 `is_deleted` 覆盖了此前的手写值，钉住无从保留，恢复即回到自动推导；需要重新钉住的管理员在恢复后再提交一次 `state` 即可。已撤销的 token 不恢复，需用户重新登录。仅在宽限期内可用：超期后行已被物理删除，返回 `404`（见 §6.4 实质删除）。
 
 对未注销的用户调用返回 `422`。
 
@@ -2265,7 +2340,7 @@ GET /admin/audit-logs
 
 **说明**：时间参数必须带时区偏移（如 `2026-07-01T00:00:00Z`），不带偏移返回 `400` —— `created_at` 是 `timestamptz`，擅自按 UTC 解释会使窗口偏移数小时。`end_time` 早于 `start_time` 返回 `400`。排序为 `created_at DESC, id DESC`（`id` 用于同一时刻内的稳定分页）。
 
-管理端写操作在审计日志中的 `action` 为 `admin_user_create` / `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值——`redirect_uris` 列表冗长，事后要问的是「管理员改了哪些属性、是否切断了现有会话」。委派管理能力的变化是唯一的例外，会额外记录取值：`admin_scope_granted`（本次授予的 admin scope 列表）、`admin_scope_revoked`（布尔）与 `scopes_removed`（被移除的 scope 列表）。复盘管理事件时，首先需要知道「这个客户端不再持有哪些 scope」，而字段名加事后快照推不出这一点。
+管理端写操作在审计日志中的 `action` 为 `admin_user_create` / `admin_user_update` / `admin_user_delete` / `admin_user_restore`（`resource = user`）、`user_purge`（retention worker 物理清除已过宽限期的注销账号，`user_id` / `actor_client_id` 均为 NULL，`detail` 无 PII，台账用途）与 `admin_oauth_client_create` / `admin_oauth_client_update`（`resource = oauth_client`）。OAuth 侧的 `action` 包括 `oauth_grant_revoke`（用户在授权应用列表撤销某个客户端，`resource = oauth`）。失败的操作同样记录，`success = false` 且 `err_code` 为对应业务码。`detail.changed_fields` 只记字段名，不记提交值——`redirect_uris` 列表冗长，事后要问的是「管理员改了哪些属性、是否切断了现有会话」。委派管理能力的变化是唯一的例外，会额外记录取值：`admin_scope_granted`（本次授予的 admin scope 列表）、`admin_scope_revoked`（布尔）与 `scopes_removed`（被移除的 scope 列表）。复盘管理事件时，首先需要知道「这个客户端不再持有哪些 scope」，而字段名加事后快照推不出这一点。
 
 `user_name` 是展示字段：随查询取回对应用户显示名，best-effort。软删除（`state = is_deleted`）的行仍在表里，名字照常返回；仅当用户行被物理删除、或显示名回查失败时为 `null`，此时前端应回退显示 `user_id`。
 
@@ -2347,7 +2422,7 @@ GET /admin/stats
 
 **说明**：
 
-- `users` 为账户聚合，枚举见附录 A。本仓软删除是状态位而非 `deleted_at` 列，因此口径为：**`total` / `by_role` / `by_department` / `no_department` 均只统计未注销账户**（`state ≠ is_deleted`），避免「账户总数」被已注销账户虚增；`by_state` 保留全部状态，`is_deleted` 作为独立 bucket 可见注销数。
+- `users` 为账户聚合，枚举见附录 A。软删除是状态位 `state = 'is_deleted'` 加 V023 的 `deleted_at` 清除时钟（读路径仍一律按 `state` 过滤，不读本列），因此口径为：**`total` / `by_role` / `by_department` / `no_department` 均只统计未注销账户**（`state ≠ is_deleted`），避免「账户总数」被已注销账户虚增；`by_state` 保留全部状态，`is_deleted` 作为独立 bucket 可见注销数。
   - `by_role` / `by_state` 按 `user` 表分组统计（`by_state` 含 `is_deleted`，其余两个维度不含）
   - `by_department` 按 `profile` 表 `LEFT JOIN` 分组统计，键为 `department_enum` 全量枚举值（按写入数据动态分桶，非固定七桶）；`no_department` 是没有 `profile` 行或部门未设（新生、尚未招新的 `njupter`）的用户数
   - `incomplete_by_role` / `incomplete_by_state` 是资料未补全（`profile_needs_completion = true`，见 V010 生成列）账户的分组计数，供控制台概览把迁移残留账户单独归为「未补全」扇区：
@@ -2377,7 +2452,7 @@ GET /admin/stats
 
 `recover` 的审批是比开新号更敏感的动作：它把一个能收重置验证码的邮箱绑到现役账号上。控制台必须以高危操作呈现（展示目标账号现有资料与绑定，确认后放行）；已有的第三方绑定一概不动（解绑永远需要密码），每账号绑定上限与 §6.2.1 相同。
 
-审批通过与驳回都会自动发邮件通知校友。通知发往**申请中填写的第三方邮箱**，不是 `login_email`——后者正是那个已停用的学生邮箱，发过去等于不发。
+审批通过与驳回都会自动发邮件通知校友（驳回可带 `silent` 静默跳过，见 §6.13.5）。通知发往**申请中填写的第三方邮箱**，不是 `login_email`——后者正是那个已停用的学生邮箱，发过去等于不发。
 
 #### 6.13.1 提交建号申请（免登录）
 
@@ -2414,7 +2489,7 @@ POST /alumni-requests
 | `student_id` | 是 | 同一学号同时只允许一条待审申请（无论 intent） |
 | `intent` | 否 | `provision`（缺省，开新号）或 `recover`（给该学号现有账号绑定 personal_email 恢复访问）。其余取值返回 400 |
 | `login_email` | 是 | 原学号邮箱，仍限 `@njupt.edu.cn` / `@sast.fun`；provision 时成为新账号登录身份，`@njupt.edu.cn` 前缀须为学号样式；recover 时必须与该学号现有账号登记的登录邮箱一致，允许存量非学号样式前缀 |
-| `personal_email` | 是 | 可正常收信的第三方邮箱，审批通过后直绑为 `other_mail` 登录身份，也是通知与自助改密的收件地址；不能与 `login_email` 相同 |
+| `personal_email` | 是 | 可正常收信的第三方邮箱，审批通过后直绑为 `other_mail` 登录身份，也是通知与自助改密的收件地址；不能与 `login_email` 相同，**不接受 `@njupt.edu.cn` 域**（校园邮箱是登录身份不是个人邮箱） |
 | `phone_number` | 是 | |
 | `qq_number` | 是 | |
 | `major` | 是 | **比 §6.2.1 更严**：管理员建号允许 `major` 为空，本端点必须填，理由见下 |
@@ -2456,7 +2531,7 @@ POST /alumni-requests
 | `42900` | 429 | 提交过于频繁（按 IP 或按学号） |
 | `50301` | 503 | 申请通道不可用——**重做验证无意义，应隐藏入口** |
 
-> 审批侧错误（`40905` 绑定上限、`42200` 目标已注销 / `login_email` 漂移、`42204` 重复审批）见 §6.13.4。
+> 审批侧错误（`40901` 工单邮箱前缀与现有账号学号冲突——审批前查表，邮箱前缀指向已注册学生时拒绝并提示驳回、`40902` 学号已被占用——典型即申请人已自行注册，文案引导静默驳回、`40905` 绑定上限、`42200` 目标已注销 / `login_email` 漂移、`42204` 重复审批）见 §6.13.4。
 
 #### 6.13.2 申请列表
 
@@ -2585,9 +2660,17 @@ POST /admin/alumni-requests/:id/reject
 
 `reject_reason` **必填**（≤ 500 字符）：它会进入驳回通知邮件，是校友唯一的修正依据。
 
+可选 `silent`（默认 `false`）：**静默驳回**——落库 verdict 但不发结果邮件，适用于误操作工单（典型：新生误发起建号申请后已自行完成注册，此时一封驳回邮件只会造成困惑）。静默时 `reject_reason` 仍必填：它是工单与审计自身的解释，不只是邮件正文。
+
+```json
+{ "reject_reason": "学号已自行注册，无需建号", "silent": true }
+```
+
 **Response** `200`: `{ "code": 0, "message": "ok", "data": { "notify_enqueued": true } }`
 
-驳回后该学号不再占用待审名额，校友可修正后重新提交。
+（静默驳回的 `notify_enqueued` 恒为 `false`。）
+
+驳回后该学号不再占用待审名额，校友可修正后重新提交；静默驳回同样释放名额。工单行携带 `silently_rejected` 标记，队列与详情响应均返回该字段，控制台据此渲染「静默驳回（未通知申请人）」；审计 detail 另记 `silent: true`，解释该 verdict 为何没有后续邮件。
 
 **错误码**：`40000`（`reject_reason` 缺失或超长）、`40100`、`40300`、`40403`、`42204`、`50000`。
 
@@ -2605,9 +2688,9 @@ POST /admin/alumni-requests/:id/resend-notification
 
 投递链路是有界队列 + SMTP，两者都可能在审批已提交之后失败。通过邮件是校友唯一的「去设置密码」指引，丢了等于建号白做，所以提供手动补发。
 
-`notified_at` 已非空时**也允许重发**：管理员提出补发说明他掌握系统不知道的信息（通常是校友根本没收到）。工单仍为 `pending` 时返回 `42200`——没有结果可通知。
+`notified_at` 已非空时**也允许重发**：管理员提出补发说明他掌握系统不知道的信息（通常是校友根本没收到）。工单仍为 `pending` 时返回 `42200`——没有结果可通知。**静默驳回的工单拒绝补发**（同样 `42200`，文案「该申请已静默驳回，不发送结果通知」）——沉默是审核人的决定，补发端点不能悄悄把它撤掉。
 
-**错误码**：`40100`、`40300`、`40403`、`42200`（申请尚未处理）、`50000`。
+**错误码**：`40100`、`40300`、`40403`、`42200`（申请尚未处理 / 已静默驳回）、`50000`。
 
 ---
 
@@ -3055,7 +3138,7 @@ GET /badge/:key
 | 422 | 业务校验失败 | `422xx` |
 | 429 | 请求频率限制 | `429xx` |
 | 500 | 服务器内部错误 | `500xx` |
-| 503 | 依赖服务暂不可用 | `503xx` |
+| 503 | 服务暂不可用，请稍后重试 | `503xx` |
 
 ### C. Token 生命周期
 

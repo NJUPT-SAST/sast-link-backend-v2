@@ -52,10 +52,14 @@ type requestDTO struct {
 	ReviewedAt    *time.Time `json:"reviewed_at"`
 	// NotifiedAt is null until the result email is confirmed sent, which is what the
 	// console filters on to find the notification backlog.
-	NotifiedAt     *time.Time `json:"notified_at"`
-	NotifyAttempts int        `json:"notify_attempts"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	NotifiedAt *time.Time `json:"notified_at"`
+	// SilentlyRejected marks a rejection that chose not to email the applicant,
+	// so the console renders it as never-notified and hides the resend offer
+	// instead of reading notified_at as a delivered notice.
+	SilentlyRejected bool      `json:"silently_rejected"`
+	NotifyAttempts   int       `json:"notify_attempts"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // listDTO is one page of the queue.
@@ -68,28 +72,29 @@ type listDTO struct {
 
 func mapRequest(view alumnirequest.RequestView) requestDTO {
 	return requestDTO{
-		ID:             view.ID,
-		Name:           view.Name,
-		StudentID:      view.StudentID,
-		LoginEmail:     view.LoginEmail,
-		PersonalEmail:  view.PersonalEmail,
-		PhoneNumber:    view.PhoneNumber,
-		QQNumber:       view.QQNumber,
-		College:        view.College,
-		Major:          view.Major,
-		JoinYear:       view.JoinYear,
-		DepartmentNote: view.DepartmentNote,
-		Note:           view.Note,
-		Status:         view.Status,
-		Intent:         view.Intent,
-		RejectReason:   view.RejectReason,
-		CreatedUserID:  view.CreatedUserID,
-		ReviewedBy:     view.ReviewedBy,
-		ReviewedAt:     view.ReviewedAt,
-		NotifiedAt:     view.NotifiedAt,
-		NotifyAttempts: view.NotifyAttempts,
-		CreatedAt:      view.CreatedAt,
-		UpdatedAt:      view.UpdatedAt,
+		ID:               view.ID,
+		Name:             view.Name,
+		StudentID:        view.StudentID,
+		LoginEmail:       view.LoginEmail,
+		PersonalEmail:    view.PersonalEmail,
+		PhoneNumber:      view.PhoneNumber,
+		QQNumber:         view.QQNumber,
+		College:          view.College,
+		Major:            view.Major,
+		JoinYear:         view.JoinYear,
+		DepartmentNote:   view.DepartmentNote,
+		Note:             view.Note,
+		Status:           view.Status,
+		Intent:           view.Intent,
+		RejectReason:     view.RejectReason,
+		CreatedUserID:    view.CreatedUserID,
+		ReviewedBy:       view.ReviewedBy,
+		ReviewedAt:       view.ReviewedAt,
+		NotifiedAt:       view.NotifiedAt,
+		SilentlyRejected: view.SilentlyRejected,
+		NotifyAttempts:   view.NotifyAttempts,
+		CreatedAt:        view.CreatedAt,
+		UpdatedAt:        view.UpdatedAt,
 	}
 }
 

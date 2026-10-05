@@ -81,9 +81,13 @@ type AdminUserRow struct {
 	// StateManual is V014's pin flag: it says whether State was decided by a human
 	// or derived. It travels next to state because a value whose origin is unknown
 	// cannot be judged — see the state_auto channel on the update endpoint.
-	StateManual bool      `gorm:"column:state_manual"`
-	CreatedAt   time.Time `gorm:"column:created_at"`
-	UpdatedAt   time.Time `gorm:"column:updated_at"`
+	StateManual bool `gorm:"column:state_manual"`
+	// DeletedAt is the physical-purge clock's reading (V023): NULL on a live
+	// account, the close moment on a closed one, and the countdown input for the
+	// retention worker's hard delete.
+	DeletedAt *time.Time `gorm:"column:deleted_at"`
+	CreatedAt time.Time  `gorm:"column:created_at"`
+	UpdatedAt time.Time  `gorm:"column:updated_at"`
 }
 
 // ListAdminUsers returns a filtered page of users plus the total matching count,
@@ -122,8 +126,8 @@ func (r *UserRepository) ListAdminUsers(
 		Select(`"user".id`, `"user".name`, `"user".student_id`, `"user".login_email`,
 			`"user".role`, `"user".state`, `"user".email_type`, `"user".phone_number`,
 			`"user".qq_number`, `"user".college`, `"user".major`,
-			`"user".profile_needs_completion`, `"user".state_manual`, `"user".created_at`,
-			`"user".updated_at`, "profile.department").
+			`"user".profile_needs_completion`, `"user".state_manual`, `"user".deleted_at`,
+			`"user".created_at`, `"user".updated_at`, "profile.department").
 		Order(`"user".id`).
 		Limit(filter.Limit).
 		Offset(filter.Offset).
@@ -136,11 +140,13 @@ func (r *UserRepository) ListAdminUsers(
 
 // UserStats aggregates the account dimensions the console overview shows.
 //
-// Soft deletion here is a state bit (is_deleted), not a deleted_at column, so the
-// "live account" dimensions must exclude it explicitly. Total, ByRole and
-// ByDepartment / NoDepartment count only accounts whose state is not is_deleted;
-// ByState counts every state, is_deleted included, so the console can show how
-// many accounts were deleted without inflating the usable-account totals.
+// Soft deletion is a state bit (is_deleted) plus, since V023, a deleted_at
+// stamp that only drives the physical purge clock — reads still filter on the
+// state bit, so the "live account" dimensions must exclude it explicitly. Total,
+// ByRole and ByDepartment / NoDepartment count only accounts whose state is not
+// is_deleted; ByState counts every state, is_deleted included, so the console
+// can show how many accounts were closed without inflating the usable-account
+// totals.
 type UserStats struct {
 	Total        int64                      `json:"total"`
 	ByRole       map[model.UserRole]int64   `json:"by_role"`
@@ -677,6 +683,10 @@ func (r *UserRepository) SoftDeleteAndRevokeSessions(
 			Updates(map[string]any{
 				"state":         model.UserStateDeleted,
 				"token_version": gorm.Expr("token_version + 1"),
+				// V023: the purge clock starts here, in the same transaction as the
+				// close, so the retention worker never has to infer an age from
+				// updated_at (which any later write would refresh).
+				"deleted_at": revokedAt,
 			})
 		if result.Error != nil {
 			return fmt.Errorf("soft delete user: %w", result.Error)
@@ -743,7 +753,7 @@ func (r *UserRepository) RestoreUser(ctx context.Context, userID int64, callerRo
 		// keeping the historic njupter fallback.
 		result := transaction.Model(&model.User{}).
 			Where("id = ? AND state = ?", userID, model.UserStateDeleted).
-			Updates(map[string]any{"state": state, "state_manual": false})
+			Updates(map[string]any{"state": state, "state_manual": false, "deleted_at": nil})
 		if result.Error != nil {
 			return fmt.Errorf("restore user: %w", result.Error)
 		}

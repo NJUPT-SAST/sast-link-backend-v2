@@ -130,7 +130,7 @@ func defaultMessage(kind oauthlogin.Kind) string {
 	case oauthlogin.KindProviderUnavailable:
 		return "第三方服务暂时不可用"
 	case oauthlogin.KindDependencyUnavailable:
-		return "依赖服务暂不可用"
+		return errcode.Messages[errcode.CodeDependencyUnavailable]
 	default:
 		return "服务器内部错误"
 	}

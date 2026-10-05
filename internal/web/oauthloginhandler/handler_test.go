@@ -28,6 +28,10 @@ type fakeService struct {
 	callbackErr    error
 	callbackInput  oauthlogin.CallbackInput
 
+	appCodeResult *oauthlogin.CallbackResult
+	appCodeErr    error
+	appCodeInput  oauthlogin.AppCodeLoginInput
+
 	exchangeResult *oauthlogin.ExchangeCodeResult
 	exchangeErr    error
 
@@ -50,6 +54,14 @@ func (s *fakeService) Callback(
 ) (*oauthlogin.CallbackResult, error) {
 	s.callbackInput = input
 	return s.callbackResult, s.callbackErr
+}
+
+func (s *fakeService) AppCodeLogin(
+	_ context.Context,
+	input oauthlogin.AppCodeLoginInput,
+) (*oauthlogin.CallbackResult, error) {
+	s.appCodeInput = input
+	return s.appCodeResult, s.appCodeErr
 }
 
 func (s *fakeService) ExchangeCode(
@@ -363,8 +375,8 @@ func TestCallbackFailureHidesInternalMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse Location: %v", err)
 	}
-	if got := location.Query().Get("error_description"); got != "依赖服务暂不可用" {
-		t.Fatalf("error_description = %q, want the generic per-Kind string", got)
+	if got := location.Query().Get("error_description"); got != "服务暂不可用，请稍后重试" {
+		t.Fatalf("error_description = %q, want the canonical dependency string", got)
 	}
 }
 
@@ -793,6 +805,120 @@ func TestCallbackRateLimitKeepsStateCookie(t *testing.T) {
 	}
 }
 
+// A provider outage failure is Restorable: the service wrote the consumed state
+// back for a browser retry, so clearing the pairing cookie here would strand
+// that state behind a check that can never pass again.
+func TestCallbackProviderOutageKeepsStateCookie(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:       oauthlogin.KindInvalidState,
+		Code:       errcode.CodeBadRequest,
+		Message:    "连接第三方登录服务超时",
+		Display:    true,
+		Restorable: true,
+	}}
+	stateCookie := &middleware.SessionCookie{
+		Name: "sl_oauth_state", Path: "/v2", Secure: true, SameSite: http.SameSiteLaxMode,
+	}
+	router := newTestRouter(Handler{
+		Service:       service,
+		StateCookie:   stateCookie,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=provider-code&state=os_abc", nil)
+	// #nosec G124 -- test fixture: a browser callback request, not a cookie this
+	// service writes.
+	request.AddCookie(&http.Cookie{Name: "sl_oauth_state", Value: "deadbeef"})
+	router.ServeHTTP(recorder, request)
+
+	response := recorder.Result()
+	defer response.Body.Close()
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "sl_oauth_state" {
+			t.Fatalf("state cookie was touched on a restorable outage (Max-Age = %d)", cookie.MaxAge)
+		}
+	}
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := location.Query().Get("error_description"); got != "连接第三方登录服务超时" {
+		t.Fatalf("error_description = %q, want the outage display message", got)
+	}
+}
+
+// A plain failure (not Restorable) still clears the pairing cookie, keeping the
+// one-consumption invariant for every non-outage outcome.
+func TestCallbackPlainFailureStillClearsStateCookie(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:    oauthlogin.KindInvalidState,
+		Code:    errcode.CodeBadRequest,
+		Message: "登录已中断，请重新发起登录",
+		Display: true,
+	}}
+	stateCookie := &middleware.SessionCookie{
+		Name: "sl_oauth_state", Path: "/v2", Secure: true, SameSite: http.SameSiteLaxMode,
+	}
+	router := newTestRouter(Handler{
+		Service:       service,
+		StateCookie:   stateCookie,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/github/callback?code=provider-code&state=os_abc", nil)
+	// #nosec G124 -- test fixture: a browser callback request, not a cookie this
+	// service writes.
+	request.AddCookie(&http.Cookie{Name: "sl_oauth_state", Value: "deadbeef"})
+	router.ServeHTTP(recorder, request)
+
+	response := recorder.Result()
+	defer response.Body.Close()
+	cleared := false
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "sl_oauth_state" && cookie.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("state cookie survived a non-restorable failure, want it cleared")
+	}
+}
+
+// The error redirect names the provider, so the page can offer a one-click
+// restart of that provider's login instead of a generic message.
+func TestCallbackFailureRedirectNamesProvider(t *testing.T) {
+	service := &fakeService{callbackErr: &oauthlogin.Error{
+		Kind:    oauthlogin.KindInvalidState,
+		Code:    errcode.CodeBadRequest,
+		Display: false,
+	}}
+	router := newTestRouter(Handler{
+		Service:       service,
+		ErrorRedirect: "https://link.sast.fun/oauth/error",
+	}, 0)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet,
+		"/oauth/lark/callback?code=c&state=s", nil))
+
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := location.Query().Get("provider"); got != "lark" {
+		t.Fatalf("provider = %q, want lark", got)
+	}
+	// The generic per-Kind string still rides along when the service marked
+	// nothing for display.
+	if got := location.Query().Get("error_description"); got != "state 无效或已过期" {
+		t.Fatalf("error_description = %q, want the Kind default", got)
+	}
+}
+
 // Without the state cookie wired, the handler passes an empty cookie value —
 // the service refuses the callback rather than silently dropping the defense.
 func TestCallbackWithoutStateCookieWirePassesEmptyValue(t *testing.T) {
@@ -809,5 +935,90 @@ func TestCallbackWithoutStateCookieWirePassesEmptyValue(t *testing.T) {
 
 	if service.callbackInput.StateCookie != "" {
 		t.Fatalf("callback StateCookie = %q, want empty when the cookie is not wired", service.callbackInput.StateCookie)
+	}
+}
+
+func TestAppCodeLoginReturnsLoginCodeWhenBound(t *testing.T) {
+	service := &fakeService{appCodeResult: &oauthlogin.CallbackResult{
+		Bound:     true,
+		LoginCode: "lc_abc",
+		Provider:  "lark",
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/lark/app-code",
+		strings.NewReader(`{"code":"jsapi-code"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", recorder.Code, recorder.Body.String())
+	}
+	code, message, data := decodeEnvelope(t, recorder.Body.String())
+	if code != 0 || message != "ok" {
+		t.Fatalf("envelope = %d/%q, want 0/ok", code, message)
+	}
+	if data["bound"] != true || data["login_code"] != "lc_abc" {
+		t.Fatalf("data = %+v, want bound=true with the login_code", data)
+	}
+	// The registration fields must not appear on the bound leg: an omitted key
+	// reads as "not applicable", an empty string reads as "missing".
+	for _, absent := range []string{"registration_state", "oauth_state", "name", "avatar"} {
+		if _, ok := data[absent]; ok {
+			t.Fatalf("data carries %q on the bound leg", absent)
+		}
+	}
+	if service.appCodeInput.Code != "jsapi-code" {
+		t.Fatalf("service code = %q, want the posted code", service.appCodeInput.Code)
+	}
+}
+
+func TestAppCodeLoginReturnsRegistrationPairWhenUnbound(t *testing.T) {
+	service := &fakeService{appCodeResult: &oauthlogin.CallbackResult{
+		RegistrationState: "rs_abc",
+		OAuthState:        "os_xyz",
+		Provider:          "lark",
+		DisplayName:       "张三",
+		AvatarURL:         "https://lark.test/a.png",
+	}}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/lark/app-code",
+		strings.NewReader(`{"code":"jsapi-code"}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", recorder.Code, recorder.Body.String())
+	}
+	_, _, data := decodeEnvelope(t, recorder.Body.String())
+	if data["bound"] != false {
+		t.Fatalf("bound = %v, want false", data["bound"])
+	}
+	if data["registration_state"] != "rs_abc" || data["oauth_state"] != "os_xyz" {
+		t.Fatalf("data = %+v, want both halves of the registration pair", data)
+	}
+	if data["provider"] != "lark" || data["name"] != "张三" || data["avatar"] != "https://lark.test/a.png" {
+		t.Fatalf("data = %+v, want the prefill hints", data)
+	}
+}
+
+func TestAppCodeLoginRejectsMissingCode(t *testing.T) {
+	service := &fakeService{}
+	router := newTestRouter(Handler{Service: service}, 0)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/lark/app-code",
+		strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", recorder.Code)
+	}
+	if service.appCodeInput.Code != "" {
+		t.Fatal("service was called despite the missing code")
 	}
 }

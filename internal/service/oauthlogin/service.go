@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -21,6 +22,10 @@ const (
 	loginCodePrefix         = "lc_"
 	registrationStatePrefix = "rs_"
 	oauthStatePrefix        = "os_"
+	// auditSourceAppCode tags the Feishu client JSAPI login-free entrance on
+	// oauth_login audit rows, so an incident review can tell which entrance a
+	// login came through without a second action name to filter on.
+	auditSourceAppCode = "app_code"
 )
 
 // providerIdentityLimit is the per-user cap on github and lark bindings;
@@ -68,6 +73,12 @@ type Service struct {
 	// invalid call still consumes state and writes an audit row, and the authorize
 	// budget does not cover it.
 	CallbackLimiter EndpointLimiter
+	// AppCodeLimiter throttles the Feishu client JSAPI login-free endpoint per
+	// IP. The endpoint is unauthenticated and every accepted call spends one
+	// provider code exchange, so it needs a cap of its own; it reuses the
+	// callback tier's configured rate but a separate bucket, so neither entrance
+	// can exhaust the other's budget.
+	AppCodeLimiter EndpointLimiter
 	// ExchangeLimiter throttles login_code redemption per IP; the endpoint cannot
 	// require a session, so the cap bounds probing of the code space.
 	ExchangeLimiter EndpointLimiter
@@ -258,8 +269,12 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 			newError(ErrDependencyUnavailable, "读取 OAuth state 失败", err))
 	}
 	if !found {
+		// Display: the default Kind string names the mechanism ("state 无效或已过期"),
+		// which a user cannot act on — every cause of a missing state (expired,
+		// forged, or consumed by an earlier copy of this same callback) has the
+		// same instruction: start the login again.
 		return nil, tagCallbackFailure(StageState, ReasonStateNotFound,
-			newError(ErrStateInvalid, "state 无效或已过期", nil))
+			newDisplayError(ErrStateInvalid, "登录已中断，请重新发起登录", nil))
 	}
 	// Login CSRF (OAuth 2.0 §10.12): the state alone proves somebody started a
 	// login, not that the browser completing it is the one that did. The digest
@@ -273,18 +288,31 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 			reason = ReasonStateCookieMissing
 		}
 		return nil, tagCallbackFailure(StageState, reason,
-			newError(ErrStateInvalid, "state 与发起授权的浏览器不匹配", nil))
+			newDisplayError(ErrStateInvalid, "登录校验失败，请重新发起登录", nil))
 	}
 	// A state issued for one provider must not be redeemable at another's
 	// callback, which would pair a GitHub state with a Lark identity.
 	if statePayload.Provider != input.Provider {
 		return nil, tagCallbackFailure(StageState, ReasonProviderMismatch,
-			newError(ErrStateInvalid, "state 与回调 provider 不匹配", nil))
+			newDisplayError(ErrStateInvalid, "登录已中断，请重新发起登录", nil))
 	}
 
 	identity, err := client.Exchange(ctx, input.Code, "")
 	if err != nil {
 		stage, reason, outcome := providerFailureOutcome(err)
+		// A provider outage is the one failure whose state is written back:
+		// the callback failed on our network leg, not on an answer GitHub or
+		// Lark gave, and a retried GET (a browser refresh, the provider page's
+		// back-and-authorize) arriving with this state should re-run the whole
+		// exchange instead of falling into "state 无效或已过期" — which is what
+		// made these outages undiagnosable from the user side. Re-running is
+		// safe: the CSRF cookie still binds the state to the browser that started
+		// it (the HTTP layer keeps the cookie for exactly this flag), and the code
+		// is single-use at the provider, so a retry that finds the code already
+		// spent lands on the ordinary restart-the-login path.
+		if isRestorableOutcome(outcome) {
+			s.restoreStateAfterOutage(ctx, input.State, statePayload)
+		}
 		return nil, tagCallbackFailure(stage, reason, outcome)
 	}
 
@@ -302,6 +330,32 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		return s.registrationBranch(ctx, input, identity, redirect)
 	}
 	return s.loginBranch(ctx, input, identity, existing, redirect)
+}
+
+// oauthStateRestoreTTL bounds how long a state is written back after a provider
+// outage. Short on purpose: it must cover a user noticing the error page and
+// retrying, while keeping the replay window of an outage-restored state far
+// below the 10-minute lifetime of a fresh one.
+const oauthStateRestoreTTL = 2 * time.Minute
+
+// isRestorableOutcome reports whether a mapped provider failure carries the
+// Restorable flag — the same flag the HTTP layer reads to keep the state cookie.
+func isRestorableOutcome(outcome error) bool {
+	var serviceErr *Error
+	return errors.As(outcome, &serviceErr) && serviceErr.Restorable
+}
+
+// restoreStateAfterOutage puts a consumed state back so the browser's own
+// retry can complete the login. Best-effort: when Redis refuses the write the
+// retry simply finds no state and restarts the login, exactly as before.
+func (s Service) restoreStateAfterOutage(ctx context.Context, state string, payload StatePayload) {
+	ttl := s.stateTTL()
+	if ttl > oauthStateRestoreTTL {
+		ttl = oauthStateRestoreTTL
+	}
+	if err := s.States.SaveOAuthState(ctx, state, payload, ttl); err != nil {
+		slog.WarnContext(ctx, "restore oauth state after provider outage failed", "error", err)
+	}
 }
 
 // loginBranch handles a provider account that is already bound: it refreshes the
@@ -393,6 +447,129 @@ func (s Service) registrationBranch(
 		DisplayName:       identity.DisplayName,
 		AvatarURL:         identity.AvatarURL,
 		Redirect:          redirect,
+	}, nil
+}
+
+// AppCodeLogin redeems the pre-authorization code the Feishu client handed
+// the embedded web app through the tt.requestAccess / tt.requestAuthCode
+// JSAPI: the login-free leg. It reuses the callback flow's branches — a bound
+// account gets a login_code, an unbound one gets a registration_state — so the
+// two entrances cannot diverge in what they hand the frontend.
+func (s Service) AppCodeLogin(ctx context.Context, input AppCodeLoginInput) (*CallbackResult, error) {
+	// Throttled before the empty-code check, matching ExchangeCode: the caller
+	// controls the input, so a free blank rejection would leave the expensive
+	// path — one provider exchange plus Redis writes — uncapped.
+	if err := s.checkLimit(ctx, s.AppCodeLimiter, "oauth_login_app_code", ipSubject(input.ClientIP)); err != nil {
+		return nil, err
+	}
+	result, err := s.appCodeLogin(ctx, input)
+	if err != nil {
+		// Audited through the same shape as a failed callback; the Source tag on
+		// the input keeps the row attributable to this entrance.
+		stage, reason, providerID, userID := failureDetail(err)
+		s.auditLogin(ctx, userID, CallbackInput{
+			Provider:  model.LoginMethodLark,
+			ClientIP:  input.ClientIP,
+			UserAgent: input.UserAgent,
+			Source:    auditSourceAppCode,
+		}, false, auditErrorCode(err), providerID, stage, reason)
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s Service) appCodeLogin(ctx context.Context, input AppCodeLoginInput) (*CallbackResult, error) {
+	client, err := s.providerClient(model.LoginMethodLark)
+	if err != nil {
+		return nil, tagCallbackFailure(StageRequestValidation, ReasonProviderDisabled, err)
+	}
+	exchanger, ok := client.(AppCodeExchanger)
+	if !ok {
+		// A Lark provider without the JSAPI leg is a wiring fault, but it is
+		// reported the same way as a disabled provider: the caller only needs to
+		// know this entrance is not available.
+		return nil, tagCallbackFailure(StageRequestValidation, ReasonProviderDisabled,
+			newError(ErrInvalidInput, "不支持的第三方登录方式", nil))
+	}
+	if strings.TrimSpace(input.Code) == "" {
+		return nil, tagCallbackFailure(StageRequestValidation, ReasonMissingCode,
+			newError(ErrInvalidInput, "code 不能为空", nil))
+	}
+	identity, err := exchanger.ExchangeAppCode(ctx, input.Code)
+	if err != nil {
+		stage, reason, outcome := providerFailureOutcome(err)
+		return nil, tagCallbackFailure(stage, reason, outcome)
+	}
+
+	// The branches below consume a CallbackInput. Source is the only field they
+	// need beyond the audit metadata, and the login-free leg has no state, no
+	// cookie and no redirect for them to read.
+	callbackInput := CallbackInput{
+		Provider:  model.LoginMethodLark,
+		ClientIP:  input.ClientIP,
+		UserAgent: input.UserAgent,
+		Source:    auditSourceAppCode,
+	}
+	existing, err := s.Identities.FindByProviderID(ctx, model.LoginMethodLark, identity.ProviderID)
+	if err != nil && !isNotFound(err) {
+		return nil, tagCallbackFailureWithProvider(StageIdentity, ReasonIdentityLookupFailed, identity.ProviderID,
+			newError(ErrInternal, "查询第三方绑定失败", err))
+	}
+	if existing == nil {
+		return s.appCodeRegistrationBranch(ctx, callbackInput, identity)
+	}
+	return s.loginBranch(ctx, callbackInput, identity, existing, "")
+}
+
+// appCodeRegistrationBranch parks an unbound identity behind a
+// registration_state, mirroring registrationBranch for the login-free leg.
+//
+// The oauth_state half of the double binding is minted here rather than riding
+// a provider authorization: the JSAPI flow has no cross-site callback whose
+// CSRF a state would bind, so the state's only role is forcing
+// POST /auth/register to present both halves of the pair. It is deliberately
+// not stored in the OAuthStateStore — nothing will ever consume it there, and
+// an unconsumed key would be a never-expiring pseudo attack surface.
+func (s Service) appCodeRegistrationBranch(
+	ctx context.Context,
+	input CallbackInput,
+	identity *providerIdentity,
+) (*CallbackResult, error) {
+	state, err := randomToken(oauthStatePrefix)
+	if err != nil {
+		return nil, tagCallbackFailureWithProvider(StageSession, ReasonRegistrationStateFailed, identity.ProviderID,
+			newError(ErrInternal, "生成 oauth state 失败", err))
+	}
+	registrationState, err := randomToken(registrationStatePrefix)
+	if err != nil {
+		return nil, tagCallbackFailureWithProvider(StageSession, ReasonRegistrationStateFailed, identity.ProviderID,
+			newError(ErrInternal, "生成 registration_state 失败", err))
+	}
+	payload := RegistrationPayload{
+		Provider:     model.LoginMethodLark,
+		ProviderID:   identity.ProviderID,
+		IdentityData: identityJSONB(ctx, identity.Data),
+		OAuthState:   state,
+		// The provider's own credentials are carried through registration so the
+		// identity row records them, matching what a callback registration or a
+		// /user/identities/* binding would store.
+		AccessToken:    identity.AccessToken,
+		RefreshToken:   identity.RefreshToken,
+		TokenExpiresAt: identity.TokenExpiresAt,
+	}
+	if err := s.RegistrationState.SaveRegistrationState(ctx, registrationState, payload, s.registrationStateTTL()); err != nil {
+		return nil, tagCallbackFailureWithProvider(StageSession, ReasonRegistrationStateFailed, identity.ProviderID,
+			newError(ErrDependencyUnavailable, "保存 registration_state 失败", err))
+	}
+
+	s.auditLogin(ctx, nil, input, true, 0, identity.ProviderID, "", "")
+	return &CallbackResult{
+		Bound:             false,
+		RegistrationState: registrationState,
+		OAuthState:        state,
+		Provider:          string(model.LoginMethodLark),
+		DisplayName:       identity.DisplayName,
+		AvatarURL:         identity.AvatarURL,
 	}, nil
 }
 

@@ -37,7 +37,85 @@ var (
 // httpIOTimeout bounds a single provider round trip. A provider that accepts
 // the TCP connection and then stalls would otherwise hold a login request open
 // for as long as the caller's context allows.
-const httpIOTimeout = 10 * time.Second
+//
+// The value is deliberately tight — a normal token exchange or user fetch
+// answers in well under a second — because a slow callback is the amplifier
+// behind retried GETs: the longer the browser waits, the likelier a refresh or
+// an intermediate proxy re-issues the callback against an already-consumed
+// state. One retry (doJSONRetry) keeps the worst case below the previous single
+// 10s attempt.
+const httpIOTimeout = 4 * time.Second
+
+// providerRetryBackoff spaces the two attempts of doJSONRetry. Long enough to
+// clear a transient route flap, short enough that the retry cannot turn a slow
+// failure into a slow success the user has already given up on. A variable (not
+// a constant) so retry tests can shrink it instead of sleeping real time.
+var providerRetryBackoff = 250 * time.Millisecond
+
+// requestBuilder rebuilds an outbound request per attempt. A retried POST
+// cannot reuse the original *http.Request: its body reader was consumed by the
+// first attempt, so every attempt needs a freshly built request.
+type requestBuilder func() (*http.Request, error)
+
+// doJSONRetry issues the request and, on a retryable provider failure, waits
+// the backoff and issues it once more.
+//
+// What counts as retryable: transport failures and 5xx responses — evidence
+// the round trip or the provider side failed, not that the request was wrong.
+// A 4xx, a provider-side rejection (ErrInvalidGrant) and an unparseable body
+// (ErrUnexpectedResponse) are answers, and re-asking the same question cannot
+// change them. The per-call timeout (context.DeadlineExceeded from inside
+// doJSON) is retryable: a provider that stalled once often answers the next
+// try, and the retry's own budget keeps the total bounded.
+//
+// Exchanging the same authorization code twice is safe by construction: the
+// provider's code is single-use, so if the first attempt actually reached it,
+// the retry returns a rejection that maps to invalid_grant — the same
+// restart-the-login outcome as before the retry, just less likely.
+func doJSONRetry(ctx context.Context, client Doer, build requestBuilder, stage string, target any) error {
+	err := doJSONBuilt(ctx, client, build, stage, target)
+	if err == nil || ctx.Err() != nil || !retryableProviderError(err) {
+		return err
+	}
+	timer := time.NewTimer(providerRetryBackoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return err
+	case <-timer.C:
+	}
+	return doJSONBuilt(ctx, client, build, stage, target)
+}
+
+// doJSONBuilt builds and issues one attempt of doJSONRetry.
+func doJSONBuilt(ctx context.Context, client Doer, build requestBuilder, stage string, target any) error {
+	req, err := build()
+	if err != nil {
+		return err
+	}
+	return doJSON(ctx, client, req, stage, target)
+}
+
+// retryableProviderError reports whether a provider failure is worth one more
+// attempt. See doJSONRetry for the classification rationale.
+//
+// The classification is exhaustive over what doJSON can return: a statusError
+// carries its status; a decoded 2xx that did not parse wraps
+// ErrUnexpectedResponse; everything else is a transport failure wrapped by
+// contextError (real clients wrap it as *url.Error, but nothing here should
+// depend on that) or a request-build failure — harmless to try once more.
+// ErrInvalidGrant is raised by the callers after decoding and never reaches
+// this function, but stays excluded so the rule remains local.
+func retryableProviderError(err error) bool {
+	var status *statusError
+	if errors.As(err, &status) {
+		return status.StatusCode >= 500
+	}
+	if errors.Is(err, ErrInvalidGrant) || errors.Is(err, ErrUnexpectedResponse) {
+		return false
+	}
+	return true
+}
 
 // maxResponseBytes caps how much of a provider response is read. The payloads
 // are small JSON objects; without a cap a misbehaving or hostile endpoint could

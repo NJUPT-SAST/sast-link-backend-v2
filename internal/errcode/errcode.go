@@ -103,7 +103,7 @@ const (
 	CodeEmailDeliveryFailed   = 50001 // 邮件发送失败
 	CodeObjectUploadFailed    = 50002 // 对象存储上传失败
 	CodeDatabaseFailed        = 50003 // 数据库错误
-	CodeDependencyUnavailable = 50300 // 依赖服务暂不可用
+	CodeDependencyUnavailable = 50300 // 服务暂不可用，请稍后重试
 	// CodeAlumniRequestUnavailable means the account-request channel cannot accept a
 	// submission because its human-verification dependency is absent or unreachable:
 	// no Turnstile secret configured, or siteverify timing out. The endpoint refuses
@@ -171,6 +171,6 @@ var Messages = map[int]string{
 	CodeEmailDeliveryFailed:      "邮件发送失败",
 	CodeObjectUploadFailed:       "对象存储上传失败",
 	CodeDatabaseFailed:           "数据库错误",
-	CodeDependencyUnavailable:    "依赖服务暂不可用",
+	CodeDependencyUnavailable:    "服务暂不可用，请稍后重试",
 	CodeAlumniRequestUnavailable: "申请通道暂不可用",
 }

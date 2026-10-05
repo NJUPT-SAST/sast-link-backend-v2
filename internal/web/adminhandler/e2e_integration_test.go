@@ -912,3 +912,28 @@ func TestAdminE2EStatePinIsVisibleAndReversible(t *testing.T) {
 			both.Code, both.Body.String())
 	}
 }
+
+// The console's student-id occupancy check folds case, unlike the
+// user_student_id_key constraint it backs: a case-variant of an existing ID
+// must refuse to provision instead of opening a second account for the same
+// student — the B24040525/b24040525 shape the import produced once.
+func TestAdminE2EStudentIDOccupancyFoldsCase(t *testing.T) {
+	testutil.RequireProvider(t)
+	h := setupAdminE2E(t)
+
+	refused := h.do(t, http.MethodPost, "/admin/users", "application/json",
+		`{"name":"变体学号","student_id":"b24040302","login_email":"b24049999@njupt.edu.cn",
+		  "phone_number":"13800138999","qq_number":"24049999"}`)
+	if refused.Code != http.StatusConflict {
+		t.Fatalf("create status = %d, want 409: %s", refused.Code, refused.Body.String())
+	}
+	if !strings.Contains(refused.Body.String(), "40902") {
+		t.Fatalf("missing student-id occupancy code: %s", refused.Body.String())
+	}
+	var variants int64
+	if err := h.database.Model(&model.User{}).
+		Where("lower(btrim(student_id)) = lower(btrim(?))", "B24040302").
+		Count(&variants).Error; err != nil || variants != 1 {
+		t.Fatalf("case-variant accounts = %d err = %v, want exactly the original", variants, err)
+	}
+}

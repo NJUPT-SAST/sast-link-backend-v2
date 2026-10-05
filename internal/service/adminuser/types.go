@@ -62,6 +62,15 @@ type UserRepository interface {
 	// other_mail binding on some account, so the console can refuse a personal
 	// email up front instead of racing the unique indexes and V005 trigger.
 	ExistsAsEmailAnywhere(ctx context.Context, email string) (bool, error)
+	// ExistsByStudentIDExcluding reports whether a student ID is taken by any
+	// account other than excludeUserID (0 = no exclusion). The comparison folds
+	// case and whitespace because user.student_id's unique constraint does not,
+	// so a case-variant spelling of an existing ID would otherwise slip past the
+	// constraint the way it once slipped past the alumni intake's occupancy check.
+	// The NJUPT-prefix collision guard reads it with an email local part in place
+	// of a student ID: a login_email whose prefix names another account's student
+	// ID hands that student a reset handle on this account.
+	ExistsByStudentIDExcluding(ctx context.Context, studentID string, excludeUserID int64) (bool, error)
 }
 
 // AuditLogRepository records and queries audit events.
@@ -140,8 +149,12 @@ type UserListItem struct {
 	// reviewer sees a value and cannot tell whether it is a fact to trust or a
 	// judgement to reconsider, so the state_auto unpin channel is unusable.
 	StateManual bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// DeletedAt is the close moment (V023). The console counts the remaining
+	// grace window down from it — past the window the retention worker physically
+	// deletes the row and restore starts answering 404.
+	DeletedAt *time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // UpdateUserInput is a partial administrative edit. A nil field is left
@@ -339,10 +352,12 @@ type UserDetail struct {
 	IncompleteFields       []string
 	// StateManual is the pin flag; see UserListItem.
 	StateManual bool
-	Profile     *ProfileDetail
-	Identities  []IdentityDetail
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// DeletedAt is the close moment; see UserListItem.
+	DeletedAt  *time.Time
+	Profile    *ProfileDetail
+	Identities []IdentityDetail
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // ProfileDetail is the display-card half of a user record.

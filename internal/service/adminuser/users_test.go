@@ -1006,6 +1006,103 @@ func TestUpdateUserManagerBoundary(t *testing.T) {
 	})
 }
 
+// The NJUPT-prefix collision guard on the edit: only a login_email write
+// triggers the lookup, judged against the effective student ID (submitted or
+// already on the row) and excluding the target's own row.
+func TestUpdateUserPrefixCollisionGuard(t *testing.T) {
+	t.Run("email rewrite naming another account's id is refused", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		h.users.studentIDOwners = map[string]int64{"b24040999": 777}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.LoginEmail = stringPtr("b24040999@njupt.edu.cn")
+		}))
+
+		assertKind(t, err, KindConflict)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+	})
+
+	t.Run("prefix equal to the effective student id passes unchecked", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		// The target itself owns the folded value: the exclusion keeps its own
+		// consistent pairing writable.
+		h.users.studentIDOwners = map[string]int64{"b24040101": testTargetID}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.LoginEmail = stringPtr("b24040101@njupt.edu.cn")
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(own effective id): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
+	})
+
+	t.Run("a student-id-only write never looks the prefix up", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		h.users.studentIDOwners = map[string]int64{"b24040101": 777}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.StudentID = stringPtr("B24040999")
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(student id only): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
+	})
+}
+
+// The student-id occupancy guard folds case and whitespace, unlike the
+// user_student_id_key constraint: a case-variant of another account's ID must
+// read as occupied, while the target's own ID — exact or case-normalized —
+// must not collide with itself.
+func TestUpdateUserStudentIDOccupancyFoldsCase(t *testing.T) {
+	t.Run("case-variant of another account is occupied", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		h.users.studentIDOwners = map[string]int64{"b24040999": 777}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.StudentID = stringPtr("B24040999")
+		}))
+
+		assertKind(t, err, KindConflict)
+		if h.users.updateCalls != 0 {
+			t.Fatalf("update calls = %d, want the write refused before the repository", h.users.updateCalls)
+		}
+		assertAudited(t, h, actionUpdateUser, false, errcode.CodeStudentIDOccupied)
+	})
+
+	t.Run("the target's own id is not a collision", func(t *testing.T) {
+		h := newHarness(t)
+		h.users.findResult = targetUser(model.UserRoleMember, model.UserStateNJUPTer)
+		// The owner of the folded id is the target itself: re-submitting or
+		// case-normalizing its own student id must pass the exclusion.
+		h.users.studentIDOwners = map[string]int64{"b24040101": testTargetID}
+
+		_, err := h.service.UpdateUser(context.Background(), updateInput(func(input *UpdateUserInput) {
+			input.StudentID = stringPtr("B24040101")
+		}))
+
+		if err != nil {
+			t.Fatalf("UpdateUser(own id): %v", err)
+		}
+		if h.users.updateCalls != 1 {
+			t.Fatalf("update calls = %d, want the write through", h.users.updateCalls)
+		}
+	})
+}
+
 // The batch endpoint routes through UpdateUser, so the manager boundary holds
 // per item: admin targets fail with the boundary reason, everything else
 // proceeds.

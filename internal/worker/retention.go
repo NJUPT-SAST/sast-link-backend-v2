@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/objectstore"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
@@ -51,6 +53,12 @@ type RetentionStore interface {
 	// current as the academic year advances; it never revokes sessions.
 	// Returns the next cursor (0 = swept to the end).
 	RecomputeDerivedState(ctx context.Context, cursor int64, now time.Time, batchSize int) (int64, error)
+	// PurgeDeletedUsers physically removes closed accounts whose deleted_at stamp
+	// is older than before, writing a user_purge audit row per account inside the
+	// same transaction. Returns the purged accounts with their COS avatar keys
+	// (read before the cascade deleted the profile row) so the caller can remove
+	// the objects outside the transaction.
+	PurgeDeletedUsers(ctx context.Context, before, now time.Time, limit int) ([]repository.PurgedUser, error)
 }
 
 // Retention deletes expired OAuth metadata and aged-out audit logs, and keeps
@@ -73,7 +81,17 @@ type Retention struct {
 	// ticket's retention starts when it was decided, and an unreviewed one has no
 	// start.
 	AlumniRequestAge time.Duration
-	Clock            auth.Clock
+	// DeletedUserAge is the grace window between a soft close (DELETE
+	// /admin/users/:id, which stamps deleted_at) and the physical purge that
+	// removes the row and everything cascading from it. Zero disables the purge —
+	// the sweep then never physically deletes, which is the pre-V023 behavior and
+	// the brake to pull during an incident.
+	DeletedUserAge time.Duration
+	// AvatarStore removes COS objects for purged accounts. Nil skips object
+	// cleanup (a deployment without STORAGE_* configured has no avatars to
+	// remove); a failed delete is a logged orphan, never a failed purge.
+	AvatarStore objectstore.ObjectStore
+	Clock       auth.Clock
 	// derivedFailures counts consecutive ticks whose derived-state recompute
 	// errored without advancing. Past the threshold the cursor resets to the
 	// table head: a persistent, position-stable error (bad row shape, planner
@@ -156,6 +174,12 @@ func (w *Retention) sweep(ctx context.Context) {
 		}
 		w.drain(ctx, target.name, now.Add(-target.age), target.delete)
 	}
+	// Closed accounts are purged after the token sweeps: their token metadata is
+	// long revoked and swept by then, so the cascade deletes little beyond the
+	// profile and identity rows. Disabled (age 0) is a deliberate off switch.
+	if w.DeletedUserAge > 0 {
+		w.purgeDeletedUsers(ctx, now)
+	}
 	// Derived user state is recalibrated in the same sweep, under the same
 	// advisory lock, so two instances cannot interleave state writes. Unlike the
 	// deletes above, an unchanged row still matches the candidate predicate, so
@@ -215,6 +239,51 @@ func (w *Retention) rememberDerivedStateCursor(cursor int64) {
 	}
 }
 
+// purgeDeletedUsers physically removes grace-expired closed accounts in batches,
+// deleting each account's COS avatar outside the database transaction. A failed
+// object delete is an orphan the storage lifecycle policy handles, not a reason
+// to roll back a purge the audit row already recorded.
+func (w Retention) purgeDeletedUsers(ctx context.Context, now time.Time) {
+	cutoff := now.Add(-w.DeletedUserAge)
+	batchSize := w.batchSize()
+	var total int64
+	for pass := 0; pass < maxRetentionPasses; pass++ {
+		if ctx.Err() != nil {
+			return
+		}
+		purged, err := w.Store.PurgeDeletedUsers(ctx, cutoff, now, batchSize)
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Error("retention purge closed accounts", "deleted", total, "error", err)
+			}
+			return
+		}
+		for _, account := range purged {
+			if account.Avatar == nil || w.AvatarStore == nil {
+				continue
+			}
+			// Detached from ctx: the row is already gone, so an aborted shutdown-time
+			// delete would strand the object with no row to rediscover it from. A
+			// bounded window beats waiting out the shutdown.
+			deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			deleteErr := w.AvatarStore.Delete(deleteCtx, *account.Avatar)
+			cancel()
+			if deleteErr != nil {
+				slog.Warn("retention purge orphaned avatar object", "user_id", account.ID, "error", deleteErr)
+			}
+		}
+		total += int64(len(purged))
+		if len(purged) < batchSize {
+			if total > 0 {
+				slog.Info("retention purge closed accounts", "deleted", total, "cutoff", cutoff)
+			}
+			return
+		}
+	}
+	slog.Warn("retention purge truncated at pass cap",
+		"deleted", total, "cutoff", cutoff, "passes", maxRetentionPasses)
+}
+
 // drain deletes in batches until a pass comes back short or the pass cap is hit.
 func (w *Retention) drain(
 	ctx context.Context,
@@ -256,6 +325,11 @@ func (w *Retention) validate() error {
 	if w.AuthorizationAge <= 0 || w.AccessTokenAge <= 0 || w.RefreshTokenAge <= 0 ||
 		w.AuditLogAge <= 0 || w.AlumniRequestAge <= 0 {
 		return fmt.Errorf("retention worker requires positive retention windows")
+	}
+	// DeletedUserAge is the one window that may be zero: zero is the documented
+	// off switch for physical deletion, not a misconfiguration.
+	if w.DeletedUserAge < 0 {
+		return fmt.Errorf("retention worker deleted-user age must not be negative")
 	}
 	if w.Interval < 0 || w.BatchSize < 0 {
 		return fmt.Errorf("retention worker interval and batch size must not be negative")
