@@ -309,7 +309,12 @@ for provider in lark github; do
     warn "${provider} 未启用（${enabled_var}=false），跳过"
     continue
   fi
-  AUTH_URL="http://localhost:${API_PORT}/oauth/${provider}?redirect=$(printf '%s' "$FIRST_REDIRECT_URI" | jq -sRr @uri)"
+  # RFC 7636: the exchange leg redeems the login_code only against the
+  # verifier this run generated, so the challenge rides the authorize URL.
+  PKCE_VERIFIER=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=
+' | cut -c1-43)
+  PKCE_CHALLENGE=$(printf '%s' "$PKCE_VERIFIER" | openssl dgst -sha256 -binary     | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+  AUTH_URL="http://localhost:${API_PORT}/oauth/${provider}?redirect=$(printf '%s' "$FIRST_REDIRECT_URI" | jq -sRr @uri)&code_challenge=${PKCE_CHALLENGE}&code_challenge_method=S256"
   info "请在浏览器打开：${AUTH_URL}"
   open_url "$AUTH_URL"
   info "授权后浏览器会跳回 ${FIRST_REDIRECT_URI}，把地址栏链接粘回来即可"
@@ -320,7 +325,7 @@ for provider in lark github; do
     OS=$(get_query_param "$CALLBACK_URL" "oauth_state")
     if [[ -n "$LC" ]]; then
       info "解析到 login_code，兑换 Token"
-      EXCHANGE_RESP=$(api_post "/oauth/exchange-code" "{\"code\":\"${LC}\"}")
+      EXCHANGE_RESP=$(api_post "/oauth/exchange-code" "{\"code\":\"${LC}\",\"code_verifier\":\"${PKCE_VERIFIER}\"}")
       json "$EXCHANGE_RESP"
       # 兑换后会话切到第三方账号绑定的用户，后续步骤用新身份。
       NEW_AT=$(echo "$EXCHANGE_RESP" | jq -r '.data.access_token')
