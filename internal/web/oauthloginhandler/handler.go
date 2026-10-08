@@ -127,6 +127,12 @@ func (h Handler) authorize(name model.LoginMethod) gin.HandlerFunc {
 			Redirect:  c.Query("redirect"),
 			ClientIP:  c.ClientIP(),
 			UserAgent: c.Request.UserAgent(),
+			// RFC 7636: the starting page's PKCE challenge rides the state, so
+			// the login_code this round trip buys redeems only against the
+			// verifier that page holds. Required and S256-only, like the
+			// provider surface.
+			CodeChallenge:       c.Query("code_challenge"),
+			CodeChallengeMethod: c.Query("code_challenge_method"),
 		})
 		if err != nil {
 			response.Error(c, mapServiceError(err))
@@ -268,12 +274,21 @@ func isRestorableFailure(err error) bool {
 // exchangeCodeRequest redeems a login_code.
 type exchangeCodeRequest struct {
 	Code string `json:"code" binding:"required"`
+	// CodeVerifier is the RFC 7636 counterpart of the challenge the starting
+	// page sent at authorize time. The service rejects missing/invalid values
+	// after consuming the code, with the same outcome as an unknown code.
+	// Do not add binding:required here: it would bypass that contract.
+	CodeVerifier string `json:"code_verifier"`
 }
 
 // appCodeRequest submits the Feishu client JSAPI pre-authorization code the
 // embedded web app obtained through tt.requestAccess / tt.requestAuthCode.
 type appCodeRequest struct {
 	Code string `json:"code" binding:"required"`
+	// CodeChallenge is the PKCE S256 challenge the embedded page generated
+	// before posting, required: the login_code this entrance buys is bound to
+	// its verifier like the authorize leg's.
+	CodeChallenge string `json:"code_challenge" binding:"required"`
 }
 
 // AppCodeLogin redeems a Feishu client JSAPI pre-authorization code: the
@@ -287,9 +302,10 @@ func (h Handler) AppCodeLogin(c *gin.Context) {
 		return
 	}
 	result, err := h.Service.AppCodeLogin(c.Request.Context(), oauthlogin.AppCodeLoginInput{
-		Code:      request.Code,
-		ClientIP:  c.ClientIP(),
-		UserAgent: c.Request.UserAgent(),
+		Code:          request.Code,
+		ClientIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
+		CodeChallenge: request.CodeChallenge,
 	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))
@@ -314,9 +330,10 @@ func (h Handler) ExchangeCode(c *gin.Context) {
 		return
 	}
 	result, err := h.Service.ExchangeCode(c.Request.Context(), oauthlogin.ExchangeCodeInput{
-		Code:      request.Code,
-		ClientIP:  c.ClientIP(),
-		UserAgent: c.Request.UserAgent(),
+		Code:         request.Code,
+		ClientIP:     c.ClientIP(),
+		UserAgent:    c.Request.UserAgent(),
+		CodeVerifier: request.CodeVerifier,
 	})
 	if err != nil {
 		response.Error(c, mapServiceError(err))

@@ -52,6 +52,10 @@ type AppCodeExchanger interface {
 type StatePayload struct {
 	Provider model.LoginMethod `json:"provider"`
 	Redirect string            `json:"redirect,omitempty"`
+	// CodeChallenge is the PKCE S256 challenge the starting page generated,
+	// carried through the provider round trip so the login_code it buys is
+	// bound to the verifier only that page holds.
+	CodeChallenge string `json:"code_challenge,omitempty"`
 }
 
 // OAuthStateStore holds the short-lived CSRF state for one authorization round
@@ -101,8 +105,11 @@ type RegistrationStateStore interface {
 // The callback cannot return tokens directly: it is a 302 to the frontend, and a
 // token in the query string would land in browser history and Referer headers.
 type LoginCodeStore interface {
-	SaveLoginCode(ctx context.Context, code string, userID int64, ttl time.Duration) error
-	ConsumeLoginCode(ctx context.Context, code string) (userID int64, found bool, err error)
+	// SaveLoginCode binds the code to its PKCE challenge: redemption must prove
+	// the verifier, so a code leaked through the callback URL (Referer, browser
+	// history, logs) cannot be exchanged without the starting page's secret.
+	SaveLoginCode(ctx context.Context, code string, userID int64, challenge string, ttl time.Duration) error
+	ConsumeLoginCode(ctx context.Context, code string) (userID int64, challenge string, found bool, err error)
 }
 
 // UserRepository is the subset of user persistence this flow needs.
@@ -170,6 +177,10 @@ type AuthorizeInput struct {
 	Redirect  string
 	ClientIP  string
 	UserAgent string
+	// CodeChallenge/CodeChallengeMethod carry RFC 7636 PKCE from the starting
+	// page; required, S256 only. The verifier never leaves the page.
+	CodeChallenge       string
+	CodeChallengeMethod string
 }
 
 type AuthorizeResult struct {
@@ -217,6 +228,10 @@ type AppCodeLoginInput struct {
 	Code      string
 	ClientIP  string
 	UserAgent string
+	// CodeChallenge is the same RFC 7636 S256 binding as the authorize leg: the
+	// embedded page generates it before posting, so the login_code this
+	// entrance buys is bound to its verifier too.
+	CodeChallenge string
 }
 
 // CallbackResult is one of three outcomes, distinguished by which field is set.
@@ -251,6 +266,11 @@ type ExchangeCodeInput struct {
 	Code      string
 	ClientIP  string
 	UserAgent string
+	// CodeVerifier is the RFC 7636 counterpart of the challenge the starting
+	// page sent: redemption without it (or with the wrong one) is refused with
+	// the same code and copy as an unknown login_code, so a holder of a leaked
+	// code learns nothing about how close they got.
+	CodeVerifier string
 }
 
 type ExchangeCodeResult struct {

@@ -12,8 +12,25 @@ repos:
     rev: v0.5.1
     hooks:
       - id: go-fmt
+
+  - repo: local
+    hooks:
+      # Pin the tool and let Go manage its cache; no global goimports install.
       - id: go-imports
+        name: go imports
+        entry: go run golang.org/x/tools/cmd/goimports@v0.43.0 -w
+        language: system
+        types: [go]
+        require_serial: true
+      # This module has no Go package at its root. Vet all module packages,
+      # rather than deriving package paths from a failing bare `go list`.
       - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+        require_serial: true
 
   # Same linter the CI lint job runs (golangci/golangci-lint-action, also pinned
   # to v2.12.2), so a commit and CI read the same .golangci.yml with the same

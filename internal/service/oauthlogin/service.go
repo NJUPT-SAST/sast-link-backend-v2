@@ -19,6 +19,10 @@ import (
 // Token prefixes match the PRD's naming so a value's origin is readable in logs
 // and in the frontend URL that carries it.
 const (
+	// pkceMethodS256 mirrors internal/auth's private constant: this flow is
+	// S256-only, like the provider surface.
+	pkceMethodS256 = "S256"
+
 	loginCodePrefix         = "lc_"
 	registrationStatePrefix = "rs_"
 	oauthStatePrefix        = "os_"
@@ -167,12 +171,24 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 	if err != nil {
 		return nil, err
 	}
+	// PKCE (RFC 7636), S256 only, mandatory: the login_code this round trip
+	// buys is redeemed by proving the verifier, which never appears in any URL
+	// — the callback hands the code through the redirect's query string, and a
+	// code leaked that way (Referer, history, logs) is useless without the
+	// starting page's secret. A malformed challenge fails here as a fixable
+	// client error rather than at redemption time.
+	if !auth.IsValidPKCEChallenge(input.CodeChallenge) {
+		return nil, newError(ErrInvalidInput, "code_challenge 缺失或格式错误（须为 S256 摘要，43 位 base64url）", nil)
+	}
+	if input.CodeChallengeMethod != pkceMethodS256 {
+		return nil, newError(ErrInvalidInput, "code_challenge_method 仅支持 S256", nil)
+	}
 
 	state, err := randomToken(oauthStatePrefix)
 	if err != nil {
 		return nil, newError(ErrInternal, "生成 OAuth state 失败", err)
 	}
-	payload := StatePayload{Provider: input.Provider, Redirect: redirect}
+	payload := StatePayload{Provider: input.Provider, Redirect: redirect, CodeChallenge: input.CodeChallenge}
 	if err := s.States.SaveOAuthState(ctx, state, payload, s.stateTTL()); err != nil {
 		// Fail-closed: without a stored state the callback could not be validated,
 		// so the login must not start.
@@ -317,7 +333,7 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 	if existing == nil {
 		return s.registrationBranch(ctx, input, identity, redirect)
 	}
-	return s.loginBranch(ctx, input, identity, existing, redirect)
+	return s.loginBranch(ctx, input, identity, existing, redirect, statePayload.CodeChallenge)
 }
 
 // oauthStateRestoreTTL bounds how long a state is written back after a provider
@@ -354,6 +370,7 @@ func (s Service) loginBranch(
 	identity *providerIdentity,
 	existing *model.Identity,
 	redirect string,
+	challenge string,
 ) (*CallbackResult, error) {
 	user, err := s.Users.FindAuthUserByID(ctx, existing.UserID)
 	if err != nil {
@@ -387,7 +404,7 @@ func (s Service) loginBranch(
 		return nil, tagCallbackFailureWithProvider(StageSession, ReasonLoginCodeStoreFailed, identity.ProviderID,
 			newError(ErrInternal, "生成 login_code 失败", err))
 	}
-	if err := s.LoginCodes.SaveLoginCode(ctx, code, user.ID, s.loginCodeTTL()); err != nil {
+	if err := s.LoginCodes.SaveLoginCode(ctx, code, user.ID, challenge, s.loginCodeTTL()); err != nil {
 		return nil, tagCallbackFailureWithProvider(StageSession, ReasonLoginCodeStoreFailed, identity.ProviderID,
 			newError(ErrDependencyUnavailable, "保存 login_code 失败", err))
 	}
@@ -483,15 +500,19 @@ func (s Service) appCodeLogin(ctx context.Context, input AppCodeLoginInput) (*Ca
 		return nil, tagCallbackFailure(StageRequestValidation, ReasonMissingCode,
 			newError(ErrInvalidInput, "code 不能为空", nil))
 	}
+	// Reject client input before spending the provider's one-time code.
+	if !auth.IsValidPKCEChallenge(input.CodeChallenge) {
+		return nil, tagCallbackFailure(StageRequestValidation, ReasonInvalidChallenge,
+			newError(ErrInvalidInput, "code_challenge 缺失或格式错误（须为 S256 摘要，43 位 base64url）", nil))
+	}
 	identity, err := exchanger.ExchangeAppCode(ctx, input.Code)
 	if err != nil {
 		stage, reason, outcome := providerFailureOutcome(err)
 		return nil, tagCallbackFailure(stage, reason, outcome)
 	}
 
-	// The branches below consume a CallbackInput. Source is the only field they
-	// need beyond the audit metadata, and the login-free leg has no state, no
-	// cookie and no redirect for them to read.
+	// The login-free leg has no state, cookie or redirect. Its validated
+	// challenge binds the same login-code issuance as the authorize leg.
 	callbackInput := CallbackInput{
 		Provider:  model.LoginMethodLark,
 		ClientIP:  input.ClientIP,
@@ -506,7 +527,7 @@ func (s Service) appCodeLogin(ctx context.Context, input AppCodeLoginInput) (*Ca
 	if existing == nil {
 		return s.appCodeRegistrationBranch(ctx, callbackInput, identity)
 	}
-	return s.loginBranch(ctx, callbackInput, identity, existing, "")
+	return s.loginBranch(ctx, callbackInput, identity, existing, "", input.CodeChallenge)
 }
 
 // appCodeRegistrationBranch parks an unbound identity behind a
@@ -586,11 +607,20 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 	if input.Code == "" {
 		return nil, newError(ErrLoginCodeInvalid, "code 不能为空", nil)
 	}
-	userID, found, err := s.LoginCodes.ConsumeLoginCode(ctx, input.Code)
+	userID, challenge, found, err := s.LoginCodes.ConsumeLoginCode(ctx, input.Code)
 	if err != nil {
 		return nil, newError(ErrDependencyUnavailable, "读取 login_code 失败", err)
 	}
 	if !found {
+		return nil, newError(ErrLoginCodeInvalid, "login_code 无效或已过期", nil)
+	}
+	// PKCE redemption (RFC 7636 §4.6): every failure below answers with the
+	// login_code-invalid code and copy, because the code was already consumed by
+	// the GetDel above — telling a holder of a leaked code that their verifier
+	// was "wrong" would hand them a free oracle distinguishing a live code from
+	// a spent one, and the burn on failure keeps verification retries from
+	// brute-forcing anything.
+	if auth.VerifyPKCES256(input.CodeVerifier, challenge, pkceMethodS256) != nil {
 		return nil, newError(ErrLoginCodeInvalid, "login_code 无效或已过期", nil)
 	}
 
