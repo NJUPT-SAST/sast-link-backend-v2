@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // DeviceInfo is one logged-in device record, as stored in the device Hash.
@@ -59,6 +63,7 @@ func (s Store) RegisterDevice(
 	now time.Time,
 	ttl time.Duration,
 	limit int,
+	operation ...shared.DeviceOperation,
 ) (string, error) {
 	if s.Client == nil || userID <= 0 || deviceID == "" || ttl <= 0 || limit <= 0 {
 		return "", fmt.Errorf("register device: %w", ErrInvalidArgument)
@@ -67,14 +72,18 @@ func (s Store) RegisterDevice(
 	if seconds <= 0 {
 		return "", fmt.Errorf("register device: %w", ErrInvalidArgument)
 	}
+	op := deviceOperation(operation)
+	operationID := uuid.NewString()
 	loginTime := now.UTC().Format(time.RFC3339)
 	keys := []string{
 		s.Keys.Devices(userID),
 		s.Keys.Device(deviceID),
 		s.Keys.deviceHashKeyPrefix(),
+		s.Keys.join("{dev}", "operation", operationID),
+		s.Keys.join("{dev}", "pending_evictions"),
 	}
 	evicted, err := evalScript(ctx, s.Client, registerDeviceScript, keys,
-		now.UnixMilli(), deviceID, seconds, ua, ip, loginTime, limit,
+		now.UnixMilli(), deviceID, seconds, ua, ip, loginTime, limit, op.TokenHash, userID, op.ExpiresAt.Unix()+1, deviceID, operationID,
 	).Text()
 	if err != nil {
 		return "", fmt.Errorf("register device eval: %w", err)
@@ -89,6 +98,22 @@ func (s Store) RegisterDevice(
 // force the eviction of a real device. Returns the evicted device ID ("" when
 // nothing was evicted).
 const registerDeviceScript = `
+local prior = redis.call("GET", KEYS[4])
+if prior then return cjson.decode(prior) end
+-- Bound outage storage. Refuse before mutating device state if the journal is full.
+if ARGV[8] ~= "" and redis.call("ZCARD", KEYS[5]) >= 10000 then
+ return redis.error_reply("device eviction journal full")
+end
+local function finish(result)
+ local evicted = type(result) == "table" and result[2] or result
+ if evicted ~= "" and ARGV[8] ~= "" then
+  local pending = cjson.encode({operation_id=ARGV[12], token_hash=ARGV[8], user_id=tonumber(ARGV[9]), expires_at=tonumber(ARGV[10]), source_family=ARGV[11], evicted=evicted})
+  redis.call("ZADD", KEYS[5], tonumber(ARGV[10]), pending)
+ end
+ redis.call("SET", KEYS[4], cjson.encode(result), "EX", 60)
+ return result
+end
+
 redis.call("ZADD", KEYS[1], ARGV[1], ARGV[2])
 redis.call("EXPIRE", KEYS[1], tonumber(ARGV[3]))
 redis.call("HSET", KEYS[2], "ua", ARGV[4], "ip", ARGV[5], "login_time", ARGV[6], "last_seen", ARGV[6])
@@ -110,9 +135,9 @@ if count > tonumber(ARGV[7]) then
   -- revoke keyed on that return value is the load-bearing half of the
   -- eviction, while a stranded Hash self-clears through its TTL.
   pcall(redis.call, "DEL", KEYS[3] .. evicted[1])
-  return evicted[1]
+  return finish(evicted[1])
 end
-return ""
+return finish("")
 `
 
 // TouchDevice updates a device's last_seen on token refresh without extending
@@ -122,7 +147,7 @@ return ""
 // limit, like RegisterDevice): silently dropping the refresh would leave an
 // invisible, unloggable ghost session, and skipping the cap check would allow
 // more live sessions than the "最多 5 台同时登录" limit.
-func (s Store) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time, ttl time.Duration, limit int) (string, error) {
+func (s Store) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time, ttl time.Duration, limit int, operation ...shared.DeviceOperation) (string, error) {
 	if s.Client == nil || userID <= 0 || deviceID == "" || ttl <= 0 || limit <= 0 {
 		return "", fmt.Errorf("touch device: %w", ErrInvalidArgument)
 	}
@@ -130,12 +155,16 @@ func (s Store) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip s
 	if seconds <= 0 {
 		return "", fmt.Errorf("touch device: %w", ErrInvalidArgument)
 	}
+	op := deviceOperation(operation)
+	operationID := uuid.NewString()
 	lastSeen := now.UTC().Format(time.RFC3339)
 	values, err := evalScript(ctx, s.Client, touchDeviceScript, []string{
 		s.Keys.Devices(userID),
 		s.Keys.Device(deviceID),
 		s.Keys.deviceHashKeyPrefix(),
-	}, deviceID, lastSeen, seconds, ua, ip, now.UnixMilli(), limit).Slice()
+		s.Keys.join("{dev}", "operation", operationID),
+		s.Keys.join("{dev}", "pending_evictions"),
+	}, deviceID, lastSeen, seconds, ua, ip, now.UnixMilli(), limit, op.TokenHash, userID, op.ExpiresAt.Unix()+1, deviceID, operationID).Slice()
 	if err != nil {
 		return "", fmt.Errorf("touch device eval: %w", err)
 	}
@@ -160,6 +189,22 @@ func (s Store) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip s
 // stays consistent with its sort position. The resurrect branch sweeps phantom
 // members before the cap check so they cannot occupy cap slots.
 const touchDeviceScript = `
+local prior = redis.call("GET", KEYS[4])
+if prior then return cjson.decode(prior) end
+-- Bound outage storage. Refuse before mutating device state if the journal is full.
+if ARGV[8] ~= "" and redis.call("ZCARD", KEYS[5]) >= 10000 then
+ return redis.error_reply("device eviction journal full")
+end
+local function finish(result)
+ local evicted = type(result) == "table" and result[2] or result
+ if evicted ~= "" and ARGV[8] ~= "" then
+  local pending = cjson.encode({operation_id=ARGV[12], token_hash=ARGV[8], user_id=tonumber(ARGV[9]), expires_at=tonumber(ARGV[10]), source_family=ARGV[11], evicted=evicted})
+  redis.call("ZADD", KEYS[5], tonumber(ARGV[10]), pending)
+ end
+ redis.call("SET", KEYS[4], cjson.encode(result), "EX", 60)
+ return result
+end
+
 local score = redis.call("ZSCORE", KEYS[1], ARGV[1])
 -- unix_ms_to_rfc3339 renders a Unix-millis score back into the RFC3339
 -- "2006-01-02T15:04:05Z" shape Go stores in the Hash, so a rebuilt login_time
@@ -197,7 +242,7 @@ if score then
   if redis.call("TTL", KEYS[1]) < 0 then
     redis.call("EXPIRE", KEYS[1], tonumber(ARGV[3]))
   end
-  return {1, ""}
+  return finish({1, ""})
 end
 redis.call("ZADD", KEYS[1], ARGV[6], ARGV[1])
 redis.call("EXPIRE", KEYS[1], tonumber(ARGV[3]))
@@ -216,9 +261,9 @@ if count > tonumber(ARGV[7]) then
   -- Same pcall'd in-script DEL as RegisterDevice's eviction branch: the
   -- revoke riding on the returned ID must survive a failed Hash delete.
   pcall(redis.call, "DEL", KEYS[3] .. evicted[1])
-  return {0, evicted[1]}
+  return finish({0, evicted[1]})
 end
-return {0, ""}
+return finish({0, ""})
 `
 
 // RemoveDevice removes one device: ZREM from the user's set and DEL its Hash.
@@ -367,4 +412,11 @@ func parseRFC3339(raw string) time.Time {
 		return time.Time{}
 	}
 	return parsed
+}
+
+func deviceOperation(operations []shared.DeviceOperation) shared.DeviceOperation {
+	if len(operations) > 0 {
+		return operations[0]
+	}
+	return shared.DeviceOperation{}
 }

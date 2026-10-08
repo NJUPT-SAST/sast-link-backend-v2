@@ -126,21 +126,24 @@ func mapCaptchaError(err error) error {
 	return newError(ErrCaptcha, "人机校验未通过，请重试", err)
 }
 
-// checkLimit applies one fixed-window bucket. Fail-open on a Redis error: losing
-// the counter only widens the window, and the captcha is still in front.
+// checkLimit preserves intake availability during a limiter outage. The health
+// bit lets Submit suppress unverified failure audits while the bucket is absent.
 func (s Service) checkLimit(ctx context.Context, subject string) error {
+	_, err := s.checkLimitHealth(ctx, subject)
+	return err
+}
+func (s Service) checkLimitHealth(ctx context.Context, subject string) (bool, error) {
 	if s.Limiter == nil || s.SubmitRateLimit <= 0 {
-		return nil
+		return true, nil
 	}
 	result, err := s.Limiter.Allow(ctx, limitScope, subject)
 	if err != nil {
-		slog.WarnContext(ctx, "alumni request rate limit unavailable", "error", err)
-		return nil
+		return false, nil
 	}
 	if !result.Allowed {
-		return newError(ErrRateLimited, "提交过于频繁，请稍后再试", nil)
+		return true, newError(ErrRateLimited, "提交过于频繁，请稍后再试", nil)
 	}
-	return nil
+	return true, nil
 }
 
 // requestView maps a stored ticket onto the console's read shape. ClientIP is not

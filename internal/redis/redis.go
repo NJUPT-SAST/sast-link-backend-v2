@@ -17,16 +17,17 @@ import (
 // idle pool, and short timeouts.
 func New(addr, password string, db int) (*redis.Client, error) {
 	client := redis.NewClient(&redis.Options{
-		Addr:         addr,
-		Password:     password,
-		DB:           db,
-		MaxRetries:   0,
-		MinIdleConns: 4,
-		MaxIdleConns: 8,
-		DialTimeout:  3 * time.Second,
-		ReadTimeout:  2 * time.Second,
-		WriteTimeout: 2 * time.Second,
-		PoolTimeout:  2 * time.Second,
+		Addr:                  addr,
+		Password:              password,
+		DB:                    db,
+		MaxRetries:            -1, // Zero enables go-redis defaults; writes are not all replay-safe.
+		ContextTimeoutEnabled: true,
+		MinIdleConns:          4,
+		MaxIdleConns:          8,
+		DialTimeout:           3 * time.Second,
+		ReadTimeout:           2 * time.Second,
+		WriteTimeout:          2 * time.Second,
+		PoolTimeout:           2 * time.Second,
 	})
 	return client, nil
 }

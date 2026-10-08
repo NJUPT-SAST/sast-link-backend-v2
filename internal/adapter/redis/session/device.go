@@ -6,6 +6,7 @@ import (
 
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/session"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
 // deviceTTL bounds every device record (PRD §6.1: 30d). Refreshes update
@@ -24,11 +25,11 @@ type DeviceStore struct {
 }
 
 func (d DeviceStore) RegisterDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (string, error) {
-	return d.Store.RegisterDevice(ctx, userID, deviceID, ua, ip, now, deviceTTL, maxDevicesPerUser)
+	return d.Store.RegisterDevice(ctx, userID, deviceID, ua, ip, now, deviceTTL, maxDevicesPerUser, shared.DeviceOperationFromContext(ctx))
 }
 
 func (d DeviceStore) TouchDevice(ctx context.Context, userID int64, deviceID, ua, ip string, now time.Time) (string, error) {
-	return d.Store.TouchDevice(ctx, userID, deviceID, ua, ip, now, deviceTTL, maxDevicesPerUser)
+	return d.Store.TouchDevice(ctx, userID, deviceID, ua, ip, now, deviceTTL, maxDevicesPerUser, shared.DeviceOperationFromContext(ctx))
 }
 
 func (d DeviceStore) RemoveDevice(ctx context.Context, userID int64, deviceID string) error {

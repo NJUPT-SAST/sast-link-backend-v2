@@ -59,19 +59,19 @@ func (w TokenBlacklist) Run(ctx context.Context) error {
 	// A timer lets an empty outbox sleep at maxBackoff.
 	dueTimer := time.NewTimer(interval)
 	defer dueTimer.Stop()
-	cleanupTicker := time.NewTicker(cleanupInterval)
-	defer cleanupTicker.Stop()
+	cleanupTimer := time.NewTimer(cleanupInterval)
+	defer cleanupTimer.Stop()
 
 	w.processDue(ctx)
-	w.cleanupExpired(ctx)
+	cleanupTimer.Reset(w.cleanupExpired(ctx))
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-dueTimer.C:
 			dueTimer.Reset(w.processDue(ctx))
-		case <-cleanupTicker.C:
-			w.cleanupExpired(ctx)
+		case <-cleanupTimer.C:
+			cleanupTimer.Reset(w.cleanupExpired(ctx))
 		}
 	}
 }
@@ -162,10 +162,29 @@ func (w TokenBlacklist) ackMany(ctx context.Context, ids []int64, claimToken str
 	}
 }
 
-func (w TokenBlacklist) cleanupExpired(ctx context.Context) {
-	if _, err := w.Outbox.CleanupExpired(ctx, w.now(), w.batchSize()); err != nil && ctx.Err() == nil {
-		slog.Error("cleanup token blacklist outbox", "error", err)
+// cleanupExpired bounds both each statement and each pass. A full pass means
+// backlog may remain, so schedule the next pass promptly rather than in an hour.
+func (w TokenBlacklist) cleanupExpired(ctx context.Context) time.Duration {
+	idle := shared.DurationOrDefault(w.CleanupInterval, defaultTokenBlacklistCleanupRate)
+	retry := shared.DurationOrDefault(w.Interval, defaultTokenBlacklistInterval)
+	cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for batch := 0; batch < 20; batch++ {
+		n, err := w.Outbox.CleanupExpired(cleanupCtx, w.now(), w.batchSize())
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Error("cleanup token blacklist outbox", "error", err)
+			}
+			return retry
+		}
+		if n < int64(w.batchSize()) {
+			return idle
+		}
+		if cleanupCtx.Err() != nil {
+			return retry
+		}
 	}
+	return retry
 }
 
 func (w TokenBlacklist) retryBackoff(attemptCount int) time.Duration {

@@ -2,6 +2,7 @@ package alumnirequest
 
 import (
 	"context"
+	"unicode/utf8"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -26,10 +27,12 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 	// student-ID bucket stays behind the captcha — a student ID is only
 	// meaningful once validated, and solving the challenge is what earns the
 	// right to spend that identity's bucket.
-	if err := s.checkLimit(ctx, "ip:"+input.ClientIP); err != nil {
+	limitHealthy, err := s.checkLimitHealth(ctx, "ip:"+input.ClientIP)
+	if err != nil {
 		return nil, err
 	}
 
+	ctx = context.WithValue(ctx, submitAuditHealthKey{}, limitHealthy)
 	validated, err := validateSubmit(input)
 	if err != nil {
 		s.auditSubmit(ctx, input, 0, false, errorCode(err), attemptedSubmitDetail(input))
@@ -179,9 +182,9 @@ func (s Service) mapCreateError(ctx context.Context, err error) error {
 // durable log.
 func attemptedSubmitDetail(input SubmitInput) map[string]any {
 	return map[string]any{
-		"student_id":     input.StudentID,
-		"login_email":    input.LoginEmail,
-		"personal_email": input.PersonalEmail,
+		"student_id":     boundedAuditField(input.StudentID, 128),
+		"login_email":    boundedAuditField(input.LoginEmail, 320),
+		"personal_email": boundedAuditField(input.PersonalEmail, 320),
 	}
 }
 
@@ -195,6 +198,9 @@ func (s Service) auditSubmit(
 	errCode int,
 	detail map[string]any,
 ) {
+	if healthy, ok := ctx.Value(submitAuditHealthKey{}).(bool); ok && !healthy && !success {
+		return
+	}
 	resourceID := ""
 	if requestID != 0 {
 		resourceID = formatID(requestID)
@@ -209,4 +215,19 @@ func (s Service) auditSubmit(
 		UserAgent:  input.UserAgent,
 		Detail:     detail,
 	})
+}
+
+// During a limiter outage, successful verified submissions retain their audit;
+// attacker-controlled failures do not create unbounded durable rows or logs.
+type submitAuditHealthKey struct{}
+
+func boundedAuditField(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for !utf8.ValidString(value) && len(value) > 0 {
+		value = value[:len(value)-1]
+	}
+	return value
 }

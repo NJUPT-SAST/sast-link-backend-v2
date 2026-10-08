@@ -185,7 +185,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	// committed and audited by this point, so a failed record write only costs a
 	// WARN and the device shows up on the next login.
 	if s.Devices != nil {
-		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
+		evicted, err := s.Devices.RegisterDevice(shared.WithDeviceOperation(ctx, pair.refresh.TokenHash, pair.refresh.ExpiresAt), user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}
@@ -319,7 +319,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	// than logging the user out of a device they never touched.
 	var evicted string
 	if s.Devices != nil {
-		evicted, err = s.Devices.TouchDevice(ctx, current.UserID, current.FamilyID, input.UserAgent, input.ClientIP, s.now())
+		evicted, err = s.Devices.TouchDevice(shared.WithDeviceOperation(ctx, pair.refresh.TokenHash, pair.refresh.ExpiresAt), current.UserID, current.FamilyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
 			slog.WarnContext(ctx, "touch device failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", err)
 		}
@@ -771,6 +771,9 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		// A unique violation here means the pre-flight checks raced a concurrent
 		// registration; dispatch on the constraint name so the reply points at the
 		// right field.
+		if errors.Is(createErr, repository.ErrStudentIDExists) {
+			return nil, newError(ErrStudentIDOccupied, "学号或校园邮箱前缀已被占用", createErr)
+		}
 		switch constraint := duplicateConstraint(createErr); constraint {
 		case userStudentIDConstraint:
 			return nil, newError(ErrStudentIDOccupied, "学号已被占用", createErr)
@@ -809,7 +812,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	// a device exactly like a password login. Fail-open: the account and its
 	// session already committed.
 	if s.Devices != nil {
-		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
+		evicted, err := s.Devices.RegisterDevice(shared.WithDeviceOperation(ctx, pair.refresh.TokenHash, pair.refresh.ExpiresAt), user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}

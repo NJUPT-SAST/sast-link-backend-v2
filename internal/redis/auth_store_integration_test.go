@@ -441,12 +441,22 @@ func TestRecordLoginFailureHealsATTLessCounterKey(t *testing.T) {
 	if expireErr := client.Expire(context.Background(), key, time.Second).Err(); expireErr != nil {
 		t.Fatalf("fast-forward expiry: %v", expireErr)
 	}
-	time.Sleep(1200 * time.Millisecond)
-	state, err = store.GetLoginFailures(context.Background(), "victim@example.com")
-	if err != nil {
-		t.Fatalf("GetLoginFailures() error = %v", err)
-	}
-	if state.Count != 0 {
-		t.Fatalf("count after window = %d, want 0: the healed window must expire", state.Count)
+	// The Redis clock is in a VM on some runners; a fixed host sleep does not
+	// prove that the server has advanced past its deadline. Wait for observable
+	// expiry, bounded so a broken TTL still fails rather than hanging the suite.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		state, err = store.GetLoginFailures(context.Background(), "victim@example.com")
+		if err != nil {
+			t.Fatalf("GetLoginFailures() error = %v", err)
+		}
+		if state.Count == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			ttl, ttlErr := client.PTTL(context.Background(), key).Result()
+			t.Fatalf("count after window = %d, want 0: remaining TTL=%v error=%v", state.Count, ttl, ttlErr)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

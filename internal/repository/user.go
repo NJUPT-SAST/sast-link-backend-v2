@@ -50,6 +50,9 @@ func (r *UserRepository) CreateWithProfile(
 	}
 
 	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := guardNewUserAssignment(transaction, user); err != nil {
+			return err
+		}
 		if err := transaction.Create(user).Error; err != nil {
 			return fmt.Errorf("create user: %w", err)
 		}
@@ -96,6 +99,9 @@ func createAdminUserInTransaction(
 	profile *model.Profile,
 	identity *model.Identity,
 ) error {
+	if err := guardNewUserAssignment(transaction, user); err != nil {
+		return err
+	}
 	if err := transaction.Create(user).Error; err != nil {
 		return fmt.Errorf("create admin user: %w", err)
 	}
@@ -154,6 +160,9 @@ func (r *UserRepository) CreateRegistrationWithIdentity(
 	}
 
 	return r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := guardNewUserAssignment(transaction, user); err != nil {
+			return err
+		}
 		if err := transaction.Create(user).Error; err != nil {
 			return fmt.Errorf("create user: %w", err)
 		}

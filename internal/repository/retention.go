@@ -240,7 +240,7 @@ func (r *RetentionRepository) RecomputeDerivedState(
 		return 0, nil
 	}
 	next := rows[len(rows)-1].ID
-	// Collect the divergent rows, then apply them in one statement: the academic
+	// Collect divergent rows, then apply bounded multi-row statements: the academic
 	// year boundary flips a whole cohort at once, and per-row UPDATEs turned one
 	// tick into up to batchSize independent round trips. The per-row guards stay
 	// in the WHERE clause, so a concurrent pin or closure still wins exactly as
@@ -261,10 +261,13 @@ func (r *RetentionRepository) RecomputeDerivedState(
 			divergent = append(divergent, divergence{id: row.ID, derivedState: derived})
 		}
 	}
-	if len(divergent) > 0 {
-		values := make([]string, 0, len(divergent))
-		args := make([]any, 0, len(divergent)*2)
-		for _, item := range divergent {
+	// 2 parameters per row plus 2 predicates; chunk well below the protocol cap.
+	const derivedStateChunkSize = 1000
+	for start := 0; start < len(divergent); start += derivedStateChunkSize {
+		chunk := divergent[start:min(start+derivedStateChunkSize, len(divergent))]
+		values := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, item := range chunk {
 			args = append(args, item.id, string(item.derivedState))
 			values = append(values, "(?::int8, ?::state_enum)")
 		}

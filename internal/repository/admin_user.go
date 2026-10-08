@@ -196,20 +196,22 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 	stats.IncompleteByState = make(map[model.UserState]int64)
 
 	type censusRow struct {
-		Role       string
-		State      string
-		Count      int64
-		Incomplete int64
+		Role            string
+		State           string
+		Count           int64
+		Incomplete      int64
+		StateIncomplete int64
 	}
 	rows := make([]censusRow, 0, 16)
 	// Incomplete (role cut): live accounts still flagged incomplete whose role
 	// is neither lecturer nor admin - staff are organization members, not
-	// follow-up targets. The state cut below narrows the same flag to njupter,
-	// mirroring the role cut's population judgement.
+	// follow-up targets. The state cut remains independent: a manually pinned
+	// njupter is included regardless of role.
 	if err := r.database.WithContext(ctx).Model(&model.User{}).
 		Select(fmt.Sprintf(`role, state, COUNT(*) AS count,
 			COUNT(*) FILTER (WHERE profile_needs_completion = true
-				AND role NOT IN ('%s', '%s')) AS incomplete`,
+				AND role NOT IN ('%s', '%s')) AS incomplete,
+			COUNT(*) FILTER (WHERE profile_needs_completion = true) AS state_incomplete`,
 			model.UserRoleLecturer, model.UserRoleAdmin)).
 		Group("role, state").
 		Scan(&rows).Error; err != nil {
@@ -225,12 +227,9 @@ func (r *UserRepository) Stats(ctx context.Context) (UserStats, error) {
 		stats.ByRole[model.UserRole(row.Role)] += row.Count
 		if row.Incomplete > 0 {
 			stats.IncompleteByRole[model.UserRole(row.Role)] += row.Incomplete
-			// Grouped by state, the njupter bucket's flagged count is exactly the
-			// state cut (njupter is a live state, so the deleted guard above and
-			// the live predicate of the old queries agree here).
-			if state == model.UserStateNJUPTer {
-				stats.IncompleteByState[state] += row.Incomplete
-			}
+		}
+		if state == model.UserStateNJUPTer {
+			stats.IncompleteByState[state] += row.StateIncomplete
 		}
 	}
 
@@ -496,6 +495,15 @@ func (r *UserRepository) UpdateAdminUser(
 	var entries []model.BlacklistEntry
 	sessionsRevoked := false
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if update.StudentID != nil || update.LoginEmail != nil {
+			if err := lockIdentityAssignment(transaction); err != nil {
+				return err
+			}
+			if err := guardIdentityAssignment(transaction, userID, update.StudentID, update.LoginEmail); err != nil {
+				return err
+			}
+		}
+
 		// The advisory lock is taken before the user row, matching
 		// SoftDeleteAndRevokeSessions' lock order so the two write paths cannot
 		// deadlock each other.

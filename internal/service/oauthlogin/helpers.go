@@ -24,10 +24,6 @@ import (
 // package's signatures do not repeat the import path.
 type providerIdentity = provider.Identity
 
-// auditTimeout bounds the detached audit write; the row must survive the caller
-// going away, but a stuck database must not hold a login callback hostage.
-const auditTimeout = 5 * time.Second
-
 // providerClient resolves an enabled provider, or reports that this deployment
 // does not offer it.
 func (s Service) providerClient(name model.LoginMethod) (ProviderClient, error) {
@@ -196,7 +192,7 @@ func (s Service) audit(
 	successValue := success
 	// Detached context: an audit row for a completed action must survive the
 	// caller going away, or an aborted callback's events vanish from the log.
-	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	auditCtx, cancel := cleanupBudget(ctx)
 	defer cancel()
 	return s.Audits.Create(auditCtx, &model.AuditLog{
 		UserID:     userID,

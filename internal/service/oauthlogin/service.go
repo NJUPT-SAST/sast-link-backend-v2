@@ -153,11 +153,6 @@ func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoi
 }
 
 // Authorize issues an OAuth state and returns the provider page to redirect to.
-// callbackExchangeBudget caps the whole provider callback exchange — token
-// fetch plus code redemption plus (Lark) user info — where each hop otherwise
-// carries its own independent 10s bound.
-const callbackExchangeBudget = 15 * time.Second
-
 func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*AuthorizeResult, error) {
 	// Throttled before the provider is resolved, so a disabled provider's route
 	// cannot serve as an unthrottled probe.
@@ -194,19 +189,16 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 // Callback validates the provider callback and splits into the login branch or
 // the registration branch.
 func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
+	ctx, cancelRequest := WithRequestBudget(ctx)
+	defer cancelRequest()
+	ctx, cancelWork := workBudget(ctx)
+	defer cancelWork()
 	// Throttled before any state is consumed: the point of the cap is to keep an
 	// invalid-callback flood from spending state and audit writes.
 	if err := s.checkLimit(ctx, s.CallbackLimiter, "oauth_login_callback", ipSubject(input.ClientIP)); err != nil {
 		return nil, err
 	}
-	// One budget for the whole multi-hop provider exchange. Each hop already
-	// carries its own 10s bound, but Lark chains three hops (a 30s worst case
-	// that held a handler goroutine and its connection the whole way). 15s
-	// covers the healthy path with margin; the failure audit detaches from ctx,
-	// so a budget expiry still leaves its row in the trail.
-	exchangeCtx, cancel := context.WithTimeout(ctx, callbackExchangeBudget)
-	defer cancel()
-	result, err := s.callback(exchangeCtx, input)
+	result, err := s.callback(ctx, input)
 	if err != nil {
 		// Audit failed callbacks too — they are the events an incident review wants
 		// when someone drives a stolen or replayed state at the endpoint; the success
@@ -297,7 +289,9 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 			newDisplayError(ErrStateInvalid, "登录已中断，请重新发起登录", nil))
 	}
 
-	identity, err := client.Exchange(ctx, input.Code, "")
+	exchangeCtx, cancelExchange := context.WithTimeout(ctx, callbackExchangeBudget)
+	identity, err := client.Exchange(exchangeCtx, input.Code, "")
+	cancelExchange()
 	if err != nil {
 		stage, reason, outcome := providerFailureOutcome(err)
 		// A provider outage is the one failure whose state is written back:
@@ -311,7 +305,12 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		// is single-use at the provider, so a retry that finds the code already
 		// spent lands on the ordinary restart-the-login path.
 		if isRestorableOutcome(outcome) {
-			s.restoreStateAfterOutage(ctx, input.State, statePayload)
+			if !s.restoreStateAfterOutage(ctx, input.State, statePayload) {
+				var e *Error
+				if errors.As(outcome, &e) {
+					e.Restorable = false
+				}
+			}
 		}
 		return nil, tagCallbackFailure(stage, reason, outcome)
 	}
@@ -348,14 +347,18 @@ func isRestorableOutcome(outcome error) bool {
 // restoreStateAfterOutage puts a consumed state back so the browser's own
 // retry can complete the login. Best-effort: when Redis refuses the write the
 // retry simply finds no state and restarts the login, exactly as before.
-func (s Service) restoreStateAfterOutage(ctx context.Context, state string, payload StatePayload) {
+func (s Service) restoreStateAfterOutage(ctx context.Context, state string, payload StatePayload) bool {
+	ctx, cancel := cleanupBudget(ctx)
+	defer cancel()
 	ttl := s.stateTTL()
 	if ttl > oauthStateRestoreTTL {
 		ttl = oauthStateRestoreTTL
 	}
 	if err := s.States.SaveOAuthState(ctx, state, payload, ttl); err != nil {
 		slog.WarnContext(ctx, "restore oauth state after provider outage failed", "error", err)
+		return false
 	}
+	return true
 }
 
 // loginBranch handles a provider account that is already bound: it refreshes the
@@ -456,6 +459,10 @@ func (s Service) registrationBranch(
 // account gets a login_code, an unbound one gets a registration_state — so the
 // two entrances cannot diverge in what they hand the frontend.
 func (s Service) AppCodeLogin(ctx context.Context, input AppCodeLoginInput) (*CallbackResult, error) {
+	ctx, cancelRequest := WithRequestBudget(ctx)
+	defer cancelRequest()
+	ctx, cancelWork := workBudget(ctx)
+	defer cancelWork()
 	// Throttled before the empty-code check, matching ExchangeCode: the caller
 	// controls the input, so a free blank rejection would leave the expensive
 	// path — one provider exchange plus Redis writes — uncapped.
@@ -495,7 +502,9 @@ func (s Service) appCodeLogin(ctx context.Context, input AppCodeLoginInput) (*Ca
 		return nil, tagCallbackFailure(StageRequestValidation, ReasonMissingCode,
 			newError(ErrInvalidInput, "code 不能为空", nil))
 	}
-	identity, err := exchanger.ExchangeAppCode(ctx, input.Code)
+	exchangeCtx, cancelExchange := context.WithTimeout(ctx, callbackExchangeBudget)
+	identity, err := exchanger.ExchangeAppCode(exchangeCtx, input.Code)
+	cancelExchange()
 	if err != nil {
 		stage, reason, outcome := providerFailureOutcome(err)
 		return nil, tagCallbackFailure(stage, reason, outcome)
@@ -649,7 +658,7 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 	if s.Devices != nil {
 		// s.now(), not s.Clock.Now(): Clock is not wired in production, and
 		// s.now() falls back to the system clock instead of dereferencing nil.
-		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.Refresh.FamilyID, input.UserAgent, input.ClientIP, s.now())
+		evicted, err := s.Devices.RegisterDevice(shared.WithDeviceOperation(ctx, pair.Refresh.TokenHash, pair.Refresh.ExpiresAt), user.ID, pair.Refresh.FamilyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}

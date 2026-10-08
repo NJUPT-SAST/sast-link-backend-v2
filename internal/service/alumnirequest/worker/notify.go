@@ -17,8 +17,8 @@ import (
 // Enqueue non-blocking.
 const defaultQueueSize = 64
 
-// writeTimeout bounds the delivery-state writes, detached from the caller's context
-// so a delivered email is not left looking undelivered.
+// writeTimeout bounds delivery-state writes. The delivery context survives
+// the shutdown signal, but is canceled with the shared drain budget.
 const writeTimeout = 5 * time.Second
 
 // Requests records delivery state.
@@ -98,10 +98,12 @@ func (w *Notifier) Run(ctx context.Context) error {
 	if w == nil || w.jobs == nil || w.Requests == nil || w.Mailer == nil {
 		return fmt.Errorf("alumni notification worker requires queue, requests and mailer")
 	}
+	deliveryCtx, cancelDelivery := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelDelivery()
 	consumed := make(chan struct{})
 	go func() {
 		defer close(consumed)
-		w.consume(ctx)
+		w.consumeWithDelivery(ctx, deliveryCtx)
 	}()
 	w.reconcileWithRetry(ctx)
 	<-ctx.Done()
@@ -141,14 +143,18 @@ func (w *Notifier) reconcileWithRetry(ctx context.Context) {
 	}
 }
 
-// consume delivers queued jobs until ctx is cancelled.
-func (w *Notifier) consume(ctx context.Context) {
+// consumeWithDelivery stops accepting work on ctx cancellation; the in-flight
+// job keeps deliveryCtx until completion or expiry of the shutdown grace.
+func (w *Notifier) consumeWithDelivery(ctx, deliveryCtx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case job := <-w.jobs:
-			w.process(ctx, job)
+			if ctx.Err() != nil {
+				return
+			}
+			w.process(deliveryCtx, job)
 		}
 	}
 }
@@ -265,13 +271,13 @@ func (w *Notifier) process(ctx context.Context, job alumnirequest.NotificationJo
 }
 
 func (w *Notifier) markAttempt(ctx context.Context, requestID int64) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 	return w.Requests.MarkNotifyAttempt(writeCtx, requestID)
 }
 
 func (w *Notifier) markNotified(ctx context.Context, requestID int64) error {
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 	return w.Requests.MarkNotified(writeCtx, requestID, w.now())
 }
