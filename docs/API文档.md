@@ -582,7 +582,7 @@ POST /auth/reset-password
 ### 2.1 GitHub 登录
 
 ```
-GET /oauth/github
+GET /oauth/github?code_challenge=<S256摘要>&code_challenge_method=S256
 ```
 
 重定向至 GitHub OAuth 授权页。
@@ -607,7 +607,7 @@ GET /oauth/github/callback?code=...&state=...
 ### 2.3 飞书登录
 
 ```
-GET /oauth/lark
+GET /oauth/lark?code_challenge=<S256摘要>&code_challenge_method=S256
 ```
 
 重定向至飞书 OAuth 授权页。
@@ -644,7 +644,8 @@ POST /oauth/lark/app-code
 
 ```json
 {
-  "code": "1d34ef4fdfdf12332fffd"
+  "code": "1d34ef4fdfdf12332fffd",
+  "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 }
 ```
 
@@ -689,18 +690,36 @@ POST /oauth/lark/app-code
 **飞书侧前置配置**（非本服务代码）：同一自建应用加「网页应用」能力并配置桌面/移动端主页 URL；`tt.requestAccess` 传 `scopeList: []`（仅授予「获取登录用户信息」，无需新申请 API 权限）；`requestAccess`/`requestAuthCode` 无需网页应用鉴权（JSSDK 鉴权）。前端接入要点：
 
 ```js
-if (window.h5sdk) {
-  window.h5sdk.ready(() => {
-    tt.requestAccess({
-      appID, scopeList: [],
-      success: ({code}) => api.post('/oauth/lark/app-code', {code}),
-      fail: ({errno}) => { if (errno === 103) callRequestAuthCode(); } // 旧客户端回退
-    });
+const base64url = bytes => btoa(String.fromCharCode(...bytes))
+  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+async function beginLarkLogin() {
+  // 在请求一次性飞书 code 之前准备证明；不要把 verifier 放进 URL。
+  const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  const challenge = base64url(new Uint8Array(digest));
+  sessionStorage.setItem('oauth_pkce_verifier', verifier);
+  const submitCode = ({code}) => api.post('/oauth/lark/app-code', {
+    code, code_challenge: challenge,
   });
+  tt.requestAccess({
+    appID, scopeList: [],
+    success: submitCode,
+    fail: ({errno}) => {
+      if (errno === 103) callRequestAuthCode(submitCode); // 旧 SDK 封装复用同一成功回调
+    },
+  });
+}
+
+if (window.h5sdk) {
+  window.h5sdk.ready(() => { void beginLarkLogin(); });
 } else {
-  // 普通浏览器走 §2.3 GET /oauth/lark 授权页流程
+  // 普通浏览器也先生成 verifier/challenge，再走 §2.3 的带参数授权 URL。
 }
 ```
+
+`callRequestAuthCode(onSuccess)` 表示应用对旧 SDK 的封装，两条 SDK 路径必须复用同一个 challenge 和成功回调。示例只发起免登；收到 `login_code` 后，按 §2.6 从 `sessionStorage` 取回本次 verifier，随 `code_verifier` 兑换，并在成功或终止本次登录后清理。畸形 challenge 在调用飞书前返回 `40000`，不消耗飞书 code。
+
 
 ---
 

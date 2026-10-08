@@ -500,21 +500,19 @@ func (s Service) appCodeLogin(ctx context.Context, input AppCodeLoginInput) (*Ca
 		return nil, tagCallbackFailure(StageRequestValidation, ReasonMissingCode,
 			newError(ErrInvalidInput, "code 不能为空", nil))
 	}
+	// Reject client input before spending the provider's one-time code.
+	if !auth.IsValidPKCEChallenge(input.CodeChallenge) {
+		return nil, tagCallbackFailure(StageRequestValidation, ReasonInvalidChallenge,
+			newError(ErrInvalidInput, "code_challenge 缺失或格式错误（须为 S256 摘要，43 位 base64url）", nil))
+	}
 	identity, err := exchanger.ExchangeAppCode(ctx, input.Code)
 	if err != nil {
 		stage, reason, outcome := providerFailureOutcome(err)
 		return nil, tagCallbackFailure(stage, reason, outcome)
 	}
 
-	// The branches below consume a CallbackInput. Source is the only field they
-	// need beyond the audit metadata, and the login-free leg has no state, no
-	// cookie and no redirect for them to read. The PKCE challenge arrives with
-	// this request instead of riding a state: the embedded page generated it
-	// before posting, and the same shape rules as the authorize leg apply.
-	if !auth.IsValidPKCEChallenge(input.CodeChallenge) {
-		return nil, tagCallbackFailure(StageRequestValidation, ReasonMissingCode,
-			newError(ErrInvalidInput, "code_challenge 缺失或格式错误（须为 S256 摘要，43 位 base64url）", nil))
-	}
+	// The login-free leg has no state, cookie or redirect. Its validated
+	// challenge binds the same login-code issuance as the authorize leg.
 	callbackInput := CallbackInput{
 		Provider:  model.LoginMethodLark,
 		ClientIP:  input.ClientIP,

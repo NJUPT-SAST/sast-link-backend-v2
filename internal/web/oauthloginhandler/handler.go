@@ -275,9 +275,10 @@ func isRestorableFailure(err error) bool {
 type exchangeCodeRequest struct {
 	Code string `json:"code" binding:"required"`
 	// CodeVerifier is the RFC 7636 counterpart of the challenge the starting
-	// page sent at authorize time; required, and a wrong one fails with the
-	// same code and copy as an unknown login_code.
-	CodeVerifier string `json:"code_verifier" binding:"required"`
+	// page sent at authorize time. The service rejects missing/invalid values
+	// after consuming the code, with the same outcome as an unknown code.
+	// Do not add binding:required here: it would bypass that contract.
+	CodeVerifier string `json:"code_verifier"`
 }
 
 // appCodeRequest submits the Feishu client JSAPI pre-authorization code the

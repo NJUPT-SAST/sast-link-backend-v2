@@ -1365,26 +1365,25 @@ func TestAuthorizeRequiresSizedS256Challenge(t *testing.T) {
 // copy as an unknown login_code, and the GetDel has already burned the code:
 // a holder of a leaked code gets no oracle and no retry surface.
 func TestExchangeCodeWrongVerifierBurnsTheCode(t *testing.T) {
-	service, doubles := newTestService(t)
-	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
-		t.Fatalf("seed login code: %v", err)
-	}
-
-	wrong := strings.Repeat("w", 43)
-	for name, verifier := range map[string]string{"wrong": wrong, "missing": ""} {
-		_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: verifier})
-		assertKind(t, err, KindInvalidToken, errcode.CodeLoginCodeInvalid)
-		_ = name
-	}
-
-	// The code burned on the first wrong attempt: the second refuses as unknown
-	// too, and no session was issued anywhere.
-	if _, ok := doubles.LoginCodes.codes["lc_abc"]; ok {
-		t.Fatal("login_code survived a failed verification")
-	}
-	if doubles.Tokens.pairs != 0 {
-		t.Fatalf("persisted pairs = %d, want 0", doubles.Tokens.pairs)
+	for name, verifier := range map[string]string{"wrong": strings.Repeat("w", 43), "missing": "", "short": "short"} {
+		t.Run(name, func(t *testing.T) {
+			service, doubles := newTestService(t)
+			doubles.Users.byID[42] = activeUser(42)
+			if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
+				t.Fatal(err)
+			}
+			_, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: verifier})
+			assertKind(t, err, KindInvalidToken, errcode.CodeLoginCodeInvalid)
+			if _, ok := doubles.LoginCodes.codes["lc_abc"]; ok {
+				t.Fatal("login_code survived failed verification")
+			}
+			// The correct proof must not resurrect a code burned by this attempt.
+			_, err = service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier})
+			assertKind(t, err, KindInvalidToken, errcode.CodeLoginCodeInvalid)
+			if doubles.Tokens.pairs != 0 {
+				t.Fatalf("persisted pairs=%d", doubles.Tokens.pairs)
+			}
+		})
 	}
 }
 
