@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/objectstore"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
@@ -134,6 +135,8 @@ func (w *Retention) Run(ctx context.Context) error {
 // retention falling behind degrades storage, while returning an error from Run
 // would take the whole API process down with it.
 func (w *Retention) sweep(ctx context.Context) {
+	sweepStart := time.Now()
+	defer func() { metrics.RetentionTick(time.Since(sweepStart)) }()
 	acquired, err := w.Store.TryLock(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -146,7 +149,9 @@ func (w *Retention) sweep(ctx context.Context) {
 		// tick covers anything the winner leaves behind.
 		return
 	}
+	metrics.SetRetentionLeader(true)
 	defer func() {
+		metrics.SetRetentionLeader(false)
 		// Detached from ctx on purpose: the lock is session-scoped, and an unlock
 		// skipped during shutdown would leave it held until the pooled connection is
 		// recycled, blocking every later sweep on every instance.
@@ -275,11 +280,13 @@ func (w Retention) purgeDeletedUsers(ctx context.Context, now time.Time) {
 		total += int64(len(purged))
 		if len(purged) < batchSize {
 			if total > 0 {
+				metrics.RetentionRows(metrics.RetentionTableUsersPurged, total)
 				slog.Info("retention purge closed accounts", "deleted", total, "cutoff", cutoff)
 			}
 			return
 		}
 	}
+	metrics.RetentionRows(metrics.RetentionTableUsersPurged, total)
 	slog.Warn("retention purge truncated at pass cap",
 		"deleted", total, "cutoff", cutoff, "passes", maxRetentionPasses)
 }
@@ -307,6 +314,7 @@ func (w *Retention) drain(
 		total += removed
 		if removed < int64(batchSize) {
 			if total > 0 {
+				metrics.RetentionRows(table, total)
 				slog.Info("retention sweep", "table", table, "deleted", total, "cutoff", cutoff)
 			}
 			return
@@ -314,6 +322,7 @@ func (w *Retention) drain(
 	}
 	// Hitting the cap means rows still qualify. Say so, rather than letting a
 	// permanent backlog look like a clean sweep.
+	metrics.RetentionRows(table, total)
 	slog.Warn("retention sweep truncated at pass cap",
 		"table", table, "deleted", total, "cutoff", cutoff, "passes", maxRetentionPasses)
 }

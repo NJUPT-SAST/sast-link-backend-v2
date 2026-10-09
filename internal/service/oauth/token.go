@@ -11,6 +11,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/tokenissue"
@@ -263,11 +264,13 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		if !repository.IsWithinRefreshGrace(*current.RevokedAt, s.now()) {
 			// A true replay of a long-dead token: cut the family.
 			s.revokeFamily(ctx, current.FamilyID)
+			metrics.RefreshOutcome(metrics.RefreshPathOAuth, metrics.RefreshReplayed)
 			s.auditToken(ctx, &current.UserID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
 		} else {
 			// A benign concurrent refresh within the grace window: report invalid
 			// without cutting, audited distinctly from a replay (matching the session
 			// path's concurrent_refresh).
+			metrics.RefreshOutcome(metrics.RefreshPathOAuth, metrics.RefreshConcurrent)
 			s.auditToken(ctx, &current.UserID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "concurrent_refresh")
 		}
 		return nil, newError(ErrInvalidGrant, "refresh_token 无效", nil)
@@ -363,6 +366,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 			// The rotation transaction preserved the family for a benign concurrent
 			// refresh; re-revoking would log out the winner. Audited as
 			// concurrent_refresh, not a replay.
+			metrics.RefreshOutcome(metrics.RefreshPathOAuth, metrics.RefreshConcurrent)
 			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "concurrent_refresh")
 			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
 		}
@@ -371,6 +375,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 			errors.Is(rotateErr, repository.ErrTokenFamilyRevoked) {
 			// A true replay: the rotation transaction already cut the family, so
 			// report invalid without re-revoking. Audited as a replay.
+			metrics.RefreshOutcome(metrics.RefreshPathOAuth, metrics.RefreshReplayed)
 			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_replayed")
 			return nil, newError(ErrInvalidGrant, "refresh_token 无效", rotateErr)
 		}
@@ -378,6 +383,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 			// The family reached its capability lifetime cap and the rotation
 			// transaction revoked it, so the client must re-authorize. Audited
 			// distinctly from a replay.
+			metrics.RefreshOutcome(metrics.RefreshPathOAuth, metrics.RefreshFamilyExpired)
 			s.auditToken(ctx, &user.ID, client.ClientID, grantTypeRefreshToken, input, false, errcode.CodeAccessTokenInvalid, "refresh_family_expired")
 			return nil, newError(ErrInvalidGrant, "refresh_token 已超过最长有效期，请重新授权", rotateErr)
 		}
@@ -389,6 +395,7 @@ func (s Service) tokenByRefreshToken(ctx context.Context, input TokenInput) (*To
 		return nil, err
 	}
 
+	metrics.RefreshOutcome(metrics.RefreshPathOAuth, metrics.RefreshOK)
 	return s.tokenResult(pair, idToken), nil
 }
 
@@ -521,6 +528,7 @@ func (s Service) auditToken(
 // auditSessionRevoked preserves the durable administrative cause across both
 // the pre-read and locked rotation paths without issuing another revocation.
 func (s Service) auditSessionRevoked(ctx context.Context, userID int64, clientID string, input TokenInput, reason string) {
+	metrics.RefreshOutcome(metrics.RefreshPathOAuth, metrics.RefreshSessionRevoked)
 	s.audit(ctx, &userID, "oauth_token", &clientID, false, errcode.CodeAccessTokenInvalid, input.ClientIP, input.UserAgent, map[string]any{
 		"client_id": clientID, "grant_type": grantTypeRefreshToken,
 		"outcome": "session_revoked", "revoked_reason": reason,

@@ -154,6 +154,24 @@ func (r *TokenBlacklistOutboxRepository) CleanupExpired(ctx context.Context, now
 	return result.RowsAffected, nil
 }
 
+// CountDue reports the number of rows still awaiting delivery (excluding
+// rows whose JWT has already expired past blacklisting — CleanupExpired drains
+// those). It exists for the backlog gauge, not for delivery decisions, so it is
+// called on the worker's cleanup cadence rather than every pass.
+func (r *TokenBlacklistOutboxRepository) CountDue(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		return 0, fmt.Errorf("count token blacklist outbox: %w", ErrInvalidArgument)
+	}
+	var count int64
+	if err := r.database.WithContext(ctx).
+		Model(&model.TokenBlacklistOutbox{}).
+		Where("expires_at > ?", now).
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("count token blacklist outbox: %w", err)
+	}
+	return count, nil
+}
+
 func newOutboxClaimToken() (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {

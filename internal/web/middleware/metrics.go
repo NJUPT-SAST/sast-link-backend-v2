@@ -7,6 +7,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 // httpRequestsTotal counts every HTTP request, partitioned by method, route and
@@ -76,6 +78,7 @@ func init() {
 // outside every auth gate.
 func Metrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		defer metrics.HTTPInFlight()()
 		start := time.Now()
 		c.Next()
 		route := c.FullPath()

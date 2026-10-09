@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 )
 
@@ -64,12 +65,28 @@ func (c *renderCache) lockFill(ctx context.Context, key string) (func(), error) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The non-blocking attempt classifies the acquire for the lane metric:
+	// waited means the lane was busy and this call queued behind display work.
+	waited := false
 	select {
 	case lane <- struct{}{}:
-		return func() { <-lane }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	default:
+		waited = true
+		select {
+		case lane <- struct{}{}:
+		case <-ctx.Done():
+			if waited {
+				metrics.BadgeLane(metrics.BadgeLaneRejected)
+			}
+			return nil, ctx.Err()
+		}
 	}
+	if waited {
+		metrics.BadgeLane(metrics.BadgeLaneWaited)
+	} else {
+		metrics.BadgeLane(metrics.BadgeLaneImmediate)
+	}
+	return func() { <-lane }, nil
 }
 
 func (c *renderCache) get(key string) (renderCacheEntry, bool) {
@@ -151,6 +168,10 @@ func renderCacheKey(version, key string, theme Theme, target Target) string {
 // badges answer the error card (NotFound=true) so an img embed never cracks;
 // the caller pairs it with HTTP 404.
 func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult, error) {
+	renderStart := time.Now()
+	recordRender := func(result string) {
+		metrics.BadgeRender(result, time.Since(renderStart))
+	}
 	theme := Theme(input.Theme)
 	switch theme {
 	case ThemeLight, ThemeDark, ThemeAuto:
@@ -167,6 +188,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 
 	// Bound cache-key memory before any database lookup or cache insertion.
 	if input.Key == "" || len(input.Key) > base64.RawURLEncoding.EncodedLen(badgeKeyBytes) {
+		recordRender(metrics.BadgeRenderError)
 		return &RenderResult{SVG: renderErrorCard(theme), NotFound: true}, nil
 	}
 	s.renderCacheOnce.Do(func() {
@@ -177,6 +199,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	if s.PublicLimiter != nil && input.ClientIP != "" {
 		result, err := s.PublicLimiter.Allow(ctx, "badge_public", input.ClientIP)
 		if err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 			slog.WarnContext(ctx, "badge public limiter unavailable, allowing request", "error", err)
 		} else if !result.Allowed {
 			return nil, withRetryAfter(newError(ErrRateLimited, "badge render rate limited", nil), result.RetryAfter)
@@ -187,6 +210,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	badge, err := s.Badges.FindBadgeTarget(ctx, input.Key)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
+			recordRender(metrics.BadgeRenderError)
 			return &RenderResult{SVG: renderErrorCard(theme), NotFound: true}, nil
 		}
 		return nil, newError(ErrInternal, "render badge: resolve key", err)
@@ -199,6 +223,7 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	// Authorization is always live, including on a render-cache hit: another
 	// instance may have disabled sharing, or an admin may have closed the user.
 	if entry, ok := s.renderCache.get(cacheKey); ok {
+		recordRender(metrics.BadgeRenderHit)
 		return &RenderResult{SVG: entry.svg, ETag: entry.etag}, nil
 	}
 
@@ -210,10 +235,12 @@ func (s *Service) Render(ctx context.Context, input RenderInput) (*RenderResult,
 	// to this request and must never be shared with the preceding fill.
 	if _, visibilityErr := s.Badges.FindBadgeTarget(ctx, input.Key); visibilityErr != nil {
 		if errors.Is(visibilityErr, repository.ErrNotFound) {
+			recordRender(metrics.BadgeRenderError)
 			return &RenderResult{SVG: renderErrorCard(theme), NotFound: true}, nil
 		}
 		return nil, newError(ErrInternal, "render badge: final visibility", visibilityErr)
 	}
+	recordRender(metrics.BadgeRenderMiss)
 	return result, nil
 }
 

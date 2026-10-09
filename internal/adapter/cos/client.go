@@ -6,6 +6,7 @@ package cos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/tencentyun/cos-go-sdk-v5"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/objectstore"
 )
 
@@ -99,6 +101,7 @@ func New(cfg Config) (*Client, error) {
 // Upload writes content under key with public-read ACL and returns its public
 // URL (base URL when configured, the bucket access host otherwise).
 func (c *Client) Upload(ctx context.Context, key string, r io.Reader, contentType string, size int64) (string, error) {
+	start := time.Now()
 	if _, err := c.client.Object.Put(ctx, key, r, &cos.ObjectPutOptions{
 		ACLHeaderOptions: &cos.ACLHeaderOptions{XCosACL: "public-read"},
 		ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{
@@ -106,17 +109,22 @@ func (c *Client) Upload(ctx context.Context, key string, r io.Reader, contentTyp
 			ContentLength: size,
 		},
 	}); err != nil {
+		metrics.ExternalRequest(metrics.ExtCOS, "upload", cosResult(ctx, err), time.Since(start))
 		return "", fmt.Errorf("cos: upload %s: %w", key, err)
 	}
+	metrics.ExternalRequest(metrics.ExtCOS, "upload", metrics.ExtOK, time.Since(start))
 	return c.PublicURL(key), nil
 }
 
 // Delete removes an object. A missing key is not an error (the SDK answers 204
 // for delete on absent keys), matching the port contract.
 func (c *Client) Delete(ctx context.Context, key string) error {
+	start := time.Now()
 	if _, err := c.client.Object.Delete(ctx, key); err != nil {
+		metrics.ExternalRequest(metrics.ExtCOS, "delete", cosResult(ctx, err), time.Since(start))
 		return fmt.Errorf("cos: delete %s: %w", key, err)
 	}
+	metrics.ExternalRequest(metrics.ExtCOS, "delete", metrics.ExtOK, time.Since(start))
 	return nil
 }
 
@@ -124,13 +132,16 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 // to an objectstore.AuditResult. A non-nil error means the review did not run —
 // the caller must treat that as a rejected upload (fail-closed).
 func (c *Client) AuditImage(ctx context.Context, key string) (objectstore.AuditResult, error) {
+	start := time.Now()
 	result, _, err := c.client.CI.ImageAuditing(ctx, key, &cos.ImageRecognitionOptions{
 		CIProcess:  "sensitive-content-recognition",
 		DetectType: "porn,terrorist,politics,ads",
 	})
 	if err != nil {
+		metrics.ExternalRequest(metrics.ExtCOS, "audit_image", cosResult(ctx, err), time.Since(start))
 		return objectstore.AuditResult{}, fmt.Errorf("cos: audit %s: %w", key, err)
 	}
+	metrics.ExternalRequest(metrics.ExtCOS, "audit_image", metrics.ExtOK, time.Since(start))
 	sensitive := result.Result == 1
 	for _, info := range []*cos.RecognitionInfo{
 		result.PornInfo, result.TerroristInfo, result.PoliticsInfo, result.AdsInfo,
@@ -144,6 +155,15 @@ func (c *Client) AuditImage(ctx context.Context, key string) (objectstore.AuditR
 		label = "unknown"
 	}
 	return objectstore.AuditResult{Sensitive: sensitive, Label: label}, nil
+}
+
+// cosResult classifies a COS SDK failure for the external-request metric: a
+// caller cancellation or deadline is a timeout, anything else is an error.
+func cosResult(ctx context.Context, err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		return metrics.ExtTimeout
+	}
+	return metrics.ExtError
 }
 
 // PublicURL joins the configured base URL (or the bucket host) with key.

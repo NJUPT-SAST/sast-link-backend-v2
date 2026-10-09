@@ -14,6 +14,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
@@ -455,16 +456,22 @@ func (a Authenticator) authState(ctx context.Context, jti string) (*repository.A
 	if a.AuthStateCache != nil {
 		data, found, err := a.AuthStateCache.GetAuthState(ctx, jti)
 		if err != nil {
+			metrics.AuthStateCache(metrics.AuthCacheErrorGet)
 			slog.WarnContext(ctx, "auth-state cache get failed, using DB", "jti", jti, "error", err)
 		} else if found {
 			var cached repository.AccessAuthState
 			if jsonErr := json.Unmarshal(data, &cached); jsonErr != nil {
+				metrics.AuthStateCache(metrics.AuthCacheErrorDecode)
 				slog.WarnContext(ctx, "auth-state cache entry failed to decode, using DB", "jti", jti, "error", jsonErr)
 			} else if cached.TokenID != "" {
+				metrics.AuthStateCache(metrics.AuthCacheHit)
 				return &cached, nil
 			} else {
+				metrics.AuthStateCache(metrics.AuthCacheErrorDecode)
 				slog.WarnContext(ctx, "auth-state cache entry missing token ID, using DB", "jti", jti)
 			}
+		} else {
+			metrics.AuthStateCache(metrics.AuthCacheMiss)
 		}
 	}
 	state, err := a.Tokens.FindAccessAuthStateByJTI(ctx, jti)
@@ -475,6 +482,7 @@ func (a Authenticator) authState(ctx context.Context, jti string) (*repository.A
 		if data, marshalErr := json.Marshal(state); marshalErr != nil {
 			slog.WarnContext(ctx, "auth-state cache marshal failed", "jti", jti, "error", marshalErr)
 		} else if putErr := a.AuthStateCache.PutAuthState(ctx, jti, data, a.AuthStateTTL); putErr != nil {
+			metrics.AuthStateCache(metrics.AuthCacheErrorPut)
 			slog.WarnContext(ctx, "auth-state cache put failed", "jti", jti, "error", putErr)
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/objectstore"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -114,6 +115,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		return nil, lockErr
 	}
 	if user.State == model.UserStateDeleted {
+		metrics.LoginFailure(metrics.LoginFailClosed)
 		// A closed account answers 40301 like the other account-level paths
 		// (reset, refresh), so the client can route to the closed-account
 		// surface instead of reading it as a password typo. The attempt is not
@@ -374,6 +376,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	// device (if any) must be evicted exactly like a login eviction; revokeEvictedDevice
 	// no-ops on an empty ID (a live-record touch that evicted nothing).
 	s.revokeEvictedDevice(ctx, current.UserID, evicted, s.now(), input.ClientIP, input.UserAgent)
+	metrics.RefreshOutcome(metrics.RefreshPathInternal, metrics.RefreshOK)
 	return &RefreshResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -1153,6 +1156,7 @@ func (s Service) checkEndpointLimit(ctx context.Context, limiter EndpointLimiter
 	}
 	result, err := limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
+		metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 		// Redis-backed throttling has no durable fallback: rejecting every request
 		// would take the endpoint down entirely, so allow the call and rely on
 		// argon2id cost plus alerting during the outage.
@@ -1254,10 +1258,12 @@ func (s Service) checkLoginLock(ctx context.Context, key string) error {
 	}
 	locked, retryAfter, err := s.Failures.IsLocked(ctx, key)
 	if err != nil {
+		metrics.RedisFailOpen(metrics.FailOpenLoginFailure)
 		slog.WarnContext(ctx, "login lockout state unavailable, allowing attempt", "error", err)
 		return nil
 	}
 	if locked {
+		metrics.LoginFailure(metrics.LoginFailLocked)
 		return withRetryAfter(newError(ErrLocked, "登录已被锁定", nil), retryAfter)
 	}
 	return nil
@@ -1267,6 +1273,7 @@ func (s Service) checkLoginLock(ctx context.Context, key string) error {
 // keeps the not-found vs wrong-password distinction in the audit trail, which
 // is finer-grained than the wire's 40106/40105 split.
 func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInput, failureKey string, sentinel *Error, message, reason string, cause error) error {
+	metrics.LoginFailure(reason)
 	locked := false
 	lockTTL := time.Duration(0)
 	if s.Failures != nil {
@@ -1345,6 +1352,7 @@ func (s Service) auditRefresh(
 	revokedReason string,
 	input RefreshInput,
 ) {
+	metrics.RefreshOutcome(metrics.RefreshPathInternal, outcome)
 	errCode := 0
 	if !success {
 		errCode = errcode.CodeAccessTokenInvalid

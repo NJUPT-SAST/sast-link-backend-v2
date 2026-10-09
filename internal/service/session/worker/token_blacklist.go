@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
@@ -26,6 +27,12 @@ type TokenBlacklistOutbox interface {
 	AckMany(ctx context.Context, ids []int64, claimToken string) (int64, error)
 	Fail(ctx context.Context, id int64, claimToken string, attemptedAt, nextDeliveryAt time.Time, deliveryError string) (bool, error)
 	CleanupExpired(ctx context.Context, now time.Time, batchSize int) (int64, error)
+}
+
+// BacklogCounter is the optional backlog probe for the metrics gauge. The
+// production repository implements it; test fakes need not.
+type BacklogCounter interface {
+	CountDue(ctx context.Context, now time.Time) (int64, error)
 }
 
 type AuthStateInvalidator interface {
@@ -117,6 +124,7 @@ func (w TokenBlacklist) processDue(ctx context.Context) time.Duration {
 		deliverableIDs = append(deliverableIDs, entry.ID)
 	}
 	if len(expiredIDs) > 0 {
+		metrics.OutboxDelivery(metrics.OutboxDelivered, len(expiredIDs))
 		w.ackMany(ctx, expiredIDs, claimToken)
 	}
 	if len(deliverable) == 0 {
@@ -142,11 +150,15 @@ func (w TokenBlacklist) processDue(ctx context.Context) time.Duration {
 			if failErr != nil {
 				slog.Error("fail token blacklist outbox", "id", entry.ID, "error", failErr)
 			} else if !updated {
+				metrics.OutboxDelivery(metrics.OutboxLeaseLost, 1)
 				slog.Warn("token blacklist outbox lease lost after delivery failure", "id", entry.ID)
+			} else {
+				metrics.OutboxDelivery(metrics.OutboxFailed, 1)
 			}
 		}
 		return base
 	}
+	metrics.OutboxDelivery(metrics.OutboxDelivered, len(deliverableIDs))
 	w.ackMany(ctx, deliverableIDs, claimToken)
 	return base
 }
@@ -156,17 +168,23 @@ func (w TokenBlacklist) processDue(ctx context.Context) time.Duration {
 func (w TokenBlacklist) ackMany(ctx context.Context, ids []int64, claimToken string) {
 	acked, err := w.Outbox.AckMany(ctx, ids, claimToken)
 	if err != nil {
+		metrics.OutboxDelivery(metrics.OutboxAckShort, len(ids))
 		slog.Error("ack token blacklist outbox batch", "error", err)
 	} else if acked != int64(len(ids)) {
+		metrics.OutboxDelivery(metrics.OutboxAckShort, int(int64(len(ids))-acked))
 		slog.Warn("token blacklist outbox lease lost before ack", "acked", acked, "want", len(ids))
 	}
 }
 
 // cleanupExpired bounds both each statement and each pass. A full pass means
 // backlog may remain, so schedule the next pass promptly rather than in an hour.
+// It also refreshes the backlog gauge through the optional BacklogCounter: a
+// COUNT on the outbox table on the cleanup cadence (default hourly), cheap
+// enough next to the batched deletes it follows.
 func (w TokenBlacklist) cleanupExpired(ctx context.Context) time.Duration {
 	idle := shared.DurationOrDefault(w.CleanupInterval, defaultTokenBlacklistCleanupRate)
 	retry := shared.DurationOrDefault(w.Interval, defaultTokenBlacklistInterval)
+	defer w.refreshBacklog(ctx)
 	cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	for batch := 0; batch < 20; batch++ {
@@ -185,6 +203,27 @@ func (w TokenBlacklist) cleanupExpired(ctx context.Context) time.Duration {
 		}
 	}
 	return retry
+}
+
+// refreshBacklog updates the outbox backlog gauge when the store supports
+// counting. A probe failure logs and leaves the previous value: the gauge is a
+// lagging snapshot either way, and one failed COUNT must not spam the log at
+// the cleanup cadence.
+func (w TokenBlacklist) refreshBacklog(ctx context.Context) {
+	counter, ok := w.Outbox.(BacklogCounter)
+	if !ok {
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	count, err := counter.CountDue(probeCtx, w.now())
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("count token blacklist outbox backlog", "error", err)
+		}
+		return
+	}
+	metrics.SetOutboxBacklog(float64(count))
 }
 
 func (w TokenBlacklist) retryBackoff(attemptCount int) time.Duration {

@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/argon2"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 const (
@@ -69,15 +72,19 @@ func (h PasswordHasher) acquire(ctx context.Context) (func(), error) {
 	if h.Semaphore == nil {
 		return func() {}, nil
 	}
+	waitStart := time.Now()
 	// Honour an already-cancelled context even when a slot is free: a select with
 	// both cases ready picks at random, which would let abandoned work through.
 	if err := ctx.Err(); err != nil {
+		metrics.Argon2Acquire(metrics.Argon2Abandoned, 0)
 		return func() {}, err
 	}
 	select {
 	case h.Semaphore <- struct{}{}:
+		metrics.Argon2Acquire(metrics.Argon2Acquired, time.Since(waitStart))
 		return func() { <-h.Semaphore }, nil
 	case <-ctx.Done():
+		metrics.Argon2Acquire(metrics.Argon2Abandoned, 0)
 		return func() {}, ctx.Err()
 	}
 }
