@@ -11,7 +11,9 @@ package oauthloginredis
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
@@ -118,41 +120,51 @@ type LoginCodeStore struct {
 	Store internalredis.Store
 }
 
-// SaveLoginCode stashes the user this code redeems to.
+// SaveLoginCode stashes the user this code redeems to, bound to its PKCE
+// challenge.
 //
-// The user ID is stored as a raw decimal string rather than a JSON number or a
-// JSON-quoted string: JSON unmarshalling into `any` would yield a float64 and
-// silently lose precision above 2^53, and a plain string round-trips exactly
-// without paying for encoding.
+// The value is `userID:challenge` as a raw string rather than JSON: the user ID
+// in JSON would unmarshal into `any` as a float64 and silently lose precision
+// above 2^53, the challenge is base64url (no colons), so the two halves
+// round-trip exactly without paying for encoding. The separator cannot appear
+// in either half, making the split unambiguous.
 func (s LoginCodeStore) SaveLoginCode(
 	ctx context.Context,
 	code string,
 	userID int64,
+	challenge string,
 	ttl time.Duration,
 ) error {
 	return s.Store.SetRawOneTime(ctx, s.Store.Keys.LoginCode(code),
-		strconv.FormatInt(userID, 10), ttl)
+		strconv.FormatInt(userID, 10)+":"+challenge, ttl)
 }
 
 // ConsumeLoginCode atomically reads and deletes the code, returning the user it
-// belonged to.
+// belonged to and the PKCE challenge it was bound to.
 //
 // GetDel is what enforces single use: two concurrent exchanges of one code race
-// here and exactly one gets a session.
-func (s LoginCodeStore) ConsumeLoginCode(ctx context.Context, code string) (int64, bool, error) {
+// here and exactly one gets a session — and the burn happens before the caller
+// verifies its verifier, so a failed verification cannot be retried.
+func (s LoginCodeStore) ConsumeLoginCode(ctx context.Context, code string) (int64, string, bool, error) {
 	raw, err := s.Store.GetDelRawOneTime(ctx, s.Store.Keys.LoginCode(code))
 	if err != nil {
 		if errors.Is(err, internalredis.ErrMiss) {
-			return 0, false, nil
+			return 0, "", false, nil
 		}
-		return 0, false, err
+		return 0, "", false, err
 	}
-	userID, parseErr := strconv.ParseInt(raw, 10, 64)
-	if parseErr != nil {
-		// The key existed but did not hold a user ID. Treating it as not-found
-		// would tell the user their code expired; this is a corrupted value and
-		// must surface as an error so it is visible.
-		return 0, false, parseErr
+	userPart, challenge, separated := strings.Cut(raw, ":")
+	userID, parseErr := strconv.ParseInt(userPart, 10, 64)
+	if parseErr != nil || !separated {
+		// The key existed but held neither shape this writer produces — an
+		// unbound code from a pre-PKCE deployment mid-rollout or a corrupted
+		// value. Reporting it as not-found would tell the user their code
+		// expired; an unbound code must not redeem, and a corrupted one must be
+		// visible, so both surface as errors.
+		if separated {
+			return 0, "", false, parseErr
+		}
+		return 0, "", false, fmt.Errorf("login code %q: unbound pre-PKCE value", code[:min(len(code), 8)])
 	}
-	return userID, true, nil
+	return userID, challenge, true, nil
 }

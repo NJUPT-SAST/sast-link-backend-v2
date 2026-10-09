@@ -81,16 +81,20 @@ func TestStateStoreMissingKeyIsNotAnError(t *testing.T) {
 }
 
 func TestLoginCodeStoreRoundTripPreservesUserID(t *testing.T) {
+	// A fixed, well-formed S256 challenge (43 base64url characters): the stored
+	// binding must survive the round trip exactly, or redemption would compare
+	// against a mutated digest.
+	const challengeS256 = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 	store := LoginCodeStore{Store: newTestStore(t)}
 	ctx := context.Background()
 
 	// Above 2^53 to prove the ID is not routed through a JSON number, which
 	// would silently lose precision.
 	const userID int64 = 9007199254740993
-	if err := store.SaveLoginCode(ctx, "lc_abc", userID, time.Minute); err != nil {
+	if err := store.SaveLoginCode(ctx, "lc_abc", userID, challengeS256, time.Minute); err != nil {
 		t.Fatalf("SaveLoginCode: %v", err)
 	}
-	got, found, err := store.ConsumeLoginCode(ctx, "lc_abc")
+	got, gotChallenge, found, err := store.ConsumeLoginCode(ctx, "lc_abc")
 	if err != nil {
 		t.Fatalf("ConsumeLoginCode: %v", err)
 	}
@@ -100,7 +104,10 @@ func TestLoginCodeStoreRoundTripPreservesUserID(t *testing.T) {
 	if got != userID {
 		t.Fatalf("user ID = %d, want %d", got, userID)
 	}
-	if _, found, _ = store.ConsumeLoginCode(ctx, "lc_abc"); found {
+	if gotChallenge != challengeS256 {
+		t.Fatalf("challenge = %q, want the stored binding back", gotChallenge)
+	}
+	if _, _, found, _ = store.ConsumeLoginCode(ctx, "lc_abc"); found {
 		t.Fatal("login code survived consumption")
 	}
 }

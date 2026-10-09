@@ -227,10 +227,10 @@ func TestCallbackSuccessAuditLeavesActorClientIDNull(t *testing.T) {
 func TestExchangeCodeAuditKeepsInternalActor(t *testing.T) {
 	service, doubles := newTestService(t)
 	doubles.Users.byID[42] = activeUser(42)
-	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, 0); err != nil {
+	if err := doubles.LoginCodes.SaveLoginCode(context.Background(), "lc_abc", 42, testPKCEChallenge, 0); err != nil {
 		t.Fatalf("seed login code: %v", err)
 	}
-	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc"}); err != nil {
+	if _, err := service.ExchangeCode(context.Background(), ExchangeCodeInput{Code: "lc_abc", CodeVerifier: testPKCEVerifier}); err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
 	entries := auditEntries(doubles.Audits)

@@ -161,6 +161,7 @@ const (
 
 const (
 	ReasonMissingCode             = "missing_code"
+	ReasonInvalidChallenge        = "invalid_challenge"
 	ReasonMissingState            = "missing_state"
 	ReasonProviderDisabled        = "provider_disabled"
 	ReasonStateNotFound           = "state_not_found"

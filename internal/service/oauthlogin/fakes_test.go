@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -259,39 +262,55 @@ func (s *fakeRegistrationStore) ConsumeRegistrationState(
 	return payload, true, nil
 }
 
+// testPKCEVerifier/testPKCEChallenge are the RFC 7636 pair the login tests
+// seed codes with: every SaveLoginCode call binds the challenge, every
+// ExchangeCode call proves the verifier.
+var testPKCEVerifier = strings.Repeat("v", 43)
+
+var testPKCEChallenge = func() string {
+	sum := sha256.Sum256([]byte(testPKCEVerifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}()
+
+type loginCodeRecord struct {
+	userID    int64
+	challenge string
+}
+
 type fakeLoginCodeStore struct {
-	codes   map[string]int64
+	codes   map[string]loginCodeRecord
 	saveErr error
 	readErr error
 }
 
 func newFakeLoginCodeStore() *fakeLoginCodeStore {
-	return &fakeLoginCodeStore{codes: make(map[string]int64)}
+	return &fakeLoginCodeStore{codes: make(map[string]loginCodeRecord)}
 }
 
 func (s *fakeLoginCodeStore) SaveLoginCode(
 	_ context.Context,
 	code string,
 	userID int64,
+	challenge string,
 	_ time.Duration,
 ) error {
 	if s.saveErr != nil {
 		return s.saveErr
 	}
-	s.codes[code] = userID
+	s.codes[code] = loginCodeRecord{userID: userID, challenge: challenge}
 	return nil
 }
 
-func (s *fakeLoginCodeStore) ConsumeLoginCode(_ context.Context, code string) (int64, bool, error) {
+func (s *fakeLoginCodeStore) ConsumeLoginCode(_ context.Context, code string) (int64, string, bool, error) {
 	if s.readErr != nil {
-		return 0, false, s.readErr
+		return 0, "", false, s.readErr
 	}
-	userID, ok := s.codes[code]
+	record, ok := s.codes[code]
 	if !ok {
-		return 0, false, nil
+		return 0, "", false, nil
 	}
 	delete(s.codes, code)
-	return userID, true, nil
+	return record.userID, record.challenge, true, nil
 }
 
 type fakeClientRepository struct {
