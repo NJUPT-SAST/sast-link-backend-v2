@@ -442,9 +442,10 @@ func buildSessionRuntime(ctx context.Context, cfg *config.Config, database *gorm
 		Auth: authenticator,
 		Workers: []backgroundWorker{
 			sessionworker.TokenBlacklist{Outbox: outbox, AuthState: blacklist},
+			sessionworker.DeviceEvictions{Store: store, Tokens: tokens},
 			forgotPasswords,
 			alumniNotifier,
-			worker.Retention{
+			&worker.Retention{
 				Store:              repository.NewRetention(database),
 				Interval:           cfg.RetentionInterval,
 				BatchSize:          cfg.RetentionBatchSize,

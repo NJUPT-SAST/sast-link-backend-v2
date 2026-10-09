@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
@@ -53,6 +55,17 @@ func (f *fakeClients) RotateClientSecret(
 
 func (f *fakeClients) ListClients(_ context.Context) ([]adminclient.Client, error) {
 	return f.listResult, f.listErr
+}
+
+func (f *fakeClients) CountClients(_ context.Context) (repository.ClientCountSummary, error) {
+	var summary repository.ClientCountSummary
+	for _, item := range f.listResult {
+		summary.Total++
+		if item.IsActive {
+			summary.Active++
+		}
+	}
+	return summary, f.listErr
 }
 
 func (f *fakeClients) CreateClient(

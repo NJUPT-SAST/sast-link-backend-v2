@@ -50,6 +50,8 @@ func run() error {
 	}
 
 	setupLogger(cfg.LogLevel)
+	// Posture warnings after the logger is up: see WarnProductionLinkSecurity.
+	cfg.WarnProductionLinkSecurity()
 	// automaxprocs calibrates GOMAXPROCS from the container's cgroup CPU quota; log the effective value.
 	slog.Info("effective GOMAXPROCS", slog.Int("gomaxprocs", runtime.GOMAXPROCS(0)))
 

@@ -49,18 +49,25 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 	if evicted == "" {
 		return
 	}
-	entries, err := s.Tokens.RevokeFamily(ctx, evicted, now)
+	// Detached like oauth's revokeFamilyErr: the eviction fires after the new
+	// session has committed, so a caller that disconnects in the window between
+	// commit and revoke must not leave the sixth family alive with no audit row.
+	// The next cap-exceeding login would self-heal, but until then the user is
+	// over the device limit the console promises.
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	entries, err := s.Tokens.RevokeFamily(revokeCtx, evicted, now)
 	if err != nil {
 		slog.WarnContext(ctx, "revoke evicted device family failed", "user_id", userID, "device_id", evicted, "error", err)
 		return
 	}
-	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
+	shared.DeliverBlacklist(revokeCtx, s.Blacklist, entries, now)
 	if s.Devices != nil {
-		if err := s.Devices.RemoveDevice(ctx, userID, evicted); err != nil {
+		if err := s.Devices.RemoveDevice(revokeCtx, userID, evicted); err != nil {
 			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, nil, true, 0, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
+	if auditErr := s.audit(revokeCtx, &userID, "evict_device", "session", &evicted, nil, true, 0, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
 		slog.Error("audit evict device", "user_id", userID, "device_id", evicted, "error", auditErr)
 	}
 }

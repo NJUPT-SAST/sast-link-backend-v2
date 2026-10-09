@@ -210,7 +210,8 @@ func testRetention(store RetentionStore, now time.Time) Retention {
 func TestRetentionSweepUsesPerTableCutoffs(t *testing.T) {
 	now := time.Now().UTC()
 	store := newFakeRetentionStore()
-	testRetention(store, now).sweep(context.Background())
+	worker := testRetention(store, now)
+	worker.sweep(context.Background())
 
 	want := map[string]time.Time{
 		"oauth_authorizations": now.Add(-time.Hour),
@@ -242,7 +243,8 @@ func TestRetentionSweepUsesPerTableCutoffs(t *testing.T) {
 func TestRetentionSweepSkipsWithoutLock(t *testing.T) {
 	store := newFakeRetentionStore()
 	store.lockResult = false
-	testRetention(store, time.Now().UTC()).sweep(context.Background())
+	worker := testRetention(store, time.Now().UTC())
+	worker.sweep(context.Background())
 
 	if got := len(store.snapshot()); got != 0 {
 		t.Fatalf("delete calls = %d, want 0 when the lock is held elsewhere", got)
@@ -257,7 +259,8 @@ func TestRetentionSweepSkipsWithoutLock(t *testing.T) {
 func TestRetentionSweepReleasesLockAfterDeleteFailure(t *testing.T) {
 	store := newFakeRetentionStore()
 	store.failOn = "oauth_access_tokens"
-	testRetention(store, time.Now().UTC()).sweep(context.Background())
+	worker := testRetention(store, time.Now().UTC())
+	worker.sweep(context.Background())
 
 	if got := store.unlocks(); got != 1 {
 		t.Fatalf("unlock calls = %d, want 1", got)
@@ -271,7 +274,8 @@ func TestRetentionSweepReleasesLockAfterDeleteFailure(t *testing.T) {
 func TestRetentionSweepContinuesPastFailingTable(t *testing.T) {
 	store := newFakeRetentionStore()
 	store.failOn = "oauth_authorizations"
-	testRetention(store, time.Now().UTC()).sweep(context.Background())
+	worker := testRetention(store, time.Now().UTC())
+	worker.sweep(context.Background())
 
 	seen := map[string]bool{}
 	for _, call := range store.snapshot() {
@@ -290,7 +294,8 @@ func TestRetentionSweepContinuesPastFailingTable(t *testing.T) {
 func TestRetentionDrainsUntilPassComesBackShort(t *testing.T) {
 	store := newFakeRetentionStore()
 	store.remaining["audit_logs"] = 25
-	testRetention(store, time.Now().UTC()).sweep(context.Background())
+	worker := testRetention(store, time.Now().UTC())
+	worker.sweep(context.Background())
 
 	// 10 + 10 + 5: the third pass is short and stops the loop.
 	if got := store.callsFor("audit_logs"); got != 3 {
@@ -305,7 +310,8 @@ func TestRetentionDrainsUntilPassComesBackShort(t *testing.T) {
 func TestRetentionDrainStopsAtPassCap(t *testing.T) {
 	store := newFakeRetentionStore()
 	store.remaining["audit_logs"] = 10_000
-	testRetention(store, time.Now().UTC()).sweep(context.Background())
+	worker := testRetention(store, time.Now().UTC())
+	worker.sweep(context.Background())
 
 	if got := store.callsFor("audit_logs"); got != maxRetentionPasses {
 		t.Fatalf("audit_logs delete calls = %d, want the %d-pass cap", got, maxRetentionPasses)
@@ -361,7 +367,8 @@ func TestRetentionRunSweepsBeforeFirstTick(t *testing.T) {
 func TestRetentionDerivedStateAdvancesByCursor(t *testing.T) {
 	store := newFakeRetentionStore()
 	store.recomputeRowsLeft = 25
-	testRetention(store, time.Now().UTC()).sweep(context.Background())
+	worker := testRetention(store, time.Now().UTC())
+	worker.sweep(context.Background())
 
 	calls, cursors := store.recomputeSnapshot()
 	if calls != 3 {
@@ -425,7 +432,8 @@ func TestRetentionDerivedStateFailureStopsPasses(t *testing.T) {
 	store := newFakeRetentionStore()
 	store.recomputeRowsLeft = 1000
 	store.recomputeErr = errors.New("recompute failed")
-	testRetention(store, time.Now().UTC()).sweep(context.Background())
+	worker := testRetention(store, time.Now().UTC())
+	worker.sweep(context.Background())
 
 	calls, _ := store.recomputeSnapshot()
 	if calls != 1 {
@@ -444,10 +452,49 @@ func TestRetentionDerivedStateSkippedWithoutLock(t *testing.T) {
 	store := newFakeRetentionStore()
 	store.lockResult = false
 	store.recomputeRowsLeft = 100
-	testRetention(store, time.Now().UTC()).sweep(context.Background())
+	worker := testRetention(store, time.Now().UTC())
+	worker.sweep(context.Background())
 
 	if calls, _ := store.recomputeSnapshot(); calls != 0 {
 		t.Fatalf("recompute calls = %d, want 0 when the lock is held elsewhere", calls)
+	}
+}
+
+// Three consecutive failing ticks reset the derived-state cursor to the table
+// head: a persistent, position-stable error would otherwise wedge the sweep
+// between the cursor and the end forever — earlier rows never revisited, later
+// rows never reached — with only one Error log per tick as the symptom. Two
+// failures keep the position (a transient error resumes where it stopped);
+// the third restarts the walk.
+func TestRetentionDerivedStateCursorResetsAfterRepeatedFailures(t *testing.T) {
+	store := newFakeRetentionStore()
+	store.recomputeRowsLeft = 1000
+	store.recomputeErr = errors.New("recompute failed")
+	var cursor int64
+	worker := testRetention(store, time.Now().UTC())
+	worker.DerivedStateCursor = &cursor
+
+	worker.sweep(context.Background())
+	if cursor != 0 {
+		t.Fatalf("cursor after first failure = %d, want 0 (start position)", cursor)
+	}
+	// Advance the cursor as a successful tick would, so the wedge scenario is
+	// real: the failure branch keeps a carried position.
+	cursor = 500
+	worker.sweep(context.Background())
+	if cursor != 500 {
+		t.Fatalf("cursor after second failure = %d, want 500 (position kept)", cursor)
+	}
+	worker.sweep(context.Background())
+	if cursor != 0 {
+		t.Fatalf("cursor after third failure = %d, want 0 (head reset)", cursor)
+	}
+	// The counter cleared with the reset: the next failure keeps position again
+	// rather than resetting every other tick.
+	cursor = 700
+	worker.sweep(context.Background())
+	if cursor != 700 {
+		t.Fatalf("cursor after post-reset failure = %d, want 700 (counter restarted)", cursor)
 	}
 }
 
@@ -480,7 +527,8 @@ func (s *fakeAvatarStore) Delete(_ context.Context, key string) error {
 func TestRetentionPurgeUsesItsOwnCutoff(t *testing.T) {
 	now := time.Now().UTC()
 	store := newFakeRetentionStore()
-	testRetention(store, now).sweep(context.Background())
+	worker := testRetention(store, now)
+	worker.sweep(context.Background())
 
 	want := now.Add(-30 * 24 * time.Hour)
 	if len(store.purgeCutoffs) == 0 || !store.purgeCutoffs[0].Equal(want) {

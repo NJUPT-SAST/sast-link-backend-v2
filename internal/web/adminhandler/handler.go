@@ -16,6 +16,7 @@ import (
 // ClientService is the OAuth client registry use cases this handler exposes.
 type ClientService interface {
 	ListClients(ctx context.Context) ([]adminclient.Client, error)
+	CountClients(ctx context.Context) (repository.ClientCountSummary, error)
 	CreateClient(ctx context.Context, input adminclient.CreateClientInput) (*adminclient.CreateClientResult, error)
 	UpdateClient(ctx context.Context, input adminclient.UpdateClientInput) (*adminclient.UpdateClientResult, error)
 	DeleteClient(ctx context.Context, input adminclient.DeleteClientInput) (*adminclient.DeleteClientResult, error)

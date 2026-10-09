@@ -84,3 +84,25 @@ func TestMetricsMiddlewareUnmatchedRouteUsesSentinel(t *testing.T) {
 		t.Fatalf("unmatched counter = %v, want 2", got)
 	}
 }
+
+// TestMetricsMiddlewareNormalizesUnknownMethod asserts an arbitrary method
+// token cannot mint new label values: Go's server accepts any RFC 7230 token
+// as a method, so the raw string is attacker-chosen input and every distinct
+// value would permanently add a label set to both metric families.
+func TestMetricsMiddlewareNormalizesUnknownMethod(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(Metrics())
+
+	for _, method := range []string{"FROB", "WEIRD-method.~x", "x%d"} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequestWithContext(
+			context.Background(), method, "/nope", nil))
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404", method, recorder.Code)
+		}
+	}
+	if got := testutil.ToFloat64(httpRequestsTotal.WithLabelValues(otherMethod, unmatchedRoute, "404")); got != 3 {
+		t.Fatalf("other-method counter = %v, want 3", got)
+	}
+}

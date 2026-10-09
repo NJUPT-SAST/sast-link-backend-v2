@@ -540,7 +540,13 @@ func validateTokenFamilyAppend(transaction *gorm.DB, refresh *model.OAuthRefresh
 		return nil
 	}
 	var existing []model.OAuthRefreshToken
+	// Narrow projection, single round trip: the validation reads only the
+	// revocation flag and the family-consistency columns, so materializing the
+	// hash column (and the rest of the row) for every member of the family was
+	// pure payload on the rotation path.
 	if err := transaction.
+		Model(&model.OAuthRefreshToken{}).
+		Select("revoked_at", "sequence", "client_id", "user_id", "scopes").
 		Where("family_id = ?", refresh.FamilyID).
 		Order("sequence ASC").
 		Find(&existing).Error; err != nil {

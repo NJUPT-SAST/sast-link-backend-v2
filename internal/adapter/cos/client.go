@@ -50,6 +50,15 @@ type Client struct {
 
 // New builds a COS client. The bucket must be in {name}-{appid} form; the SDK
 // rejects anything else, which doubles as a configuration sanity check.
+// objectTransport keeps a real idle-connection pool for bucket traffic; see
+// New for why the SDK's default transport falls short.
+var objectTransport = func() *http.Transport {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.MaxIdleConns = 100
+	base.MaxIdleConnsPerHost = 16
+	return base
+}()
+
 func New(cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.Region) == "" || strings.TrimSpace(cfg.Bucket) == "" ||
 		strings.TrimSpace(cfg.AccessKey) == "" || strings.TrimSpace(cfg.SecretKey) == "" {
@@ -69,10 +78,14 @@ func New(cfg Config) (*Client, error) {
 		}
 		bucketURL = generated
 	}
+	// AuthorizationTransport delegates to its Transport field; nil falls back
+	// to http.DefaultTransport (MaxIdleConnsPerHost=2), so avatar traffic beyond
+	// the second in-flight request rebuilt its TLS handshake each time.
 	sdkClient := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &http.Client{
 		Transport: &cos.AuthorizationTransport{
 			SecretID:  strings.TrimSpace(cfg.AccessKey),
 			SecretKey: strings.TrimSpace(cfg.SecretKey),
+			Transport: objectTransport,
 		},
 		Timeout: cosIOTimeout,
 	})

@@ -156,6 +156,14 @@ func (h Handler) authorize(name model.LoginMethod) gin.HandlerFunc {
 // carry the provider's own error text, which can contain arbitrary content.
 func (h Handler) callback(name model.LoginMethod) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx, cancel := oauthlogin.WithRequestBudget(c.Request.Context())
+		defer cancel()
+		c.Request = c.Request.WithContext(ctx)
+		// Request context cancellation alone does not interrupt a slow body read.
+		// Gin exposes Unwrap, so ResponseController reaches the net/http connection.
+		deadline, _ := ctx.Deadline()
+		_ = http.NewResponseController(c.Writer).SetReadDeadline(deadline)
+
 		result, err := h.Service.Callback(c.Request.Context(), oauthlogin.CallbackInput{
 			Provider:      name,
 			Code:          c.Query("code"),
@@ -296,6 +304,14 @@ type appCodeRequest struct {
 // callback it answers in the envelope, because the caller is the page's own
 // fetch rather than a top-level navigation a redirect could serve.
 func (h Handler) AppCodeLogin(c *gin.Context) {
+	ctx, cancel := oauthlogin.WithRequestBudget(c.Request.Context())
+	defer cancel()
+	c.Request = c.Request.WithContext(ctx)
+	// Request context cancellation alone does not interrupt a slow body read.
+	// Gin exposes Unwrap, so ResponseController reaches the net/http connection.
+	deadline, _ := ctx.Deadline()
+	_ = http.NewResponseController(c.Writer).SetReadDeadline(deadline)
+
 	var request appCodeRequest
 	if err := webutil.DecodeStrictJSON(c, &request); err != nil {
 		response.Error(c, webutil.BadRequest())
@@ -359,6 +375,14 @@ func (h Handler) ExchangeCode(c *gin.Context) {
 // code was issued against.
 func (h Handler) bind(name model.LoginMethod) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx, cancel := oauthlogin.WithRequestBudget(c.Request.Context())
+		defer cancel()
+		c.Request = c.Request.WithContext(ctx)
+		// Request context cancellation alone does not interrupt a slow body read.
+		// Gin exposes Unwrap, so ResponseController reaches the net/http connection.
+		deadline, _ := ctx.Deadline()
+		_ = http.NewResponseController(c.Writer).SetReadDeadline(deadline)
+
 		principal, ok := middleware.PrincipalFrom(c)
 		if !ok {
 			response.Error(c, &response.BusinessError{

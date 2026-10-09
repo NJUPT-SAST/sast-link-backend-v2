@@ -440,6 +440,14 @@ func TestUserRepositoryUniqueViolationConstraintNames(t *testing.T) {
 			if err == nil {
 				t.Fatal("CreateWithProfile() error = nil, want a unique violation")
 			}
+			// The assignment guard now reports student collisions before INSERT.
+			// Still pin the underlying constraint for imports/direct SQL callers.
+			if test.wantConstraint == "user_student_id_key" {
+				if !errors.Is(err, repository.ErrStudentIDExists) {
+					t.Fatalf("assignment error=%v", err)
+				}
+				err = database.Create(test.build()).Error
+			}
 			var pgErr *pgconn.PgError
 			if !errors.As(err, &pgErr) {
 				t.Fatalf("error = %v, want a *pgconn.PgError", err)

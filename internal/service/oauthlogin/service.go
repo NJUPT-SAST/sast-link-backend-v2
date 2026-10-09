@@ -205,6 +205,10 @@ func (s Service) Authorize(ctx context.Context, input AuthorizeInput) (*Authoriz
 // Callback validates the provider callback and splits into the login branch or
 // the registration branch.
 func (s Service) Callback(ctx context.Context, input CallbackInput) (*CallbackResult, error) {
+	ctx, cancelRequest := WithRequestBudget(ctx)
+	defer cancelRequest()
+	ctx, cancelWork := workBudget(ctx)
+	defer cancelWork()
 	// Throttled before any state is consumed: the point of the cap is to keep an
 	// invalid-callback flood from spending state and audit writes.
 	if err := s.checkLimit(ctx, s.CallbackLimiter, "oauth_login_callback", ipSubject(input.ClientIP)); err != nil {
@@ -301,7 +305,9 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 			newDisplayError(ErrStateInvalid, "登录已中断，请重新发起登录", nil))
 	}
 
-	identity, err := client.Exchange(ctx, input.Code, "")
+	exchangeCtx, cancelExchange := context.WithTimeout(ctx, callbackExchangeBudget)
+	identity, err := client.Exchange(exchangeCtx, input.Code, "")
+	cancelExchange()
 	if err != nil {
 		stage, reason, outcome := providerFailureOutcome(err)
 		// A provider outage is the one failure whose state is written back:
@@ -315,7 +321,12 @@ func (s Service) callback(ctx context.Context, input CallbackInput) (*CallbackRe
 		// is single-use at the provider, so a retry that finds the code already
 		// spent lands on the ordinary restart-the-login path.
 		if isRestorableOutcome(outcome) {
-			s.restoreStateAfterOutage(ctx, input.State, statePayload)
+			if !s.restoreStateAfterOutage(ctx, input.State, statePayload) {
+				var e *Error
+				if errors.As(outcome, &e) {
+					e.Restorable = false
+				}
+			}
 		}
 		return nil, tagCallbackFailure(stage, reason, outcome)
 	}
@@ -352,14 +363,18 @@ func isRestorableOutcome(outcome error) bool {
 // restoreStateAfterOutage puts a consumed state back so the browser's own
 // retry can complete the login. Best-effort: when Redis refuses the write the
 // retry simply finds no state and restarts the login, exactly as before.
-func (s Service) restoreStateAfterOutage(ctx context.Context, state string, payload StatePayload) {
+func (s Service) restoreStateAfterOutage(ctx context.Context, state string, payload StatePayload) bool {
+	ctx, cancel := cleanupBudget(ctx)
+	defer cancel()
 	ttl := s.stateTTL()
 	if ttl > oauthStateRestoreTTL {
 		ttl = oauthStateRestoreTTL
 	}
 	if err := s.States.SaveOAuthState(ctx, state, payload, ttl); err != nil {
 		slog.WarnContext(ctx, "restore oauth state after provider outage failed", "error", err)
+		return false
 	}
+	return true
 }
 
 // loginBranch handles a provider account that is already bound: it refreshes the
@@ -461,6 +476,10 @@ func (s Service) registrationBranch(
 // account gets a login_code, an unbound one gets a registration_state — so the
 // two entrances cannot diverge in what they hand the frontend.
 func (s Service) AppCodeLogin(ctx context.Context, input AppCodeLoginInput) (*CallbackResult, error) {
+	ctx, cancelRequest := WithRequestBudget(ctx)
+	defer cancelRequest()
+	ctx, cancelWork := workBudget(ctx)
+	defer cancelWork()
 	// Throttled before the empty-code check, matching ExchangeCode: the caller
 	// controls the input, so a free blank rejection would leave the expensive
 	// path — one provider exchange plus Redis writes — uncapped.
@@ -505,7 +524,9 @@ func (s Service) appCodeLogin(ctx context.Context, input AppCodeLoginInput) (*Ca
 		return nil, tagCallbackFailure(StageRequestValidation, ReasonInvalidChallenge,
 			newError(ErrInvalidInput, "code_challenge 缺失或格式错误（须为 S256 摘要，43 位 base64url）", nil))
 	}
-	identity, err := exchanger.ExchangeAppCode(ctx, input.Code)
+	exchangeCtx, cancelExchange := context.WithTimeout(ctx, callbackExchangeBudget)
+	identity, err := exchanger.ExchangeAppCode(exchangeCtx, input.Code)
+	cancelExchange()
 	if err != nil {
 		stage, reason, outcome := providerFailureOutcome(err)
 		return nil, tagCallbackFailure(stage, reason, outcome)
@@ -667,7 +688,7 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 	if s.Devices != nil {
 		// s.now(), not s.Clock.Now(): Clock is not wired in production, and
 		// s.now() falls back to the system clock instead of dereferencing nil.
-		evicted, err := s.Devices.RegisterDevice(ctx, user.ID, pair.Refresh.FamilyID, input.UserAgent, input.ClientIP, s.now())
+		evicted, err := s.Devices.RegisterDevice(shared.WithDeviceOperation(ctx, pair.Refresh.TokenHash, pair.Refresh.ExpiresAt), user.ID, pair.Refresh.FamilyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}
@@ -692,23 +713,28 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 	if evicted == "" {
 		return
 	}
-	entries, err := s.Tokens.RevokeFamily(ctx, evicted, now)
+	// Detached like the session service's hook: the login has committed, so a
+	// caller disconnecting between commit and revoke must not leave the evicted
+	// family alive past the device cap.
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	entries, err := s.Tokens.RevokeFamily(revokeCtx, evicted, now)
 	if err != nil {
 		slog.WarnContext(ctx, "revoke evicted device family failed", "user_id", userID, "device_id", evicted, "error", err)
 		return
 	}
 	// The shared helper applies the same two filters (expired entry, empty JTI) and
 	// the same fail-open log; this path used to carry its own copy of both.
-	shared.DeliverBlacklist(ctx, s.Blacklist, entries, now)
+	shared.DeliverBlacklist(revokeCtx, s.Blacklist, entries, now)
 	// Drop the displaced record (idempotent): the script already removed the
 	// member, and this closes the gap where a failed Hash delete would leave an
 	// orphan record.
 	if s.Devices != nil {
-		if err := s.Devices.RemoveDevice(ctx, userID, evicted); err != nil {
+		if err := s.Devices.RemoveDevice(revokeCtx, userID, evicted); err != nil {
 			slog.WarnContext(ctx, "remove evicted device record failed", "user_id", userID, "device_id", evicted, "error", err)
 		}
 	}
-	if auditErr := s.audit(ctx, &userID, "evict_device", "session", &evicted, true, 0, s.InternalClientID, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
+	if auditErr := s.audit(revokeCtx, &userID, "evict_device", "session", &evicted, true, 0, s.InternalClientID, clientIP, userAgent, map[string]any{"device_id": evicted}); auditErr != nil {
 		slog.ErrorContext(ctx, "audit evict device", "user_id", userID, "device_id", evicted, "error", auditErr)
 	}
 }

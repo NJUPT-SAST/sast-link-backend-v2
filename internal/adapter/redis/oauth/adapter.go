@@ -4,7 +4,6 @@ package oauthredis
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
@@ -57,34 +56,20 @@ func (s AuthorizeRequestStore) SaveAuthorizeRequest(
 
 // PeekAuthorizeRequest reads a stashed request without consuming it and reports
 // its remaining lifetime, so the consent page can display verified client
-// metadata before the user decides. A missing or already-expired key is reported
-// as not-found rather than an error.
+// metadata before the user decides. Value and TTL come from one atomic Lua
+// read, so a key cannot expire between the two facts and force the caller to
+// guess. A missing or already-expired key is reported as not-found rather than
+// an error.
 func (s AuthorizeRequestStore) PeekAuthorizeRequest(
 	ctx context.Context,
 	requestID string,
 ) (oauth.AuthorizeRequestPayload, time.Duration, bool, error) {
 	var payload oauth.AuthorizeRequestPayload
-	if err := s.Store.PeekOneTime(ctx, s.Store.Keys.AuthorizeRequest(requestID), &payload); err != nil {
-		if errors.Is(err, internalredis.ErrMiss) {
-			return oauth.AuthorizeRequestPayload{}, 0, false, nil
-		}
+	ttl, found, err := s.Store.PeekOneTimeWithTTL(ctx, s.Store.Keys.AuthorizeRequest(requestID), &payload)
+	if err != nil {
 		return oauth.AuthorizeRequestPayload{}, 0, false, err
 	}
-	// PeekOneTime succeeded, so the key exists; guard the TTL edge where it
-	// expired between the GET and the PTTL (PTTL returns a negative duration).
-	//
-	// Result, not Val: Val reports the zero duration on a failed command, which
-	// this guard would read as "expired between the two calls" and turn into a
-	// 400 telling the user to restart a flow that is still perfectly valid. A
-	// Redis error here is a dependency fault and must stay one.
-	ttl, ttlErr := s.Store.Client.PTTL(ctx, s.Store.Keys.AuthorizeRequest(requestID)).Result()
-	if ttlErr != nil {
-		return oauth.AuthorizeRequestPayload{}, 0, false, fmt.Errorf("peek authorize request ttl: %w", ttlErr)
-	}
-	if ttl <= 0 {
-		return oauth.AuthorizeRequestPayload{}, 0, false, nil
-	}
-	return payload, ttl, true, nil
+	return payload, ttl, found, nil
 }
 
 // ConsumeAuthorizeRequest atomically reads and deletes a stashed request.

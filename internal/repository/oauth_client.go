@@ -98,6 +98,26 @@ func (r *OAuthClientRepository) List(ctx context.Context) ([]model.OAuthClient, 
 }
 
 // Create inserts a new client registration.
+// ClientCountSummary carries the overview's two registry numbers without the
+// registry itself: counting does not need to decode every client's redirect
+// URIs and scopes into memory.
+type ClientCountSummary struct {
+	Total  int64
+	Active int64
+}
+
+// CountClients returns the registry's total and active counts in one aggregate.
+func (r *OAuthClientRepository) CountClients(ctx context.Context) (ClientCountSummary, error) {
+	var summary ClientCountSummary
+	err := r.database.WithContext(ctx).Model(&model.OAuthClient{}).
+		Select("COUNT(*) AS total, COUNT(*) FILTER (WHERE is_active) AS active").
+		Scan(&summary).Error
+	if err != nil {
+		return summary, fmt.Errorf("count oauth clients: %w", err)
+	}
+	return summary, nil
+}
+
 func (r *OAuthClientRepository) Create(ctx context.Context, client *model.OAuthClient) error {
 	if client == nil {
 		return fmt.Errorf("%w: client is nil", ErrInvalidArgument)

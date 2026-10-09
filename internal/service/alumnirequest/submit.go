@@ -2,6 +2,7 @@ package alumnirequest
 
 import (
 	"context"
+	"unicode/utf8"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -11,12 +12,27 @@ import (
 // student ID.
 const pendingStudentConstraint = "uq_alumni_requests_pending_student"
 
-// Submit records an account-request ticket. Field validation runs before the
-// captcha, because a Turnstile token is single-use and short-lived: verifying
-// first would burn it on a submission that then fails a length check. The
-// occupancy queries — the real disclosure surface ("does this email or student ID
-// already have an account") — run behind both the captcha and the rate limiter.
+// Submit records an account-request ticket. The IP rate bucket leads every
+// other step, field validation included: this is the service's only
+// unauthenticated write surface, and each later branch writes an audit row, so
+// every one of those writes must sit behind a bound an anonymous caller cannot
+// skip. Field validation still runs before the captcha, because a Turnstile
+// token is single-use and short-lived: verifying first would burn it on a
+// submission that then fails a length check. The occupancy queries — the real
+// disclosure surface ("does this email or student ID already have an account")
+// — run behind both the captcha and the rate limiter.
 func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, error) {
+	// A refused IP writes no audit row: each refusal would itself be an
+	// unbounded anonymous write, which is exactly what the bucket caps. The
+	// student-ID bucket stays behind the captcha — a student ID is only
+	// meaningful once validated, and solving the challenge is what earns the
+	// right to spend that identity's bucket.
+	limitHealthy, err := s.checkLimitHealth(ctx, "ip:"+input.ClientIP)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx = context.WithValue(ctx, submitAuditHealthKey{}, limitHealthy)
 	validated, err := validateSubmit(input)
 	if err != nil {
 		s.auditSubmit(ctx, input, 0, false, errorCode(err), attemptedSubmitDetail(input))
@@ -36,14 +52,9 @@ func (s Service) Submit(ctx context.Context, input SubmitInput) (*SubmitResult, 
 		return nil, mapped
 	}
 
-	// Two buckets: the IP bound stops one host from flooding the queue, and the
-	// student-ID bound stops a distributed retry loop from doing it under one
-	// identity.
-	for _, subject := range []string{"ip:" + input.ClientIP, "student:" + validated.studentID} {
-		if err := s.checkLimit(ctx, subject); err != nil {
-			s.auditSubmit(ctx, input, 0, false, errorCode(err), attemptedSubmitDetail(input))
-			return nil, err
-		}
+	if err := s.checkLimit(ctx, "student:"+validated.studentID); err != nil {
+		s.auditSubmit(ctx, input, 0, false, errorCode(err), attemptedSubmitDetail(input))
+		return nil, err
 	}
 
 	if err := s.checkOccupancy(ctx, validated); err != nil {
@@ -171,9 +182,9 @@ func (s Service) mapCreateError(ctx context.Context, err error) error {
 // durable log.
 func attemptedSubmitDetail(input SubmitInput) map[string]any {
 	return map[string]any{
-		"student_id":     input.StudentID,
-		"login_email":    input.LoginEmail,
-		"personal_email": input.PersonalEmail,
+		"student_id":     boundedAuditField(input.StudentID, 128),
+		"login_email":    boundedAuditField(input.LoginEmail, 320),
+		"personal_email": boundedAuditField(input.PersonalEmail, 320),
 	}
 }
 
@@ -187,6 +198,9 @@ func (s Service) auditSubmit(
 	errCode int,
 	detail map[string]any,
 ) {
+	if healthy, ok := ctx.Value(submitAuditHealthKey{}).(bool); ok && !healthy && !success {
+		return
+	}
 	resourceID := ""
 	if requestID != 0 {
 		resourceID = formatID(requestID)
@@ -201,4 +215,19 @@ func (s Service) auditSubmit(
 		UserAgent:  input.UserAgent,
 		Detail:     detail,
 	})
+}
+
+// During a limiter outage, successful verified submissions retain their audit;
+// attacker-controlled failures do not create unbounded durable rows or logs.
+type submitAuditHealthKey struct{}
+
+func boundedAuditField(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for !utf8.ValidString(value) && len(value) > 0 {
+		value = value[:len(value)-1]
+	}
+	return value
 }

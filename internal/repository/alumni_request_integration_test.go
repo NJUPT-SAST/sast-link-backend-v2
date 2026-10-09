@@ -173,8 +173,8 @@ func TestAlumniRequestSchemaAndReview(t *testing.T) {
 		if err == nil {
 			t.Fatal("ApproveAlumniRequest() with a colliding login email error = nil")
 		}
-		if got := repository.DuplicateConstraint(err); got == "" {
-			t.Fatalf("error = %v, want a unique violation the service can classify", err)
+		if got := repository.DuplicateConstraint(err); got == "" && !errors.Is(err, repository.ErrStudentIDExists) {
+			t.Fatalf("error = %v, want a classified assignment conflict or unique violation", err)
 		}
 
 		// The ticket is still pending, so the reviewer can fix the address and retry.

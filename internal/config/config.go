@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -1027,4 +1028,19 @@ func quoteDSNValue(value string) string {
 // RedisAddr returns the Redis server address in host:port form.
 func (c *Config) RedisAddr() string {
 	return fmt.Sprintf("%s:%s", c.RedisHost, c.RedisPort)
+}
+
+// WarnProductionLinkSecurity logs the deployment-posture warnings that must not
+// be hard errors: production instances running with an unencrypted database
+// link exist today (same-host compose), so this surfaces the risk instead of
+// refusing to boot. Called from main after the logger is ready — a WARN before
+// that goes nowhere visible.
+func (c *Config) WarnProductionLinkSecurity() {
+	if c.AppEnv != "production" {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(c.DBSSLMode)) {
+	case "", "disable", "allow":
+		slog.Warn("DB_SSLMODE is unencrypted in production: credentials and data cross the database link in the clear. Set DB_SSLMODE=require (or verify-full) whenever the database is not on the same trusted host.")
+	}
 }

@@ -43,8 +43,9 @@ type LarkConfig struct {
 // The app_access_token is cached: it is app-level (not per-user), valid for two
 // hours, and identical for every exchange, so re-fetching it on each login costs
 // an outbound round trip and one Lark quota hit per login. The cache lives
-// behind this client's interface — nothing in the callers needs to know. A burst
-// of concurrent misses may each fetch once; the requests are idempotent.
+// behind this client's interface — nothing in the callers needs to know. The
+// cache is protected by a short mutex; concurrent misses share a bounded
+// fetch, while each caller can independently cancel its wait.
 type LarkClient struct {
 	cfg    LarkConfig
 	client Doer
@@ -52,6 +53,7 @@ type LarkClient struct {
 
 	// tokenMu guards the cached app token and its expiry.
 	tokenMu        sync.Mutex
+	tokenFlight    *appTokenFlight
 	appToken       string
 	appTokenExpiry time.Time
 }
@@ -241,10 +243,48 @@ func (c *LarkClient) identityFromUser(user *larkUserData, accessToken, refreshTo
 	}, nil
 }
 
+type appTokenFlight struct {
+	done  chan struct{}
+	token string
+	err   error
+}
+
 func (c *LarkClient) fetchAppAccessToken(ctx context.Context) (string, error) {
-	if token := c.cachedAppToken(); token != "" {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	c.tokenMu.Lock()
+	if token := c.cachedAppTokenLocked(); token != "" {
+		c.tokenMu.Unlock()
 		return token, nil
 	}
+	flight := c.tokenFlight
+	if flight == nil {
+		flight = &appTokenFlight{done: make(chan struct{})}
+		c.tokenFlight = flight
+		// The fetch belongs to the cache, not the first caller. It survives that
+		// caller's cancellation but has its own bound, even when every waiter leaves.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 6*time.Second)
+		go func() {
+			defer cancel()
+			token, err := c.fetchAppToken(fetchCtx)
+			c.tokenMu.Lock()
+			flight.token, flight.err = token, err
+			c.tokenFlight = nil
+			close(flight.done)
+			c.tokenMu.Unlock()
+		}()
+	}
+	c.tokenMu.Unlock()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-flight.done:
+		return flight.token, flight.err
+	}
+}
+
+func (c *LarkClient) fetchAppToken(ctx context.Context) (string, error) {
 	payload, err := json.Marshal(map[string]string{
 		"app_id":     c.cfg.AppID,
 		"app_secret": c.cfg.AppSecret,
@@ -276,19 +316,17 @@ func (c *LarkClient) fetchAppAccessToken(ctx context.Context) (string, error) {
 	if strings.TrimSpace(response.AppAccessToken) == "" {
 		return "", fmt.Errorf("lark app_access_token response is empty: %w", ErrUnexpectedResponse)
 	}
-	expiry := c.now().Add(time.Duration(response.Expire) * time.Second)
 	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
 	c.appToken = response.AppAccessToken
-	c.appTokenExpiry = expiry
-	c.tokenMu.Unlock()
+	c.appTokenExpiry = c.now().Add(time.Duration(response.Expire) * time.Second)
 	return response.AppAccessToken, nil
 }
 
-// cachedAppToken returns the cached app token while it still has
-// refreshAppTokenLeadTime of life left, or "" so the caller re-fetches.
-func (c *LarkClient) cachedAppToken() string {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
+// cachedAppTokenLocked returns the cached app token while it still has
+// refreshAppTokenLeadTime of life left, or "" so the caller re-fetches. The
+// caller must already hold tokenMu.
+func (c *LarkClient) cachedAppTokenLocked() string {
 	if c.appToken == "" || !c.now().Before(c.appTokenExpiry.Add(-refreshAppTokenLeadTime)) {
 		return ""
 	}

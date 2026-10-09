@@ -10,7 +10,11 @@ import (
 const (
 	fixedWindowLimiterScript = `
 local current = redis.call("INCR", KEYS[1])
-if current == 1 then
+-- The TTL heal is not only for the first INCR: a key that lost its TTL (an
+-- operator SET, a restore from persistence) would otherwise count forever,
+-- permanently 429-ing the subject while every further request keeps INCR-ing
+-- a key with no expiry. PTTL < 0 re-arms the window, self-healing the key.
+if current == 1 or redis.call("PTTL", KEYS[1]) < 0 then
   redis.call("PEXPIRE", KEYS[1], ARGV[2])
 end
 local ttl = redis.call("PTTL", KEYS[1])
@@ -43,7 +47,7 @@ func (l FixedWindowLimiter) Allow(ctx context.Context, scope, subject string) (R
 	if windowMilliseconds <= 0 || windowMilliseconds > math.MaxInt {
 		return RateLimitResult{}, fmt.Errorf("rate limit: %w", ErrInvalidArgument)
 	}
-	values, err := l.Client.Eval(ctx, fixedWindowLimiterScript, []string{l.Keys.RateLimit(scope, subject)}, l.Limit, int(windowMilliseconds)).Slice()
+	values, err := evalScript(ctx, l.Client, fixedWindowLimiterScript, []string{l.Keys.RateLimit(scope, subject)}, l.Limit, int(windowMilliseconds)).Slice()
 	if err != nil {
 		return RateLimitResult{}, fmt.Errorf("rate limit eval: %w", err)
 	}

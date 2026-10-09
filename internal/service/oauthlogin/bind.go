@@ -23,6 +23,10 @@ import (
 // the request is already authenticated, so there is no cross-site request to
 // protect against.
 func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error) {
+	ctx, cancelRequest := WithRequestBudget(ctx)
+	defer cancelRequest()
+	ctx, cancelWork := workBudget(ctx)
+	defer cancelWork()
 	if input.UserID <= 0 {
 		return nil, newError(ErrInvalidInput, "身份主体无效", nil)
 	}
@@ -52,7 +56,9 @@ func (s Service) Bind(ctx context.Context, input BindInput) (*BindResult, error)
 		return nil, newError(ErrUserDeleted, "账号已注销", nil)
 	}
 
-	identity, err := client.Exchange(ctx, input.Code, input.RedirectURI)
+	exchangeCtx, cancelExchange := context.WithTimeout(ctx, callbackExchangeBudget)
+	identity, err := client.Exchange(exchangeCtx, input.Code, input.RedirectURI)
+	cancelExchange()
 	if err != nil {
 		return nil, providerError(err)
 	}

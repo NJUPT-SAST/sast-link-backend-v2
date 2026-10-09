@@ -294,10 +294,12 @@ func (s Service) GetUsersByIDs(ctx context.Context, input GetUsersByIDsInput) ([
 	return details, nil
 }
 
-// BatchUpdateUsers applies the requested role and/or department change to every
-// id, independently, and reports each outcome. Deliberately not atomic: each
-// item runs its own UpdateUser transaction with its own guards, so the batch
-// cannot bypass a guard the single-user endpoint honors.
+// batchUpdateGate bounds all batch requests in this process without occupying
+// database connections while queued. Single-user writes still use DB guards.
+var batchUpdateGate = make(chan struct{}, 1)
+
+// BatchUpdateUsers preserves each UpdateUser transaction and its guards, with
+// process-wide backpressure and cancellation between items.
 func (s Service) BatchUpdateUsers(ctx context.Context, input BatchUpdateUsersInput) (*BatchUpdateUsersResult, error) {
 	if s.Users == nil {
 		return nil, newError(ErrInternal, "用户仓储未配置", nil)
@@ -334,8 +336,21 @@ func (s Service) BatchUpdateUsers(ctx context.Context, input BatchUpdateUsersInp
 	}
 	requestedRole := string(role)
 
-	results := make([]BatchUpdateResult, 0, len(ids))
-	for _, id := range ids {
+	// Transactions share the admin guard; parallel workers only occupy DB pool
+	// connections waiting for it. Serialize batch work process-wide, and let
+	// canceled requests leave the queue without acquiring a connection.
+	select {
+	case batchUpdateGate <- struct{}{}:
+		defer func() { <-batchUpdateGate }()
+	case <-ctx.Done():
+		return nil, newError(ErrInternal, "批量更新已取消", ctx.Err())
+	}
+	results := make([]BatchUpdateResult, len(ids))
+	for index := range ids {
+		if ctx.Err() != nil {
+			return nil, newError(ErrInternal, "批量更新已取消", ctx.Err())
+		}
+		id := ids[index]
 		result := BatchUpdateResult{ID: id, Department: requestedDepartment}
 		if roleRequested {
 			result.Role = requestedRole
@@ -355,18 +370,16 @@ func (s Service) BatchUpdateUsers(ctx context.Context, input BatchUpdateUsersInp
 		if input.Department != nil {
 			update.Department = requestedDepartment
 		}
-		_, updateErr := s.UpdateUser(ctx, update)
-		if updateErr == nil {
+		if _, updateErr := s.UpdateUser(ctx, update); updateErr == nil {
 			result.Success = true
-			results = append(results, result)
-			continue
+		} else {
+			// A failure carries the reason and no echo of the requested
+			// changes, since neither was applied.
+			result.Role = ""
+			result.Department = nil
+			result.Reason = batchUpdateReason(updateErr)
 		}
-		// A failure carries the reason and no echo of the requested changes, since
-		// neither was applied.
-		result.Role = ""
-		result.Department = nil
-		result.Reason = batchUpdateReason(updateErr)
-		results = append(results, result)
+		results[index] = result
 	}
 	return &BatchUpdateUsersResult{Results: results}, nil
 }

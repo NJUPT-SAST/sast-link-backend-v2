@@ -102,9 +102,19 @@ func New(cfg Config) (*Client, error) {
 		// An explicit client rather than http.DefaultClient, which has no timeout:
 		// a Cloudflare side that accepts the connection and never answers would
 		// hold the request goroutine until the caller's context is cancelled.
-		httpClient: &http.Client{Timeout: timeout},
+		httpClient: &http.Client{Timeout: timeout, Transport: siteverifyTransport},
 	}, nil
 }
+
+// siteverifyTransport keeps a real idle-connection pool for siteverify calls:
+// http.DefaultTransport parks only two idle connections per host, and every
+// verification beyond the second rebuilt its TLS handshake.
+var siteverifyTransport = func() *http.Transport {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.MaxIdleConns = 100
+	base.MaxIdleConnsPerHost = 16
+	return base
+}()
 
 // siteverifyResponse is the documented response shape. Only the fields this
 // decision needs are decoded.

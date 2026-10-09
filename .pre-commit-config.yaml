@@ -18,7 +18,7 @@ repos:
       # Pin the tool and let Go manage its cache; no global goimports install.
       - id: go-imports
         name: go imports
-        entry: go run golang.org/x/tools/cmd/goimports@v0.43.0 -w
+        entry: go run golang.org/x/tools/cmd/goimports@v0.51.0 -w
         language: system
         types: [go]
         require_serial: true
@@ -33,10 +33,10 @@ repos:
         require_serial: true
 
   # Same linter the CI lint job runs (golangci/golangci-lint-action, also pinned
-  # to v2.12.2), so a commit and CI read the same .golangci.yml with the same
+  # to v2.14.0), so a commit and CI read the same .golangci.yml with the same
   # version. The default hook lints only the change (--new-from-rev HEAD); swap
   # the id for golangci-lint-full to run the whole module exactly like CI does.
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.12.2
+    rev: v2.14.0
     hooks:
       - id: golangci-lint

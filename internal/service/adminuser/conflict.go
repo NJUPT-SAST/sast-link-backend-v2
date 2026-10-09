@@ -2,6 +2,7 @@ package adminuser
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -32,6 +33,9 @@ const (
 // for anything that is not a duplicate. An unmapped constraint is logged rather
 // than guessed at: reporting the wrong field is worse than a generic conflict.
 func (s Service) mapUniqueViolation(ctx context.Context, err error, internalMessage string) error {
+	if errors.Is(err, repository.ErrStudentIDExists) {
+		return newError(ErrStudentIDOccupied, "学号或校园邮箱前缀已被占用", err)
+	}
 	switch constraint := duplicateConstraint(err); constraint {
 	case userLoginEmailConstraint, userLoginEmailIsIdentityConstraint,
 		identityProviderIDNotLoginEmailConstraint, identityProviderProviderIDConstraint:

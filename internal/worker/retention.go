@@ -21,6 +21,9 @@ const (
 	// the connection pool that live traffic needs. Whatever is left over is picked
 	// up next tick, so the backlog still drains, just spread out.
 	maxRetentionPasses = 20
+	// maxDerivedStateFailures is the consecutive-tick threshold that resets the
+	// derived-state cursor to the table head; see Retention.derivedFailures.
+	maxDerivedStateFailures = 3
 )
 
 // RetentionStore runs the periodic maintenance the service needs from PostgreSQL:
@@ -89,6 +92,13 @@ type Retention struct {
 	// remove); a failed delete is a logged orphan, never a failed purge.
 	AvatarStore objectstore.ObjectStore
 	Clock       auth.Clock
+	// derivedFailures counts consecutive ticks whose derived-state recompute
+	// errored without advancing. Past the threshold the cursor resets to the
+	// table head: a persistent, position-stable error (bad row shape, planner
+	// refusal) would otherwise wedge the sweep between the cursor and the end
+	// forever — earlier rows never revisited, later rows never reached — with
+	// only one Error log per tick as the symptom.
+	derivedFailures int
 	// DerivedStateCursor carries the user.state recompute position across ticks.
 	// It is optional (nil restarts every tick, which is correct for any table that
 	// fits in one sweep) and exists so a table larger than maxRetentionPasses x
@@ -100,7 +110,7 @@ type Retention struct {
 }
 
 // Run sweeps on a ticker until ctx is canceled.
-func (w Retention) Run(ctx context.Context) error {
+func (w *Retention) Run(ctx context.Context) error {
 	if err := w.validate(); err != nil {
 		return err
 	}
@@ -123,7 +133,7 @@ func (w Retention) Run(ctx context.Context) error {
 // Failures are logged and abandoned until the next tick rather than returned:
 // retention falling behind degrades storage, while returning an error from Run
 // would take the whole API process down with it.
-func (w Retention) sweep(ctx context.Context) {
+func (w *Retention) sweep(ctx context.Context) {
 	acquired, err := w.Store.TryLock(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -187,12 +197,26 @@ func (w Retention) sweep(ctx context.Context) {
 		if recErr != nil {
 			if ctx.Err() == nil {
 				slog.Error("retention sweep derived state", "error", recErr)
+				w.derivedFailures++
+				if w.derivedFailures >= maxDerivedStateFailures {
+					// Wedge breaker: three consecutive failing ticks at a stuck
+					// position mean the cursor itself is the trap, so restart the
+					// walk from the table head — the failing batch will error again
+					// (visibly, every tick) instead of quietly starving every row
+					// past it.
+					slog.Error("retention derived-state cursor reset after repeated failures",
+						"cursor", cursor, "failures", w.derivedFailures)
+					w.rememberDerivedStateCursor(0)
+					w.derivedFailures = 0
+					return
+				}
 			}
 			// Resume from where this tick got to rather than re-reading the same
 			// head forever while a later table stays unreachable.
 			w.rememberDerivedStateCursor(cursor)
 			return
 		}
+		w.derivedFailures = 0
 		if next == 0 {
 			w.rememberDerivedStateCursor(0)
 			return
@@ -209,7 +233,7 @@ func (w Retention) sweep(ctx context.Context) {
 
 // rememberDerivedStateCursor stores the sweep position for the next tick when a
 // caller supplied a place to keep it.
-func (w Retention) rememberDerivedStateCursor(cursor int64) {
+func (w *Retention) rememberDerivedStateCursor(cursor int64) {
 	if w.DerivedStateCursor != nil {
 		*w.DerivedStateCursor = cursor
 	}
@@ -261,7 +285,7 @@ func (w Retention) purgeDeletedUsers(ctx context.Context, now time.Time) {
 }
 
 // drain deletes in batches until a pass comes back short or the pass cap is hit.
-func (w Retention) drain(
+func (w *Retention) drain(
 	ctx context.Context,
 	table string,
 	cutoff time.Time,
@@ -294,7 +318,7 @@ func (w Retention) drain(
 		"table", table, "deleted", total, "cutoff", cutoff, "passes", maxRetentionPasses)
 }
 
-func (w Retention) validate() error {
+func (w *Retention) validate() error {
 	if w.Store == nil {
 		return fmt.Errorf("retention worker requires a store")
 	}
@@ -313,14 +337,14 @@ func (w Retention) validate() error {
 	return nil
 }
 
-func (w Retention) batchSize() int {
+func (w *Retention) batchSize() int {
 	if w.BatchSize > 0 {
 		return w.BatchSize
 	}
 	return defaultRetentionBatchSize
 }
 
-func (w Retention) now() time.Time {
+func (w *Retention) now() time.Time {
 	clock := w.Clock
 	if clock == nil {
 		clock = auth.SystemClock

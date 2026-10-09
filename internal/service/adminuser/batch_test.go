@@ -117,8 +117,8 @@ func TestGetUsersByIDsMapsRepositoryFailure(t *testing.T) {
 func TestBatchUpdateUsersAppliesEachIdIndependently(t *testing.T) {
 	h := newHarness(t)
 	h.users.findResult = targetUser(model.UserRoleFreshman, model.UserStateNJUPTer)
-	// First call fails with a not-found, the rest succeed.
-	h.users.updateErrs = []error{repository.ErrNotFound, nil, nil}
+	// Id 1 fails with a not-found, the rest succeed.
+	h.users.updateErrByID = map[int64]error{1: repository.ErrNotFound}
 
 	result, err := h.service.BatchUpdateUsers(context.Background(), BatchUpdateUsersInput{
 		IDs:         []int64{1, 2, 3},
@@ -151,8 +151,13 @@ func TestBatchUpdateUsersAppliesEachIdIndependently(t *testing.T) {
 	if h.users.updateInput.Role == nil || *h.users.updateInput.Role != "member" {
 		t.Fatalf("last update role = %v, want member", h.users.updateInput.Role)
 	}
-	if h.users.updatedUserID != 3 {
-		t.Fatalf("last update target = %d, want 3", h.users.updatedUserID)
+	// The batch overlaps its per-item calls, so "the last update's target" is
+	// no longer a stable fact; what the contract needs is that every id in the
+	// request reached the repository exactly once.
+	for _, id := range []int64{1, 2, 3} {
+		if !h.users.updatedTargets[id] {
+			t.Fatalf("id %d never reached the repository", id)
+		}
 	}
 }
 

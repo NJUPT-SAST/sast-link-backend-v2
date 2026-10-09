@@ -190,6 +190,9 @@ func (r *AlumniRequestRepository) ApproveAlumniRequest(
 
 	var approved model.AlumniRequest
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := lockIdentityAssignment(transaction); err != nil {
+			return err
+		}
 		request, err := lockPendingRequest(transaction, requestID)
 		if err != nil {
 			return err
@@ -264,6 +267,9 @@ func (r *AlumniRequestRepository) ApproveAlumniRequestRecover(
 
 	var approved model.AlumniRequest
 	err := r.database.WithContext(ctx).Transaction(func(transaction *gorm.DB) error {
+		if err := lockIdentityAssignment(transaction); err != nil {
+			return err
+		}
 		request, err := lockPendingRequest(transaction, requestID)
 		if err != nil {
 			return err
@@ -272,6 +278,15 @@ func (r *AlumniRequestRepository) ApproveAlumniRequestRecover(
 			return fmt.Errorf("%w: recovery approval on a %s ticket", ErrInvalidArgument, request.Intent)
 		}
 
+		// Historic imports may contain folded duplicates. Never choose an arbitrary
+		// account for recovery when the normalized identity is ambiguous.
+		var owners int64
+		if countErr := transaction.Model(&model.User{}).Where("lower(btrim(student_id)) = lower(btrim(?))", request.StudentID).Count(&owners).Error; countErr != nil {
+			return countErr
+		}
+		if owners > 1 {
+			return ErrStudentIDExists
+		}
 		var target model.User
 		err = transaction.
 			Clauses(clause.Locking{Strength: "UPDATE"}).
