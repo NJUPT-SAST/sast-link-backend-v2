@@ -1199,10 +1199,11 @@ paths:
       description: >
         每个用户只能绑定一个 GitHub 账号，每个 GitHub 账号只能绑定一个用户。
 
-        绑定回调与登录回调不同，但 GitHub OAuth App 只能注册一条 callback URL，
-        且要求 host 与端口精确匹配、path 必须位于已注册路径之下。因此两条回调必须
-        共享一个已注册的父路径：生产上绑定页放在 /v2/oauth/bind/github，与登录回调
-        同处 /v2/oauth 之下并注册该前缀；本地利用 loopback 免端口匹配的例外注册
+        绑定回调与登录回调不同：登录回调 /v2/oauth/github/callback 由本服务消费，
+        绑定回调是前端页面 https://link.sast.fun/oauth/bind/github（不带 /v2 前缀，
+        经反代兜底规则直归前端）。GitHub OAuth App 注册这两条精确回调，wildcard
+        matching 关闭，redirect_uri 须与注册值完全相等；飞书两条在 Lark 开放平台的
+        重定向白名单精确登记。本地利用 loopback 免端口匹配的例外注册
         http://127.0.0.1/oauth。详见 docs/runbooks/caddy-reverse-proxy.md。
 
         为绑定单独开一个 OAuth App 行不通：Bind() 用 OAUTH_GITHUB_CLIENT_ID/SECRET
