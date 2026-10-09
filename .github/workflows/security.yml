@@ -19,7 +19,7 @@ concurrency:
 env:
   # No GO_VERSION: setup-go reads go-version-file: go.mod below, so the toolchain
   # is declared once. See ci.yml's toolchain job for the Dockerfile side.
-  GOVULNCHECK_VERSION: "v1.6.0"
+  GOVULNCHECK_VERSION: "v1.8.0"
 
 jobs:
   gosec:
@@ -41,7 +41,7 @@ jobs:
           cache: true
 
       - name: Run gosec
-        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -fmt text ./...
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 -fmt text ./...
 
   govulncheck:
     name: govulncheck
