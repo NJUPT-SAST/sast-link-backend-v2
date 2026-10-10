@@ -7,6 +7,8 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 // maxOpenConns caps the GORM pool. PostgreSQL's default max_connections is 100
@@ -32,6 +34,12 @@ func Open(dsn string) (*gorm.DB, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
+	}
+	// Statement metrics ride the callback chain so every caller of Open — the
+	// API, migrations, integration tests — gets the same instrumentation without
+	// each composition root remembering it.
+	if useErr := db.Use(metrics.NewGormPlugin()); useErr != nil {
+		return nil, fmt.Errorf("register statement metrics plugin: %w", useErr)
 	}
 	sqlDB, err := db.DB()
 	if err != nil {

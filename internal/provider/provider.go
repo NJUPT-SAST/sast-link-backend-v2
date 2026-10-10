@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 // Sentinel errors describe the failure classes a caller must distinguish. The
@@ -191,8 +193,10 @@ func doJSON(ctx context.Context, client Doer, req *http.Request, stage string, t
 	ctx, cancel := context.WithTimeout(ctx, httpIOTimeout)
 	defer cancel()
 
+	start := time.Now()
 	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
+		recordProviderRequest(stage, err, start)
 		return contextError(ctx, stage, err)
 	}
 	defer func() {
@@ -204,9 +208,11 @@ func doJSON(ctx context.Context, client Doer, req *http.Request, stage string, t
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
+		recordProviderRequest(stage, err, start)
 		return contextError(ctx, stage+": read body", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		recordProviderRequest(stage, ErrUnexpectedResponse, start)
 		// The body often explains the rejection; keep a bounded excerpt so the
 		// failure is diagnosable without logging a full payload. The status is
 		// preserved in the error so a caller can separate "provider refused
@@ -218,9 +224,38 @@ func doJSON(ctx context.Context, client Doer, req *http.Request, stage string, t
 		}
 	}
 	if err := json.Unmarshal(body, target); err != nil {
+		recordProviderRequest(stage, ErrUnexpectedResponse, start)
 		return fmt.Errorf("%s: decode body: %w", stage, ErrUnexpectedResponse)
 	}
+	recordProviderRequest(stage, nil, start)
 	return nil
+}
+
+// recordProviderRequest maps one doJSON attempt onto the external-request
+// metrics. The dependency is derived from the stage prefix: every stage
+// literal in this package starts with its provider's name ("github …",
+// "lark …"), and an unknown prefix records nothing rather than silently
+// minting a new dependency label.
+func recordProviderRequest(stage string, err error, start time.Time) {
+	dependency := ""
+	switch {
+	case strings.HasPrefix(stage, "github "):
+		dependency = metrics.ExtProviderGithub
+	case strings.HasPrefix(stage, "lark "):
+		dependency = metrics.ExtProviderLark
+	default:
+		return
+	}
+	result := metrics.ExtError
+	switch {
+	case err == nil:
+		result = metrics.ExtOK
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		result = metrics.ExtTimeout
+	case isClientRejection(err):
+		result = metrics.ExtRejected
+	}
+	metrics.ExternalRequest(dependency, stage, result, time.Since(start))
 }
 
 // statusError carries the HTTP status alongside an ErrUnexpectedResponse wrap so

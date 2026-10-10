@@ -10,6 +10,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/mailer"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/objectstore"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
@@ -114,6 +115,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		return nil, lockErr
 	}
 	if user.State == model.UserStateDeleted {
+		metrics.LoginFailure(metrics.LoginFailClosed)
 		// A closed account answers 40301 like the other account-level paths
 		// (reset, refresh), so the client can route to the closed-account
 		// surface instead of reading it as a password typo. The attempt is not
@@ -187,6 +189,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	if s.Devices != nil {
 		evicted, err := s.Devices.RegisterDevice(shared.WithDeviceOperation(ctx, pair.refresh.TokenHash, pair.refresh.ExpiresAt), user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}
 		// Eviction revokes the displaced family even when the record write
@@ -194,6 +197,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		// invisible, unmanageable ghost session.
 		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	}
+	metrics.LoginSuccess(metrics.LoginMethodPassword)
 	return &LoginResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -255,6 +259,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			// can no longer authenticate. Fail-open — the revoke already committed.
 			if s.Devices != nil {
 				if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+					metrics.RedisFailOpen(metrics.FailOpenDevice)
 					slog.WarnContext(ctx, "remove device on replay revoke failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 				}
 			}
@@ -273,6 +278,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		// is authoritative in the DB.
 		if s.Devices != nil {
 			if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+				metrics.RedisFailOpen(metrics.FailOpenDevice)
 				slog.WarnContext(ctx, "remove device on expired refresh failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 			}
 		}
@@ -321,6 +327,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	if s.Devices != nil {
 		evicted, err = s.Devices.TouchDevice(shared.WithDeviceOperation(ctx, pair.refresh.TokenHash, pair.refresh.ExpiresAt), current.UserID, current.FamilyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "touch device failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", err)
 		}
 	}
@@ -362,6 +369,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			// stops showing a session that can no longer authenticate.
 			if s.Devices != nil {
 				if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+					metrics.RedisFailOpen(metrics.FailOpenDevice)
 					slog.WarnContext(ctx, "remove device on rotation failure failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 				}
 			}
@@ -374,6 +382,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	// device (if any) must be evicted exactly like a login eviction; revokeEvictedDevice
 	// no-ops on an empty ID (a live-record touch that evicted nothing).
 	s.revokeEvictedDevice(ctx, current.UserID, evicted, s.now(), input.ClientIP, input.UserAgent)
+	metrics.RefreshOutcome(metrics.RefreshPathInternal, metrics.RefreshOK)
 	return &RefreshResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -484,6 +493,7 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 	// a leftover record expires on its own.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveDevice(ctx, input.PrincipalUserID, familyID); err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "remove device on logout failed", "user_id", input.PrincipalUserID, "device_id", familyID, "error", err)
 		}
 	}
@@ -814,6 +824,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if s.Devices != nil {
 		evicted, err := s.Devices.RegisterDevice(shared.WithDeviceOperation(ctx, pair.refresh.TokenHash, pair.refresh.ExpiresAt), user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}
 		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
@@ -830,6 +841,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		slog.ErrorContext(ctx, "reload registered user, answering from the in-memory row", "user_id", user.ID, "error", reloadErr)
 		reloaded = user
 	}
+	metrics.LoginSuccess(metrics.LoginMethodRegister)
 	return &RegisterResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -936,6 +948,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	// device set must not survive.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "remove all devices on password reset failed", "user_id", user.ID, "error", err)
 		}
 	}
@@ -995,6 +1008,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	// record cannot authenticate anything.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "remove all devices on password change failed", "user_id", user.ID, "error", err)
 		}
 	}
@@ -1153,6 +1167,7 @@ func (s Service) checkEndpointLimit(ctx context.Context, limiter EndpointLimiter
 	}
 	result, err := limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
+		metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 		// Redis-backed throttling has no durable fallback: rejecting every request
 		// would take the endpoint down entirely, so allow the call and rely on
 		// argon2id cost plus alerting during the outage.
@@ -1175,6 +1190,7 @@ func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) er
 		result, err := s.EmailLimiter.Allow(ctx, "send_email", "email:"+validate.StripSubaddress(email))
 		switch {
 		case err != nil:
+			metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 			slog.WarnContext(ctx, "email limiter unavailable, allowing request", "error", err)
 		case !result.Allowed:
 			return withRetryAfter(newError(ErrRateLimited, "请求过于频繁", nil), result.RetryAfter)
@@ -1184,6 +1200,7 @@ func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) er
 		result, err := s.EmailIPLimiter.Allow(ctx, "send_email", "ip:"+strings.TrimSpace(clientIP))
 		switch {
 		case err != nil:
+			metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 			slog.WarnContext(ctx, "email ip limiter unavailable, allowing request", "error", err)
 		case !result.Allowed:
 			return withRetryAfter(newError(ErrRateLimited, "请求过于频繁", nil), result.RetryAfter)
@@ -1199,14 +1216,18 @@ func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) er
 func (s Service) verifyCode(ctx context.Context, purpose, email, code string) error {
 	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, validate.StripSubaddress(email), code)
 	if err != nil {
+		metrics.VerificationCode(purpose, metrics.VerifyCodeUnavailable)
 		return newError(ErrDependencyUnavailable, "校验验证码失败", err)
 	}
 	if matched {
+		metrics.VerificationCode(purpose, metrics.VerifyCodeOK)
 		return nil
 	}
 	if remaining <= 0 {
+		metrics.VerificationCode(purpose, metrics.VerifyCodeExpired)
 		return newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
 	}
+	metrics.VerificationCode(purpose, metrics.VerifyCodeWrong)
 	return newError(ErrVerificationCodeWrong, "验证码错误", nil)
 }
 
@@ -1254,10 +1275,12 @@ func (s Service) checkLoginLock(ctx context.Context, key string) error {
 	}
 	locked, retryAfter, err := s.Failures.IsLocked(ctx, key)
 	if err != nil {
+		metrics.RedisFailOpen(metrics.FailOpenLoginFailure)
 		slog.WarnContext(ctx, "login lockout state unavailable, allowing attempt", "error", err)
 		return nil
 	}
 	if locked {
+		metrics.LoginFailure(metrics.LoginFailLocked)
 		return withRetryAfter(newError(ErrLocked, "登录已被锁定", nil), retryAfter)
 	}
 	return nil
@@ -1267,6 +1290,7 @@ func (s Service) checkLoginLock(ctx context.Context, key string) error {
 // keeps the not-found vs wrong-password distinction in the audit trail, which
 // is finer-grained than the wire's 40106/40105 split.
 func (s Service) failLogin(ctx context.Context, user *model.User, input LoginInput, failureKey string, sentinel *Error, message, reason string, cause error) error {
+	metrics.LoginFailure(reason)
 	locked := false
 	lockTTL := time.Duration(0)
 	if s.Failures != nil {
@@ -1345,6 +1369,7 @@ func (s Service) auditRefresh(
 	revokedReason string,
 	input RefreshInput,
 ) {
+	metrics.RefreshOutcome(metrics.RefreshPathInternal, outcome)
 	errCode := 0
 	if !success {
 		errCode = errcode.CodeAccessTokenInvalid

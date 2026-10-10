@@ -25,12 +25,6 @@ GET  /health
 link.sast.fun {
  encode zstd gzip
 
- # 第三方绑定回调必须先于 /v2/* 声明其意图：它是前端页面，不是 API 路由。
- # 后端没有 /oauth/bind/* 这个路由，落到后端只会得到 404。
- handle /v2/oauth/bind/* {
-  reverse_proxy frontend:3000
- }
-
  # /metrics 只允许内网抓取：匿名公网可达会暴露路由清单、每路由 QPS/延迟
  # 与错误分布（撞库与限流探测的地图）。与 /v2/debug 同一道路径级防线；
  # 抓取走 SSH 本地转发或内网监听，不经过公网路径。单路径 matcher 比
@@ -66,32 +60,28 @@ Caddy 的 `handle` 块是**互斥**的——只有第一个匹配的块会被执
 
 官方给出的例子：`/foobar` 比 `/foo` 更具体；`/foo` 比 `/foo*` 更具体；`/foo/*` 比 `/foo*` 更具体。
 
-所以 `/v2/oauth/bind/*` 一定排在 `/v2/*` 之前，无 matcher 的 `handle` 排在最后。上面的书写顺序与实际生效顺序一致，便于阅读，但即使调换书写顺序行为也不变——不依赖书写顺序是这个方案可靠的原因。
+所以 `/v2/metrics` 一定排在 `/v2/*` 之前，无 matcher 的 `handle` 排在最后。上面的书写顺序与实际生效顺序一致，便于阅读，但即使调换书写顺序行为也不变——不依赖书写顺序是这个方案可靠的原因。
 
 如果确实需要强制按书写顺序执行，用 `route` 块包裹：`route` 内部忽略全部排序，严格按字面顺序运行。这里不需要。
 
 ## GitHub OAuth App 的回调注册
 
-这条特例规则的目的是让登录与绑定两个回调**共享一个已注册的父路径**。
-
 | 用途 | 地址 | 由谁处理 |
 |------|------|----------|
-| 登录回调 | `https://link.sast.fun/v2/oauth/github/callback` | 后端（反代剥前缀） |
-| 绑定回调 | `https://link.sast.fun/v2/oauth/bind/github` | 前端页面 |
+| 登录回调 | `https://link.sast.fun/v2/oauth/github/callback` | 后端（`handle_path /v2/*` 剥前缀） |
+| 绑定回调 | `https://link.sast.fun/oauth/bind/github` | 前端页面（不带 `/v2`，落兜底 `handle` 归前端，无需代理特判） |
 
-GitHub OAuth App 只允许注册**一条** Authorization callback URL，匹配规则是：host（不含子域）与端口必须精确相等，请求路径必须是已注册路径的**子目录**。官方示例表中，注册 `http://example.com/path` 时 `http://example.com/` 会被拒绝——所以是「等于或位于其下」，不是「同 host 即可」。
-
-把绑定页放进 `/v2/oauth/bind/` 后，两条回调的公共父路径是 `/v2/oauth`，于是注册：
+GitHub OAuth App 注册两条精确回调，wildcard matching 关闭：
 
 ```
-Authorization callback URL: https://link.sast.fun/v2/oauth
+Authorization callback URL:
+  https://link.sast.fun/v2/oauth/github/callback   (登录)
+  https://link.sast.fun/oauth/bind/github          (绑定)
 ```
 
-两条回调都明确是它的子目录，落在文档给出的示例形状内。
+关闭 wildcard 后 redirect_uri 必须与某条注册值**完全相等**（host、端口、路径逐字比对），授权码只可能落到这两条路径。GitHub 支持注册多条 callback URL，未显式传 redirect_uri 时回落到第一条。飞书侧的登录/绑定两条地址登记在 Lark 开放平台的重定向白名单，同为精确匹配。
 
-**不要注册根路径 `https://link.sast.fun`。** GitHub 的文档没有为「注册值本身是根路径」给出任何示例或文字说明，按规则字面推断似乎可行，但这属于未承诺的行为。此外根路径注册意味着该域下**任何**路径都能接收授权码，范围远大于必要。
-
-飞书没有这个限制，其重定向 URL 支持配置多条，把登录与绑定两条地址都填进去即可；不过与 GitHub 保持同一套路径布局可以减少两边配置的差异。
+绑定回调不带 `/v2` 前缀是刻意的：它落在代理的兜底规则里，任何 `/v2` 之外的路径都直归前端，因此不需要为它维护代理特判。
 
 ## 本地开发不需要反代
 
@@ -113,7 +103,7 @@ Authorization callback URL: http://127.0.0.1/oauth
 - **写 `127.0.0.1`，不要写 `localhost`。** 该例外只对字面的 loopback 地址成立，`localhost` 拿不到端口豁免。
 - **路径规则依然生效。** 端口被豁免，路径不被豁免，所以两条回调仍然要落在注册路径 `/oauth` 之下。
 
-这个端口豁免**仅限本地**。生产环境没有端口豁免（两条回调本来都在 443），依赖的是上文那条 Caddy 分流规则。两套配置的共同点是「路径共享一个已注册的父目录」——这部分在两处都成立，本地验证的正是它。
+这个端口豁免**仅限本地**；生产是两条精确回调、无 wildcard（见上节）。本地的绑定页与生产同路径布局（`/oauth/bind/github`），切换环境只改 host 与端口。
 
 ## 对应的环境变量
 
@@ -143,7 +133,7 @@ OAUTH_LOGIN_ERROR_REDIRECT=http://127.0.0.1:3000/oauth/error
 OAUTH_GITHUB_BIND_REDIRECT_URI=http://127.0.0.1:3000/oauth/bind/github
 ```
 
-前端绑定页在调用 `POST /v2/user/identities/github` 时，需要把 `redirect_uri=https://link.sast.fun/v2/oauth/bind/github` 作为 query 参数一并传入——RFC 6749 §4.1.3 要求 token 交换重复签发 code 时使用的那个回调地址。省略时后端会回退到 `OAUTH_GITHUB_REDIRECT_URI`，那是登录回调，与绑定 code 不匹配，provider 会以 `invalid_grant` 拒绝。
+前端绑定页在调用 `POST /v2/user/identities/github` 时，需要把 `redirect_uri=https://link.sast.fun/oauth/bind/github` 作为 query 参数一并传入——RFC 6749 §4.1.3 要求 token 交换重复签发 code 时使用的那个回调地址。省略时后端会回退到 `OAUTH_GITHUB_REDIRECT_URI`，那是登录回调，与绑定 code 不匹配，provider 会以 `invalid_grant` 拒绝。
 
 ## 验证
 
@@ -158,16 +148,21 @@ curl -s https://link.sast.fun/v2/health
 curl -s https://link.sast.fun/v2/.well-known/openid-configuration | jq '.issuer, .token_endpoint'
 # 期望 "https://link.sast.fun/v2" 与 "https://link.sast.fun/v2/oauth/token"
 
-# 3. 绑定路径走前端，不是后端的 404
-curl -sI https://link.sast.fun/v2/oauth/bind/github | head -1
+# 3. 绑定路径走前端（兜底规则），不是后端的 404
+curl -sI https://link.sast.fun/oauth/bind/github | head -1
 # 期望前端返回的 200，而非后端 JSON 形态的 404
 
-# 4. 登录跳转可用
-curl -sI "https://link.sast.fun/v2/oauth/github" | grep -i location
+# 4. 登录跳转可用（authorize 必带 S256 code_challenge，缺参得 400）
+curl -s -o /dev/null -w '%{redirect_url}'   "https://link.sast.fun/v2/oauth/github?code_challenge=<任意S256摘要>&code_challenge_method=S256"
 # 期望 302 至 github.com/login/oauth/authorize，且 redirect_uri 为 /v2/oauth/github/callback
+
+# 5. /v2/metrics 被代理层拦截
+curl -sI https://link.sast.fun/v2/metrics | head -1
+# 期望 404
 ```
 
-第 3 项是这条特例规则的唯一目的，务必实测。如果它返回了 `{"code":40400,...}` 形态的响应，说明请求落到了后端，`handle /v2/oauth/bind/*` 没有生效。
+第 3 项验证兜底规则确实接管了绑定页；第 5 项验证 metrics 拦截生效。
+
 
 ## 参考
 

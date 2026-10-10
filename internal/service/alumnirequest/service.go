@@ -10,6 +10,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/adapter/turnstile"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/validate"
@@ -138,6 +139,11 @@ func (s Service) checkLimitHealth(ctx context.Context, subject string) (bool, er
 	}
 	result, err := s.Limiter.Allow(ctx, limitScope, subject)
 	if err != nil {
+		// Fail-open, like every other limiter: rejecting every submission during a
+		// Redis outage would close the alumni channel entirely. Counted and logged
+		// so the unguarded window is visible, not silent.
+		metrics.RedisFailOpen(metrics.FailOpenRateLimit)
+		slog.WarnContext(ctx, "alumni limiter unavailable, allowing request", "subject", subject, "error", err)
 		return false, nil
 	}
 	if !result.Allowed {

@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 // Response is the standard API response envelope.
@@ -52,8 +53,13 @@ func Created(c *gin.Context, data any) {
 
 // Error writes an error response. Unknown errors are mapped to CodeInternal.
 func Error(c *gin.Context, err error) {
+	route := c.FullPath()
+	if route == "" {
+		route = "unmatched"
+	}
 	var be *BusinessError
 	if errors.As(err, &be) {
+		metrics.BusinessCode(be.Code, route)
 		if be.RetryAfter > 0 {
 			seconds := be.RetryAfter / time.Second
 			if be.RetryAfter%time.Second != 0 {
@@ -69,6 +75,7 @@ func Error(c *gin.Context, err error) {
 		return
 	}
 
+	metrics.BusinessCode(errcode.CodeInternal, route)
 	c.JSON(http.StatusInternalServerError, Response{
 		Code:    errcode.CodeInternal,
 		Message: "服务器内部错误",

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -19,6 +20,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 // Config holds SMTP connection settings.
@@ -85,7 +88,7 @@ func (m *Mailer) SendVerificationCode(ctx context.Context, to, code string, purp
 		return fmt.Errorf("render verification html: %w", err)
 	}
 	textBody := renderVerificationText(data)
-	return m.send(ctx, []string{to}, subject, textBody, htmlBody)
+	return m.send(ctx, []string{to}, subject, textBody, htmlBody, metrics.SMTPSendVerifyPrefix+string(purpose))
 }
 
 // verificationCopy returns the email subject, the in-mail heading (subject
@@ -106,10 +109,29 @@ func verificationCopy(purpose VerificationPurpose) (string, string, string, erro
 // Send delivers a plain-text email to the given recipients. Prefer
 // SendVerificationCode for verification-code emails so the styled template is used.
 func (m *Mailer) Send(ctx context.Context, to []string, subject, body string) error {
-	return m.send(ctx, to, subject, body, "")
+	return m.send(ctx, to, subject, body, "", metrics.SMTPSendPlain)
 }
 
-func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlBody string) error {
+func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlBody, operation string) (err error) {
+	start := time.Now()
+	// didDial separates local rejections (config, addressing, message build) —
+	// which never touched the network — from actual SMTP conversations, so the
+	// latency histogram only describes real deliveries.
+	didDial := false
+	defer func() {
+		result := metrics.ExtError
+		switch {
+		case err == nil:
+			result = metrics.ExtOK
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			result = metrics.ExtTimeout
+		}
+		duration := time.Duration(0)
+		if didDial {
+			duration = time.Since(start)
+		}
+		metrics.ExternalRequest(metrics.ExtSMTP, operation, result, duration)
+	}()
 	if m.cfg.Host == "" || m.cfg.Port == 0 || m.cfg.From == "" {
 		return fmt.Errorf("mailer: invalid SMTP configuration")
 	}
@@ -147,8 +169,10 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 	}
 
 	if m.cfg.UseTLS {
+		didDial = true
 		return sendTLS(ctx, addr, m.cfg.Host, auth, from, recipients, msg)
 	}
+	didDial = true
 	return sendSTARTTLS(ctx, addr, auth, from, recipients, msg)
 }
 

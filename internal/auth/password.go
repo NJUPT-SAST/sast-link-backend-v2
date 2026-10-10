@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/argon2"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 const (
@@ -69,15 +72,19 @@ func (h PasswordHasher) acquire(ctx context.Context) (func(), error) {
 	if h.Semaphore == nil {
 		return func() {}, nil
 	}
+	waitStart := time.Now()
 	// Honour an already-cancelled context even when a slot is free: a select with
 	// both cases ready picks at random, which would let abandoned work through.
 	if err := ctx.Err(); err != nil {
+		metrics.Argon2Acquire(metrics.Argon2Abandoned, 0)
 		return func() {}, err
 	}
 	select {
 	case h.Semaphore <- struct{}{}:
+		metrics.Argon2Acquire(metrics.Argon2Acquired, time.Since(waitStart))
 		return func() { <-h.Semaphore }, nil
 	case <-ctx.Done():
+		metrics.Argon2Acquire(metrics.Argon2Abandoned, 0)
 		return func() {}, ctx.Err()
 	}
 }
@@ -110,7 +117,9 @@ func (h PasswordHasher) HashPassword(ctx context.Context, password string) (stri
 	if threads == 0 {
 		threads = defaultArgon2Threads
 	}
+	deriveStart := time.Now()
 	key := argon2.IDKey([]byte(password), salt, t, m, threads, memoryHashKeyBytes)
+	metrics.Argon2Derive(metrics.Argon2OpHash, time.Since(deriveStart))
 	return strings.Join([]string{
 		"argon2id-v1",
 		strconv.FormatUint(uint64(t), 10),
@@ -237,7 +246,9 @@ func (h PasswordHasher) verifyArgon2id(ctx context.Context, password, encodedHas
 		return err
 	}
 	defer release()
+	deriveStart := time.Now()
 	actual := argon2.IDKey([]byte(password), salt, uint32(t), uint32(m), uint8(threads), memoryHashKeyBytes)
+	metrics.Argon2Derive(metrics.Argon2OpVerify, time.Since(deriveStart))
 	if subtle.ConstantTimeCompare(actual, expected) != 1 {
 		return ErrInvalidSecret
 	}

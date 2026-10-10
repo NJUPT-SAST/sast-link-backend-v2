@@ -16,6 +16,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 // siteverifyURL is Cloudflare's token validation endpoint.
@@ -138,7 +140,31 @@ type siteverifyResponse struct {
 // would likely come back timeout-or-duplicate - turning a network blip into
 // "you failed the challenge", which tells the submitter to fix something that is
 // not broken.
-func (c *Client) Verify(ctx context.Context, token, remoteIP string) error {
+func (c *Client) Verify(ctx context.Context, token, remoteIP string) (err error) {
+	start := time.Now()
+	// didRequest separates local rejections (no outbound call) from siteverify
+	// round trips: only the latter belong in the latency histogram.
+	didRequest := false
+	defer func() {
+		result := metrics.ExtError
+		switch {
+		case err == nil:
+			result = metrics.ExtOK
+		case errors.Is(err, ErrFailed):
+			result = metrics.ExtRejected
+		case errors.Is(err, ErrUnavailable):
+			// ctx.Err covers caller cancellation; errors.Is(DeadlineExceeded)
+			// covers the http.Client's own 5s timeout (it surfaces as a wrapped
+			// context error, with the original ctx still live). Both are timeouts;
+			// a healthy-endpoint failure is the residual unavailable.
+			if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+				result = metrics.ExtTimeout
+			} else {
+				result = metrics.ExtUnavailable
+			}
+		}
+		metrics.ExternalRequest(metrics.ExtTurnstile, "siteverify", result, elapsed(didRequest, start))
+	}()
 	if c == nil {
 		return fmt.Errorf("%w: nil client", ErrUnavailable)
 	}
@@ -165,6 +191,7 @@ func (c *Client) Verify(ctx context.Context, token, remoteIP string) error {
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	response, err := c.httpClient.Do(request)
+	didRequest = true
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
@@ -196,7 +223,19 @@ func (c *Client) Verify(ctx context.Context, token, remoteIP string) error {
 	return nil
 }
 
-// Unavailable is a verifier that refuses every token.
+// elapsed returns the measured duration for an outbound request, or zero for
+// a local rejection that made no request (zero skips the latency histogram).
+func elapsed(didRequest bool, start time.Time) time.Duration {
+	if !didRequest {
+		return 0
+	}
+	return time.Since(start)
+}
+
+// Unavailable is a verifier that refuses every token. It bypasses the metrics
+// in Client.Verify (it never reaches the outbound call), so a deployment with
+// no TURNSTILE_SECRET is observable through http_business_code_total{code="50301"}
+// instead of external_request_total.
 //
 // Injected when no secret is configured, in place of leaving the dependency nil.
 // A nil verifier has to be guarded at each call site, and the failure mode of a

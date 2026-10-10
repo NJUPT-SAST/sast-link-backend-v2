@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
 
@@ -49,6 +50,7 @@ func (s Service) revokeEvictedDevice(ctx context.Context, userID int64, evicted 
 	if evicted == "" {
 		return
 	}
+	metrics.DeviceEvicted()
 	// Detached like oauth's revokeFamilyErr: the eviction fires after the new
 	// session has committed, so a caller that disconnects in the window between
 	// commit and revoke must not leave the sixth family alive with no audit row.

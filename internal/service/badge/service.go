@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
@@ -212,6 +213,7 @@ func (s *Service) checkLimit(ctx context.Context, endpoint string, userID int64)
 	}
 	result, err := s.ToggleLimiter.Allow(ctx, endpoint, strconv.FormatInt(userID, 10))
 	if err != nil {
+		metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 		slog.WarnContext(ctx, "badge limiter unavailable, allowing request", "error", err)
 		return nil
 	}

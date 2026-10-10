@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 // New returns a go-redis client configured with the provided address, password,
@@ -29,7 +31,35 @@ func New(addr, password string, db int) (*redis.Client, error) {
 		WriteTimeout:          2 * time.Second,
 		PoolTimeout:           2 * time.Second,
 	})
+	client.AddHook(commandMetricsHook{})
 	return client, nil
+}
+
+// commandMetricsHook records per-command latency on the metrics registry. The
+// command label is normalized through metrics.NormalizeRedisCommand so a key or
+// argument can never reach a label; pipelines land in their own bucket because
+// one pipeline call covers many commands and would otherwise overcount neither
+// accurately.
+type commandMetricsHook struct{}
+
+func (commandMetricsHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (commandMetricsHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		start := time.Now()
+		err := next(ctx, cmd)
+		metrics.RedisCommand(metrics.NormalizeRedisCommand(cmd.FullName()), time.Since(start))
+		return err
+	}
+}
+
+func (commandMetricsHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		start := time.Now()
+		err := next(ctx, cmds)
+		metrics.RedisCommand("pipeline", time.Since(start))
+		return err
+	}
 }
 
 // Close closes the redis client.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
@@ -197,6 +198,7 @@ func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoi
 	}
 	result, err := limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
+		metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 		slog.WarnContext(ctx, "oauth limiter unavailable, allowing request",
 			"endpoint", endpoint, "error", err)
 		return nil

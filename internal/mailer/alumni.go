@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 )
 
 // AlumniResult is the outcome of an account-request review, as the applicant is
@@ -72,7 +74,7 @@ func (m *Mailer) SendAlumniRequestResult(ctx context.Context, to string, result 
 	if err != nil {
 		return fmt.Errorf("render alumni result html: %w", err)
 	}
-	return m.send(ctx, []string{to}, subject, renderAlumniResultText(data), htmlBody)
+	return m.send(ctx, []string{to}, subject, renderAlumniResultText(data), htmlBody, metrics.SMTPSendAlumni)
 }
 
 // alumniResultCopy returns the subject and the in-mail heading for a verdict.

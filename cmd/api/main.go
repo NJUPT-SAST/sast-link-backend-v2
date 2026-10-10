@@ -19,6 +19,7 @@ import (
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/config"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/db"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/health"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	internalredis "github.com/NJUPT-SAST/sast-link-backend-v2/internal/redis"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/web/adminhandler"
@@ -66,6 +67,26 @@ func run() error {
 		return fmt.Errorf("open redis: %w", err)
 	}
 	defer func() { _ = internalredis.Close(rdb) }()
+
+	// Pool-state sources for /metrics: both are atomic in-memory reads on
+	// scrape, never a store round trip.
+	if sqlDB, sqlErr := database.DB(); sqlErr == nil {
+		metrics.SetDBPoolSource(func() metrics.DBPoolSnapshot {
+			return metrics.SnapshotDBPool(sqlDB.Stats())
+		})
+	} else {
+		slog.Warn("expose db pool stats unavailable", "error", sqlErr)
+	}
+	metrics.SetRedisPoolSource(func() metrics.RedisPoolSnapshot {
+		s := rdb.PoolStats()
+		return metrics.RedisPoolSnapshot{
+			Hits:       uint64(s.Hits),
+			Misses:     uint64(s.Misses),
+			Timeouts:   uint64(s.Timeouts),
+			TotalConns: uint64(s.TotalConns),
+			IdleConns:  uint64(s.IdleConns),
+		}
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
