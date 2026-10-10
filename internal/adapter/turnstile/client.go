@@ -153,7 +153,11 @@ func (c *Client) Verify(ctx context.Context, token, remoteIP string) (err error)
 		case errors.Is(err, ErrFailed):
 			result = metrics.ExtRejected
 		case errors.Is(err, ErrUnavailable):
-			if ctx.Err() != nil {
+			// ctx.Err covers caller cancellation; errors.Is(DeadlineExceeded)
+			// covers the http.Client's own 5s timeout (it surfaces as a wrapped
+			// context error, with the original ctx still live). Both are timeouts;
+			// a healthy-endpoint failure is the residual unavailable.
+			if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 				result = metrics.ExtTimeout
 			} else {
 				result = metrics.ExtUnavailable
@@ -228,7 +232,10 @@ func elapsed(didRequest bool, start time.Time) time.Duration {
 	return time.Since(start)
 }
 
-// Unavailable is a verifier that refuses every token.
+// Unavailable is a verifier that refuses every token. It bypasses the metrics
+// in Client.Verify (it never reaches the outbound call), so a deployment with
+// no TURNSTILE_SECRET is observable through http_business_code_total{code="50301"}
+// instead of external_request_total.
 //
 // Injected when no secret is configured, in place of leaving the dependency nil.
 // A nil verifier has to be guarded at each call site, and the failure mode of a

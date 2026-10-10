@@ -147,6 +147,7 @@ func (s Service) checkLimit(ctx context.Context, limiter EndpointLimiter, endpoi
 	}
 	result, err := limiter.Allow(ctx, endpoint, subject)
 	if err != nil {
+		metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 		slog.WarnContext(ctx, "oauth login limiter unavailable, allowing request",
 			"endpoint", endpoint, "error", err)
 		return nil

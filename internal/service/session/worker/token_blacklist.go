@@ -124,7 +124,7 @@ func (w TokenBlacklist) processDue(ctx context.Context) time.Duration {
 		deliverableIDs = append(deliverableIDs, entry.ID)
 	}
 	if len(expiredIDs) > 0 {
-		metrics.OutboxDelivery(metrics.OutboxDelivered, len(expiredIDs))
+		metrics.OutboxDelivery(metrics.OutboxExpired, len(expiredIDs))
 		w.ackMany(ctx, expiredIDs, claimToken)
 	}
 	if len(deliverable) == 0 {
@@ -148,6 +148,7 @@ func (w TokenBlacklist) processDue(ctx context.Context) time.Duration {
 			next := now.Add(w.retryBackoff(entry.AttemptCount))
 			updated, failErr := w.Outbox.Fail(ctx, entry.ID, *entry.ClaimToken, now, next, err.Error())
 			if failErr != nil {
+				metrics.OutboxDelivery(metrics.OutboxFailed, 1)
 				slog.Error("fail token blacklist outbox", "id", entry.ID, "error", failErr)
 			} else if !updated {
 				metrics.OutboxDelivery(metrics.OutboxLeaseLost, 1)

@@ -1190,6 +1190,7 @@ func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) er
 		result, err := s.EmailLimiter.Allow(ctx, "send_email", "email:"+validate.StripSubaddress(email))
 		switch {
 		case err != nil:
+			metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 			slog.WarnContext(ctx, "email limiter unavailable, allowing request", "error", err)
 		case !result.Allowed:
 			return withRetryAfter(newError(ErrRateLimited, "请求过于频繁", nil), result.RetryAfter)
@@ -1199,6 +1200,7 @@ func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) er
 		result, err := s.EmailIPLimiter.Allow(ctx, "send_email", "ip:"+strings.TrimSpace(clientIP))
 		switch {
 		case err != nil:
+			metrics.RedisFailOpen(metrics.FailOpenRateLimit)
 			slog.WarnContext(ctx, "email ip limiter unavailable, allowing request", "error", err)
 		case !result.Allowed:
 			return withRetryAfter(newError(ErrRateLimited, "请求过于频繁", nil), result.RetryAfter)

@@ -91,6 +91,60 @@ func TestAllFamiliesExposed(t *testing.T) {
 			t.Errorf("metric %s missing from default registry", name)
 		}
 	}
+	// Closed assertion: a new family added without a want entry (or an entry
+	// for a renamed family) fails here rather than passing vacuously.
+	if len(got) < len(want) {
+		t.Errorf("exposed families (%d) fewer than wanted (%d): %v", len(got), len(want), missingLabels(t, got, want))
+	}
+}
+
+func missingLabels(t *testing.T, got map[string]bool, want []string) []string {
+	t.Helper()
+	var missing []string
+	for _, name := range want {
+		if !got[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+// TestLabelConstantsPinAuditStrings pins the label values that must match audit
+// detail strings: a rename on either side silently splits the series, and the
+// per-package constants are unexported, so this is the one place both sides
+// meet as literals.
+func TestLabelConstantsPinAuditStrings(t *testing.T) {
+	refreshOutcomes := map[string]bool{
+		RefreshOK: true, RefreshReplayed: true, RefreshConcurrent: true,
+		RefreshSessionRevoked: true, RefreshFamilyExpired: true, RefreshExpired: true,
+		RefreshClientMismatch: true, RefreshUserMissing: true, RefreshUserDeleted: true,
+	}
+	for _, s := range []string{
+		"rotated", "refresh_replayed", "concurrent_refresh", "session_revoked",
+		"refresh_family_expired", "expired", "client_mismatch", "user_missing", "user_deleted",
+	} {
+		if !refreshOutcomes[s] {
+			t.Errorf("audit refresh outcome %q has no metrics constant", s)
+		}
+	}
+	if LoginMethodPassword != "password" || LoginMethodRegister != "register" {
+		t.Error("login method constants drifted")
+	}
+	for _, s := range []string{
+		CodeOutcomeIssued, CodeOutcomeClientAuthFailed, CodeOutcomeReplayed, CodeOutcomeRedeemedAfterRevoke,
+	} {
+		switch s {
+		case "issued", "client_auth_failed", "code_replayed", "code_redeemed_after_revocation":
+		default:
+			t.Errorf("code outcome constant %q drifted from its audit string", s)
+		}
+	}
+	if AuthorizeGranted != "granted" || AuthorizeGrantedSilent != "granted_silent" {
+		t.Error("authorize outcome constants drifted")
+	}
+	if LoginFailUnknownIdentifier != "identifier_unknown" || LoginFailBadPassword != "password_invalid" {
+		t.Error("login failure reason constants drifted from audit strings")
+	}
 }
 
 // TestPoolCollectorsWithoutSource verifies the collectors emit nothing (rather

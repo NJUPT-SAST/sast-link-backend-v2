@@ -29,12 +29,19 @@ const (
 	// Refresh outcome values, shared by the internal-session and OAuth refresh
 	// legs. They reuse the audit detail strings (session/service.go's
 	// refreshOutcome* constants and oauth/token.go's literals) so a metric
-	// alert and an audit row name the same event.
+	// alert and an audit row name the same event. The internal leg additionally
+	// produces expired/client_mismatch/user_missing/user_deleted (its audit
+	// covers those branches; the OAuth leg's audit does not, so those series
+	// only ever carry path="internal").
 	RefreshOK             = "rotated"
 	RefreshReplayed       = "refresh_replayed"
 	RefreshConcurrent     = "concurrent_refresh"
 	RefreshSessionRevoked = "session_revoked"
 	RefreshFamilyExpired  = "refresh_family_expired"
+	RefreshExpired        = "expired"
+	RefreshClientMismatch = "client_mismatch"
+	RefreshUserMissing    = "user_missing"
+	RefreshUserDeleted    = "user_deleted"
 
 	// Auth-state cache outcomes. miss is the cold-fill path, not an error; the
 	// error_* values are the fail-open fallbacks that only log today.
@@ -52,8 +59,11 @@ const (
 	LoginFailLocked            = "locked"
 	LoginFailClosed            = "closed"
 
-	// Outbox delivery outcomes.
+	// Outbox delivery outcomes. expired rows are acked without delivery (their
+	// JWT outlived blacklisting), kept out of delivered so that result means a
+	// completed Redis invalidation.
 	OutboxDelivered = "delivered"
+	OutboxExpired   = "expired"
 	OutboxFailed    = "failed"
 	OutboxLeaseLost = "lease_lost"
 	OutboxAckShort  = "ack_short"
@@ -162,7 +172,7 @@ var (
 	redisFailOpenTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "redis_failopen_total",
-			Help: "Requests that proceeded without a fail-open Redis dependency (rate limits, login-failure counters, device records). Growth means those guards are silently not enforcing.",
+			Help: "Limiter calls that proceeded without a fail-open Redis dependency (rate limits, login-failure counters, device records). Growth means those guards are silently not enforcing. One request passing several limiters counts once per limiter.",
 		},
 		[]string{"dependency"},
 	)

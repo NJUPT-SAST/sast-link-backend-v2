@@ -23,7 +23,11 @@ import (
 // many statements and the callback chain carries no cross-statement state (the
 // ConnPool wrap that prepared_stmt.go uses is a far bigger change than the
 // signal is worth). Pool wait plus statement p99 already attribute lock
-// contention.
+// contention. Two measurement caveats: raw/row row-iteration (Scan after
+// Execute) is outside the timed span — the same blind spot gorm's own slow
+// log has — and a gorm upgrade that renames an anchor callback silently sorts
+// these to the chain tail (the metric still fires, around a shorter span), so
+// a gorm bump should re-check the callback names against RegisterDefaultCallbacks.
 const (
 	// gormSlowThreshold is the bar for gorm_slow_query_total. The GORM logger
 	// uses 200ms for its own slow log; the metric threshold is a little wider
