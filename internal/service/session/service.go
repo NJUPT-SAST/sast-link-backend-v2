@@ -189,6 +189,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 	if s.Devices != nil {
 		evicted, err := s.Devices.RegisterDevice(shared.WithDeviceOperation(ctx, pair.refresh.TokenHash, pair.refresh.ExpiresAt), user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}
 		// Eviction revokes the displaced family even when the record write
@@ -196,6 +197,7 @@ func (s Service) Login(ctx context.Context, input LoginInput) (*LoginResult, err
 		// invisible, unmanageable ghost session.
 		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
 	}
+	metrics.LoginSuccess(metrics.LoginMethodPassword)
 	return &LoginResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -257,6 +259,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			// can no longer authenticate. Fail-open — the revoke already committed.
 			if s.Devices != nil {
 				if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+					metrics.RedisFailOpen(metrics.FailOpenDevice)
 					slog.WarnContext(ctx, "remove device on replay revoke failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 				}
 			}
@@ -275,6 +278,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 		// is authoritative in the DB.
 		if s.Devices != nil {
 			if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+				metrics.RedisFailOpen(metrics.FailOpenDevice)
 				slog.WarnContext(ctx, "remove device on expired refresh failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 			}
 		}
@@ -323,6 +327,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 	if s.Devices != nil {
 		evicted, err = s.Devices.TouchDevice(shared.WithDeviceOperation(ctx, pair.refresh.TokenHash, pair.refresh.ExpiresAt), current.UserID, current.FamilyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "touch device failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", err)
 		}
 	}
@@ -364,6 +369,7 @@ func (s Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshResul
 			// stops showing a session that can no longer authenticate.
 			if s.Devices != nil {
 				if removeErr := s.Devices.RemoveDevice(ctx, current.UserID, current.FamilyID); removeErr != nil {
+					metrics.RedisFailOpen(metrics.FailOpenDevice)
 					slog.WarnContext(ctx, "remove device on rotation failure failed", "user_id", current.UserID, "device_id", current.FamilyID, "error", removeErr)
 				}
 			}
@@ -487,6 +493,7 @@ func (s Service) Logout(ctx context.Context, input LogoutInput) (*LogoutResult, 
 	// a leftover record expires on its own.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveDevice(ctx, input.PrincipalUserID, familyID); err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "remove device on logout failed", "user_id", input.PrincipalUserID, "device_id", familyID, "error", err)
 		}
 	}
@@ -817,6 +824,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 	if s.Devices != nil {
 		evicted, err := s.Devices.RegisterDevice(shared.WithDeviceOperation(ctx, pair.refresh.TokenHash, pair.refresh.ExpiresAt), user.ID, pair.familyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}
 		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)
@@ -833,6 +841,7 @@ func (s Service) Register(ctx context.Context, input RegisterInput) (*RegisterRe
 		slog.ErrorContext(ctx, "reload registered user, answering from the in-memory row", "user_id", user.ID, "error", reloadErr)
 		reloaded = user
 	}
+	metrics.LoginSuccess(metrics.LoginMethodRegister)
 	return &RegisterResult{
 		AccessToken:      pair.accessToken,
 		RefreshToken:     pair.refreshToken,
@@ -939,6 +948,7 @@ func (s Service) ResetPassword(ctx context.Context, input ResetPasswordInput) (*
 	// device set must not survive.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "remove all devices on password reset failed", "user_id", user.ID, "error", err)
 		}
 	}
@@ -998,6 +1008,7 @@ func (s Service) ChangePassword(ctx context.Context, input ChangePasswordInput) 
 	// record cannot authenticate anything.
 	if s.Devices != nil {
 		if err := s.Devices.RemoveAllDevices(ctx, user.ID); err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "remove all devices on password change failed", "user_id", user.ID, "error", err)
 		}
 	}

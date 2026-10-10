@@ -38,6 +38,8 @@ func warmup(t *testing.T) {
 	ConsentScope([]string{"openid", "profile"}, AuthorizeGranted)
 	BusinessCode(40001, "/user/login")
 	Argon2Derive(Argon2OpHash, time.Millisecond)
+	CodeOutcome(CodeOutcomeIssued)
+	LoginSuccess(LoginMethodPassword)
 }
 
 // TestAllFamiliesExposed asserts every metric family in this package is
@@ -81,6 +83,8 @@ func TestAllFamiliesExposed(t *testing.T) {
 		"oauth_consent_scope_total",
 		"http_business_code_total",
 		"argon2_derive_duration_seconds",
+		"oauth_code_outcome_total",
+		"auth_login_total",
 	}
 	for _, name := range want {
 		if !got[name] {

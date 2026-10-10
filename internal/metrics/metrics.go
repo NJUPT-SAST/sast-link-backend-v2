@@ -220,6 +220,22 @@ var (
 		},
 		[]string{"code", "route"},
 	)
+
+	oauthCodeOutcomeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "oauth_code_outcome_total",
+			Help: "Authorization-code redemption outcomes, matching the oauth_token audit detail strings. code_replayed means a single-use code was presented twice: a stolen-code or hijacked redirect_uri signal.",
+		},
+		[]string{"outcome"},
+	)
+
+	authLoginTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auth_login_total",
+			Help: "Successful logins by method. The denominator for auth_login_failure_total. Third-party methods count at login_code issuance (identity verified, session ticket minted), not at exchange-code redemption.",
+		},
+		[]string{"method"},
+	)
 )
 
 func init() {
@@ -240,6 +256,8 @@ func init() {
 		oauthGrantRevokedTotal,
 		oauthConsentScopeTotal,
 		httpBusinessCodeTotal,
+		oauthCodeOutcomeTotal,
+		authLoginTotal,
 	)
 	prometheus.MustRegister(newDBPoolCollector())
 	prometheus.MustRegister(newRedisPoolCollector())
@@ -367,4 +385,31 @@ func ConsentScope(scopes []string, outcome string) {
 // BusinessCode counts one envelope business error written to the wire.
 func BusinessCode(code int, route string) {
 	httpBusinessCodeTotal.WithLabelValues(strconv.Itoa(code), route).Inc()
+}
+
+// OAuth code-redemption outcomes, matching the oauth_token audit detail
+// strings for the authorization_code grant.
+const (
+	CodeOutcomeIssued              = "issued"
+	CodeOutcomeClientAuthFailed    = "client_auth_failed"
+	CodeOutcomeReplayed            = "code_replayed"
+	CodeOutcomeRedeemedAfterRevoke = "code_redeemed_after_revocation"
+)
+
+// CodeOutcome counts one authorization-code redemption outcome.
+func CodeOutcome(outcome string) {
+	oauthCodeOutcomeTotal.WithLabelValues(outcome).Inc()
+}
+
+// Login method label values. password and register count at the direct session
+// mint; github/lark/app_code count at login_code issuance in the callback
+// service, where the provider is known (exchange-code cannot see it).
+const (
+	LoginMethodPassword = "password"
+	LoginMethodRegister = "register"
+)
+
+// LoginSuccess counts one successful login by method.
+func LoginSuccess(method string) {
+	authLoginTotal.WithLabelValues(method).Inc()
 }

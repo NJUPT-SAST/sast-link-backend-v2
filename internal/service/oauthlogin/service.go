@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
@@ -425,7 +426,21 @@ func (s Service) loginBranch(
 	}
 
 	s.auditLogin(ctx, &user.ID, input, true, 0, identity.ProviderID, "", "")
+	// Counted here rather than at exchange-code: the provider is known only on
+	// this leg (a login_code is unattributed by design), and an issued code is
+	// the moment the third-party identity was verified.
+	metrics.LoginSuccess(loginMetricMethod(input))
 	return &CallbackResult{Bound: true, LoginCode: code, Redirect: redirect}, nil
+}
+
+// loginMetricMethod maps one login_code issuance onto the fixed method label:
+// the app-code entrance carries its own source tag, every other callback uses
+// the route-determined provider.
+func loginMetricMethod(input CallbackInput) string {
+	if input.Source == auditSourceAppCode {
+		return "app_code"
+	}
+	return string(input.Provider)
 }
 
 // registrationBranch parks an unbound provider identity behind a
@@ -690,6 +705,7 @@ func (s Service) exchangeCode(ctx context.Context, input ExchangeCodeInput) (*Ex
 		// s.now() falls back to the system clock instead of dereferencing nil.
 		evicted, err := s.Devices.RegisterDevice(shared.WithDeviceOperation(ctx, pair.Refresh.TokenHash, pair.Refresh.ExpiresAt), user.ID, pair.Refresh.FamilyID, input.UserAgent, input.ClientIP, s.now())
 		if err != nil {
+			metrics.RedisFailOpen(metrics.FailOpenDevice)
 			slog.WarnContext(ctx, "register device failed", "user_id", user.ID, "error", err)
 		}
 		s.revokeEvictedDevice(ctx, user.ID, evicted, s.now(), input.ClientIP, input.UserAgent)

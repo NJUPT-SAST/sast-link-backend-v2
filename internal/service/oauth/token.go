@@ -78,6 +78,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	if err != nil {
 		// Audit client-authentication failures too — a client_secret sweep against
 		// the token endpoint must not be indistinguishable from silence.
+		metrics.CodeOutcome(metrics.CodeOutcomeClientAuthFailed)
 		s.auditToken(ctx, nil, input.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeUnauthenticated, "client_auth_failed")
 		return nil, err
 	}
@@ -115,6 +116,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 			slog.ErrorContext(ctx, "replayed authorization code has no family to revoke",
 				"client_id", client.ClientID)
 		}
+		metrics.CodeOutcome(metrics.CodeOutcomeReplayed)
 		s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_replayed")
 		return nil, newError(ErrInvalidGrant, "授权码无效", nil)
 	case errors.Is(consumeErr, repository.ErrAuthorizationExpired):
@@ -154,6 +156,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 	// consume, issuing now would mint a session the revocation never saw; the write
 	// below re-checks under the user row lock, so this early exit only skips work.
 	if user.TokenVersion != int(consumedVersion) {
+		metrics.CodeOutcome(metrics.CodeOutcomeRedeemedAfterRevoke)
 		s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_redeemed_after_revocation")
 		return nil, newError(ErrInvalidGrant, "授权码已失效，请重新发起授权",
 			errors.New("user token version changed since code consume"))
@@ -219,6 +222,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 			// A revocation landed between the consume and this write: the pair must not
 			// be minted, and the answer matches an unknown code so the endpoint stays
 			// non-oracular.
+			metrics.CodeOutcome(metrics.CodeOutcomeRedeemedAfterRevoke)
 			s.auditToken(ctx, nil, client.ClientID, grantTypeAuthorizationCode, input, false, errcode.CodeAccessTokenInvalid, "code_redeemed_after_revocation")
 			return nil, newError(ErrInvalidGrant, "授权码已失效，请重新发起授权", createErr)
 		}
@@ -237,6 +241,7 @@ func (s Service) tokenByAuthorizationCode(ctx context.Context, input TokenInput)
 		return nil, err
 	}
 
+	metrics.CodeOutcome(metrics.CodeOutcomeIssued)
 	return s.tokenResult(pair, idToken), nil
 }
 
