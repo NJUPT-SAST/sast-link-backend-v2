@@ -30,6 +30,14 @@ func warmup(t *testing.T) {
 	BadgeRender(BadgeRenderHit, time.Millisecond)
 	BadgeLane(BadgeLaneImmediate)
 	HTTPInFlight()()
+	DeviceEvicted()
+	VerificationCode("register", VerifyCodeOK)
+	AuthorizeOutcome(AuthorizeGranted)
+	TokenGrant(GrantTypeCode, GrantResultOK)
+	GrantRevoked()
+	ConsentScope([]string{"openid", "profile"}, AuthorizeGranted)
+	BusinessCode(40001, "/user/login")
+	Argon2Derive(Argon2OpHash, time.Millisecond)
 }
 
 // TestAllFamiliesExposed asserts every metric family in this package is
@@ -65,6 +73,14 @@ func TestAllFamiliesExposed(t *testing.T) {
 		"badge_render_duration_seconds",
 		"badge_lane_wait_total",
 		"http_requests_in_flight",
+		"device_evicted_total",
+		"verification_code_total",
+		"oauth_authorize_outcome_total",
+		"oauth_token_total",
+		"oauth_grant_revoked_total",
+		"oauth_consent_scope_total",
+		"http_business_code_total",
+		"argon2_derive_duration_seconds",
 	}
 	for _, name := range want {
 		if !got[name] {

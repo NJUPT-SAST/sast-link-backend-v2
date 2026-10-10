@@ -12,6 +12,7 @@ import (
 
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/auth"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/errcode"
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/model"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/scope"
@@ -300,6 +301,8 @@ func (s Service) issueAuthorizationCode(
 	}
 
 	s.auditAuthorize(ctx, input, payload, &user.ID, true, 0, decision)
+	metrics.AuthorizeOutcome(decision)
+	metrics.ConsentScope(payload.Scopes, decision)
 	return &ConsentResult{
 		RedirectURI: successRedirectURI(payload.RedirectURI, payload.State, code),
 	}, nil

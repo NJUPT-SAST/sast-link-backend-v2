@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/metrics"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/repository"
 	"github.com/NJUPT-SAST/sast-link-backend-v2/internal/service/shared"
 )
@@ -65,5 +66,6 @@ func (s Service) RevokeGrant(ctx context.Context, userID, clientID int64, actorC
 	clientIDStr := strconv.FormatInt(clientID, 10)
 	s.auditAs(ctx, &userID, "oauth_grant_revoke", &clientIDStr,
 		nullableClientID(actorClientID), true, 0, "", "", nil)
+	metrics.GrantRevoked()
 	return nil
 }

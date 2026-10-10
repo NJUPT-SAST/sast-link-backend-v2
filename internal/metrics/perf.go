@@ -45,6 +45,15 @@ var (
 		},
 	)
 
+	argon2DeriveDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "argon2_derive_duration_seconds",
+			Help:    "Argon2id derivation itself (post-slot-acquisition), by operation. The capacity evidence behind KDF parameter decisions.",
+			Buckets: prometheus.ExponentialBuckets(0.01, 2, 12),
+		},
+		[]string{"op"},
+	)
+
 	externalRequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "external_request_duration_seconds",
@@ -117,6 +126,7 @@ func init() {
 	prometheus.MustRegister(
 		argon2AcquireTotal,
 		argon2WaitDuration,
+		argon2DeriveDuration,
 		externalRequestDuration,
 		externalRequestTotal,
 		redisCommandDuration,
@@ -126,6 +136,18 @@ func init() {
 		badgeLaneWaitTotal,
 		httpInFlight,
 	)
+}
+
+// Argon2 derivation operation labels.
+const (
+	Argon2OpHash   = "hash"
+	Argon2OpVerify = "verify"
+	Argon2OpRehash = "rehash"
+)
+
+// Argon2Derive observes one derivation's own cost, excluding slot wait.
+func Argon2Derive(op string, d time.Duration) {
+	argon2DeriveDuration.WithLabelValues(op).Observe(d.Seconds())
 }
 
 // Argon2Acquire counts one semaphore acquire attempt. Wait time is observed

@@ -29,7 +29,16 @@ func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, err
 	if err := s.checkTokenLimit(ctx, input.ClientIP); err != nil {
 		return nil, err
 	}
-	switch strings.TrimSpace(input.GrantType) {
+	grant := strings.TrimSpace(input.GrantType)
+	result, err := s.dispatchTokenGrant(ctx, input, grant)
+	metrics.TokenGrant(tokenGrantLabel(grant), grantResultLabel(err))
+	return result, err
+}
+
+// dispatchTokenGrant routes the grant. The metric label is normalized by
+// tokenGrantLabel so an arbitrary grant_type string cannot mint label values.
+func (s Service) dispatchTokenGrant(ctx context.Context, input TokenInput, grant string) (*TokenResult, error) {
+	switch grant {
 	case grantTypeAuthorizationCode:
 		return s.tokenByAuthorizationCode(ctx, input)
 	case grantTypeRefreshToken:
@@ -39,6 +48,22 @@ func (s Service) Token(ctx context.Context, input TokenInput) (*TokenResult, err
 	default:
 		return nil, newError(ErrUnsupportedGrantType, "仅支持 authorization_code 与 refresh_token", nil)
 	}
+}
+
+func tokenGrantLabel(grant string) string {
+	switch grant {
+	case grantTypeAuthorizationCode, grantTypeRefreshToken:
+		return grant
+	default:
+		return "other"
+	}
+}
+
+func grantResultLabel(err error) string {
+	if err != nil {
+		return metrics.GrantResultError
+	}
+	return metrics.GrantResultOK
 }
 
 // tokenByAuthorizationCode redeems an authorization code for a token pair.

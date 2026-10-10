@@ -88,7 +88,7 @@ func (m *Mailer) SendVerificationCode(ctx context.Context, to, code string, purp
 		return fmt.Errorf("render verification html: %w", err)
 	}
 	textBody := renderVerificationText(data)
-	return m.send(ctx, []string{to}, subject, textBody, htmlBody)
+	return m.send(ctx, []string{to}, subject, textBody, htmlBody, metrics.SMTPSendVerifyPrefix+string(purpose))
 }
 
 // verificationCopy returns the email subject, the in-mail heading (subject
@@ -109,10 +109,10 @@ func verificationCopy(purpose VerificationPurpose) (string, string, string, erro
 // Send delivers a plain-text email to the given recipients. Prefer
 // SendVerificationCode for verification-code emails so the styled template is used.
 func (m *Mailer) Send(ctx context.Context, to []string, subject, body string) error {
-	return m.send(ctx, to, subject, body, "")
+	return m.send(ctx, to, subject, body, "", metrics.SMTPSendPlain)
 }
 
-func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlBody string) (err error) {
+func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlBody, operation string) (err error) {
 	start := time.Now()
 	// didDial separates local rejections (config, addressing, message build) —
 	// which never touched the network — from actual SMTP conversations, so the
@@ -130,7 +130,7 @@ func (m *Mailer) send(ctx context.Context, to []string, subject, textBody, htmlB
 		if didDial {
 			duration = time.Since(start)
 		}
-		metrics.ExternalRequest(metrics.ExtSMTP, "send", result, duration)
+		metrics.ExternalRequest(metrics.ExtSMTP, operation, result, duration)
 	}()
 	if m.cfg.Host == "" || m.cfg.Port == 0 || m.cfg.From == "" {
 		return fmt.Errorf("mailer: invalid SMTP configuration")

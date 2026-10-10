@@ -17,6 +17,7 @@
 package metrics
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -71,6 +72,11 @@ const (
 	FailOpenRateLimit    = "rate_limit"
 	FailOpenLoginFailure = "login_failure"
 	FailOpenDevice       = "device"
+
+	// SMTP operation names for the external-request metric.
+	SMTPSendPlain        = "plain"
+	SMTPSendVerifyPrefix = "verify_" // + VerificationPurpose (register/reset_password/bind_email)
+	SMTPSendAlumni       = "alumni_result"
 
 	// External dependency and operation names.
 	ExtTurnstile      = "turnstile"
@@ -160,6 +166,60 @@ var (
 		},
 		[]string{"dependency"},
 	)
+
+	deviceEvictedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "device_evicted_total",
+			Help: "Device records evicted by the 5-device cap. Each eviction revokes a live session family: a spike means more devices than the user owns are active on the account.",
+		},
+	)
+
+	verificationCodeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "verification_code_total",
+			Help: "Email-code verification attempts by purpose and result. The middle of the registration/reset funnel: send volume comes from smtp external metrics, outcomes land here.",
+		},
+		[]string{"purpose", "result"},
+	)
+
+	oauthAuthorizeOutcomeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "oauth_authorize_outcome_total",
+			Help: "Authorization-code mints by outcome. granted_silent is the standing-grant fast path; its share moving is a registration or grant change, not user behaviour.",
+		},
+		[]string{"outcome"},
+	)
+
+	oauthTokenTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "oauth_token_total",
+			Help: "Token endpoint requests by grant type and result. Failure detail for refresh lives in auth_refresh_outcome_total.",
+		},
+		[]string{"grant_type", "result"},
+	)
+
+	oauthGrantRevokedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "oauth_grant_revoked_total",
+			Help: "Consent grants revoked by users. Each revoke cuts every token the client held, so the client must re-consent.",
+		},
+	)
+
+	oauthConsentScopeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "oauth_consent_scope_total",
+			Help: "Scopes consented (or silently re-authorized) per grant. The scope set is the fixed registration catalogue, so cardinality is bounded by it.",
+		},
+		[]string{"scope", "outcome"},
+	)
+
+	httpBusinessCodeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_business_code_total",
+			Help: "Envelope business error codes written by response.Error, by code and route. HTTP status alone cannot see a 200 envelope carrying 40108.",
+		},
+		[]string{"code", "route"},
+	)
 )
 
 func init() {
@@ -173,6 +233,13 @@ func init() {
 		retentionTickDuration,
 		retentionLeader,
 		redisFailOpenTotal,
+		deviceEvictedTotal,
+		verificationCodeTotal,
+		oauthAuthorizeOutcomeTotal,
+		oauthTokenTotal,
+		oauthGrantRevokedTotal,
+		oauthConsentScopeTotal,
+		httpBusinessCodeTotal,
 	)
 	prometheus.MustRegister(newDBPoolCollector())
 	prometheus.MustRegister(newRedisPoolCollector())
@@ -239,4 +306,65 @@ func SetRetentionLeader(holds bool) {
 // RedisFailOpen counts one request that proceeded without a fail-open store.
 func RedisFailOpen(dependency string) {
 	redisFailOpenTotal.WithLabelValues(dependency).Inc()
+}
+
+// DeviceEvicted counts one 5-cap eviction. Counted when the eviction is decided
+// (the cap was exceeded), not when the family revoke succeeds — the revoke's
+// failure is already logged and retried by the next cap-exceeding login.
+func DeviceEvicted() {
+	deviceEvictedTotal.Inc()
+}
+
+// Verification-code outcomes.
+const (
+	VerifyCodeOK          = "ok"
+	VerifyCodeExpired     = "expired"
+	VerifyCodeWrong       = "wrong"
+	VerifyCodeUnavailable = "unavailable"
+)
+
+// VerificationCode counts one verification attempt by purpose and result.
+func VerificationCode(purpose, result string) {
+	verificationCodeTotal.WithLabelValues(purpose, result).Inc()
+}
+
+// OAuth authorize outcomes, matching the audit decision strings.
+const (
+	AuthorizeGranted       = "granted"
+	AuthorizeGrantedSilent = "granted_silent"
+)
+
+// AuthorizeOutcome counts one authorization-code mint path.
+func AuthorizeOutcome(outcome string) {
+	oauthAuthorizeOutcomeTotal.WithLabelValues(outcome).Inc()
+}
+
+// OAuth token grant types and results.
+const (
+	GrantTypeCode    = "authorization_code"
+	GrantTypeRefresh = "refresh_token"
+	GrantResultOK    = "ok"
+	GrantResultError = "error"
+)
+
+// TokenGrant counts one token-endpoint request.
+func TokenGrant(grantType, result string) {
+	oauthTokenTotal.WithLabelValues(grantType, result).Inc()
+}
+
+// GrantRevoked counts one user-initiated consent revoke.
+func GrantRevoked() {
+	oauthGrantRevokedTotal.Inc()
+}
+
+// ConsentScope counts every scope in one consent decision.
+func ConsentScope(scopes []string, outcome string) {
+	for _, s := range scopes {
+		oauthConsentScopeTotal.WithLabelValues(s, outcome).Inc()
+	}
+}
+
+// BusinessCode counts one envelope business error written to the wire.
+func BusinessCode(code int, route string) {
+	httpBusinessCodeTotal.WithLabelValues(strconv.Itoa(code), route).Inc()
 }

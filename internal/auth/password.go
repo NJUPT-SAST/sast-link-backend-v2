@@ -117,7 +117,9 @@ func (h PasswordHasher) HashPassword(ctx context.Context, password string) (stri
 	if threads == 0 {
 		threads = defaultArgon2Threads
 	}
+	deriveStart := time.Now()
 	key := argon2.IDKey([]byte(password), salt, t, m, threads, memoryHashKeyBytes)
+	metrics.Argon2Derive(metrics.Argon2OpHash, time.Since(deriveStart))
 	return strings.Join([]string{
 		"argon2id-v1",
 		strconv.FormatUint(uint64(t), 10),
@@ -244,7 +246,9 @@ func (h PasswordHasher) verifyArgon2id(ctx context.Context, password, encodedHas
 		return err
 	}
 	defer release()
+	deriveStart := time.Now()
 	actual := argon2.IDKey([]byte(password), salt, uint32(t), uint32(m), uint8(threads), memoryHashKeyBytes)
+	metrics.Argon2Derive(metrics.Argon2OpVerify, time.Since(deriveStart))
 	if subtle.ConstantTimeCompare(actual, expected) != 1 {
 		return ErrInvalidSecret
 	}

@@ -1203,14 +1203,18 @@ func (s Service) checkEmailLimit(ctx context.Context, email, clientIP string) er
 func (s Service) verifyCode(ctx context.Context, purpose, email, code string) error {
 	matched, remaining, err := s.VerificationCode.VerifyVerificationCode(ctx, purpose, validate.StripSubaddress(email), code)
 	if err != nil {
+		metrics.VerificationCode(purpose, metrics.VerifyCodeUnavailable)
 		return newError(ErrDependencyUnavailable, "校验验证码失败", err)
 	}
 	if matched {
+		metrics.VerificationCode(purpose, metrics.VerifyCodeOK)
 		return nil
 	}
 	if remaining <= 0 {
+		metrics.VerificationCode(purpose, metrics.VerifyCodeExpired)
 		return newError(ErrVerificationCodeExpired, "验证码已过期或不存在", nil)
 	}
+	metrics.VerificationCode(purpose, metrics.VerifyCodeWrong)
 	return newError(ErrVerificationCodeWrong, "验证码错误", nil)
 }
 
