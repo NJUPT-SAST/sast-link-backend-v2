@@ -159,7 +159,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4.4.1
 
-      - uses: docker/login-action@v4.6.0
+      - uses: docker/login-action@v4.7.0
         with:
           registry: ${{ env.TCR_HOST }}
           username: ${{ secrets.TCR_USERNAME }}
