@@ -3,7 +3,7 @@ module github.com/NJUPT-SAST/sast-link-backend-v2
 go 1.27.3
 
 require (
-	github.com/caarlos0/env/v11 v11.4.1
+	github.com/caarlos0/env/v11 v11.4.2
 	github.com/disintegration/imaging v1.6.2
 	github.com/gabriel-vasile/mimetype v1.4.16
 	github.com/gin-gonic/gin v1.12.0
@@ -11,14 +11,14 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.76
-	github.com/testcontainers/testcontainers-go v0.44.0
-	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
+	github.com/testcontainers/testcontainers-go v0.45.0
+	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0
 	go.uber.org/automaxprocs v1.6.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/image v0.47.0
@@ -64,7 +64,7 @@ require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
